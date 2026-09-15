@@ -55,6 +55,9 @@ class ConsumableReceipt(Base, PkMixin, TimestampMixin):
     received_on: Mapped[date] = mapped_column(Date)
     # 新逻辑以 warehouse_id 为准；location 仅保留兼容旧 own/factory 流水，后续不再作为配置主键。
     warehouse_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey("warehouses.id"), nullable=True, index=True)
-    location: Mapped[str] = mapped_column(String(16), default="own", server_default="own")
+    location: Mapped[str] = mapped_column(
+        String(16), default="own", server_default="own",
+        comment="到货位置：own=自有仓 / factory=工厂",
+    )
     note: Mapped[str] = mapped_column(Text, default="")
     created_by: Mapped[str] = mapped_column(String(128), default="")

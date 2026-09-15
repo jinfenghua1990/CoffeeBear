@@ -7,9 +7,10 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
-from app.api.deps import current_actor
+from app.api.deps import current_actor, require_roles
 from app.core.audit import audit
 from app.db import get_db
+from app.models.org import User
 from app.services import tax_accounting_service as service
 from app.services import tax_category_rule_service as category_rule_service
 from app.services import tax_finance_summary_service as finance_summary_service
@@ -65,6 +66,7 @@ def finance_summary_csv(
 
 class CategoryRuleCreate(BaseModel):
     pattern: str = Field(..., min_length=3, max_length=400, examples=["*软饮料*咖啡"])
+    tax_code: str = Field("", max_length=32, description="开票用税收分类编码")
     match_keyword: str = Field("", max_length=256)
     match_mode: Literal["contains", "exact", "prefix"] = "contains"
     priority: int = Field(100, ge=0, le=9999)
@@ -74,6 +76,7 @@ class CategoryRuleCreate(BaseModel):
 
 class CategoryRuleUpdate(BaseModel):
     pattern: str | None = Field(None, min_length=3, max_length=400)
+    tax_code: str | None = Field(None, max_length=32, description="开票用税收分类编码")
     match_keyword: str | None = Field(None, max_length=256)
     match_mode: Literal["contains", "exact", "prefix"] | None = None
     priority: int | None = Field(None, ge=0, le=9999)
@@ -98,6 +101,7 @@ def get_category_rules(
 def add_category_rule(
     body: CategoryRuleCreate,
     request: Request,
+    _editor: User = Depends(require_roles("admin", "operator")),
     db: Session = Depends(get_db),
 ) -> dict:
     actor = current_actor(request)
@@ -105,6 +109,7 @@ def add_category_rule(
         row = category_rule_service.create_rule(
             db,
             pattern=body.pattern,
+            tax_code=body.tax_code,
             match_keyword=body.match_keyword,
             match_mode=body.match_mode,
             priority=body.priority,
@@ -130,6 +135,7 @@ def edit_category_rule(
     rule_id: int,
     body: CategoryRuleUpdate,
     request: Request,
+    _editor: User = Depends(require_roles("admin", "operator")),
     db: Session = Depends(get_db),
 ) -> dict:
     actor = current_actor(request)
@@ -138,6 +144,7 @@ def edit_category_rule(
             db,
             rule_id,
             pattern=body.pattern,
+            tax_code=body.tax_code,
             match_keyword=body.match_keyword,
             match_mode=body.match_mode,
             priority=body.priority,
@@ -157,6 +164,7 @@ def edit_category_rule(
         row.id,
         {
             "pattern": category_rule_service.build_pattern(row.category_name, row.item_name),
+            "taxCode": row.tax_code or "",
             "enabled": row.enabled,
             "priority": row.priority,
         },

@@ -11,15 +11,15 @@ def f(category: str):
 
 
 def test_incomplete_without_required_monthly_files():
-    """新账期固定要求银行资料 + 系统生成的销售汇总。"""
+    """新账期固定要求两份银行资料；销售汇总由系统动态生成。"""
     status, summary = evaluate_completeness([], DEFAULT_REQUIRED)
     assert status == "INCOMPLETE"
-    assert summary["missing"] == {"bank": 1, "sales_summary": 1}
+    assert summary["missing"] == {"bank": 2}
 
 
-def test_ready_with_bank_and_sales_summary():
+def test_ready_with_two_bank_files():
     status, summary = evaluate_completeness(
-        [f("bank"), f("sales_summary")], DEFAULT_REQUIRED
+        [f("bank"), f("bank")], DEFAULT_REQUIRED
     )
     assert status == "READY"
     assert summary["missing"] == {}
@@ -71,6 +71,21 @@ def test_managed_data_file_rejects_path_outside_data_dir(tmp_path, monkeypatch):
     assert finance_service.managed_data_file(inside, label="归档文件") == inside.resolve()
     with pytest.raises(RuntimeError, match="受管数据目录"):
         finance_service.managed_data_file(outside, label="归档文件")
+
+
+def test_managed_data_file_rejects_external_symlink(tmp_path, monkeypatch):
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    finance_dir = data_dir / "finance"
+    finance_dir.mkdir()
+    outside = tmp_path / "outside.xlsx"
+    outside.write_bytes(b"outside")
+    linked = finance_dir / "linked.xlsx"
+    linked.symlink_to(outside)
+    monkeypatch.setattr(finance_service.settings, "DATA_DIR", str(data_dir))
+
+    with pytest.raises(RuntimeError, match="受管数据目录"):
+        finance_service.managed_data_file(linked, label="归档文件")
 
 
 def test_exclusive_archive_write_never_overwrites_existing_file(tmp_path):

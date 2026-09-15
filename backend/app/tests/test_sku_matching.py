@@ -62,6 +62,25 @@ def test_auto_match_never_overwrites_manual_result(db_session):
     assert any(row["itemId"] == item.id for row in summary["manualMatches"])
 
 
+def test_auto_match_uses_inbound_amount_as_fact_not_fixed_catalog_cost(db_session):
+    sku, item = _manual_match_fixture(db_session)
+    item.goods_no = sku.sku_code
+    item.sku_barcode = sku.sku_code
+    item.match_status = ""
+    item.match_note = ""
+    item.amount_tax = Decimal("30")  # 15 / 件；档案 default_cost 仍是 10
+    db_session.flush()
+
+    stats = sku_matching_service.match_inbound_items(db_session)
+    db_session.refresh(item)
+
+    assert stats["price_ok"] >= 1
+    assert stats["price_mismatch"] == 0
+    assert item.matched_sku_id == sku.id
+    assert item.match_status == "price_ok"
+    assert "实际成本事实" in item.match_note
+
+
 def test_manual_match_endpoint_can_change_existing_result(client, db_session):
     first_sku, item = _manual_match_fixture(db_session)
     suffix = uuid4().hex[:10]

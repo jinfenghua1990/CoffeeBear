@@ -102,6 +102,31 @@ def update_row(
     return svc.serialize(row)
 
 
+@router.delete("/{warehouse_id}")
+def delete_row(
+    warehouse_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    try:
+        row = svc.delete_warehouse(db, warehouse_id)
+    except LookupError as exc:
+        db.rollback()
+        raise HTTPException(404, str(exc))
+    except ValueError as exc:
+        db.rollback()
+        raise HTTPException(409, str(exc))
+    audit(
+        db,
+        current_actor(request),
+        "warehouse.delete",
+        "warehouses",
+        row.id,
+        {"code": row.code, "name": row.name},
+    )
+    return {"ok": True, "warehouseId": warehouse_id}
+
+
 @router.post("/consumable-purchases/{purchase_id}/receipts")
 def receive_consumable_purchase(
     purchase_id: int,

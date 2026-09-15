@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+from collections import defaultdict
 from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Iterable
@@ -43,7 +44,7 @@ def _po_from_link(db: Session, link: ProcurementChainLink) -> ExternalPurchaseOr
         if order and order.external_order_id:
             return (
                 db.query(ExternalPurchaseOrder)
-                .filter_by(external_order_id=order.external_order_id)
+                .filter_by(platform="1688", external_order_id=order.external_order_id)
                 .first()
             )
     return None
@@ -52,7 +53,7 @@ def _po_from_link(db: Session, link: ProcurementChainLink) -> ExternalPurchaseOr
 def collect_linked_doc_ids_for_po(db: Session, po: ExternalPurchaseOrder) -> set[int]:
     """汇总该 PO 已确认关联的入库单 ID：含 procurement_chain_links 与旧 InboundLink。"""
     doc_ids: set[int] = set()
-    if po.external_order_id:
+    if (po.platform or "1688").lower() == "1688" and po.external_order_id:
         order = db.query(Alibaba1688Order).filter_by(external_order_id=po.external_order_id).first()
         if order:
             for l in (
@@ -70,8 +71,31 @@ def collect_linked_doc_ids_for_po(db: Session, po: ExternalPurchaseOrder) -> set
         .all()
     ):
         doc_ids.add(l.target_id)
-    for l in db.query(InboundLink).filter_by(po_id=po.id).all():
-        doc_ids.add(l.document_id)
+    # 兼容旧 InboundLink：模型真实字段是 goodsdoc_no，不是 document_id。
+    # 优先按入库单号解析；少数历史写入把数字主键放进 raw，也一并兼容。
+    legacy_links = db.query(InboundLink).filter_by(po_id=po.id).all()
+    legacy_nos = {str(link.goodsdoc_no or "").strip() for link in legacy_links if link.goodsdoc_no}
+    docs_by_no = {
+        doc.goodsdoc_no: doc.id
+        for doc in db.query(JackyunGoodsDocument).filter(
+            JackyunGoodsDocument.document_type == "inbound",
+            JackyunGoodsDocument.goodsdoc_no.in_(legacy_nos),
+        ).all()
+    } if legacy_nos else {}
+    for link in legacy_links:
+        raw = link.raw or {}
+        raw_document_id = raw.get("documentId") or raw.get("document_id")
+        if raw_document_id is not None:
+            try:
+                document = db.get(JackyunGoodsDocument, int(raw_document_id))
+            except (TypeError, ValueError):
+                document = None
+            if document is not None and document.document_type == "inbound":
+                doc_ids.add(document.id)
+                continue
+        document_id = docs_by_no.get(str(link.goodsdoc_no or "").strip())
+        if document_id is not None:
+            doc_ids.add(document_id)
     return doc_ids
 
 
@@ -136,6 +160,11 @@ def release_inbound_seeds_for_link(
         audit(
             db, actor, "purchase.allocation.release_seed", "purchase_allocation_items", row.id,
             {"poId": po.id, "skuCode": row.sku_code, "docId": doc_id,
+             "quantity": str(row.quantity) if row.quantity is not None else None,
+             "unitPrice": str(row.unit_price) if row.unit_price is not None else None,
+             "amount": str(row.amount) if row.amount is not None else None,
+             "sourceItemId": row.source_item_id,
+             "note": row.note or "",
              "reason": "解除/更换入库单关联，释放反填行"},
         )
         released += 1
@@ -215,6 +244,35 @@ def seed_allocations_for_po(
         )
         .all()
     )
+    # 入库文件可能把同一 SKU 的多笔采购拆成同一张单的多行。
+    # 有明确的原始 1688 订单标记时，只能取当前 PO 对应的行；否则旧数据
+    # 会按表格顺序把别的采购单的同 SKU 明细错分过来。没有任何标记的老
+    # 单据继续沿用下面的保守排他逻辑。
+    items_by_doc: dict[int, list[JackyunGoodsDocumentItem]] = defaultdict(list)
+    for item in items:
+        items_by_doc[item.document_id].append(item)
+    is_1688 = (po.platform or "1688").lower() == "1688"
+    order_marker = str(po.external_order_id or "").strip() if is_1688 else ""
+    candidate_items: list[JackyunGoodsDocumentItem] = []
+    for doc_id in sorted(doc_ids):
+        doc_items = items_by_doc.get(doc_id, [])
+        if not order_marker:
+            candidate_items.extend(doc_items)
+            continue
+        marked_items = [
+            item for item in doc_items
+            if str((item.raw or {}).get("_1688采购订单") or "").strip()
+        ]
+        matching_items = [
+            item for item in marked_items
+            if str((item.raw or {}).get("_1688采购订单") or "").strip() == order_marker
+        ]
+        if marked_items:
+            # 这张入库单已经带有明确订单归属；没有命中当前订单时不猜。
+            candidate_items.extend(matching_items)
+        else:
+            candidate_items.extend(doc_items)
+    items = candidate_items
 
     seeded = 0
     skipped = 0
@@ -241,7 +299,10 @@ def seed_allocations_for_po(
             skipped += 1
             continue
         qty = it.quantity or Decimal("0")
-        price = it.unit_price_tax or Decimal("0")
+        price = it.unit_price_tax
+        if price is None and it.amount_tax is not None and qty > 0:
+            price = it.amount_tax / qty
+        price = price or Decimal("0")
         if qty <= 0:
             skipped += 1
             continue

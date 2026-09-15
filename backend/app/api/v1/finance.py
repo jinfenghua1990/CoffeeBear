@@ -6,9 +6,11 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from app.api.deps import current_actor
+from app.config import settings
 from app.db import get_db
 from app.services import finance_sales_report_service as sales_report_service
 from app.services import finance_service
+from app.services import monthly_intake_service
 from app.utils.uploads import UploadTooLargeError, read_upload_limited
 
 router = APIRouter(prefix="/finance", tags=["finance"])
@@ -30,6 +32,11 @@ class SalesReportTemplateInput(BaseModel):
     auto_send: bool = False
     send_day: int = Field(default=3, ge=1, le=28)
     send_hour: int = Field(default=10, ge=0, le=23)
+
+
+class UnbilledAdjustmentInput(BaseModel):
+    selected_keys: list[str] = Field(default_factory=list)
+    note: str = Field(default="", max_length=500)
 
 
 @router.get("/sales-report/template")
@@ -107,6 +114,43 @@ def list_periods(company: str | None = None, db: Session = Depends(get_db)) -> l
     return finance_service.period_overview(db, company)
 
 
+@router.get("/unbilled/preview")
+def preview_unbilled_income(
+    year: int = Query(..., ge=1900, le=2999),
+    month: int = Query(..., ge=1, le=12),
+    company: str = "",
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    """无票收入预览：销售总金额 − 已开票金额（与交付包第 3 张表同口径）。"""
+    return sales_report_service.build_unbilled_income_report(
+        db, year, month, company=company or finance_service.DEFAULT_COMPANY,
+    )
+
+
+@router.put("/unbilled/adjustment")
+def update_unbilled_adjustment(
+    payload: UnbilledAdjustmentInput,
+    request: Request,
+    year: int = Query(..., ge=1900, le=2999),
+    month: int = Query(..., ge=1, le=12),
+    company: str = "",
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    """保存本月无票收入明细选择；新版本保留，历史版本不覆盖。"""
+    try:
+        return sales_report_service.save_unbilled_adjustment(
+            db,
+            company=company or finance_service.DEFAULT_COMPANY,
+            year=year,
+            month=month,
+            selected_keys=payload.selected_keys,
+            actor=current_actor(request),
+            note=payload.note,
+        )
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
 @router.post("/files")
 async def upload_file(
     request: Request,
@@ -114,17 +158,23 @@ async def upload_file(
     period_year: int = Form(...),
     period_month: int = Form(...),
     category: str = Form(...),
+    original_name: str = Form(""),
     company: str = Form(""),
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
-    """原始资料上传：SHA256 + 版本化归档，同名不覆盖。"""
+    """原始资料上传：SHA256 + 版本化归档，同名不覆盖。
+
+    original_name 可选：页面用标准表名（银行交易明细/银行回单详情）归档，
+    不依赖用户本地文件名，保证交付包命名映射稳定。
+    """
     try:
         content = await read_upload_limited(file, max_bytes=finance_service.settings.MAX_UPLOAD_BYTES)
         row = finance_service.store_upload(
             db,
             company=company or finance_service.DEFAULT_COMPANY,
             year=period_year, month=period_month,
-            category=category, original_name=file.filename or "unnamed",
+            category=category,
+            original_name=original_name.strip() or file.filename or "unnamed",
             content=content, actor=current_actor(request),
         )
     except UploadTooLargeError as exc:
@@ -135,6 +185,56 @@ async def upload_file(
         "id": row.id, "version": row.version, "sha256": row.sha256,
         "size": row.size,
     }
+
+
+@router.get("/{year}/{month}/intake")
+def monthly_intake_status(
+    year: int,
+    month: int,
+    company: str = "",
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    """返回当前账期两份业务源文件的上传与真实导入状态。"""
+    try:
+        return monthly_intake_service.status(
+            db,
+            company=company or finance_service.DEFAULT_COMPANY,
+            year=year,
+            month=month,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.post("/{year}/{month}/intake")
+async def upload_monthly_intake(
+    year: int,
+    month: int,
+    request: Request,
+    source_type: str = Form(...),
+    company: str = Form(""),
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    """归档并导入月度业务源文件：采购入库单或销售单查询。"""
+    try:
+        content = await read_upload_limited(
+            file, max_bytes=finance_service.settings.MAX_UPLOAD_BYTES
+        )
+        return monthly_intake_service.ingest(
+            db,
+            company=company or finance_service.DEFAULT_COMPANY,
+            year=year,
+            month=month,
+            source_type=source_type,
+            content=content,
+            original_name=file.filename or "monthly-source.xlsx",
+            actor=current_actor(request),
+        )
+    except UploadTooLargeError as exc:
+        raise HTTPException(status_code=413, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.get("/{year}/{month}/files")
@@ -163,22 +263,39 @@ def list_files(year: int, month: int, company: str = "", db: Session = Depends(g
 @router.get("/files/{file_id}/download")
 def download_file(file_id: int, db: Session = Depends(get_db)) -> FileResponse:
     """单文件下载：财务核对原始资料用（归档原文，未改动）。"""
-    from pathlib import Path
-
     from app.models.finance import ArchiveFile
 
     row = db.get(ArchiveFile, file_id)
     if row is None:
         raise HTTPException(status_code=404, detail="归档文件不存在")
-    path = Path(row.stored_path)
-    if not path.is_file():
-        raise HTTPException(status_code=404, detail="归档文件在存储中缺失，请联系管理员核对")
+    try:
+        path = finance_service.managed_data_file(row.stored_path, label="归档文件")
+    except RuntimeError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
     return FileResponse(
         path,
         filename=row.original_name,
         media_type=row.mime or "application/octet-stream",
         headers={"X-Archive-SHA256": row.sha256},
     )
+
+
+@router.delete("/files/{file_id}")
+def remove_archive_file(file_id: int, request: Request, db: Session = Depends(get_db)) -> dict[str, Any]:
+    """删除归档文件（含磁盘文件），页面「归档明细」用。"""
+    try:
+        return finance_service.delete_archive_file(db, file_id, actor=current_actor(request))
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.delete("/packages/{package_id}")
+def remove_delivery_package(package_id: int, request: Request, db: Session = Depends(get_db)) -> dict[str, Any]:
+    """删除交付包记录与 ZIP 文件，页面「发送记录」用。"""
+    try:
+        return finance_service.delete_delivery_package(db, package_id, actor=current_actor(request))
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @router.post("/{year}/{month}/check")
@@ -189,13 +306,20 @@ def check_period(year: int, month: int, company: str = "", db: Session = Depends
     return {"status": period.status, "missing": (period.missing_summary or {}).get("missing", {})}
 
 
+class PackageInput(BaseModel):
+    """手动打包时可选交付表子集；不传或为空列表 = 全部 3 张表。"""
+    include: list[str] = Field(default_factory=list)
+
+
 @router.post("/{year}/{month}/package")
 def package_period(year: int, month: int, request: Request, company: str = "",
+                   payload: PackageInput | None = None,
                    db: Session = Depends(get_db)) -> dict[str, Any]:
     try:
+        include = payload.include if payload and payload.include else None
         pkg = finance_service.package_period(
             db, company or finance_service.DEFAULT_COMPANY, year, month,
-            actor=current_actor(request),
+            actor=current_actor(request), include=include,
         )
     except (ValueError, RuntimeError) as exc:
         raise HTTPException(400, str(exc))
@@ -243,6 +367,18 @@ def send(year: int, month: int, body: SendBody, request: Request,
     except (ValueError, RuntimeError) as exc:
         raise HTTPException(400, str(exc))
     return {"ok": True, **result}
+
+
+@router.get("/mail-status")
+def mail_status() -> dict[str, Any]:
+    """财务邮件发送方状态（只读，不含密码），供「设置邮箱」展示当前发件邮箱与 SMTP 配置状态。"""
+    return {
+        "configured": settings.smtp_configured,
+        "host": settings.SMTP_HOST,
+        "port": settings.SMTP_PORT,
+        "username": settings.SMTP_USERNAME,
+        "from": settings.SMTP_FROM,
+    }
 
 
 @router.get("/delivery-logs")

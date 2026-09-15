@@ -7,6 +7,8 @@ import {
   ConsumableMappingRow,
   ConsumableRow,
   ConsumableTransactionRow,
+  warehousesApi,
+  WarehouseRow,
 } from "@/lib/api";
 
 type Props = {
@@ -29,18 +31,19 @@ const EMPTY_TRANSACTION = {
   quantity: "",
   unit_cost: "",
   location: "own",
+  warehouse_id: "",
   note: "",
 };
 
 const TX_OPTIONS: Array<{ value: string; label: string; hint: string }> = [
-  { value: "purchase", label: "采购入库", hint: "入库到自有仓或工厂" },
-  { value: "send_factory", label: "发往工厂", hint: "自有仓 → 在途" },
+  { value: "purchase", label: "采购入库", hint: "入库到已选实际仓库" },
+  { value: "send_factory", label: "发往工厂", hint: "库存 → 在途（历史流转）" },
   { value: "factory_receive", label: "工厂收货", hint: "在途 → 工厂仓" },
-  { value: "consume", label: "领用消耗", hint: "从自有仓扣减" },
-  { value: "stocktake", label: "盘点", hint: "按实际数量校正自有仓" },
-  { value: "loss", label: "报损", hint: "从自有仓扣减" },
+  { value: "consume", label: "领用消耗", hint: "从已选实际仓库扣减" },
+  { value: "stocktake", label: "盘点", hint: "按实际数量校正已选仓库" },
+  { value: "loss", label: "报损", hint: "从已选实际仓库扣减" },
   { value: "manual", label: "手工调整", hint: "正数增加、负数扣减" },
-  { value: "adjustment", label: "盘点(旧)", hint: "历史导入兼容" },
+  { value: "adjustment", label: "盘点调整", hint: "历史导入兼容" },
 ];
 
 function txLabel(type: string) {
@@ -68,7 +71,12 @@ function money(value: string | null | undefined) {
 }
 
 function hasHistoricalDifference(row: ConsumableRow) {
-  return Math.abs(numberOf(row.purchasedQty) - numberOf(row.usedQty) - numberOf(row.stockQty)) > 0.01;
+  return Math.abs(
+    numberOf(row.purchasedQty)
+      - numberOf(row.usedQty)
+      - numberOf(row.stockQty)
+      - numberOf(row.factoryQty),
+  ) > 0.01;
 }
 
 /** 流水数量的显示符号。 */
@@ -88,7 +96,20 @@ export default function ConsumableWorkbench({ rows, products, reload, notify, fa
   const [transactions, setTransactions] = useState<ConsumableTransactionRow[]>([]);
   const [mapping, setMapping] = useState({ sku_id: "", usage_per_unit: "1" });
   const [transaction, setTransaction] = useState(EMPTY_TRANSACTION);
+  const [warehouses, setWarehouses] = useState<WarehouseRow[]>([]);
   const [transactionSaving, setTransactionSaving] = useState(false);
+
+  const consumableWarehouses = useMemo(
+    () => warehouses.filter((row) => row.status === "active" && (row.purpose === "consumable" || row.purpose === "both")),
+    [warehouses],
+  );
+
+  const transactionOptions = useMemo(() => {
+    const directFactoryWarehouse = consumableWarehouses.length === 1 && consumableWarehouses[0].warehouseType === "factory";
+    return directFactoryWarehouse
+      ? TX_OPTIONS.filter((option) => option.value !== "send_factory" && option.value !== "factory_receive")
+      : TX_OPTIONS;
+  }, [consumableWarehouses]);
 
   const categories = useMemo(
     () => Array.from(new Set(rows.map((row) => row.category).filter(Boolean))).sort(),
@@ -114,9 +135,28 @@ export default function ConsumableWorkbench({ rows, products, reload, notify, fa
   const unmappedCount = rows.filter((row) => row.mappingCount === 0).length;
   const reconcileCount = rows.filter(hasHistoricalDifference).length;
   const inventoryValue = rows.reduce(
-    (sum, row) => sum + Math.max(0, numberOf(row.stockQty)) * numberOf(row.purchaseUnitCost),
+    (sum, row) => sum + Math.max(0, numberOf(row.availableQty)) * numberOf(row.purchaseUnitCost),
     0,
   );
+
+  useEffect(() => {
+    warehousesApi.list(false).then(setWarehouses).catch((error) => fail(String(error)));
+  }, [fail]);
+
+  useEffect(() => {
+    if (transaction.warehouse_id || !consumableWarehouses.length) return;
+    const warehouse = consumableWarehouses[0];
+    setTransaction((current) => ({
+      ...current,
+      warehouse_id: String(warehouse.id),
+      location: warehouse.warehouseType === "factory" ? "factory" : "own",
+    }));
+  }, [consumableWarehouses, transaction.warehouse_id]);
+
+  useEffect(() => {
+    if (transactionOptions.some((option) => option.value === transaction.transaction_type)) return;
+    setTransaction((current) => ({ ...current, transaction_type: transactionOptions[0]?.value ?? "purchase" }));
+  }, [transaction.transaction_type, transactionOptions]);
 
   useEffect(() => {
     if (filteredRows.length === 0) {
@@ -182,10 +222,21 @@ export default function ConsumableWorkbench({ rows, products, reload, notify, fa
   async function addTransaction(event: React.FormEvent) {
     event.preventDefault();
     if (!selected) return;
+    if (!transaction.warehouse_id && consumableWarehouses.length) {
+      fail("请选择实际耗材仓库");
+      return;
+    }
     setTransactionSaving(true);
     try {
-      await consumablesApi.addTransaction(selected.id, transaction);
-      setTransaction(EMPTY_TRANSACTION);
+      await consumablesApi.addTransaction(selected.id, {
+        ...transaction,
+        warehouse_id: transaction.warehouse_id ? Number(transaction.warehouse_id) : null,
+      });
+      setTransaction({
+        ...EMPTY_TRANSACTION,
+        warehouse_id: consumableWarehouses[0] ? String(consumableWarehouses[0].id) : "",
+        location: consumableWarehouses[0]?.warehouseType === "factory" ? "factory" : "own",
+      });
       setTransactions(await consumablesApi.transactions(selected.id));
       reload();
       notify(`${txLabel(transaction.transaction_type)}已登记，库存已更新`);
@@ -204,7 +255,7 @@ export default function ConsumableWorkbench({ rows, products, reload, notify, fa
             <h2 className="text-base font-semibold text-slate-800">耗材库</h2>
             <span className="rounded-full bg-indigo-50 px-2 py-0.5 text-[11px] font-medium text-indigo-600">本平台台账</span>
           </div>
-          <p className="mt-1 text-xs text-slate-400">耗材不写入吉客云；在本平台维护采购入库（自有仓/工厂）、发往工厂、领用消耗、盘点报损和 SKU 用量映射。</p>
+          <p className="mt-1 text-xs text-slate-400">耗材不写入吉客云；在本平台按实际配置仓维护采购入库、领用消耗、盘点报损和 SKU 用量映射。</p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
           <label className="cursor-pointer rounded-lg border border-slate-200 px-3 py-2 text-xs font-medium text-slate-600 hover:border-indigo-300 hover:text-indigo-600">
@@ -221,7 +272,7 @@ export default function ConsumableWorkbench({ rows, products, reload, notify, fa
         <Summary label="耗材种类" value={String(rows.length)} hint="已启用档案" />
         <Summary label="低库存 / 负库存" value={String(lowStockCount)} hint="可用 ≤ 安全库存" tone={lowStockCount ? "amber" : "normal"} />
         <Summary label="待核对历史数据" value={String(reconcileCount)} hint="采购量 − 已使用 ≠ 库存" tone={reconcileCount ? "amber" : "normal"} />
-        <Summary label="可估自有仓金额" value={`¥${inventoryValue.toLocaleString("zh-CN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`} hint={`${unmappedCount} 条未建立 SKU 映射`} />
+        <Summary label="可用库存金额" value={`¥${inventoryValue.toLocaleString("zh-CN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`} hint={`${unmappedCount} 条未建立 SKU 映射`} />
       </div>
 
       <div className="mt-5 flex flex-wrap items-center gap-2">
@@ -320,10 +371,10 @@ export default function ConsumableWorkbench({ rows, products, reload, notify, fa
               </div>
 
               <div className="grid grid-cols-4 gap-px border-b border-slate-100 bg-slate-100">
-                <DetailMetric label="自有仓" value={`${qty(selected.stockQty)}`} tone={selected.lowStock ? "amber" : "normal"} />
-                <DetailMetric label="工厂仓" value={`${qty(selected.factoryQty)}`} />
+                <DetailMetric label={consumableWarehouses.length === 1 && consumableWarehouses[0].warehouseType === "factory" ? consumableWarehouses[0].name : "自有仓"} value={`${qty(consumableWarehouses.length === 1 && consumableWarehouses[0].warehouseType === "factory" ? selected.factoryQty : selected.stockQty)}`} tone={selected.lowStock ? "amber" : "normal"} />
+                <DetailMetric label={consumableWarehouses.length === 1 && consumableWarehouses[0].warehouseType === "factory" ? "其他库存" : "工厂仓"} value={`${qty(consumableWarehouses.length === 1 && consumableWarehouses[0].warehouseType === "factory" ? selected.stockQty : selected.factoryQty)}`} />
                 <DetailMetric label="在途" value={`${qty(selected.transitQty)}`} />
-                <DetailMetric label="可用（自有+工厂）" value={`${qty(selected.availableQty)}`} />
+                <DetailMetric label="可用库存" value={`${qty(selected.availableQty)}`} />
               </div>
 
               {selected.linkedSkus?.length > 0 && (
@@ -359,21 +410,32 @@ export default function ConsumableWorkbench({ rows, products, reload, notify, fa
                 </section>
 
                 <section className="border-t border-slate-100 pt-5">
-                  <div className="flex items-center justify-between"><div><h4 className="text-xs font-semibold text-slate-700">库存流水</h4><p className="mt-1 text-[10px] text-slate-400">库存只能由流水变化；采购入库可选自有仓或工厂，发往工厂经在途中转。</p></div><span className="text-[10px] text-slate-400">最近 {Math.min(transactions.length, 8)} 条</span></div>
+                  <div className="flex items-center justify-between"><div><h4 className="text-xs font-semibold text-slate-700">库存流水</h4><p className="mt-1 text-[10px] text-slate-400">库存只能由流水变化；每次手工登记都必须选择实际耗材仓。</p></div><span className="text-[10px] text-slate-400">最近 {Math.min(transactions.length, 8)} 条</span></div>
                   <form onSubmit={addTransaction} className="mt-3 space-y-2">
                     <div className="grid grid-cols-[120px_minmax(0,1fr)] gap-2">
                       <select value={transaction.transaction_type} onChange={(event) => setTransaction({ ...transaction, transaction_type: event.target.value })} className="h-8 rounded-md border border-slate-200 px-1.5 text-[10px] text-slate-600 outline-none focus:border-indigo-400">
-                        {TX_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+                        {transactionOptions.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
                       </select>
-                      <div className="flex h-8 items-center px-2 text-[10px] text-slate-400">{TX_OPTIONS.find((o) => o.value === transaction.transaction_type)?.hint}</div>
+                      <div className="flex h-8 items-center px-2 text-[10px] text-slate-400">{transactionOptions.find((o) => o.value === transaction.transaction_type)?.hint}</div>
                     </div>
-                    <div className="grid grid-cols-[70px_70px_82px_92px_minmax(0,1fr)_48px] gap-2">
-                      {transaction.transaction_type === "purchase" && (
-                        <select value={transaction.location} onChange={(event) => setTransaction({ ...transaction, location: event.target.value })} className="h-8 rounded-md border border-slate-200 px-1 text-[10px] text-slate-600 outline-none focus:border-indigo-400">
-                          <option value="own">入自有仓</option>
-                          <option value="factory">入工厂</option>
-                        </select>
-                      )}
+                    <div className="grid grid-cols-[150px_92px_92px_minmax(0,1fr)_48px] gap-2">
+                      <select
+                        required={consumableWarehouses.length > 0}
+                        value={transaction.warehouse_id}
+                        aria-label="实际耗材仓库"
+                        onChange={(event) => {
+                          const warehouse = consumableWarehouses.find((row) => String(row.id) === event.target.value);
+                          setTransaction({
+                            ...transaction,
+                            warehouse_id: event.target.value,
+                            location: warehouse?.warehouseType === "factory" ? "factory" : "own",
+                          });
+                        }}
+                        className="h-8 rounded-md border border-slate-200 px-1 text-[10px] text-slate-600 outline-none focus:border-indigo-400"
+                      >
+                        <option value="">选择实际仓库</option>
+                        {consumableWarehouses.map((warehouse) => <option key={warehouse.id} value={warehouse.id}>{warehouse.name}</option>)}
+                      </select>
                       <input required value={transaction.quantity} onChange={(event) => setTransaction({ ...transaction, quantity: event.target.value })} placeholder="数量" className="h-8 rounded-md border border-slate-200 px-2 text-[10px] text-slate-600 outline-none focus:border-indigo-400" />
                       <input value={transaction.unit_cost} onChange={(event) => setTransaction({ ...transaction, unit_cost: event.target.value })} placeholder="单位成本" className="h-8 rounded-md border border-slate-200 px-2 text-[10px] text-slate-600 outline-none focus:border-indigo-400" />
                       <input value={transaction.note} onChange={(event) => setTransaction({ ...transaction, note: event.target.value })} placeholder="来源或备注" className="h-8 min-w-0 rounded-md border border-slate-200 px-2 text-[10px] text-slate-600 outline-none focus:border-indigo-400" />
@@ -383,16 +445,20 @@ export default function ConsumableWorkbench({ rows, products, reload, notify, fa
                   <div className="mt-3 divide-y divide-slate-100 rounded-lg border border-slate-100">
                     {transactions.slice(0, 8).map((item) => {
                       const sign = txSign(item.transactionType);
-                      const snapshot = item.stockBefore != null
-                        ? `自有 ${qty(item.stockBefore)}→${qty(item.stockAfter)}`
-                        : item.factoryBefore != null
-                          ? `工厂 ${qty(item.factoryBefore)}→${qty(item.factoryAfter)}`
+                      const snapshot = item.warehouseName && item.factoryBefore != null
+                        ? `${item.warehouseName} ${qty(item.factoryBefore)}→${qty(item.factoryAfter)}`
+                        : item.warehouseName && item.stockBefore != null
+                          ? `${item.warehouseName} ${qty(item.stockBefore)}→${qty(item.stockAfter)}`
+                          : item.stockBefore != null
+                            ? `自有 ${qty(item.stockBefore)}→${qty(item.stockAfter)}`
+                            : item.factoryBefore != null
+                              ? `工厂 ${qty(item.factoryBefore)}→${qty(item.factoryAfter)}`
                           : "";
                       return (
                         <div key={item.id} className="flex items-center justify-between gap-2 px-3 py-2 text-[10px]">
                           <span className="min-w-0 truncate text-slate-600">
                             {txLabel(item.transactionType)}
-                            {locationLabel(item.location) ? <span className="ml-1 rounded bg-slate-100 px-1 text-slate-500">{locationLabel(item.location)}</span> : null}
+                            {item.warehouseName ? <span className="ml-1 rounded bg-slate-100 px-1 text-slate-500">{item.warehouseName}</span> : locationLabel(item.location) ? <span className="ml-1 rounded bg-slate-100 px-1 text-slate-500">{locationLabel(item.location)}</span> : null}
                             {item.note ? <span className="ml-1 text-slate-400">· {item.note}</span> : null}
                           </span>
                           <span className="flex shrink-0 items-center gap-2">

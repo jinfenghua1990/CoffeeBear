@@ -17,6 +17,7 @@ from app.core.audit import audit
 from app.models.catalog import ProductSku
 from app.models.profit import CostSnapshot
 from app.models.sales import SalesOrder, SalesOrderItem
+from app.services.inbound_cost_service import weighted_inbound_costs
 from app.services.monthly_core import month_bounds
 from app.utils.money import quantize, to_decimal
 
@@ -262,6 +263,11 @@ def compute(db: Session, period_year: int, period_month: int) -> dict[str, Any]:
          .filter(ProductSku.id.in_(sku_quantities.keys())).all()}
         if sku_quantities else {}
     )
+    weighted_costs = weighted_inbound_costs(
+        db,
+        as_of=next_start,
+        sku_ids=set(sku_quantities),
+    )
 
     goods_cost = Decimal("0")
     missing_skus: set[int] = set()
@@ -270,7 +276,11 @@ def compute(db: Session, period_year: int, period_month: int) -> dict[str, Any]:
         if sku is None:
             missing_skus.add(sku_id)
             continue
-        _, unit_cost, _ = _combined_cost(grouped_costs.get(sku_id, []), sku.default_cost)
+        values, unit_cost, _ = _combined_cost(grouped_costs.get(sku_id, []), sku.default_cost)
+        # 采购入库是实际货品成本事实；只有没有实际结算/采购订单成本快照时，
+        # 才用账期截止前的入库数量加权平均覆盖货品档案默认成本。
+        if values["actual_cost"] is None and values["purch_order_cost"] is None:
+            unit_cost = weighted_costs.get(sku_id, unit_cost)
         if unit_cost is None:
             missing_skus.add(sku_id)
         else:

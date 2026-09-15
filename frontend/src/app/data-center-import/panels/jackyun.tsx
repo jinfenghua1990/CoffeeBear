@@ -1,97 +1,18 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
-import { JackyunFileImportRow, JackyunRecordPreview, automationApi, jackyunFileApi } from "@/lib/api";
+import { JackyunFileImportRow, JackyunRecordPreview, jackyunFileApi } from "@/lib/api";
 import { LifecyclePanel } from "./LifecyclePanel";
 
-type SyncJobLite = { provider: string; jobType: string; startedAt?: string | null; status: string; errorSummary?: string | null };
-
-/** 在线同步入库单（吉客云开放平台）：每日配额耗尽时自动禁用，引导改用下方文件导入 */
-function JackyunOnlineSyncCard() {
-  const [busy, setBusy] = useState(false);
-  const [blocked, setBlocked] = useState(false);
-  const [blockedReason, setBlockedReason] = useState("");
-  const [message, setMessage] = useState("");
-
-  // 吉客云测试环境每天 300 次配额耗尽后 inbound 任务会全部撞 0130020806；
-  // 扫今天所有 inbound 任务，若最后一次成功之后全部撞同一道墙就禁用按钮
-  const loadGuard = useCallback(async () => {
-    try {
-      const now = new Date();
-      const todayKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
-      const jobs: SyncJobLite[] = await automationApi.jobs(100);
-      const todayJobs = jobs
-        .filter((j) => j.provider === "jackyun" && j.jobType === "inbound" && (j.startedAt || "").startsWith(todayKey))
-        .sort((a, b) => (a.startedAt || "").localeCompare(b.startedAt || ""));
-      if (todayJobs.length === 0) {
-        setBlocked(false);
-        setBlockedReason("");
-        return;
-      }
-      const isQuotaFailure = (j: SyncJobLite) => j.status === "failed" && /0130020806|测试期间每天最多调用/.test(j.errorSummary || "");
-      let lastSuccess = -1;
-      todayJobs.forEach((j, idx) => { if (j.status === "success") lastSuccess = idx; });
-      const later = lastSuccess >= 0 ? todayJobs.slice(lastSuccess + 1) : todayJobs;
-      if (later.length > 0 && later.every(isQuotaFailure)) {
-        setBlocked(true);
-        setBlockedReason(later.find(isQuotaFailure)?.errorSummary || "今日吉客云开放平台 300 次/日配额已耗尽");
-      } else {
-        setBlocked(false);
-        setBlockedReason("");
-      }
-    } catch {
-      // 守卫只作防误触提示，失败不阻塞页面
-      setBlocked(false);
-      setBlockedReason("");
-    }
-  }, []);
-
-  useEffect(() => { void loadGuard(); }, [loadGuard]);
-
-  async function syncInbound() {
-    if (blocked) {
-      setMessage("今日配额已耗尽（" + (blockedReason || "请走文件导入") + "），请使用下方文件导入");
-      return;
-    }
-    setBusy(true);
-    setMessage("");
-    try {
-      const result = await automationApi.runJackyun("inbound");
-      setMessage("吉客云入库单已加入同步队列，任务 " + result.taskId.slice(0, 8) + "…完成后数据自动更新");
-    } catch (caught) {
-      setMessage("同步入库单失败：" + String(caught));
-    } finally {
-      setBusy(false);
-      void loadGuard();
-    }
-  }
-
-  return (
-    <div className="mb-4 rounded-lg border border-slate-200 bg-white p-4">
-      <div className="flex items-center justify-between gap-3">
-        <div className="min-w-0">
-          <div className="text-sm font-medium text-gray-800">在线同步 · 入库单（开放平台）</div>
-          <p className="mt-0.5 text-xs text-gray-500">直接从吉客云开放平台拉取入库单；每日配额耗尽时自动禁用，改用下方文件导入。</p>
-        </div>
-        <button
-          disabled={busy || blocked}
-          onClick={() => void syncInbound()}
-          title={blocked ? blockedReason || "今日配额已耗尽" : undefined}
-          className={"shrink-0 rounded-lg px-3.5 py-1.5 text-xs font-medium text-white disabled:opacity-50 " + (blocked ? "bg-amber-500 hover:bg-amber-600" : "bg-indigo-600 hover:bg-indigo-700")}
-        >
-          {busy ? "同步中…" : blocked ? "配额受限" : "立即同步"}
-        </button>
-      </div>
-      {blocked && <p className="mt-2 rounded bg-amber-50 px-2.5 py-1.5 text-xs text-amber-700">{blockedReason || "今日配额已耗尽"}——请使用下方文件导入。</p>}
-      {message && <p className="mt-2 rounded bg-indigo-50 px-2.5 py-1.5 text-xs text-indigo-700">{message}</p>}
-    </div>
-  );
-}
-
+/**
+ * 吉客云业务单据：纯手动上传。
+ * 开放平台在线同步已停用（JACKYUN_SYNC_MODE=manual），业务单据一律由客户端导出文件上传。
+ */
 export function JackyunPanel() {
   return (
     <div>
-      <JackyunOnlineSyncCard />
+      <div className="mb-4 rounded-lg border border-emerald-100 bg-emerald-50/60 px-4 py-3 text-xs text-emerald-800">
+        已切换为手动上传模式：开放平台在线同步已停用。请从吉客云客户端导出报表后在此上传，导入后自动执行字段映射、订单建档和采购链路关联。
+      </div>
       <LifecyclePanel<JackyunFileImportRow, JackyunRecordPreview>
       title="吉客云客户端导出导入"
       description="从吉客云客户端导出的采购/库存/结算等报表，默认上传后自动生效，并继续执行字段映射、订单建档和采购链路关联。需要逐行核对时可关闭自动确认。"

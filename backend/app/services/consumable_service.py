@@ -7,9 +7,13 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 from io import BytesIO
 
-from app.models.catalog import ProductSku
+from app.models.catalog import ProductSku, Warehouse
 from app.models.consumable import Consumable, ConsumableSkuMapping, ConsumableTransaction, InboundConsumableUsage
+from app.models.jackyun import JackyunGoodsDocumentItem
+from app.models.procurement_chain import ProcurementChainLink
 from app.models.purchase import ExternalPurchaseOrder, PurchaseAllocationItem
+from app.models.tax import TaxAccountingCategoryRule
+from app.services.tax_category_rule_service import normalize_tax_code, unique_enabled_rule_for_tax_code
 from app.utils.money import to_decimal
 
 
@@ -48,13 +52,24 @@ def serialize_consumable(row: Consumable, db: Session) -> dict:
         "availableQty": _qty(available),
         "minStockQty": _qty(row.min_stock_qty),
         "taxCode": row.tax_code or "",
+        "taxCategoryRuleId": row.tax_category_rule_id,
+        "taxCategoryRuleName": _tax_rule_label(row.tax_category_rule_id, db),
         "usageRate": _qty((to_decimal(row.used_qty) / to_decimal(row.purchased_qty)) if to_decimal(row.purchased_qty) > 0 else Decimal("0")),
         "status": row.status,
         "mappingCount": mapping_count,
         "linkedSkus": _linked_skus(db, row.id),
-        # 预警口径：可用（自有仓+工厂）≤ 安全库存，或库存为负
-        "lowStock": (min_qty > 0 and available <= min_qty) or to_decimal(row.stock_qty) < 0,
+        # 预警口径：可用（各耗材仓汇总）≤ 安全库存，或任一库存口径为负
+        "lowStock": (min_qty > 0 and available <= min_qty)
+        or to_decimal(row.stock_qty) < 0
+        or to_decimal(row.factory_qty) < 0,
     }
+
+
+def _tax_rule_label(rule_id: int | None, db: Session) -> str:
+    if rule_id is None:
+        return ""
+    row = db.get(TaxAccountingCategoryRule, rule_id)
+    return f"{row.category_name} · {row.item_name}" if row else ""
 
 
 def list_consumables(db: Session, search: str = "", status: str | None = None) -> list[dict]:
@@ -81,6 +96,7 @@ def upsert_consumable(
     min_stock_qty: str | None = None,
     barcode: str | None = None,
     tax_code: str | None = None,
+    tax_category_rule_id: int | None = None,
     sku_ids: list[int] | None = None,
 ) -> Consumable:
     code = code.strip()
@@ -100,15 +116,24 @@ def upsert_consumable(
     row.name = name.strip()
     row.category = category.strip()
     row.unit = unit.strip() or "个"
+    affected_sku_ids: set[int] = set()
     if barcode is not None:
         row.barcode = barcode.strip()
     if purchase_unit_cost is not None:
         row.purchase_unit_cost = to_decimal(purchase_unit_cost)
     if min_stock_qty is not None:
         row.min_stock_qty = to_decimal(min_stock_qty)
-    if tax_code is not None:
-        row.tax_code = tax_code.strip()
-    # 关联正品（多对多）：以本次提交为准同步映射；新建映射默认用量 1（第二阶段自动扣减才用到）。
+    if tax_category_rule_id is not None:
+        rule = db.get(TaxAccountingCategoryRule, tax_category_rule_id)
+        if rule is None:
+            raise ValueError("财务分类规则不存在")
+        row.tax_category_rule_id = rule.id
+        row.tax_code = rule.tax_code or ""
+    elif tax_code is not None:
+        row.tax_code = normalize_tax_code(tax_code)
+        matching_rule = unique_enabled_rule_for_tax_code(db, row.tax_code)
+        row.tax_category_rule_id = matching_rule.id if matching_rule is not None else None
+    # 关联正品（多对多）：以本次提交为准同步映射；新建映射默认每个正品使用 1 个耗材。
     if sku_ids is not None:
         wanted: dict[int, None] = {}
         for sku_id in sku_ids:
@@ -120,6 +145,8 @@ def upsert_consumable(
             if db.get(ProductSku, sku_id) is None:
                 raise ValueError(f"正品 SKU {sku_id} 不存在")
         existing_mappings = {m.sku_id: m for m in db.query(ConsumableSkuMapping).filter_by(consumable_id=row.id).all()}
+        affected_sku_ids.update(existing_mappings)
+        affected_sku_ids.update(wanted)
         for sku_id in wanted:
             if sku_id not in existing_mappings:
                 db.add(ConsumableSkuMapping(consumable_id=row.id, sku_id=sku_id, usage_per_unit=Decimal("1"), note="货品档案关联"))
@@ -128,6 +155,9 @@ def upsert_consumable(
                 db.delete(mapping)
     db.commit()
     db.refresh(row)
+    if affected_sku_ids:
+        auto_apply_confirmed_inbound_usage(db, sku_ids=affected_sku_ids)
+        db.refresh(row)
     return row
 
 
@@ -158,14 +188,28 @@ def record_transaction(
     request_key: str | None = None,
     commit: bool = True,
     location: str = "own",
+    warehouse_id: int | None = None,
 ) -> ConsumableTransaction:
     row = db.scalar(select(Consumable).where(Consumable.id == consumable_id).with_for_update().execution_options(populate_existing=True))
     if row is None:
         raise ValueError("耗材不存在")
     if transaction_type not in TX_TYPES:
         raise ValueError(f"流水类型必须是 {'、'.join(TX_TYPES)} 之一")
+    if location is None:
+        location = "own"
     if location not in {"own", "factory"}:
         raise ValueError("库存位置必须是 own（自有仓）或 factory（工厂）")
+    warehouse = None
+    if warehouse_id is not None:
+        warehouse = db.get(Warehouse, warehouse_id)
+        if warehouse is None or warehouse.status != "active":
+            raise ValueError("所选仓库不存在或已停用")
+        if warehouse.purpose not in {"consumable", "both"}:
+            raise ValueError(f"仓库“{warehouse.name}”当前用途不允许存放耗材")
+        # warehouse_id 是新口径的事实来源；旧 location 只保留兼容展示，不能
+        # 让调用方把工厂仓流水误写成自有仓，或反过来。
+        from app.services import warehouse_service
+        location = warehouse_service.legacy_location(warehouse)
     qty = to_decimal(quantity)
     cost = to_decimal(unit_cost) if unit_cost not in (None, "") else None
     if not qty.is_finite() or (cost is not None and (not cost.is_finite() or cost < 0)):
@@ -177,7 +221,21 @@ def record_transaction(
     if request_key:
         existing = db.query(ConsumableTransaction).filter_by(request_key=request_key).first()
         if existing:
-            if (existing.consumable_id, existing.transaction_type, existing.quantity, existing.unit_cost, existing.note) != (consumable_id, transaction_type, qty, cost, note.strip()):
+            if (
+                existing.consumable_id,
+                existing.transaction_type,
+                existing.quantity,
+                existing.unit_cost,
+                existing.warehouse_id,
+                existing.note,
+            ) != (
+                consumable_id,
+                transaction_type,
+                qty,
+                cost,
+                warehouse_id,
+                note.strip(),
+            ):
                 raise ValueError("这次登记已提交过不同内容，请刷新后重新操作")
             return existing
     if source_type != "manual" and source_id is not None:
@@ -239,6 +297,7 @@ def record_transaction(
         transaction_type=transaction_type,
         quantity=qty,
         unit_cost=cost,
+        warehouse_id=warehouse_id,
         location=tx_location,
         source_type=source_type,
         source_id=source_id,
@@ -281,6 +340,187 @@ def consume_for_purchase_order(db: Session, po: ExternalPurchaseOrder) -> dict[s
     return {"consumableCount": str(len(totals)), "consumedQty": _qty(consumed)}
 
 
+def suggest_inbound_usage(db: Session, link_id: int) -> dict:
+    """按实际入库明细和 SKU 映射生成一条入库关联的耗材使用建议。
+
+    优先使用 ``PurchaseAllocationItem.source_item_id``，因为同一张吉客云入库单
+    可能被多个采购单拆分关联；只有单据没有拆分关联时，才允许直接使用入库明细。
+    采购时间只作查询线索，不参与耗材扣减判断。
+    """
+    from app.services.inbound_allocation_seed import _po_from_link
+
+    link = db.get(ProcurementChainLink, link_id)
+    if link is None or link.target_type != "inbound":
+        return {"ready": False, "items": [], "reason": "入库关联不存在"}
+
+    item_rows = db.query(JackyunGoodsDocumentItem).filter(
+        JackyunGoodsDocumentItem.document_id == link.target_id,
+    ).order_by(JackyunGoodsDocumentItem.line_no).all()
+    item_ids = {row.id for row in item_rows}
+    if not item_ids:
+        return {"ready": True, "items": [], "reason": "入库单没有明细"}
+
+    po = _po_from_link(db, link)
+    allocation_rows = []
+    if po is not None:
+        allocation_rows = db.query(PurchaseAllocationItem).filter(
+            PurchaseAllocationItem.po_id == po.id,
+            PurchaseAllocationItem.source_item_id.in_(item_ids),
+        ).all()
+
+    source_rows: list[tuple[int, Decimal, int | None]] = []
+    basis = "allocation"
+    if allocation_rows:
+        source_rows = [
+            (int(row.sku_id), to_decimal(row.quantity), row.source_item_id)
+            for row in allocation_rows
+            if row.sku_id is not None and row.quantity is not None and to_decimal(row.quantity) > 0
+        ]
+    else:
+        active_link_count = db.query(ProcurementChainLink).filter(
+            ProcurementChainLink.target_type == "inbound",
+            ProcurementChainLink.target_id == link.target_id,
+            ProcurementChainLink.match_method != "rejected",
+            ProcurementChainLink.confirmed.is_(True),
+        ).count()
+        if active_link_count != 1:
+            return {
+                "ready": False,
+                "items": [],
+                "reason": "同一入库单关联多个采购单，尚无明细分摊",
+            }
+        basis = "single_inbound"
+        source_rows = [
+            (int(row.matched_sku_id), to_decimal(row.quantity), row.id)
+            for row in item_rows
+            if row.matched_sku_id is not None and row.quantity is not None and to_decimal(row.quantity) > 0
+        ]
+
+    sku_ids = {sku_id for sku_id, _, _ in source_rows}
+    mappings = db.query(ConsumableSkuMapping).filter(
+        ConsumableSkuMapping.sku_id.in_(sku_ids),
+    ).all() if sku_ids else []
+    mappings_by_sku: dict[int, list[ConsumableSkuMapping]] = {}
+    for mapping in mappings:
+        mappings_by_sku.setdefault(mapping.sku_id, []).append(mapping)
+
+    totals: dict[int, Decimal] = {}
+    source_item_ids: set[int] = set()
+    for sku_id, quantity, source_item_id in source_rows:
+        if source_item_id is not None:
+            source_item_ids.add(source_item_id)
+        for mapping in mappings_by_sku.get(sku_id, []):
+            usage_quantity = quantity * to_decimal(mapping.usage_per_unit)
+            if usage_quantity > 0:
+                totals[mapping.consumable_id] = totals.get(mapping.consumable_id, Decimal("0")) + usage_quantity
+
+    return {
+        "ready": True,
+        "basis": basis,
+        "skuIds": sorted(sku_ids),
+        "sourceItemIds": sorted(source_item_ids),
+        "items": [
+            {"consumable_id": consumable_id, "quantity": _qty(quantity)}
+            for consumable_id, quantity in sorted(totals.items())
+        ],
+        "reason": "按入库明细和 SKU 耗材映射生成" if totals else "入库 SKU 尚未配置耗材映射",
+    }
+
+
+def auto_apply_inbound_usage(db: Session, link_id: int, note: str = "") -> dict:
+    """把可确定的 SKU→耗材建议自动写入入库关联并扣减库存。
+
+    用户明确在工作台选择“本次不使用”的人工结果不覆盖；历史自动确认产生的
+    “本次不使用耗材”允许按新的明细分摊规则重新计算。
+    """
+    link = db.get(ProcurementChainLink, link_id)
+    if link is None or link.target_type != "inbound":
+        return {"status": "skipped", "reason": "入库关联不存在", "items": []}
+
+    automatic_link = (
+        link.match_method in {"auto", "file_import"}
+        or "自动确认" in (link.note or "")
+        or "自动按 SKU 耗材映射关联" in (link.note or "")
+        or "按 SKU 耗材映射自动关联" in (link.note or "")
+    )
+    manual_decided = (
+        link.consumable_usage_decided
+        and link.match_method == "manual"
+        and not automatic_link
+    )
+    if manual_decided:
+        return {"status": "manual_preserved", "reason": "保留人工明确的耗材登记结果", "items": []}
+
+    suggestion = suggest_inbound_usage(db, link_id)
+    if not suggestion["ready"]:
+        return {"status": "pending", **suggestion}
+
+    items = suggestion["items"]
+    if items:
+        usage_note = note.strip() or "按入库明细和 SKU 耗材映射自动关联"
+        usage = set_inbound_usage(db, link_id=link_id, enabled=True, items=items, note=usage_note)
+        link = db.get(ProcurementChainLink, link_id)
+        if link is not None and "按 SKU 耗材映射自动关联" not in (link.note or ""):
+            link.note = f"{link.note}；按 SKU 耗材映射自动关联" if link.note else "按 SKU 耗材映射自动关联"
+            db.commit()
+        return {"status": "applied", "basis": suggestion.get("basis"), "items": usage}
+
+    if automatic_link or not link.consumable_usage_decided:
+        set_inbound_usage(
+            db,
+            link_id=link_id,
+            enabled=False,
+            items=[],
+            note=note.strip() or "入库 SKU 尚未配置耗材映射",
+        )
+        link = db.get(ProcurementChainLink, link_id)
+        if link is not None and "按 SKU 耗材映射自动关联" not in (link.note or ""):
+            link.note = f"{link.note}；按 SKU 耗材映射自动关联" if link.note else "按 SKU 耗材映射自动关联"
+            db.commit()
+    return {"status": "no_mapping", "basis": suggestion.get("basis"), "items": []}
+
+
+def auto_apply_confirmed_inbound_usage(
+    db: Session,
+    *,
+    sku_ids: set[int] | None = None,
+    note: str = "",
+) -> dict:
+    """在产品-耗材映射保存后，回溯补齐已有的真实入库关联。
+
+    只扫描已确认的入库链；``suggest_inbound_usage`` 仍以入库明细分配行作为
+    唯一数量来源，因此同一入库单拆给多个采购单时不会重复扣减。明确人工登记
+    的结果不会被回溯覆盖。
+    """
+    link_ids = [link_id for (link_id,) in db.query(ProcurementChainLink.id).filter(
+        ProcurementChainLink.target_type == "inbound",
+        ProcurementChainLink.confirmed.is_(True),
+        ProcurementChainLink.match_method != "rejected",
+    ).all()]
+    stats = {"applied": 0, "pending": 0, "noMapping": 0, "preserved": 0, "skipped": 0}
+    for link_id in link_ids:
+        try:
+            suggestion = suggest_inbound_usage(db, link_id)
+            if sku_ids is not None and not (set(suggestion.get("skuIds", [])) & sku_ids):
+                continue
+            result = auto_apply_inbound_usage(db, link_id, note=note)
+            status = result.get("status")
+            if status == "applied":
+                stats["applied"] += 1
+            elif status == "pending":
+                stats["pending"] += 1
+            elif status == "no_mapping":
+                stats["noMapping"] += 1
+            elif status == "manual_preserved":
+                stats["preserved"] += 1
+            else:
+                stats["skipped"] += 1
+        except Exception:
+            db.rollback()
+            stats["skipped"] += 1
+    return stats
+
+
 def inbound_usage_rows(db: Session, link_id: int) -> list[dict]:
     """返回一条入库关联当前确认的耗材使用明细。"""
     rows = db.query(InboundConsumableUsage, Consumable).join(
@@ -307,12 +547,20 @@ def _reverse_inbound_usage(db: Session, link_id: int) -> None:
     usages = db.query(InboundConsumableUsage).filter_by(link_id=link_id).order_by(InboundConsumableUsage.consumable_id).all()
     for usage in usages:
         material = db.scalar(select(Consumable).where(Consumable.id == usage.consumable_id).with_for_update().execution_options(populate_existing=True))
-        if material is not None:
-            material.stock_qty = to_decimal(material.stock_qty) + to_decimal(usage.quantity)
-            material.used_qty = max(Decimal("0"), to_decimal(material.used_qty) - to_decimal(usage.quantity))
         tx = db.query(ConsumableTransaction).filter_by(
             source_type="inbound_link", source_id=link_id, consumable_id=usage.consumable_id
         ).first()
+        tx_warehouse = db.get(Warehouse, tx.warehouse_id) if tx is not None and tx.warehouse_id else None
+        is_factory = tx is not None and (
+            tx.location == "factory"
+            or (tx_warehouse is not None and tx_warehouse.warehouse_type == "factory")
+        )
+        if material is not None:
+            if is_factory:
+                material.factory_qty = to_decimal(material.factory_qty) + to_decimal(usage.quantity)
+            else:
+                material.stock_qty = to_decimal(material.stock_qty) + to_decimal(usage.quantity)
+            material.used_qty = max(Decimal("0"), to_decimal(material.used_qty) - to_decimal(usage.quantity))
         if tx is not None:
             db.delete(tx)
         db.delete(usage)
@@ -372,8 +620,37 @@ def set_inbound_usage(
         for material_id, quantity in normalized.items():
             material = db.get(Consumable, material_id)
             assert material is not None
-            material.stock_qty = to_decimal(material.stock_qty) - quantity
-            material.used_qty = to_decimal(material.used_qty) + quantity
+            # 优先使用唯一的启用耗材仓；只有仓库配置尚未形成唯一事实时，
+            # 才回退到该耗材最近一次有仓库的实际收货。
+            from app.models.catalog import Warehouse
+            from app.models.consumable_purchase import ConsumablePurchaseItem, ConsumableReceipt
+            from app.services import warehouse_service
+            usage_warehouse = warehouse_service.default_for_consumable(db)
+            # 测试库或尚未执行历史归一化的旧数据可能仍只有 stock_qty；在
+            # 唯一工厂仓尚无余额时保留一次 own 兼容回退，避免把这批旧余额
+            # 误判成工厂仓库存不足。归一化后的正式数据会优先走工厂仓。
+            if (
+                usage_warehouse is not None
+                and usage_warehouse.warehouse_type == "factory"
+                and to_decimal(material.factory_qty) == 0
+                and to_decimal(material.stock_qty) > 0
+            ):
+                usage_warehouse = None
+            if usage_warehouse is None:
+                receipt_match = (
+                    db.query(ConsumableReceipt, Warehouse)
+                    .join(ConsumablePurchaseItem, ConsumablePurchaseItem.purchase_id == ConsumableReceipt.purchase_id)
+                    .join(Warehouse, Warehouse.id == ConsumableReceipt.warehouse_id)
+                    .filter(
+                        ConsumablePurchaseItem.consumable_id == material_id,
+                        ConsumableReceipt.warehouse_id.isnot(None),
+                        Warehouse.status == "active",
+                    )
+                    .order_by(ConsumableReceipt.received_on.desc(), ConsumableReceipt.id.desc())
+                    .first()
+                )
+                usage_warehouse = receipt_match[1] if receipt_match else None
+            usage_location = "factory" if usage_warehouse is not None and usage_warehouse.warehouse_type == "factory" else "own"
             db.add(InboundConsumableUsage(
                 link_id=link_id,
                 inbound_document_id=link.target_id,
@@ -381,16 +658,19 @@ def set_inbound_usage(
                 quantity=quantity,
                 note=note.strip(),
             ))
-            db.add(ConsumableTransaction(
+            record_transaction(
+                db,
                 consumable_id=material_id,
                 transaction_type="consume",
-                quantity=quantity,
-                unit_cost=material.purchase_unit_cost,
+                quantity=str(quantity),
+                unit_cost=str(material.purchase_unit_cost) if material.purchase_unit_cost is not None else None,
                 source_type="inbound_link",
                 source_id=link_id,
                 note=note.strip() or f"入库单关联 #{link.target_id} 确认耗材出库",
-                occurred_at=datetime.now(timezone.utc),
-            ))
+                location=usage_location,
+                warehouse_id=usage_warehouse.id if usage_warehouse is not None else None,
+                commit=False,
+            )
     link.consumable_usage_decided = True
     link.consumable_usage_enabled = enabled
     db.commit()
@@ -400,6 +680,7 @@ def set_inbound_usage(
 def list_transactions(db: Session, consumable_id: int, limit: int = 100) -> list[dict]:
     from app.models.consumable_purchase import ConsumableReceipt
     from app.models.procurement_chain import ProcurementChainLink
+    from app.services import warehouse_service
     rows = db.query(ConsumableTransaction).filter_by(consumable_id=consumable_id).order_by(
         ConsumableTransaction.occurred_at.desc().nullslast(), ConsumableTransaction.id.desc()
     ).limit(limit).all()
@@ -407,6 +688,11 @@ def list_transactions(db: Session, consumable_id: int, limit: int = 100) -> list
     receipts = {r.id: r for r in db.query(ConsumableReceipt).filter(ConsumableReceipt.id.in_(receipt_ids)).all()} if receipt_ids else {}
     link_ids = [row.source_id for row in rows if row.source_type == "inbound_link"]
     links = {link.id: link for link in db.query(ProcurementChainLink).filter(ProcurementChainLink.id.in_(link_ids)).all()} if link_ids else {}
+    warehouse_ids = {row.warehouse_id for row in rows if row.warehouse_id is not None}
+    warehouses = {
+        warehouse.id: warehouse
+        for warehouse in db.query(Warehouse).filter(Warehouse.id.in_(warehouse_ids)).all()
+    } if warehouse_ids else {}
     return [
         {
             "id": row.id,
@@ -414,6 +700,9 @@ def list_transactions(db: Session, consumable_id: int, limit: int = 100) -> list
             "quantity": _qty(row.quantity),
             "unitCost": _money(row.unit_cost),
             "location": row.location,
+            "warehouseId": row.warehouse_id,
+            "warehouseCode": warehouse_service.display_code(warehouses[row.warehouse_id]) if row.warehouse_id in warehouses else "",
+            "warehouseName": warehouses[row.warehouse_id].name if row.warehouse_id in warehouses else "",
             "stockBefore": _qty(row.stock_before) if row.stock_before is not None else None,
             "stockAfter": _qty(row.stock_after) if row.stock_after is not None else None,
             "factoryBefore": _qty(row.factory_before) if row.factory_before is not None else None,
@@ -469,6 +758,8 @@ def upsert_mapping(db: Session, *, mapping_id: int | None, sku_id: int, consumab
     row.note = note.strip()
     db.commit()
     db.refresh(row)
+    auto_apply_confirmed_inbound_usage(db, sku_ids={sku_id})
+    db.refresh(row)
     return row
 
 
@@ -476,8 +767,10 @@ def remove_mapping(db: Session, mapping_id: int) -> None:
     row = db.get(ConsumableSkuMapping, mapping_id)
     if row is None:
         raise ValueError("耗材映射不存在")
+    sku_id = row.sku_id
     db.delete(row)
     db.commit()
+    auto_apply_confirmed_inbound_usage(db, sku_ids={sku_id})
 
 
 def import_xlsx(db: Session, content: bytes, filename: str = "consumables.xlsx") -> dict[str, int | str]:
@@ -502,6 +795,7 @@ def import_xlsx(db: Session, content: bytes, filename: str = "consumables.xlsx")
     idx = {name: headers.index(name) for name in headers if name}
     created = updated = skipped = mappings = 0
     mapping_cache: dict[tuple[int, int], ConsumableSkuMapping] = {}
+    affected_sku_ids: set[int] = set()
     def json_value(value):
         if isinstance(value, (datetime,)):
             return value.isoformat()
@@ -576,10 +870,14 @@ def import_xlsx(db: Session, content: bytes, filename: str = "consumables.xlsx")
                     mapping = ConsumableSkuMapping(sku_id=sku.id, consumable_id=material.id, usage_per_unit=ratio, note="由历史订货表自动映射")
                     db.add(mapping)
                     mappings += 1
+                    affected_sku_ids.add(sku.id)
                 elif to_decimal(mapping.usage_per_unit) != ratio:
                     mapping.usage_per_unit = ratio
                     mapping.note = "由历史订货表更新映射"
                     mappings += 1
+                    affected_sku_ids.add(sku.id)
                 mapping_cache[key] = mapping
     db.commit()
+    if affected_sku_ids:
+        auto_apply_confirmed_inbound_usage(db, sku_ids=affected_sku_ids)
     return {"created": created, "updated": updated, "skipped": skipped, "mappings": mappings, "sheet": "耗材使用情况"}

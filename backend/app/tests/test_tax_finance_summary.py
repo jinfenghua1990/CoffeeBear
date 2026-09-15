@@ -3,7 +3,9 @@ from decimal import Decimal
 from uuid import uuid4
 
 from app.models.tax import TaxInvoice, TaxInvoiceImport, TaxInvoiceImportRecord
+from app.models.catalog import ProductSku
 from app.services import tax_category_rule_service
+from app.services.dashboard import list_products
 from app.services.tax_finance_summary_service import build_finance_summary, to_finance_csv
 
 
@@ -210,6 +212,7 @@ def test_category_rule_api_can_add_and_modify(client):
         "/api/v1/tax-accounting/category-rules",
         json={
             "pattern": f"*软饮料*咖啡{suffix}",
+            "tax_code": "1234567890123456789",
             "match_keyword": f"咖啡{suffix}",
             "match_mode": "contains",
             "priority": 20,
@@ -220,14 +223,71 @@ def test_category_rule_api_can_add_and_modify(client):
     row = create.json()
     assert row["categoryName"] == "软饮料"
     assert row["pattern"] == f"*软饮料*咖啡{suffix}"
+    assert row["taxCode"] == "1234567890123456789"
 
     update = client.patch(
         f"/api/v1/tax-accounting/category-rules/{row['id']}",
-        json={"pattern": f"*软饮料*咖啡饮料{suffix}", "enabled": False},
+        json={"pattern": f"*软饮料*咖啡饮料{suffix}", "tax_code": "9876543210987654321", "enabled": False},
     )
     assert update.status_code == 200
     assert update.json()["pattern"] == f"*软饮料*咖啡饮料{suffix}"
     assert update.json()["enabled"] is False
+    assert update.json()["taxCode"] == "9876543210987654321"
+
+
+def test_tax_rule_code_is_shared_with_catalog_product(db_session):
+    rule = tax_category_rule_service.create_rule(
+        db_session,
+        pattern=f"*测试财务大类*测试货品{uuid4().hex[:8]}",
+        tax_code="1234567890123456789",
+        match_keyword="测试货品",
+        actor="pytest",
+    )
+    sku = ProductSku(
+        jackyun_sku_id=f"tax-link-{uuid4().hex}",
+        sku_code=f"TAX-LINK-{uuid4().hex[:8]}",
+        sku_name="税务联动测试货品",
+        tax_code=rule.tax_code,
+        tax_category_rule_id=rule.id,
+    )
+    db_session.add(sku)
+    db_session.flush()
+
+    tax_category_rule_service.update_rule(
+        db_session,
+        rule.id,
+        tax_code="9876543210987654321",
+        actor="pytest",
+    )
+    db_session.refresh(sku)
+    assert sku.tax_category_rule_id == rule.id
+    assert sku.tax_code == "9876543210987654321"
+    row = next(item for item in list_products(db_session) if item["id"] == sku.id)
+    assert row["taxCategoryRuleId"] == rule.id
+    assert row["taxCategoryRuleName"].startswith("测试财务大类 · 测试货品")
+
+
+def test_new_tax_rule_links_existing_direct_code_catalog_rows(db_session):
+    code = "1234567890123456789"
+    sku = ProductSku(
+        jackyun_sku_id=f"tax-direct-{uuid4().hex}",
+        sku_code=f"TAX-DIRECT-{uuid4().hex[:8]}",
+        sku_name="已有直填代码货品",
+        tax_code=code,
+    )
+    db_session.add(sku)
+    db_session.flush()
+
+    rule = tax_category_rule_service.create_rule(
+        db_session,
+        pattern=f"*测试直联大类*测试直联货品{uuid4().hex[:8]}",
+        tax_code=code,
+        match_keyword="已有直填代码货品",
+        actor="pytest",
+    )
+
+    db_session.refresh(sku)
+    assert sku.tax_category_rule_id == rule.id
 
 
 def test_tax_original_detail_delete_endpoint_is_blocked(client):

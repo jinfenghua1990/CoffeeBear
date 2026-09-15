@@ -24,6 +24,7 @@ from app.models.purchase import (
     PurchaseExtraExpense,
     PurchaseInvoice,
     PurchaseInvoiceLink,
+    InboundLink,
 )
 from app.services.allocation import balance_check
 from app.utils.money import money_sum, to_decimal
@@ -96,7 +97,9 @@ def create_external_po(db: Session, *, external_order_id: str, supplier_name: st
                        actor: str = "system") -> ExternalPurchaseOrder:
     """登记/同步一笔外部采购订单。幂等：已存在则更新状态字段，绝不重复生成。"""
     platform = normalize_platform(platform)
-    po = db.query(ExternalPurchaseOrder).filter_by(external_order_id=external_order_id).first()
+    po = db.query(ExternalPurchaseOrder).filter_by(
+        platform=platform, external_order_id=external_order_id
+    ).first()
     if po:
         po.order_status = po.order_status or ""
         po.synced_at = datetime.now(timezone.utc)
@@ -326,6 +329,8 @@ def advance_status(db: Session, po: ExternalPurchaseOrder, nxt: str,
                    actor: str = "system") -> None:
     if not validate_transition(po.purchase_status, nxt):
         raise ValueError(f"非法状态流转: {po.purchase_status} → {nxt}")
+    if nxt == "producing" and _has_actual_inbound(db, po):
+        raise ValueError("该订单已有实际入库关联，不能回到生产中；请按开票、付款和核验继续收尾")
     if nxt == "confirmed":
         mark_refined(db, po, actor=actor)
         return
@@ -592,10 +597,18 @@ def _inbound_links_for_po(db: Session, po: ExternalPurchaseOrder):
     from app.models.alibaba1688_import import Alibaba1688Order
     from app.models.procurement_chain import ProcurementChainLink
 
-    source = db.query(Alibaba1688Order).filter_by(external_order_id=po.external_order_id).first()
+    source = None
+    if (po.platform or "1688").lower() == "1688":
+        source = db.query(Alibaba1688Order).filter_by(
+            external_order_id=po.external_order_id
+        ).first()
     query = db.query(ProcurementChainLink).filter(
         ProcurementChainLink.target_type == "inbound",
         ProcurementChainLink.confirmed.is_(True),
+        or_(
+            ProcurementChainLink.match_method.is_(None),
+            ProcurementChainLink.match_method != "rejected",
+        ),
     )
     if source is not None:
         query = query.filter(or_(
@@ -605,6 +618,13 @@ def _inbound_links_for_po(db: Session, po: ExternalPurchaseOrder):
     else:
         query = query.filter(ProcurementChainLink.external_po_id == po.id)
     return query.all()
+
+
+def _has_actual_inbound(db: Session, po: ExternalPurchaseOrder) -> bool:
+    """判断采购单是否已有实际入库事实，兼容新链路表和旧入库关联表。"""
+    if _inbound_links_for_po(db, po):
+        return True
+    return db.query(InboundLink.id).filter(InboundLink.po_id == po.id).first() is not None
 
 
 def _po_amount_closed_for_bypass(db: Session, po: ExternalPurchaseOrder) -> bool:

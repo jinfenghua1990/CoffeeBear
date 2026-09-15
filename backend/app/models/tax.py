@@ -107,7 +107,11 @@ class TaxInvoiceLink(Base, PkMixin, TimestampMixin):
 
 
 class TaxAccountingCategoryRule(Base, PkMixin, TimestampMixin):
-    """用户可维护的财务大类规则，例如 *软饮料*咖啡。"""
+    """用户可维护的财务大类规则，例如 *软饮料*咖啡。
+
+    tax_code 是货品档案可引用的开票税收分类编码，避免财务规则和货品档案各自
+    维护一份互不相认的代码。
+    """
 
     __tablename__ = "tax_accounting_category_rules"
     __table_args__ = (
@@ -116,6 +120,7 @@ class TaxAccountingCategoryRule(Base, PkMixin, TimestampMixin):
 
     category_name: Mapped[str] = mapped_column(String(128), nullable=False)
     item_name: Mapped[str] = mapped_column(String(256), nullable=False)
+    tax_code: Mapped[str] = mapped_column(String(32), default="", server_default="", nullable=False)
     match_keyword: Mapped[str] = mapped_column(String(256), default="")
     match_mode: Mapped[str] = mapped_column(String(16), default="contains")
     priority: Mapped[int] = mapped_column(Integer, default=100, index=True)

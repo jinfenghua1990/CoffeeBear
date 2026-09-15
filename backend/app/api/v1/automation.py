@@ -12,26 +12,38 @@ from app.models.integration import SyncJob, SyncLog
 router = APIRouter(prefix="/automation", tags=["automation"])
 
 _order_interval = max(1, min(settings.JKY_ORDER_SYNC_INTERVAL_MINUTES, 59))
+_manual = settings.JACKYUN_SYNC_MODE == "manual"
 _order_frequency = (
-    "已暂停（JACKYUN_SYNC_MODE=manual）"
-    if settings.JACKYUN_SYNC_MODE == "manual"
+    "已停用（JACKYUN_SYNC_MODE=manual，改手动上传）"
+    if _manual
     else f"每 {_order_interval} 分钟"
+)
+_jky_frequency = (
+    "已停用（JACKYUN_SYNC_MODE=manual，改手动上传）"
+    if _manual
+    else "每 15 分钟（错峰）"
+)
+_daily_jky_frequency = (
+    "已停用（JACKYUN_SYNC_MODE=manual，改手动上传）"
+    if _manual
+    else "每天定时"
 )
 SCHEDULE = [
     {"task": "tasks.sync_jky_orders", "args": "", "label": "吉客云 销售订单（三通道自动切换）", "frequency": _order_frequency},
-    {"task": "tasks.sync_jackyun", "args": "aftersales", "label": "吉客云 售后", "frequency": "每 15 分钟（错峰）"},
-    {"task": "tasks.sync_jackyun", "args": "inventory", "label": "吉客云 库存", "frequency": "每 30 分钟"},
-    {"task": "tasks.sync_jackyun", "args": "products", "label": "吉客云 商品/SKU", "frequency": "每天 03:10"},
-    {"task": "tasks.sync_jackyun", "args": "price_lists", "label": "吉客云 SKU/价格", "frequency": "每天 03:20"},
-    {"task": "tasks.sync_jackyun", "args": "warehouses", "label": "吉客云 仓库", "frequency": "每天 03:30"},
-    {"task": "tasks.sync_jackyun", "args": "purchase", "label": "吉客云 采购", "frequency": "每 60 分钟"},
-    {"task": "tasks.sync_jackyun", "args": "online_orders", "label": "吉客云 OMS 订单", "frequency": "每 15 分钟（错峰）"},
-    {"task": "tasks.sync_jackyun", "args": "shop_orders", "label": "吉客云 网店订单/发货", "frequency": "每 15 分钟（错峰）"},
-    {"task": "tasks.sync_jackyun", "args": "purchase_settlements", "label": "吉客云 采购结算", "frequency": "每 60 分钟（错峰）"},
-    {"task": "tasks.sync_jackyun", "args": "purchase_returns", "label": "吉客云 采购退货", "frequency": "每 60 分钟（错峰）"},
-    {"task": "tasks.sync_jackyun", "args": "stock_allocations", "label": "吉客云 库存调拨", "frequency": "每 60 分钟（错峰）"},
-    {"task": "tasks.sync_jackyun", "args": "inbound", "label": "吉客云 入库单", "frequency": "每天 03:40"},
-    {"task": "tasks.sync_jackyun", "args": "outbound", "label": "吉客云 出库单", "frequency": "每天 03:50"},
+    {"task": "tasks.sync_jackyun", "args": "aftersales", "label": "吉客云 售后", "frequency": _jky_frequency},
+    {"task": "tasks.sync_jackyun", "args": "inventory", "label": "吉客云 库存", "frequency": _jky_frequency},
+    {"task": "tasks.sync_jackyun", "args": "products", "label": "吉客云 商品/SKU", "frequency": _daily_jky_frequency},
+    {"task": "tasks.sync_jackyun", "args": "price_lists", "label": "吉客云 SKU/价格", "frequency": _daily_jky_frequency},
+    {"task": "tasks.sync_jackyun", "args": "warehouses", "label": "吉客云 仓库", "frequency": _daily_jky_frequency},
+    {"task": "tasks.sync_jackyun", "args": "purchase", "label": "吉客云 采购", "frequency": _jky_frequency},
+    {"task": "tasks.sync_jackyun", "args": "online_orders", "label": "吉客云 OMS 订单", "frequency": _jky_frequency},
+    {"task": "tasks.sync_jackyun", "args": "shop_orders", "label": "吉客云 网店订单/发货", "frequency": _jky_frequency},
+    {"task": "tasks.sync_jackyun", "args": "purchase_settlements", "label": "吉客云 采购结算", "frequency": _jky_frequency},
+    {"task": "tasks.sync_jackyun", "args": "purchase_returns", "label": "吉客云 采购退货", "frequency": _jky_frequency},
+    {"task": "tasks.sync_jackyun", "args": "stock_allocations", "label": "吉客云 库存调拨", "frequency": _jky_frequency},
+    {"task": "tasks.sync_jackyun", "args": "inbound", "label": "吉客云 入库单", "frequency": _daily_jky_frequency},
+    {"task": "tasks.sync_jackyun", "args": "outbound", "label": "吉客云 出库单", "frequency": _daily_jky_frequency},
+    {"task": "tasks.sync_jky_web", "args": "", "label": "吉客云 档案（商品/SKU/仓库）", "frequency": _daily_jky_frequency},
     {"task": "tasks.sync_1688", "args": "", "label": "1688 订单", "frequency": "每天 07:30"},
     {"task": "tasks.monthly_verify", "args": "", "label": "月初完整校验", "frequency": "每月 1 日 06:00"},
     {"task": "tasks.generate_monthly_accounting_summary", "args": "", "label": "财务 销售开票分类汇总", "frequency": "每月 2 日 04:10"},

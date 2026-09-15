@@ -4,8 +4,9 @@ from uuid import uuid4
 
 import pytest
 
-from app.models.catalog import InventorySnapshot, ProductSku
+from app.models.catalog import ProductSku
 from app.models.jackyun import JackyunGoodsDocument, JackyunGoodsDocumentItem
+from app.services.inventory_position_service import current_positions
 from app.services.production_finished_flow_service import (
     inbound_candidates,
     link_inbound_allocations,
@@ -131,16 +132,21 @@ def test_finished_goods_partial_flow_and_idempotency(db_session):
         )
 
 
-def test_inbound_allocation_can_be_partial_without_changing_inventory_snapshot(db_session):
+def test_inbound_allocation_can_be_partial_without_changing_computed_inventory(db_session):
     order, sku, item_id = _order(db_session, "30")
-    snapshot = InventorySnapshot(
-        sku_id=sku.id,
-        warehouse_id=None,
-        quantity=Decimal("99"),
-        snapshot_at=datetime.now(timezone.utc),
-        source="jackyun",
+    inbound_doc = JackyunGoodsDocument(
+        document_type="inbound",
+        goodsdoc_no=f"PYTEST-FLOW-{uuid4().hex}",
+        document_at=datetime.now(timezone.utc),
     )
-    db_session.add(snapshot)
+    db_session.add(inbound_doc)
+    db_session.flush()
+    db_session.add(JackyunGoodsDocumentItem(
+        document_id=inbound_doc.id,
+        line_no=1,
+        goods_no=sku.sku_code,
+        quantity=Decimal("50"),
+    ))
     db_session.flush()
 
     for movement_type, quantity in (("complete", "30"), ("ship", "30"), ("arrive", "30")):
@@ -211,8 +217,9 @@ def test_inbound_allocation_can_be_partial_without_changing_inventory_snapshot(d
             request_key=str(uuid4()),
         )
 
-    db_session.refresh(snapshot)
-    assert snapshot.quantity == Decimal("99")
+    # 关联入库分配会落成真实出入库单据：独立运算库存 = 基线 50 + 分批认领 12 + 8。
+    stock_after = current_positions(db_session)["by_sku"].get(sku.id)
+    assert stock_after == Decimal("70")
     flow = production_finished_flow(db_session, order.id)
     assert flow["items"][0]["inboundQty"] == "20.0000"
     assert flow["items"][0]["pendingInboundQty"] == "10.0000"

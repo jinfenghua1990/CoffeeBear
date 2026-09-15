@@ -898,10 +898,21 @@ class JackyunAdapter:
         )
 
     def sync_inbound(self) -> dict[str, Any]:
-        return self._sync_goods_documents("inbound", "erp.storage.goodsdocin.v2")
+        stats = self._sync_goods_documents("inbound", "erp.storage.goodsdocin.v2")
+        return self._match_goods_document_items(stats)
 
     def sync_outbound(self) -> dict[str, Any]:
-        return self._sync_goods_documents("outbound", "erp.storage.goodsdocout.v2")
+        stats = self._sync_goods_documents("outbound", "erp.storage.goodsdocout.v2")
+        return self._match_goods_document_items(stats)
+
+    def _match_goods_document_items(self, stats: dict[str, Any]) -> dict[str, Any]:
+        """同步入库/出库单后立即刷新货品档案匹配；无明细时保持旧返回契约。"""
+        from app.services.sku_matching_service import match_inbound_items
+
+        match_stats = match_inbound_items(self.db, include_outbound=True)
+        if match_stats.get("total", 0):
+            return {**stats, "skuMatch": match_stats}
+        return stats
 
     def _sync_goods_documents(self, document_type: str, method: str) -> dict[str, Any]:
         from app.models.jackyun import JackyunGoodsDocument, JackyunGoodsDocumentItem

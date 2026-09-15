@@ -11,8 +11,8 @@
   4. 每次建链扣减新覆盖的 SKU，直到剩余为空或没有更高分候选。
 
 产出：
-- auto=True（默认）：所有可验证候选直接建链并 confirmed=True；没有耗材来源信息时
-  明确记录“不使用耗材”，不自动扣库存。
+- auto=True（默认）：只有有 SKU 重合且达到高置信度的候选才自动确认；没有 SKU 分配的
+  订单只能生成 pending 建议，不能凭供应商、金额、时间自动串单。
 - auto=False：只生成 pending 建议，供链路视图人工逐条确认。
 """
 from __future__ import annotations
@@ -139,6 +139,24 @@ def prelink_inbound(db: Session, actor: str = "system", auto: bool = True, commi
     # 全部入库单主档（含无 SKU 匹配的单据，供无分配订单做 pending）
     docs = {d.id: d for d in db.query(JackyunGoodsDocument).filter_by(document_type="inbound").all()}
     existing = _existing_links_by_order(db)
+    target_owners: dict[int, set[tuple[str, int]]] = {}
+    for link in db.query(ProcurementChainLink).filter(
+        ProcurementChainLink.target_type == "inbound",
+        ProcurementChainLink.match_method != "rejected",
+    ).all():
+        owner = (
+            ("order", link.order_id)
+            if link.order_id is not None
+            else ("external", link.external_po_id)
+        )
+        if owner[1] is not None:
+            target_owners.setdefault(link.target_id, set()).add(owner)
+
+    def source_owner(order, external) -> tuple[str, int]:
+        return ("order", order.id) if order is not None else ("external", external.id)
+
+    def claimed_by_other_source(target_id: int, owner: tuple[str, int]) -> bool:
+        return any(existing_owner != owner for existing_owner in target_owners.get(target_id, set()))
 
     auto_linked: list[dict] = []
     pending_suggested: list[dict] = []
@@ -154,6 +172,7 @@ def prelink_inbound(db: Session, actor: str = "system", auto: bool = True, commi
             external.supplier_name if external else ""
         )
         ordered_at = order_time(order) if order is not None else (external.ordered_at if external else None)
+        owner = source_owner(order, external)
 
         # 已确认链覆盖的 SKU
         links = existing.get(workbench_id, [])
@@ -172,6 +191,8 @@ def prelink_inbound(db: Session, actor: str = "system", auto: bool = True, commi
             medium: list[tuple[Decimal, float, int, set[int], str]] = []
             for doc_id, doc in docs.items():
                 if doc_id in blocked_target_ids:
+                    continue
+                if claimed_by_other_source(doc_id, owner):
                     continue
                 overlap = doc_skus.get(doc_id, set()) & remaining
                 if not overlap:
@@ -209,6 +230,7 @@ def prelink_inbound(db: Session, actor: str = "system", auto: bool = True, commi
                     db.add(link)
                     db.flush()
                     blocked_target_ids.add(doc_id)
+                    target_owners.setdefault(doc_id, set()).add(owner)
                     auto_linked.append({
                         "orderNo": order_no, "orderId": workbench_id,
                         "goodsdocNo": doc.goodsdoc_no, "targetId": doc_id,
@@ -219,12 +241,14 @@ def prelink_inbound(db: Session, actor: str = "system", auto: bool = True, commi
                     if not remaining:
                         break
                 else:
-                    # 中置信：自动化模式直接确认；干跑模式才进入待确认建议。
+                    # 中置信候选仍需人工确认；自动化模式不能把建议直接变成事实链路。
                     days = _days_apart(ordered_at, doc.document_at)
                     medium.append((score, days if days is not None else 1e9, doc_id, overlap, reason))
             # 中置信候选：按分数降序、时间近者优先，最多 3 条
             for score, _, doc_id, overlap, reason in sorted(medium, key=lambda m: (-float(m[0]), m[1]))[:3]:
                 if doc_id in blocked_target_ids:
+                    continue
+                if claimed_by_other_source(doc_id, owner):
                     continue
                 doc = docs[doc_id]
                 new_overlap = overlap & remaining
@@ -237,31 +261,25 @@ def prelink_inbound(db: Session, actor: str = "system", auto: bool = True, commi
                     target_id=doc_id,
                     match_method="auto",
                     confidence=score,
-                    confirmed=bool(auto),
-                    note=reason + ("；自动关联" if auto else "；待人工确认"),
+                    confirmed=False,
+                    note=reason + "；待人工确认",
                 )
-                if auto:
-                    auto_confirm_inbound_link(link)
                 db.add(link)
                 db.flush()
                 blocked_target_ids.add(doc_id)
+                target_owners.setdefault(doc_id, set()).add(owner)
                 item = {
                     "orderNo": order_no, "orderId": workbench_id,
                     "goodsdocNo": doc.goodsdoc_no, "targetId": doc_id,
                     "score": str(score), "reason": reason, "linkId": link.id,
                 }
-                if auto:
-                    auto_linked.append(item)
-                    remaining -= new_overlap
-                    covered_skus |= new_overlap
-                else:
-                    pending_suggested.append(item)
+                pending_suggested.append(item)
             if not remaining:
                 fully_linked_orders += 1
             continue
 
-        # 2) 无 SKU 分配（还没细化采购内容）：按「供应商+金额+时间」建立候选。
-        #    已有关联（含 xref 人工链）的订单跳过，避免重复建议噪声。
+        # 2) 无 SKU 分配（还没细化采购内容）：按「供应商+金额+时间」只建立待确认候选。
+        #    这些信号不足以证明入库单属于当前订单，禁止自动确认。
         skipped_no_alloc_orders += 1
         if order is None and external is None:
             continue
@@ -275,6 +293,8 @@ def prelink_inbound(db: Session, actor: str = "system", auto: bool = True, commi
         best: list[tuple[float, JackyunGoodsDocument]] = []
         for doc_id, doc in docs.items():
             if doc_id in blocked_target_ids or doc_id in confirmed_target_ids:
+                continue
+            if claimed_by_other_source(doc_id, owner):
                 continue
             if normalize_name(order_supplier) != normalize_name(doc.supplier_name or doc.company_name or ""):
                 continue
@@ -294,26 +314,18 @@ def prelink_inbound(db: Session, actor: str = "system", auto: bool = True, commi
             order_id=order.id if order is not None else None,
             external_po_id=None if order is not None else external.id,
             target_type="inbound", target_id=doc.id,
-            match_method="auto", confidence=score, confirmed=bool(auto),
-            note=reason + ("；自动关联" if auto else "；待人工确认"),
+            match_method="auto", confidence=score, confirmed=False,
+            note=reason + "；待人工确认",
         )
-        if auto:
-            auto_confirm_inbound_link(link)
         db.add(link)
         db.flush()
         blocked_target_ids.add(doc.id)
-        if auto:
-            auto_linked.append({
-                "orderNo": order_no, "orderId": workbench_id,
-                "goodsdocNo": doc.goodsdoc_no, "targetId": doc.id,
-                "score": str(score), "reason": reason, "linkId": link.id,
-            })
-        else:
-            pending_suggested.append({
-                "orderNo": order_no, "orderId": workbench_id,
-                "goodsdocNo": doc.goodsdoc_no, "targetId": doc.id,
-                "score": str(score), "reason": reason, "linkId": link.id,
-            })
+        target_owners.setdefault(doc.id, set()).add(owner)
+        pending_suggested.append({
+            "orderNo": order_no, "orderId": workbench_id,
+            "goodsdocNo": doc.goodsdoc_no, "targetId": doc.id,
+            "score": str(score), "reason": reason, "linkId": link.id,
+        })
 
     auto_confirm_result: dict = {}
     if commit:

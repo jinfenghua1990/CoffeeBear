@@ -1,10 +1,11 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from uuid import uuid4
 
 from app.api.v1.supply_chain import replenishment
-from app.models.catalog import InventorySnapshot, ProductSku
+from app.models.catalog import ProductSku
 from app.models.consumable import Consumable, ConsumableSkuMapping
+from app.models.jackyun import JackyunGoodsDocument, JackyunGoodsDocumentItem
 from app.models.production import ProductionOrderItem
 from app.models.sales import SalesOrder, SalesOrderItem
 from app.services.production_service import (
@@ -13,6 +14,7 @@ from app.services.production_service import (
     production_order_detail,
     recalculate_production_materials,
 )
+from app.services.inventory_position_service import current_positions
 
 
 def _sku(db_session, suffix: str) -> ProductSku:
@@ -99,13 +101,11 @@ def test_production_material_reservation_does_not_double_allocate(db_session):
 def test_replenishment_counts_produced_goods_until_real_inbound(db_session):
     sku = _sku(db_session, "OPEN-SUPPLY")
     now = datetime.now(timezone.utc)
-    db_session.add(InventorySnapshot(
-        sku_id=sku.id,
-        warehouse_id=None,
-        quantity=Decimal("0"),
-        snapshot_at=now,
-        source="jackyun",
-    ))
+    # 独立运算口径：用一张真实采购入库单建立库存基线 10。
+    inbound_doc = JackyunGoodsDocument(document_type="inbound", goodsdoc_no=f"IN-{uuid4().hex}", document_at=now - timedelta(days=40))
+    db_session.add(inbound_doc)
+    db_session.flush()
+    db_session.add(JackyunGoodsDocumentItem(document_id=inbound_doc.id, line_no=1, goods_no=sku.sku_code, quantity=Decimal("10")))
     sale = SalesOrder(
         order_no=f"PYTEST-SALE-{uuid4().hex}",
         source_provider="pytest",
@@ -136,9 +136,9 @@ def test_replenishment_counts_produced_goods_until_real_inbound(db_session):
 
     result = replenishment(days=30, lead_days=14, safety_days=7, search=sku.sku_code, limit=10, db=db_session)
     row = next(value for value in result["rows"] if value["skuId"] == sku.id)
-    # 日均 1，目标 21；库存 0；生产完成但尚未入库 20 仍属于待供应，因此只建议补 1。
+    # 日均 1，目标 21；库存 10；生产完成但尚未入库 20 仍属于待供应，因此建议补 0。
     assert Decimal(row["productionOpenSupplyQuantity"]) == Decimal("20")
-    assert Decimal(row["suggestedReplenishment"]) == Decimal("1")
+    assert Decimal(row["suggestedReplenishment"]) == Decimal("0")
 
     # 部分关联真实入库 8 后，只剩 12 作为生产待供应。
     # 测试数据必须满足数据库约束：入库数量不能超过已到货数量，已到货不能超过已发货数量。
@@ -150,4 +150,47 @@ def test_replenishment_counts_produced_goods_until_real_inbound(db_session):
     result = replenishment(days=30, lead_days=14, safety_days=7, search=sku.sku_code, limit=10, db=db_session)
     row = next(value for value in result["rows"] if value["skuId"] == sku.id)
     assert Decimal(row["productionOpenSupplyQuantity"]) == Decimal("12")
-    assert Decimal(row["suggestedReplenishment"]) == Decimal("9")
+    assert Decimal(row["suggestedReplenishment"]) == Decimal("0")
+
+
+def test_replenishment_prefers_outbound_docs_and_document_based_inventory(db_session):
+    """库存独立运算：采购入库 − 销售出库；近销优先使用真实出库单。"""
+    sku = _sku(db_session, "OUTBOUND")
+    now = datetime.now(timezone.utc)
+    inbound = JackyunGoodsDocument(document_type="inbound", goodsdoc_no=f"IN-{uuid4().hex}", document_at=now - timedelta(days=40))
+    old_outbound = JackyunGoodsDocument(document_type="outbound", goodsdoc_no=f"OLD-{uuid4().hex}", document_at=now - timedelta(days=40))
+    current_outbound = JackyunGoodsDocument(document_type="outbound", goodsdoc_no=f"NEW-{uuid4().hex}", document_at=now)
+    db_session.add_all([inbound, old_outbound, current_outbound])
+    db_session.flush()
+    db_session.add_all([
+        JackyunGoodsDocumentItem(document_id=inbound.id, line_no=1, goods_no=sku.sku_code, quantity=Decimal("100")),
+        JackyunGoodsDocumentItem(document_id=old_outbound.id, line_no=1, goods_no=sku.sku_code, quantity=Decimal("5")),
+        JackyunGoodsDocumentItem(document_id=current_outbound.id, line_no=1, goods_no=sku.sku_code, quantity=Decimal("7")),
+    ])
+    sale = SalesOrder(
+        order_no=f"PYTEST-SALE-OUTBOUND-{uuid4().hex}",
+        source_provider="pytest",
+        source_order_id=uuid4().hex,
+        platform="pytest",
+        order_status="已完成",
+        ordered_at=now,
+    )
+    db_session.add(sale)
+    db_session.flush()
+    db_session.add(SalesOrderItem(
+        order_id=sale.id,
+        sku_id=sku.id,
+        sku_code=sku.sku_code,
+        goods_name=sku.sku_name,
+        quantity=Decimal("99"),
+    ))
+    db_session.commit()
+
+    positions = current_positions(db_session)
+    assert positions["by_sku"][sku.id] == Decimal("88")
+
+    result = replenishment(days=30, lead_days=14, safety_days=7, search=sku.sku_code, limit=10, db=db_session)
+    row = next(value for value in result["rows"] if value["skuId"] == sku.id)
+    assert Decimal(row["soldQuantity"]) == Decimal("7")
+    assert row["salesSource"] == "sales_outbound"
+    assert result["data"]["outboundDocumentCount"] == 1

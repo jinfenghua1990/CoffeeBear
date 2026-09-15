@@ -2,419 +2,308 @@
 
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { useSearchParams } from "next/navigation";
 import { authenticatedFetch } from "@/lib/api";
+import ProductionPurchaseBoard from "../production/production-purchase-board";
 
-type Material = {
-  id: number;
+type Allocation = {
+  inboundDocumentId: number | null;
+  skuCode: string;
+  goodsName: string;
+  quantity: number | string | null;
+  unitPrice: number | string | null;
+  amount: number | string | null;
+  warehouseName: string | null;
+  currentStock: number | string | null;
+};
+
+type UsageItem = {
   consumableId: number;
-  code: string;
-  name: string;
-  unit: string;
-  requiredQty: string;
-  reservedQty: string;
-  dispatchedQty: string;
-  factoryReceivedQty: string;
-  consumedQty: string;
-  shortageQty: string;
-  state: string;
-};
-
-type ProductionOrder = {
-  id: number;
-  orderNo: string;
-  factoryName: string;
-  status: string;
-  expectedDeliveryDate: string | null;
-  materials: Material[];
-};
-
-type Movement = {
-  id: number;
-  movementNo: string;
-  productionOrderId: number;
-  reservationId: number;
   consumableCode: string;
   consumableName: string;
   unit: string;
-  movementType: "dispatch" | "factory_receive";
-  quantity: string;
-  carrier: string;
-  trackingNo: string;
-  note: string;
-  occurredAt: string | null;
+  quantity: number | string | null;
 };
 
-type MaterialDraft = {
-  dispatchQty: string;
-  carrier: string;
-  trackingNo: string;
-  receiveQty: string;
+type Inbound = {
+  documentId: number;
+  goodsdocNo: string;
+  date: string | null;
+  warehouseName: string | null;
+  consumableUsageDecided: boolean;
+  consumableUsageEnabled: boolean;
+  consumableUsageItems: UsageItem[];
 };
 
-function n(value: string | null | undefined) {
+type WorkbenchPayload = {
+  order: {
+    orderId: number;
+    orderNo: string;
+    platform: string;
+    supplier: string | null;
+    title: string | null;
+    orderDate: string | null;
+    purchaseStatus: string;
+    amount: number | string | null;
+    paidAmount: number | string | null;
+  };
+  detail: {
+    allocations: Allocation[];
+    inbound: Inbound[];
+    consumable?: { items?: Array<{ code: string; name: string; unit: string; quantity: number | string | null }> } | null;
+  };
+};
+
+type DetailRow = {
+  inboundNo: string;
+  inboundDate: string | null;
+  skuCode: string;
+  goodsName: string;
+  quantity: number | string | null;
+  unitPrice: number | string | null;
+  amount: number | string | null;
+  consumableName: string;
+  consumableCode: string;
+  consumableQty: number | string | null;
+  consumableUnit: string;
+  usageStatus: string;
+  warehouseName: string;
+  currentStock: number | string | null;
+};
+
+function numberValue(value: number | string | null | undefined) {
   const parsed = Number(value ?? 0);
   return Number.isFinite(parsed) ? parsed : 0;
 }
 
-function qty(value: number | string, digits = 2) {
-  const parsed = Number(value);
-  if (!Number.isFinite(parsed)) return String(value);
-  return parsed.toLocaleString("zh-CN", { maximumFractionDigits: digits });
+function quantity(value: number | string | null | undefined) {
+  return numberValue(value).toLocaleString("zh-CN", { maximumFractionDigits: 2 });
 }
 
-function requestKey() {
-  if (typeof crypto !== "undefined" && "randomUUID" in crypto) return crypto.randomUUID();
-  return `material-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+function money(value: number | string | null | undefined) {
+  if (value === null || value === undefined || value === "") return "—";
+  return `¥${numberValue(value).toLocaleString("zh-CN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }
 
-async function responseError(response: Response, fallback: string) {
-  const payload = await response.json().catch(() => ({}));
-  return typeof payload?.detail === "string" ? payload.detail : `${fallback}（${response.status}）`;
+function dateText(value: string | null | undefined) {
+  if (!value) return "—";
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? value.slice(0, 10) : date.toLocaleDateString("zh-CN");
 }
 
-function materialTransit(material: Material) {
-  return Math.max(n(material.dispatchedQty) - n(material.factoryReceivedQty), 0);
-}
-
-function defaultDraft(material: Material): MaterialDraft {
-  const transit = materialTransit(material);
-  return {
-    dispatchQty: n(material.reservedQty) > 0 ? String(n(material.reservedQty)) : "",
-    carrier: "",
-    trackingNo: "",
-    receiveQty: transit > 0 ? String(transit) : "",
+function purchaseStatus(order: WorkbenchPayload["order"], inbound: Inbound[]) {
+  if (inbound.length) return "已入库";
+  const labels: Record<string, string> = {
+    pending_refine: "待确认",
+    confirmed: "待生产",
+    jackyun_linked: "待生产",
+    producing: "生产中",
+    shipped: "已发货",
+    arrived: "已到货",
+    inbound: "已入库",
+    done: "已完成",
   };
+  return labels[order.purchaseStatus] ?? "待确认";
 }
 
-export default function MaterialFlowPage() {
-  const [orders, setOrders] = useState<ProductionOrder[]>([]);
-  const [movements, setMovements] = useState<Movement[]>([]);
-  const [drafts, setDrafts] = useState<Record<number, MaterialDraft>>({});
+function usageStatus(inbound: Inbound | undefined) {
+  if (!inbound) return "待入库";
+  if (!inbound.consumableUsageDecided) return "待确认";
+  return inbound.consumableUsageEnabled ? "已使用" : "本次不使用";
+}
+
+function DetailPage({ orderId }: { orderId: number }) {
+  const [payload, setPayload] = useState<WorkbenchPayload | null>(null);
   const [loading, setLoading] = useState(true);
-  const [working, setWorking] = useState<string | null>(null);
   const [error, setError] = useState("");
-  const [notice, setNotice] = useState("");
 
   const load = useCallback(async () => {
     setLoading(true);
     setError("");
     try {
-      const [ordersResponse, movementsResponse] = await Promise.all([
-        authenticatedFetch("/api/v1/supply-chain/production-orders?limit=500", { cache: "no-store" }),
-        authenticatedFetch("/api/v1/supply-chain/material-movements?limit=1000", { cache: "no-store" }),
-      ]);
-      if (!ordersResponse.ok) throw new Error(await responseError(ordersResponse, "生产单加载失败"));
-      if (!movementsResponse.ok) throw new Error(await responseError(movementsResponse, "耗材流转加载失败"));
-      const orderPayload = await ordersResponse.json();
-      const movementPayload = await movementsResponse.json();
-      setOrders((orderPayload.rows ?? []).filter((item: ProductionOrder) => !["completed", "cancelled"].includes(item.status)));
-      setMovements(movementPayload.rows ?? []);
+      const response = await authenticatedFetch(`/api/v1/procurement-workbench/orders/${orderId}/workbench`, { cache: "no-store" });
+      if (!response.ok) {
+        const body = await response.json().catch(() => ({}));
+        throw new Error(typeof body?.detail === "string" ? body.detail : `采购订单加载失败（${response.status}）`);
+      }
+      setPayload((await response.json()) as WorkbenchPayload);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : String(caught));
+      setPayload(null);
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [orderId]);
 
   useEffect(() => {
     void load();
   }, [load]);
 
-  const summary = useMemo(() => {
-    let reserved = 0;
-    let transit = 0;
-    let factory = 0;
-    let shortage = 0;
-    for (const order of orders) {
-      for (const material of order.materials ?? []) {
-        reserved += n(material.reservedQty);
-        transit += materialTransit(material);
-        factory += Math.max(n(material.factoryReceivedQty) - n(material.consumedQty), 0);
-        shortage += n(material.shortageQty);
+  const rows = useMemo<DetailRow[]>(() => {
+    if (!payload) return [];
+    const inboundById = new Map((payload.detail.inbound ?? []).map((item) => [item.documentId, item]));
+    const result: DetailRow[] = [];
+
+    for (const allocation of payload.detail.allocations ?? []) {
+      const inbound = allocation.inboundDocumentId ? inboundById.get(allocation.inboundDocumentId) : undefined;
+      const usageItems = inbound?.consumableUsageItems ?? [];
+      const shared = {
+        inboundNo: inbound?.goodsdocNo || "待关联",
+        inboundDate: inbound?.date ?? null,
+        skuCode: allocation.skuCode || "—",
+        goodsName: allocation.goodsName || "—",
+        quantity: allocation.quantity,
+        unitPrice: allocation.unitPrice,
+        amount: allocation.amount,
+        usageStatus: usageStatus(inbound),
+        warehouseName: allocation.warehouseName || inbound?.warehouseName || "—",
+        currentStock: allocation.currentStock,
+      };
+      if (!usageItems.length) {
+        result.push({
+          ...shared,
+          consumableName: "—",
+          consumableCode: "",
+          consumableQty: null,
+          consumableUnit: "",
+        });
+        continue;
+      }
+      for (const usage of usageItems) {
+        result.push({
+          ...shared,
+          consumableName: usage.consumableName || "—",
+          consumableCode: usage.consumableCode || "",
+          consumableQty: usage.quantity,
+          consumableUnit: usage.unit || "",
+        });
       }
     }
-    return { reserved, transit, factory, shortage };
-  }, [orders]);
 
-  function draftFor(material: Material) {
-    return drafts[material.id] ?? defaultDraft(material);
-  }
-
-  function setDraft(material: Material, field: keyof MaterialDraft, value: string) {
-    setDrafts((current) => ({
-      ...current,
-      [material.id]: { ...(current[material.id] ?? defaultDraft(material)), [field]: value },
-    }));
-  }
-
-  function resetDraft(materialId: number) {
-    setDrafts((current) => {
-      const next = { ...current };
-      delete next[materialId];
-      return next;
-    });
-  }
-
-  async function dispatch(order: ProductionOrder, material: Material) {
-    const maxQty = n(material.reservedQty);
-    if (maxQty <= 0) return;
-    const draft = draftFor(material);
-    const amount = Number(draft.dispatchQty);
-    if (!Number.isFinite(amount) || amount <= 0 || amount > maxQty) {
-      setError(`发料数量应大于 0 且不超过 ${qty(maxQty)} ${material.unit}`);
-      return;
+    if (!result.length && payload.detail.consumable?.items?.length) {
+      for (const item of payload.detail.consumable.items) {
+        result.push({
+          inboundNo: "耗材采购入库",
+          inboundDate: null,
+          skuCode: "—",
+          goodsName: "—",
+          quantity: item.quantity,
+          unitPrice: null,
+          amount: null,
+          consumableName: item.name,
+          consumableCode: item.code,
+          consumableQty: item.quantity,
+          consumableUnit: item.unit,
+          usageStatus: "已入库",
+          warehouseName: "—",
+          currentStock: null,
+        });
+      }
     }
+    return result;
+  }, [payload]);
 
-    setWorking(`${material.id}:dispatch`);
-    setError("");
-    setNotice("");
-    try {
-      const response = await authenticatedFetch(`/api/v1/supply-chain/production-orders/${order.id}/materials/dispatch`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          request_key: requestKey(),
-          carrier: draft.carrier.trim(),
-          tracking_no: draft.trackingNo.trim(),
-          note: "供应链中心耗材流转",
-          items: [{ reservation_id: material.id, quantity: String(amount) }],
-        }),
-      });
-      if (!response.ok) throw new Error(await responseError(response, "发料失败"));
-      setNotice(`${material.name || material.code} 已发往 ${order.factoryName}：${qty(amount)} ${material.unit}`);
-      resetDraft(material.id);
-      await load();
-    } catch (caught) {
-      setError(caught instanceof Error ? caught.message : String(caught));
-    } finally {
-      setWorking(null);
-    }
+  if (loading) {
+    return <div className="rounded-xl border border-slate-200 bg-white p-10 text-center text-sm text-slate-400">正在读取采购入库与耗材关联…</div>;
+  }
+  if (error || !payload) {
+    return (
+      <div className="space-y-3">
+        <Link href="/supply-chain/material-flow" className="inline-flex rounded-lg border border-slate-200 px-3 py-2 text-xs text-slate-600 hover:bg-slate-50">返回耗材流转</Link>
+        <div className="rounded-xl bg-red-50 px-4 py-3 text-sm text-red-700">{error || "采购订单不存在"}</div>
+      </div>
+    );
   }
 
-  async function receive(order: ProductionOrder, material: Material) {
-    const transit = materialTransit(material);
-    if (transit <= 0) return;
-    const draft = draftFor(material);
-    const amount = Number(draft.receiveQty);
-    if (!Number.isFinite(amount) || amount <= 0 || amount > transit) {
-      setError(`签收数量应大于 0 且不超过在途 ${qty(transit)} ${material.unit}`);
-      return;
-    }
-
-    setWorking(`${material.id}:receive`);
-    setError("");
-    setNotice("");
-    try {
-      const response = await authenticatedFetch(`/api/v1/supply-chain/production-orders/${order.id}/materials/receive`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          request_key: requestKey(),
-          note: "工厂确认签收",
-          items: [{ reservation_id: material.id, quantity: String(amount) }],
-        }),
-      });
-      if (!response.ok) throw new Error(await responseError(response, "签收失败"));
-      setNotice(`${order.factoryName} 已签收 ${material.name || material.code}：${qty(amount)} ${material.unit}`);
-      resetDraft(material.id);
-      await load();
-    } catch (caught) {
-      setError(caught instanceof Error ? caught.message : String(caught));
-    } finally {
-      setWorking(null);
-    }
-  }
+  const status = purchaseStatus(payload.order, payload.detail.inbound ?? []);
+  const usedCount = rows.filter((row) => row.usageStatus === "已使用").length;
 
   return (
-    <div className="mx-auto max-w-[1650px] space-y-4">
-      <header className="sticky top-0 z-20 -mx-8 -mt-6 border-b border-slate-200 bg-white/95 px-8 py-4 backdrop-blur">
-        <div className="flex flex-wrap items-end justify-between gap-4">
-          <div>
-            <div className="text-xs font-medium text-indigo-600">SUPPLY CHAIN / MATERIAL FLOW</div>
-            <h1 className="mt-1 text-2xl font-semibold tracking-tight text-slate-900">耗材流转</h1>
-            <p className="mt-1 text-sm text-slate-500">预占 → 发工厂 → 在途 → 工厂签收；发料与签收直接在同一行完成。</p>
-          </div>
-          <div className="flex gap-2">
-            <Link href="/supply-chain/production" className="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-600 hover:bg-slate-50">生产订单</Link>
-            <Link href="/products/inventory-consumables" className="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-600 hover:bg-slate-50">耗材库存</Link>
-            <button onClick={load} disabled={loading} className="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-600 hover:bg-slate-50 disabled:opacity-50">{loading ? "刷新中…" : "刷新"}</button>
-          </div>
+    <div className="space-y-3">
+      <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-slate-200 bg-white px-4 py-3">
+        <div>
+          <div className="text-[10px] font-medium text-indigo-600">耗材流转 · 采购入库事实</div>
+          <h1 className="mt-1 text-lg font-semibold text-slate-900">{payload.order.orderNo}</h1>
+          <p className="mt-1 text-xs text-slate-500">{payload.order.supplier || "—"} · {status} · {rows.length} 条关联明细，{usedCount} 条已使用</p>
         </div>
-
-        <div className="mt-3 flex flex-wrap items-center gap-x-6 gap-y-2 rounded-lg bg-slate-50 px-3 py-2 text-xs text-slate-500">
-          <span>生产单 <b className="ml-1 text-slate-900">{orders.length}</b></span>
-          <span>已预占 <b className="ml-1 text-indigo-700">{qty(summary.reserved)}</b></span>
-          <span>发厂在途 <b className="ml-1 text-amber-700">{qty(summary.transit)}</b></span>
-          <span>工厂可用 <b className="ml-1 text-emerald-700">{qty(summary.factory)}</b></span>
-          <span>生产缺料 <b className={`ml-1 ${summary.shortage > 0 ? "text-red-700" : "text-slate-900"}`}>{qty(summary.shortage)}</b></span>
-          <span className="ml-auto text-[11px] text-slate-400">数量 / 物流 / 运单 / 签收均在表格内处理</span>
+        <div className="flex flex-wrap gap-2">
+          <Link href="/supply-chain/material-flow" className="rounded-lg border border-slate-200 px-3 py-2 text-xs text-slate-600 hover:bg-slate-50">返回列表</Link>
+          <Link href={`/purchase/workbench?view=orders&order=${payload.order.orderId}`} className="rounded-lg border border-indigo-200 bg-indigo-50 px-3 py-2 text-xs font-medium text-indigo-700 hover:bg-indigo-100">打开采购主单</Link>
+          <Link href="/inventory?tab=consumables" className="rounded-lg border border-slate-200 px-3 py-2 text-xs text-slate-600 hover:bg-slate-50">耗材库存</Link>
+          <button type="button" onClick={() => void load()} disabled={loading} className="rounded-lg border border-slate-200 px-3 py-2 text-xs text-slate-600 hover:bg-slate-50 disabled:opacity-50">刷新</button>
         </div>
-      </header>
+      </div>
 
-      {error && <div className="rounded-lg bg-red-50 px-4 py-3 text-sm text-red-700">{error}</div>}
-      {notice && <div className="rounded-lg bg-emerald-50 px-4 py-3 text-sm text-emerald-700">{notice}</div>}
-
-      <section className="space-y-3">
-        {orders.map((order) => (
-          <div key={order.id} className="overflow-hidden rounded-xl border border-slate-200 bg-white">
-            <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-100 px-4 py-2.5">
-              <div className="flex flex-wrap items-center gap-3">
-                <span className="font-mono text-xs font-semibold text-slate-900">{order.orderNo}</span>
-                <span className="text-sm font-medium text-slate-700">{order.factoryName}</span>
-                <span className="rounded bg-slate-100 px-2 py-0.5 text-[10px] text-slate-600">{order.status}</span>
-              </div>
-              <div className="text-xs text-slate-400">预计交货 {order.expectedDeliveryDate ?? "—"}</div>
-            </div>
-
-            <div className="overflow-x-auto">
-              <table className="w-full min-w-[1780px] text-sm">
-                <thead className="bg-slate-50 text-left text-[11px] font-medium text-slate-500">
-                  <tr>
-                    <th className="px-4 py-2">耗材</th>
-                    <th className="px-3 py-2 text-right">需求</th>
-                    <th className="px-3 py-2 text-right">已预占</th>
-                    <th className="px-3 py-2 text-right">累计发出</th>
-                    <th className="px-3 py-2 text-right">当前在途</th>
-                    <th className="px-3 py-2 text-right">已到工厂</th>
-                    <th className="px-3 py-2 text-right">已消耗</th>
-                    <th className="px-3 py-2 text-right">缺口</th>
-                    <th className="px-4 py-2">发料 / 签收（同一行）</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-100">
-                  {(order.materials ?? []).map((material) => {
-                    const transit = materialTransit(material);
-                    const draft = draftFor(material);
-                    const dispatchBusy = working === `${material.id}:dispatch`;
-                    const receiveBusy = working === `${material.id}:receive`;
-                    const anyBusy = working?.startsWith(`${material.id}:`) ?? false;
-
-                    return (
-                      <tr key={material.id} className={n(material.shortageQty) > 0 ? "bg-red-50/30" : "hover:bg-slate-50/60"}>
-                        <td className="px-4 py-2.5">
-                          <div className="font-medium text-slate-800">{material.name || material.code}</div>
-                          <div className="text-[11px] text-slate-400">{material.code} · {material.unit}</div>
-                        </td>
-                        <td className="px-3 py-2.5 text-right tabular-nums">{qty(material.requiredQty)}</td>
-                        <td className="px-3 py-2.5 text-right tabular-nums text-indigo-700">{qty(material.reservedQty)}</td>
-                        <td className="px-3 py-2.5 text-right tabular-nums">{qty(material.dispatchedQty)}</td>
-                        <td className="px-3 py-2.5 text-right font-medium tabular-nums text-amber-700">{qty(transit)}</td>
-                        <td className="px-3 py-2.5 text-right tabular-nums text-emerald-700">{qty(material.factoryReceivedQty)}</td>
-                        <td className="px-3 py-2.5 text-right tabular-nums">{qty(material.consumedQty)}</td>
-                        <td className={`px-3 py-2.5 text-right tabular-nums ${n(material.shortageQty) > 0 ? "font-semibold text-red-700" : "text-slate-400"}`}>{qty(material.shortageQty)}</td>
-                        <td className="px-4 py-2.5">
-                          <div className="flex items-center gap-1.5 whitespace-nowrap">
-                            <span className="text-[10px] font-medium text-indigo-500">发</span>
-                            <input
-                              type="number"
-                              min="0"
-                              step="1"
-                              value={draft.dispatchQty}
-                              onChange={(event) => setDraft(material, "dispatchQty", event.target.value)}
-                              placeholder="数量"
-                              className="h-8 w-20 rounded-md border border-slate-200 px-2 text-xs outline-none focus:border-indigo-400"
-                            />
-                            <input
-                              value={draft.carrier}
-                              onChange={(event) => setDraft(material, "carrier", event.target.value)}
-                              placeholder="物流（选填）"
-                              className="h-8 w-24 rounded-md border border-slate-200 px-2 text-xs outline-none focus:border-indigo-400"
-                            />
-                            <input
-                              value={draft.trackingNo}
-                              onChange={(event) => setDraft(material, "trackingNo", event.target.value)}
-                              placeholder="运单号（选填）"
-                              className="h-8 w-32 rounded-md border border-slate-200 px-2 text-xs outline-none focus:border-indigo-400"
-                            />
-                            <button
-                              onClick={() => dispatch(order, material)}
-                              disabled={anyBusy || n(material.reservedQty) <= 0}
-                              className="h-8 rounded-md border border-indigo-200 px-2.5 text-xs font-medium text-indigo-700 hover:bg-indigo-50 disabled:opacity-30"
-                            >
-                              {dispatchBusy ? "发料中…" : "发工厂"}
-                            </button>
-
-                            <span className="mx-1 h-5 w-px bg-slate-200" />
-                            <span className="text-[10px] font-medium text-emerald-600">收</span>
-                            <input
-                              type="number"
-                              min="0"
-                              step="1"
-                              value={draft.receiveQty}
-                              onChange={(event) => setDraft(material, "receiveQty", event.target.value)}
-                              placeholder="签收量"
-                              className="h-8 w-20 rounded-md border border-slate-200 px-2 text-xs outline-none focus:border-emerald-400"
-                            />
-                            <button
-                              onClick={() => receive(order, material)}
-                              disabled={anyBusy || transit <= 0}
-                              className="h-8 rounded-md border border-emerald-200 px-2.5 text-xs font-medium text-emerald-700 hover:bg-emerald-50 disabled:opacity-30"
-                            >
-                              {receiveBusy ? "签收中…" : "确认签收"}
-                            </button>
-                          </div>
-                        </td>
-                      </tr>
-                    );
-                  })}
-                  {(order.materials ?? []).length === 0 && (
-                    <tr><td colSpan={9} className="px-4 py-6 text-center text-sm text-slate-400">该生产单暂未关联耗材</td></tr>
-                  )}
-                </tbody>
-              </table>
-            </div>
-          </div>
-        ))}
-
-        {!loading && orders.length === 0 && (
-          <div className="rounded-xl border border-dashed border-slate-300 bg-white p-10 text-center text-sm text-slate-400">当前没有进行中的生产单</div>
-        )}
-      </section>
-
-      <section className="overflow-hidden rounded-xl border border-slate-200 bg-white">
-        <div className="flex flex-wrap items-end justify-between gap-3 border-b border-slate-100 px-4 py-3">
+      <div className="overflow-hidden rounded-xl border border-slate-200 bg-white">
+        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-100 px-4 py-3">
           <div>
-            <h2 className="text-sm font-semibold text-slate-900">流转记录</h2>
-            <p className="mt-1 text-[11px] text-slate-500">每次发料和签收独立留痕，不覆盖历史记录。</p>
+            <h2 className="text-sm font-semibold text-slate-900">入库单 · SKU · 耗材一一对应</h2>
+            <p className="mt-1 text-[11px] text-slate-500">以吉客云入库单为主；确认入库后由 SKU 映射自动关联耗材使用，不再复制一套独立采购数据。</p>
           </div>
-          <span className="text-xs text-slate-400">共 {movements.length} 条</span>
+          <span className="text-xs text-slate-400">订单日期 {dateText(payload.order.orderDate)}</span>
         </div>
         <div className="overflow-x-auto">
-          <table className="w-full min-w-[1050px] text-sm">
-            <thead className="bg-slate-50 text-left text-[11px] text-slate-500">
+          <table className="w-full min-w-[1380px] text-xs">
+            <thead className="bg-slate-50 text-left text-[10px] font-medium text-slate-500">
               <tr>
-                <th className="px-4 py-2">时间</th>
-                <th className="px-3 py-2">流转单号</th>
-                <th className="px-3 py-2">类型</th>
-                <th className="px-3 py-2">生产单</th>
-                <th className="px-3 py-2">耗材</th>
-                <th className="px-3 py-2 text-right">数量</th>
-                <th className="px-3 py-2">物流</th>
-                <th className="px-4 py-2">运单号</th>
+                <th className="px-4 py-2.5">入库单</th>
+                <th className="px-3 py-2.5">SKU</th>
+                <th className="px-3 py-2.5">商品</th>
+                <th className="px-3 py-2.5 text-right">数量</th>
+                <th className="px-3 py-2.5 text-right">单价</th>
+                <th className="px-3 py-2.5 text-right">金额</th>
+                <th className="px-3 py-2.5">耗材名称</th>
+                <th className="px-3 py-2.5 text-right">用量</th>
+                <th className="px-3 py-2.5">状态</th>
+                <th className="px-4 py-2.5">仓库 / 库存</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
-              {movements.map((movement) => (
-                <tr key={movement.id}>
-                  <td className="px-4 py-3 text-xs text-slate-500">{movement.occurredAt ? new Date(movement.occurredAt).toLocaleString("zh-CN") : "—"}</td>
-                  <td className="px-3 py-3 font-mono text-xs">{movement.movementNo}</td>
-                  <td className="px-3 py-3">
-                    <span className={`rounded px-2 py-1 text-xs ${movement.movementType === "dispatch" ? "bg-amber-50 text-amber-700" : "bg-emerald-50 text-emerald-700"}`}>
-                      {movement.movementType === "dispatch" ? "发往工厂" : "工厂签收"}
-                    </span>
-                  </td>
-                  <td className="px-3 py-3">#{movement.productionOrderId}</td>
-                  <td className="px-3 py-3">{movement.consumableName || movement.consumableCode}<div className="text-[11px] text-slate-400">{movement.consumableCode}</div></td>
-                  <td className="px-3 py-3 text-right font-medium tabular-nums">{qty(movement.quantity)} {movement.unit}</td>
-                  <td className="px-3 py-3 text-slate-600">{movement.carrier || "—"}</td>
-                  <td className="px-4 py-3 text-slate-600">{movement.trackingNo || "—"}</td>
+              {rows.map((row, index) => (
+                <tr key={`${row.inboundNo}:${row.skuCode}:${row.consumableCode}:${index}`} className="hover:bg-slate-50/60">
+                  <td className="px-4 py-2.5"><div className="font-medium text-slate-800">{row.inboundNo}</div><div className="mt-0.5 text-[10px] text-slate-400">{dateText(row.inboundDate)}</div></td>
+                  <td className="px-3 py-2.5 font-mono text-[11px] text-indigo-600">{row.skuCode}</td>
+                  <td className="max-w-[280px] px-3 py-2.5 text-slate-700">{row.goodsName}</td>
+                  <td className="px-3 py-2.5 text-right tabular-nums">{quantity(row.quantity)}</td>
+                  <td className="px-3 py-2.5 text-right tabular-nums">{money(row.unitPrice)}</td>
+                  <td className="px-3 py-2.5 text-right tabular-nums">{money(row.amount)}</td>
+                  <td className="px-3 py-2.5"><div className="text-slate-700">{row.consumableName}</div>{row.consumableCode && <div className="mt-0.5 font-mono text-[10px] text-slate-400">{row.consumableCode}</div>}</td>
+                  <td className="px-3 py-2.5 text-right tabular-nums">{row.consumableQty === null ? "—" : `${quantity(row.consumableQty)} ${row.consumableUnit}`}</td>
+                  <td className="px-3 py-2.5"><span className={`rounded px-2 py-1 text-[10px] ${row.usageStatus === "已使用" ? "bg-emerald-50 text-emerald-700" : row.usageStatus === "待确认" ? "bg-red-50 text-red-700" : "bg-slate-100 text-slate-500"}`}>{row.usageStatus}</span></td>
+                  <td className="px-4 py-2.5"><div className="text-slate-700">{row.warehouseName}</div><div className="mt-0.5 text-[10px] text-slate-400">当前库存 {row.currentStock === null ? "—" : quantity(row.currentStock)}</div></td>
                 </tr>
               ))}
-              {!movements.length && <tr><td colSpan={8} className="px-4 py-8 text-center text-slate-400">暂无耗材流转记录</td></tr>}
+              {!rows.length && <tr><td colSpan={10} className="px-4 py-10 text-center text-slate-400">该采购单暂未形成入库或耗材关联明细</td></tr>}
             </tbody>
           </table>
         </div>
-      </section>
+      </div>
+    </div>
+  );
+}
+
+export default function MaterialFlowPage() {
+  const searchParams = useSearchParams();
+  const rawOrderId = Number(searchParams.get("order"));
+  const orderId = Number.isInteger(rawOrderId) && rawOrderId !== 0 ? rawOrderId : null;
+
+  if (orderId !== null) return <DetailPage orderId={orderId} />;
+
+  return (
+    <div className="mx-auto max-w-[1650px] space-y-3">
+      <div className="flex flex-wrap items-end justify-between gap-3 rounded-xl border border-slate-200 bg-white px-4 py-3">
+        <div>
+          <div className="text-[10px] font-medium text-indigo-600">SUPPLY CHAIN / MATERIAL FLOW</div>
+          <h1 className="mt-1 text-xl font-semibold tracking-tight text-slate-900">耗材流转</h1>
+          <p className="mt-1 text-xs text-slate-500">统一读取采购主单和吉客云入库单；正品入库后按 SKU 映射自动关联耗材使用。</p>
+        </div>
+      </div>
+      <ProductionPurchaseBoard
+        title="正品采购耗材关联"
+        description="这里显示当前真实采购主单；点击“查看耗材明细”后，按入库单、SKU 和耗材逐行核对。"
+        actionLabel="查看耗材明细"
+        actionHref={(row) => `/supply-chain/material-flow?order=${row.orderId}`}
+      />
     </div>
   );
 }

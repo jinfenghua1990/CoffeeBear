@@ -15,12 +15,14 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any
 
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from app.models.alibaba1688_import import Alibaba1688FileImport, Alibaba1688Order
 from app.models.purchase import ExternalPurchaseOrder, InboundLink
 from app.models.procurement_chain import ProcurementChainLink
 from app.services.import_lifecycle import filter_active_import, filter_active_rows
+from app.services.procurement_chain_service import is_reference_only_external_po
 
 
 def platform_source_pairs(db: Session) -> list[tuple[Alibaba1688Order | None, ExternalPurchaseOrder | None]]:
@@ -53,6 +55,7 @@ def platform_source_pairs(db: Session) -> list[tuple[Alibaba1688Order | None, Ex
             ExternalPurchaseOrder.platform == "1688"
         ).order_by(ExternalPurchaseOrder.id.desc()).all()
         if po.external_order_id not in removed_nos
+        and not is_reference_only_external_po(po)
         and (po.external_order_id in active_source_nos or po.external_order_id not in source_nos)
     }
     pairs: list[tuple[Alibaba1688Order | None, ExternalPurchaseOrder | None]] = []
@@ -65,6 +68,8 @@ def platform_source_pairs(db: Session) -> list[tuple[Alibaba1688Order | None, Ex
     for po in db.query(ExternalPurchaseOrder).filter(
         ExternalPurchaseOrder.platform != "1688"
     ).order_by(ExternalPurchaseOrder.id.desc()).all():
+        if is_reference_only_external_po(po):
+            continue
         pairs.append((None, po))
     return pairs
 
@@ -178,17 +183,27 @@ def inbound_po_from_link(db: Session, link: ProcurementChainLink) -> ExternalPur
 
 
 def collect_inbound_doc_ids_for_po(db: Session, po: ExternalPurchaseOrder) -> set[int]:
-    """仅 1688 PO 使用 Alibaba 订单号桥接；其他渠道只走 external_po_id。"""
+    """仅 1688 PO 使用 Alibaba 订单号桥接；其他渠道只走 external_po_id。
+
+    同时兼容旧 InboundLink：其真实关联字段是 goodsdoc_no，不能把入库单号
+    直接当成 JackyunGoodsDocument 的数字主键。
+    """
+    from app.models.jackyun import JackyunGoodsDocument
+
     doc_ids: set[int] = set()
     if (po.platform or "").lower() == "1688" and po.external_order_id:
         order = db.query(Alibaba1688Order).filter_by(
             external_order_id=po.external_order_id
         ).first()
         if order:
-            for link in db.query(ProcurementChainLink).filter_by(
-                order_id=order.id,
-                target_type="inbound",
-                confirmed=True,
+            for link in db.query(ProcurementChainLink).filter(
+                ProcurementChainLink.order_id == order.id,
+                ProcurementChainLink.target_type == "inbound",
+                ProcurementChainLink.confirmed.is_(True),
+                or_(
+                    ProcurementChainLink.match_method.is_(None),
+                    ProcurementChainLink.match_method != "rejected",
+                ),
             ).all():
                 doc_ids.add(link.target_id)
     for link in db.query(ProcurementChainLink).filter_by(
@@ -196,17 +211,32 @@ def collect_inbound_doc_ids_for_po(db: Session, po: ExternalPurchaseOrder) -> se
         target_type="inbound",
         confirmed=True,
     ).all():
-        doc_ids.add(link.target_id)
-    # 兼容旧 InboundLink；历史模型字段名实际为 goodsdoc_no，部分旧服务曾把它当 document_id。
-    # 只有能解析成数字主键时才纳入，避免把 RK 单号误当 ID。
+        if link.match_method is None or link.match_method != "rejected":
+            doc_ids.add(link.target_id)
+
+    legacy_links = db.query(InboundLink).filter_by(po_id=po.id).all()
+    legacy_nos = {str(link.goodsdoc_no or "").strip() for link in legacy_links if link.goodsdoc_no}
+    docs_by_no = {
+        doc.goodsdoc_no: doc.id
+        for doc in db.query(JackyunGoodsDocument).filter(
+            JackyunGoodsDocument.document_type == "inbound",
+            JackyunGoodsDocument.goodsdoc_no.in_(legacy_nos),
+        ).all()
+    } if legacy_nos else {}
     for link in db.query(InboundLink).filter_by(po_id=po.id).all():
         raw = link.raw or {}
-        document_id = raw.get("documentId") or raw.get("document_id")
-        if document_id is not None:
+        raw_document_id = raw.get("documentId") or raw.get("document_id")
+        if raw_document_id is not None:
             try:
-                doc_ids.add(int(document_id))
+                document = db.get(JackyunGoodsDocument, int(raw_document_id))
             except (TypeError, ValueError):
-                pass
+                document = None
+            if document is not None and document.document_type == "inbound":
+                doc_ids.add(document.id)
+                continue
+        document_id = docs_by_no.get(str(link.goodsdoc_no or "").strip())
+        if document_id is not None:
+            doc_ids.add(document_id)
     return doc_ids
 
 

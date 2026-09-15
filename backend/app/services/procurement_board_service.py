@@ -23,6 +23,7 @@ from app.services.procurement_chain_service import (
     _source_pairs,
     supplier_detail,
 )
+from app.services.procurement_workbench_service import _pending_queue, _step_states
 
 
 # ---------- 顶部统计卡 ----------
@@ -38,7 +39,7 @@ def overview(db: Session) -> dict:
     po_count = 0          # 待采购单
     inbound_count = 0     # 待入库
     invoice_count = 0     # 待发票
-    paid_amount = 0.0     # 已付款（来自 settlements 中已支付单）
+    paid_amount = 0.0     # 已付款（吉客云结算或 1688 已付款事实）
     total_amount = 0.0    # 应付款总额
     yesterday_count = 0   # 昨日新增订单（用于真实 delta 计算）
 
@@ -56,20 +57,17 @@ def overview(db: Session) -> dict:
                     yesterday_count += 1
             except Exception:
                 pass
-        # 状态判定：基于 stage_done_map 的简化版本（首次未完成环节）
-        first_undone = _first_undone_label(row)
-        if first_undone == "refine":
+        # 与采购工作台共用唯一待办口径，避免看板与工作台出现不同统计。
+        queue = _pending_queue(row)
+        if queue == "refine":
             refine_count += 1
-        elif first_undone == "po":
+        elif queue == "po":
             po_count += 1
-        elif first_undone == "inbound":
+        elif queue == "inbound":
             inbound_count += 1
-        elif first_undone == "invoice":
+        elif queue == "invoice":
             invoice_count += 1
-        # 付款：settlement.paid = True 计入
-        for s in row.get("settlement") or []:
-            if s.get("paid"):
-                paid_amount += s.get("paidAmount") or 0
+        paid_amount += _paid_amount(row, cap=float(amount))
 
     paid_rate = round(paid_amount / total_amount * 100) if total_amount else 0
     return {
@@ -90,25 +88,22 @@ def _today() -> date:
 
 
 def _first_undone_label(row: dict) -> str | None:
-    """简化版首次未完成环节：refine / po / inbound / invoice / None（已完成）。"""
-    allocations = row.get("allocations") or []
-    purchase_orders = row.get("purchaseOrders") or []
-    inbound = row.get("inbound") or []
-    invoice = row.get("invoice") or []
+    """返回与采购工作台相同的唯一待办环节。"""
+    return _pending_queue(row)
 
-    # ② 采购内容 = 细化 + allocations
-    if not row.get("purchaseContentComplete") or not allocations:
-        return "refine"
-    # ③/④ 吉客云采购单
-    if not purchase_orders:
-        return "po"
-    # ⑤ 入库
-    if not inbound:
-        return "inbound"
-    # ⑥ 发票
-    if not invoice:
-        return "invoice"
-    return None
+
+def _paid_amount(row: dict, cap: float | None = None) -> float:
+    """合并吉客云结算与 1688 已付款事实，避免同一订单重复计入。"""
+    settlement_paid = sum(
+        float(item.get("paidAmount") or item.get("amount") or 0)
+        for item in row.get("settlement") or []
+        if item.get("paid")
+    )
+    platform_paid = float(row.get("paidAmount") or row.get("amount") or 0) if row.get("paidOn1688") else 0.0
+    paid = max(settlement_paid, platform_paid)
+    if cap is not None:
+        paid = min(paid, max(0.0, cap))
+    return paid
 
 
 # ---------- 左侧订单列表 ----------
@@ -272,30 +267,24 @@ def order_detail(db: Session, order_id: int) -> dict | None:
 
 def _flow_status(row: dict) -> list[dict]:
     """5 步流程状态横条数据。"""
-    allocations = row.get("allocations") or []
-    purchase_orders = row.get("purchaseOrders") or []
-    inbound = row.get("inbound") or []
-    invoice = row.get("invoice") or []
-    settlement = row.get("settlement") or []
-    paid_any = any(s.get("paid") for s in settlement)
+    states = _step_states(row)
+    inbound_ready = bool(row.get("inbound")) and all(
+        item.get("consumableUsageDecided") for item in row.get("inbound") or []
+    )
+    consumable_received = bool((row.get("consumable") or {}).get("received"))
+    content_done = states["content"]["done"] and states["sku"]["done"]
 
     def step(no: int, label: str, done: bool, detail: str) -> dict:
         return {"no": no, "label": label, "done": done, "detail": detail}
 
     return [
-        step(1, "1688 订单", True, "已下单"),
-        step(
-            2,
-            "采购内容",
-            bool(allocations) and bool(row.get("purchaseContentComplete")),
-            "已细化" if allocations else "待完善",
-        ),
-        step(3, "吉客云采购单", bool(purchase_orders),
-             f"已生成 {len(purchase_orders)} 张" if purchase_orders else "待生成"),
-        step(4, "入库", bool(inbound),
-             f"已入库 {len(inbound)} 单" if inbound else "待入库"),
-        step(5, "发票", bool(invoice),
-             f"已收票 {len(invoice)} 张" if invoice else ("待收票" + ("（已付款）" if paid_any else ""))),
+        step(1, "1688 订单", states["order"]["done"], states["order"]["detail"]),
+        step(2, "采购内容 / SKU", content_done,
+             "已确认采购内容并关联 SKU" if content_done else states["content"]["detail"]),
+        step(3, "吉客云采购单", states["jackyun_po"]["done"], states["jackyun_po"]["detail"]),
+        step(4, "入库", inbound_ready or consumable_received,
+             "耗材已收货入库" if consumable_received else (f"入库 {len(row.get('inbound') or [])} 单" if inbound_ready else "待入库")),
+        step(5, "发票", row.get("invoiceStatus") == "done", states["closeout"]["detail"]),
     ]
 
 
@@ -364,7 +353,7 @@ def _payment_breakdown(row: dict) -> dict:
     discount = float(row.get("discount") or 0)
     total_due = goods_total + freight + extra - discount
     settlement = row.get("settlement") or []
-    paid_amount = sum((s.get("paidAmount") or s.get("amount") or 0) for s in settlement if s.get("paid"))
+    paid_amount = _paid_amount(row, cap=total_due)
     unpaid_amount = max(0, round(total_due - paid_amount, 2))
     diff_amount = 0.0
     return {

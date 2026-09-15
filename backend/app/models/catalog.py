@@ -1,7 +1,7 @@
 from decimal import Decimal
 from datetime import datetime
 
-from sqlalchemy import BigInteger, Boolean, DateTime, Numeric, String, Text, UniqueConstraint
+from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, Numeric, String, Text, UniqueConstraint
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -38,7 +38,13 @@ class ProductSku(Base, PkMixin, TimestampMixin):
     default_cost: Mapped[Decimal | None] = mapped_column(MONEY, nullable=True)
     cost_mode: Mapped[str] = mapped_column(String(16), default="fixed", nullable=False)
     cost_tolerance_pct: Mapped[Decimal] = mapped_column(Numeric(5, 4), default=Decimal("0.0200"), nullable=False)
-    tax_code: Mapped[str] = mapped_column(String(32), default="", server_default="", nullable=False)
+    tax_code: Mapped[str] = mapped_column(
+        String(32), default="", server_default="", nullable=False,
+        comment="税收分类编码（开票用，19 位；兼容旧 10 位简称）",
+    )
+    tax_category_rule_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("tax_accounting_category_rules.id", ondelete="SET NULL"), nullable=True, index=True
+    )
     status: Mapped[str] = mapped_column(String(32), default="active")
     raw: Mapped[dict] = mapped_column(JSONB, default=dict)
 

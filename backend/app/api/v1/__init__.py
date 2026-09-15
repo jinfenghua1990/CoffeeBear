@@ -7,6 +7,7 @@ from app.api.v1 import (
     automation,
     closing,
     consumables,
+    data_export,
     dashboard,
     exceptions,
     finance,
@@ -18,12 +19,15 @@ from app.api.v1 import (
     procurement_board,
     procurement_chain,
     procurement_workbench,
+    production_purchase_view,
     profit,
     purchase,
     purchase_consistency,
     reconciliation,
     sales_file,
     sales_outbound,
+    search,
+    suppliers,
     supply_chain,
     supply_chain_finished_flow,
     supply_chain_material_flow,
@@ -58,15 +62,19 @@ api_router.include_router(purchase.router)
 api_router.include_router(purchase_consistency.router)
 api_router.include_router(reconciliation.router)
 api_router.include_router(sales_outbound.router)
+api_router.include_router(search.router)
+api_router.include_router(suppliers.router)
 api_router.include_router(profit.router)
 api_router.include_router(dashboard.router)
 api_router.include_router(supply_chain.router)
+api_router.include_router(production_purchase_view.router)
 api_router.include_router(supply_chain_material_flow.router)
 api_router.include_router(supply_chain_finished_flow.router)
 api_router.include_router(opening.router)
 api_router.include_router(closing.router)
 api_router.include_router(consumables.router)
 api_router.include_router(warehouses.router)
+api_router.include_router(data_export.router)
 api_router.include_router(automation.router)
 api_router.include_router(tax_invoices.router)
 api_router.include_router(tax_accounting.router)

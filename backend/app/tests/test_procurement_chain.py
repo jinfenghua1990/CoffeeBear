@@ -18,6 +18,44 @@ from app.services import procurement_workbench_service as workbench_service
 from app.services import purchase_service
 
 
+def test_workbench_invoice_filter_waits_for_inbound():
+    """待发票统计与筛选一致：未入库订单不能提前进入待发票。"""
+    not_inbound = {
+        "purchaseContentComplete": True,
+        "allocations": [{"skuId": 1}],
+        "purchaseOrders": [{}],
+        "invoice": [],
+        "inbound": [],
+        "consumable": {},
+        "invoiceOutstanding": Decimal("100"),
+    }
+    inbound = {
+        **not_inbound,
+        "inbound": [{"consumableUsageDecided": True}],
+    }
+
+    assert not workbench_service._matches_status(not_inbound, {}, "content", "invoice", set())
+    assert workbench_service._matches_status(inbound, {}, "closeout", "invoice", set())
+
+
+def test_workbench_list_fields_keeps_all_unique_inbound_documents():
+    """主表必须保留一个采购单关联的全部入库单，不得只展示第一张。"""
+    fields = workbench_service._supply_chain_list_fields({
+        "allocations": [{"skuCode": "SKU-A", "goodsName": "测试商品", "quantity": "2"}],
+        "orderItems": [],
+        "inbound": [
+            {"goodsdocNo": "RK-1", "warehouseName": "常州-示范仓"},
+            {"goodsdocNo": "RK-2", "warehouseName": "常州-示范仓"},
+            {"goodsdocNo": "RK-1", "warehouseName": "常州-示范仓"},
+        ],
+        "consumable": {},
+        "logistics": {},
+    })
+
+    assert fields["jackyunInboundNo"] == "RK-1、RK-2"
+    assert fields["warehouseName"] == "常州-示范仓"
+
+
 def test_chain_row_merges_file_order_and_purchase_workflow(db_session):
     order_no = "CHAIN-TEST-001"
     file_import = Alibaba1688FileImport(
@@ -41,6 +79,7 @@ def test_chain_row_merges_file_order_and_purchase_workflow(db_session):
         supplier_name="供应商甲",
         paid_amount=Decimal("100"),
         purchase_status="confirmed",
+        logistics={"trackingNo": "SF-CHAIN-001", "company": "顺丰"},
     )
     db_session.add_all([file_order, workflow])
     db_session.flush()
@@ -87,9 +126,14 @@ def test_chain_row_merges_file_order_and_purchase_workflow(db_session):
     assert workbench_row["orderId"] == file_order.id
     assert workbench_row["externalPoId"] == workflow.id
     assert workbench_row["purchaseStatus"] == "confirmed"
+    assert workbench_row["productName"] == "测试商品"
+    assert workbench_row["productQuantity"] == 2.0
+    assert workbench_row["logisticsNo"] == "SF-CHAIN-001"
+    assert workbench_row["logisticsCompany"] == "顺丰"
     assert workbench_detail is not None
     assert workbench_detail["order"]["externalPoId"] == workflow.id
     assert workbench_detail["order"]["purchaseStatus"] == "confirmed"
+    assert workbench_detail["order"]["logistics"]["trackingNo"] == "SF-CHAIN-001"
 
 
 def test_workflow_creation_backfills_sku_from_existing_inbound_link(db_session):
@@ -248,6 +292,95 @@ def test_safe_match_creates_unconfirmed_suggestion(db_session):
     assert link.confirmed is False
     assert link.match_method == "auto"
     assert "人工确认" in link.note
+
+
+def test_auto_match_keeps_heuristic_inbound_pending(db_session):
+    """自动运行时，只有入库单明确带订单号才能直接确认。"""
+    file_import = Alibaba1688FileImport(
+        original_name="auto-inbound-pending.xlsx",
+        stored_path="/tmp/auto-inbound-pending.xlsx",
+        sha256="auto-inbound-pending-sha",
+        lifecycle="active",
+    )
+    db_session.add(file_import)
+    db_session.flush()
+    order = Alibaba1688Order(
+        external_order_id="AUTO-INBOUND-PENDING-001",
+        seller_company_name="自动候选供应商",
+        actual_payment=Decimal("123.45"),
+        order_time=datetime(2026, 2, 1, tzinfo=timezone.utc),
+        import_id=file_import.id,
+    )
+    document = JackyunGoodsDocument(
+        document_type="inbound",
+        goodsdoc_no="RK-AUTO-INBOUND-PENDING-001",
+        supplier_name="自动候选供应商",
+        total_amount=Decimal("123.45"),
+        document_at=datetime(2026, 2, 3, tzinfo=timezone.utc),
+    )
+    db_session.add_all([order, document])
+    db_session.flush()
+
+    result = service.ProcurementChainMatcher(db_session).run_match(auto_confirm=True)
+    link = db_session.query(ProcurementChainLink).filter_by(
+        order_id=order.id, target_type="inbound", target_id=document.id
+    ).one()
+
+    assert result["pendingInbound"] == 1
+    assert result["requiresConfirmation"] is True
+    assert link.confirmed is False
+    assert link.match_method == "auto"
+
+
+def test_heuristic_match_does_not_cross_link_explicit_inbound_owner(db_session):
+    """已有文件/人工明确归属的入库单，不能再被启发式挂到另一张订单。"""
+    file_import = Alibaba1688FileImport(
+        original_name="authoritative-inbound-owner.xlsx",
+        stored_path="/tmp/authoritative-inbound-owner.xlsx",
+        sha256="authoritative-inbound-owner-sha",
+        lifecycle="active",
+    )
+    db_session.add(file_import)
+    db_session.flush()
+    owner = Alibaba1688Order(
+        external_order_id="AUTHORITATIVE-INBOUND-OWNER-001",
+        seller_company_name="同供应商",
+        actual_payment=Decimal("100"),
+        order_time=datetime(2026, 3, 1, tzinfo=timezone.utc),
+        import_id=file_import.id,
+    )
+    rival = Alibaba1688Order(
+        external_order_id="AUTHORITATIVE-INBOUND-RIVAL-001",
+        seller_company_name="同供应商",
+        actual_payment=Decimal("100"),
+        order_time=datetime(2026, 3, 9, tzinfo=timezone.utc),
+        import_id=file_import.id,
+    )
+    document = JackyunGoodsDocument(
+        document_type="inbound",
+        goodsdoc_no="RK-AUTHORITATIVE-INBOUND-001",
+        supplier_name="同供应商",
+        total_amount=Decimal("100"),
+        document_at=datetime(2026, 3, 10, tzinfo=timezone.utc),
+    )
+    db_session.add_all([owner, rival, document])
+    db_session.flush()
+    db_session.add(ProcurementChainLink(
+        order_id=owner.id,
+        target_type="inbound",
+        target_id=document.id,
+        match_method="file_import",
+        confidence=Decimal("1"),
+        confirmed=True,
+    ))
+    db_session.flush()
+
+    result = service.ProcurementChainMatcher(db_session).run_match(auto_confirm=True)
+
+    assert result["protectedInbound"] == 1
+    assert db_session.query(ProcurementChainLink).filter_by(
+        order_id=rival.id, target_type="inbound", target_id=document.id
+    ).first() is None
 
 
 def test_manual_inbound_link_can_be_replaced_and_removed(client, db_session):

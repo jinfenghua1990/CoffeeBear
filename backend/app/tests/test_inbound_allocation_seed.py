@@ -13,14 +13,14 @@ from decimal import Decimal
 from app.models.catalog import ProductSku
 from app.models.jackyun import JackyunGoodsDocument, JackyunGoodsDocumentItem
 from app.models.procurement_chain import ProcurementChainLink
-from app.models.purchase import ExternalPurchaseOrder, PurchaseAllocationItem
-from app.services.inbound_allocation_seed import seed_allocations_for_po
+from app.models.purchase import ExternalPurchaseOrder, InboundLink, PurchaseAllocationItem
+from app.services.inbound_allocation_seed import collect_linked_doc_ids_for_po, seed_allocations_for_po
 from app.services.procurement_chain_service import ProcurementChainMatcher
 
 
-def _mk_po(db, external_order_id: str) -> ExternalPurchaseOrder:
+def _mk_po(db, external_order_id: str, platform: str = "taobao") -> ExternalPurchaseOrder:
     po = ExternalPurchaseOrder(
-        external_order_id=external_order_id, platform="taobao",
+        external_order_id=external_order_id, platform=platform,
         supplier_name="测试供应商", purchase_status="pending_refine",
     )
     db.add(po)
@@ -246,6 +246,47 @@ def test_seed_same_doc_same_sku_takes_single_line(db_session):
         db_session.query(ProcurementChainLink).filter_by(target_type="inbound", target_id=doc.id).delete(synchronize_session=False)
         for obj in (po, it1, it2, doc, sku):
             db_session.delete(obj)
+        db_session.commit()
+
+
+def test_seed_prefers_original_order_marker_for_same_doc_same_sku(db_session):
+    """同一入库单已有原始订单标记时，按标记取行而不是按表格顺序取行。"""
+    sku = _mk_sku(db_session, "EXCL-010")
+    doc = _mk_doc(db_session, "RK-EXCL-009", [])
+    it_a = _mk_item(db_session, doc.id, 1, "G-EXCL-10", "500", "1.0", sku.id)
+    it_b = _mk_item(db_session, doc.id, 2, "G-EXCL-10", "500", "0.9", sku.id)
+    po = _mk_po(db_session, "EXCL-PO-MARK-B", platform="1688")
+    it_a.raw = {"_1688采购订单": "EXCL-PO-MARK-A"}
+    it_b.raw = {"_1688采购订单": po.external_order_id}
+    _mk_link(db_session, po.id, doc.id)
+
+    try:
+        result = seed_allocations_for_po(db_session, po)
+        assert result["seeded"] == 1
+        row = db_session.query(PurchaseAllocationItem).filter_by(po_id=po.id).one()
+        assert row.source_item_id == it_b.id
+        assert row.unit_price == Decimal("0.9")
+    finally:
+        db_session.query(PurchaseAllocationItem).filter_by(po_id=po.id).delete(synchronize_session=False)
+        db_session.query(ProcurementChainLink).filter_by(target_type="inbound", target_id=doc.id).delete(synchronize_session=False)
+        for obj in (po, it_a, it_b, doc, sku):
+            db_session.delete(obj)
+        db_session.commit()
+
+
+def test_legacy_inbound_link_resolves_goodsdoc_no(db_session):
+    """旧入库关联按实际 goodsdoc_no 解析，不读取不存在的 document_id 字段。"""
+    po = _mk_po(db_session, "EXCL-PO-LEGACY-DOC")
+    doc = _mk_doc(db_session, "RK-EXCL-LEGACY-DOC", [])
+    db_session.add(InboundLink(po_id=po.id, goodsdoc_no=doc.goodsdoc_no))
+    db_session.flush()
+
+    try:
+        assert collect_linked_doc_ids_for_po(db_session, po) == {doc.id}
+    finally:
+        db_session.query(InboundLink).filter_by(po_id=po.id).delete(synchronize_session=False)
+        db_session.delete(doc)
+        db_session.delete(po)
         db_session.commit()
 
 

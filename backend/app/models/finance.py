@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import BigInteger, Boolean, DateTime, Index, Integer, Numeric, String, Text, UniqueConstraint, text
+from sqlalchemy import BigInteger, Boolean, CheckConstraint, DateTime, ForeignKey, Index, Integer, Numeric, String, Text, UniqueConstraint, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -22,7 +22,7 @@ class ArchiveFile(Base, PkMixin, TimestampMixin):
 
     company: Mapped[str] = mapped_column(String(256), default="浙江柴本网络科技有限公司", index=True)
     category: Mapped[str] = mapped_column(String(32), default="other")
-    # bank/jackyun/invoice/sales_summary/other
+    # bank/jackyun/invoice/sales_summary/purchase_inbound/sales_query/other
     original_name: Mapped[str] = mapped_column(Text, nullable=False)
     stored_path: Mapped[str] = mapped_column(Text, nullable=False)
     size: Mapped[int] = mapped_column(BigInteger, default=0)
@@ -47,12 +47,49 @@ class MonthlyFinancePeriod(Base, PkMixin, TimestampMixin):
     missing_summary: Mapped[dict] = mapped_column(JSONB, default=dict)
 
 
+class MonthlyIntakeSource(Base, PkMixin, TimestampMixin):
+    """月度业务源文件的当前版本与导入结果。
+
+    原始文件仍由 ``ArchiveFile`` 负责不可覆盖的版本化归档；本表只保存
+    每个账期、每种源文件的当前指针和处理状态，保证用户下个月回来时
+    能看见「采购入库单 / 销售单查询」是否真正导入，而不是只看到文件存在。
+    """
+
+    __tablename__ = "monthly_intake_sources"
+    __table_args__ = (
+        UniqueConstraint(
+            "company", "period_year", "period_month", "source_type",
+            name="uq_monthly_intake_source",
+        ),
+        Index(
+            "ix_monthly_intake_sources_period",
+            "company", "period_year", "period_month",
+        ),
+    )
+
+    company: Mapped[str] = mapped_column(String(256), nullable=False, index=True)
+    period_year: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    period_month: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    # purchase_inbound / sales_query
+    source_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    archive_file_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True, index=True)
+    sha256: Mapped[str] = mapped_column(String(64), default="")
+    # MISSING/IMPORTING/IMPORTED/REVIEW/ERROR
+    status: Mapped[str] = mapped_column(String(16), default="MISSING", index=True)
+    report_type: Mapped[str] = mapped_column(String(32), default="")
+    stats: Mapped[dict] = mapped_column(JSONB, default=dict)
+    error_summary: Mapped[str] = mapped_column(Text, default="")
+    imported_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
 class FinanceSalesReportTemplate(Base, PkMixin, TimestampMixin):
     """每月销售汇总模板；后台任务直接读取，不能依赖浏览器 LocalStorage。"""
 
     __tablename__ = "finance_sales_report_templates"
     __table_args__ = (
         UniqueConstraint("company", "name", name="uq_finance_sales_report_template_company_name"),
+        CheckConstraint("send_day >= 1 AND send_day <= 28", name="ck_finance_sales_report_send_day"),
+        CheckConstraint("send_hour >= 0 AND send_hour <= 23", name="ck_finance_sales_report_send_hour"),
     )
 
     company: Mapped[str] = mapped_column(String(256), nullable=False, index=True)
@@ -67,6 +104,31 @@ class FinanceSalesReportTemplate(Base, PkMixin, TimestampMixin):
     auto_send: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     send_day: Mapped[int] = mapped_column(Integer, nullable=False, default=3)
     send_hour: Mapped[int] = mapped_column(Integer, nullable=False, default=10)
+
+
+class FinanceUnbilledAdjustment(Base, PkMixin, TimestampMixin):
+    """无票收入明细的月度选择版本；每次保存都新增版本，不覆盖历史口径。"""
+
+    __tablename__ = "finance_unbilled_adjustments"
+    __table_args__ = (
+        UniqueConstraint(
+            "company", "period_year", "period_month", "version",
+            name="uq_finance_unbilled_adjustment_version",
+        ),
+        Index(
+            "ix_finance_unbilled_adjustments_period",
+            "company", "period_year", "period_month",
+        ),
+    )
+
+    company: Mapped[str] = mapped_column(String(256), nullable=False, index=True)
+    period_year: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    period_month: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    version: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    # 明细键为 taxCode + 分隔符 + product，保存的是本版本保留的明细。
+    selected_keys: Mapped[list] = mapped_column(JSONB, default=list)
+    actor: Mapped[str] = mapped_column(String(64), default="system")
+    note: Mapped[str] = mapped_column(Text, default="")
 
 
 class FinanceDeliveryPackage(Base, PkMixin, TimestampMixin):
@@ -84,8 +146,14 @@ class FinanceDeliveryPackage(Base, PkMixin, TimestampMixin):
 class FinanceDeliveryFile(Base, PkMixin):
     __tablename__ = "finance_delivery_files"
 
-    package_id: Mapped[int] = mapped_column(BigInteger, index=True, nullable=False)
-    archive_file_id: Mapped[int] = mapped_column(BigInteger, index=True, nullable=False)
+    package_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("finance_delivery_packages.id", name="fk_fdf_package", ondelete="CASCADE"),
+        index=True, nullable=False,
+    )
+    archive_file_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("archive_files.id", name="fk_fdf_archive", ondelete="CASCADE"),
+        index=True, nullable=False,
+    )
 
 
 class EmailDeliveryLog(Base, PkMixin, TimestampMixin):

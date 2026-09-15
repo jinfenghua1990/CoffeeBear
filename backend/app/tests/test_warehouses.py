@@ -4,7 +4,8 @@ from datetime import date
 from decimal import Decimal
 from uuid import uuid4
 
-from app.models.consumable import Consumable, ConsumableTransaction
+from app.models.catalog import InventorySnapshot
+from app.models.consumable import Consumable, ConsumableTransaction, InboundConsumableUsage
 from app.models.consumable_purchase import ConsumableReceipt
 from app.services import consumable_purchase_service as purchase_svc
 from app.services import warehouse_purchase_view
@@ -33,6 +34,45 @@ def test_warehouse_can_be_renamed_without_changing_identity(db_session):
     assert updated.id == warehouse_id
     assert updated.name == "测试工厂仓（新名称）"
     assert updated.code == code
+
+
+def test_unused_warehouse_can_be_physically_deleted(db_session):
+    warehouse = warehouse_service.create_warehouse(
+        db_session,
+        code=f"DELETE-{uuid4().hex[:8].upper()}",
+        name="待删除仓库",
+    )
+    warehouse_id = warehouse.id
+
+    warehouse_service.delete_warehouse(db_session, warehouse_id)
+
+    assert db_session.get(type(warehouse), warehouse_id) is None
+
+
+def test_referenced_warehouse_cannot_be_physically_deleted(db_session):
+    warehouse = warehouse_service.create_warehouse(
+        db_session,
+        code=f"USED-{uuid4().hex[:8].upper()}",
+        name="已使用仓库",
+    )
+    db_session.add(InventorySnapshot(
+        sku_id=900001,
+        warehouse_id=warehouse.id,
+        quantity=Decimal("1"),
+        snapshot_at=warehouse.created_at,
+        source="pytest",
+        raw={},
+    ))
+    db_session.flush()
+
+    try:
+        warehouse_service.delete_warehouse(db_session, warehouse.id)
+    except ValueError as exc:
+        assert "库存快照" in str(exc)
+    else:
+        raise AssertionError("referenced warehouse must not be physically deleted")
+
+    assert db_session.get(type(warehouse), warehouse.id) is not None
 
 
 def test_consumable_receipt_uses_selected_factory_warehouse(db_session):
@@ -152,3 +192,114 @@ def test_consumable_receipt_rejects_goods_only_warehouse(db_session):
         assert "不允许存放耗材" in str(exc)
     else:
         raise AssertionError("goods-only warehouse must reject consumable receipts")
+
+
+def test_normalize_legacy_consumable_state_moves_only_known_rows(monkeypatch, db_session):
+    warehouse = warehouse_service.create_warehouse(
+        db_session,
+        code=f"FACTORY-{uuid4().hex[:8].upper()}",
+        name="归一化测试仓",
+        warehouse_type="factory",
+        purpose="consumable",
+        is_sellable=False,
+    )
+    # 让测试不受其他测试已创建的仓库影响，专门验证唯一耗材仓分支。
+    monkeypatch.setattr(warehouse_service, "active_for_purpose", lambda _db, _purpose: [warehouse])
+    material = Consumable(
+        code=f"HC-{uuid4().hex[:8].upper()}",
+        name="归一化测试耗材",
+        stock_qty=Decimal("110"),
+        factory_qty=Decimal("0"),
+        purchased_qty=Decimal("10"),
+        used_qty=Decimal("2"),
+        transit_qty=Decimal("0"),
+        status="active",
+        raw={},
+    )
+    db_session.add(material)
+    db_session.flush()
+    purchase = purchase_svc.create_purchase(
+        db_session,
+        request_key=str(uuid4()),
+        supplier_name="归一化测试供应商",
+        ordered_on=date(2026, 9, 9),
+        items=[{"consumable_id": material.id, "quantity": Decimal("10"), "unit_cost": Decimal("1")}],
+        actor="pytest",
+    )
+    receipt = ConsumableReceipt(
+        purchase_id=purchase.id,
+        number=f"HR-LEGACY-{uuid4().hex[:8].upper()}",
+        request_key=str(uuid4()),
+        request_fingerprint="legacy",
+        received_on=date(2026, 9, 9),
+        location="own",
+    )
+    db_session.add(receipt)
+    db_session.flush()
+    known = ConsumableTransaction(
+        consumable_id=material.id,
+        transaction_type="purchase",
+        quantity=Decimal("10"),
+        warehouse_id=None,
+        location="own",
+        source_type="consumable_receipt",
+        source_id=receipt.id,
+        stock_before=Decimal("100"),
+        stock_after=Decimal("110"),
+        factory_before=Decimal("0"),
+        factory_after=Decimal("0"),
+        note="legacy",
+    )
+    usage = InboundConsumableUsage(
+        link_id=9001,
+        inbound_document_id=9001,
+        consumable_id=material.id,
+        quantity=Decimal("2"),
+    )
+    inbound = ConsumableTransaction(
+        consumable_id=material.id,
+        transaction_type="consume",
+        quantity=Decimal("2"),
+        warehouse_id=None,
+        location=None,
+        source_type="inbound_link",
+        source_id=9001,
+        stock_before=Decimal("110"),
+        stock_after=Decimal("108"),
+        factory_before=Decimal("0"),
+        factory_after=Decimal("0"),
+        note="legacy inbound",
+    )
+    orphan = ConsumableTransaction(
+        consumable_id=material.id,
+        transaction_type="purchase",
+        quantity=Decimal("1"),
+        warehouse_id=None,
+        location="own",
+        source_type="consumable_receipt",
+        source_id=999999,
+        note="orphan legacy",
+    )
+    db_session.add_all([known, usage, inbound, orphan])
+    db_session.flush()
+
+    result = warehouse_receipt_service.normalize_legacy_consumable_warehouse_state(db_session)
+
+    db_session.refresh(material)
+    db_session.refresh(receipt)
+    db_session.refresh(known)
+    db_session.refresh(inbound)
+    db_session.refresh(orphan)
+    assert result["warehouseId"] == warehouse.id
+    assert receipt.warehouse_id == warehouse.id
+    assert receipt.location == "factory"
+    assert known.warehouse_id == warehouse.id
+    assert known.location == "factory"
+    assert inbound.warehouse_id == warehouse.id
+    assert inbound.location == "factory"
+    assert inbound.stock_before is None
+    assert inbound.factory_before == Decimal("110")
+    assert orphan.warehouse_id == warehouse.id
+    assert orphan.location == "factory"
+    assert material.stock_qty == Decimal("0")
+    assert material.factory_qty == Decimal("110")

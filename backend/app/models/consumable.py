@@ -23,17 +23,26 @@ class Consumable(Base, PkMixin, TimestampMixin):
 
     code: Mapped[str] = mapped_column(String(128), unique=True, nullable=False)
     name: Mapped[str] = mapped_column(String(256), default="", index=True)
-    barcode: Mapped[str] = mapped_column(String(128), default="", server_default="", index=True)
+    barcode: Mapped[str] = mapped_column(
+        String(128), default="", server_default="", index=True,
+        comment="条形码（可与正品相同，不作唯一键）",
+    )
     category: Mapped[str] = mapped_column(String(128), default="", index=True)
     unit: Mapped[str] = mapped_column(String(32), default="个")
     purchase_unit_cost: Mapped[Decimal | None] = mapped_column(MONEY, nullable=True)
     purchased_qty: Mapped[Decimal] = mapped_column(QUANTITY, default=Decimal("0"))
     used_qty: Mapped[Decimal] = mapped_column(QUANTITY, default=Decimal("0"))
     stock_qty: Mapped[Decimal] = mapped_column(QUANTITY, default=Decimal("0"))
-    factory_qty: Mapped[Decimal] = mapped_column(QUANTITY, default=Decimal("0"))
-    transit_qty: Mapped[Decimal] = mapped_column(QUANTITY, default=Decimal("0"))
+    factory_qty: Mapped[Decimal] = mapped_column(QUANTITY, default=Decimal("0"), comment="工厂库存")
+    transit_qty: Mapped[Decimal] = mapped_column(QUANTITY, default=Decimal("0"), comment="在途库存（发往工厂未收货）")
     min_stock_qty: Mapped[Decimal] = mapped_column(QUANTITY, default=Decimal("0"))
-    tax_code: Mapped[str] = mapped_column(String(32), default="", server_default="", nullable=False)
+    tax_code: Mapped[str] = mapped_column(
+        String(32), default="", server_default="", nullable=False,
+        comment="税收分类编码（开票用，19 位；兼容旧 10 位简称）",
+    )
+    tax_category_rule_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("tax_accounting_category_rules.id", ondelete="SET NULL"), nullable=True, index=True
+    )
     status: Mapped[str] = mapped_column(String(16), default="active", index=True)
     raw: Mapped[dict] = mapped_column(JSONB, default=dict)
 
@@ -68,13 +77,13 @@ class ConsumableTransaction(Base, PkMixin, TimestampMixin):
     quantity: Mapped[Decimal] = mapped_column(QUANTITY, nullable=False)
     unit_cost: Mapped[Decimal | None] = mapped_column(Numeric(18, 10), nullable=True)
     warehouse_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey("warehouses.id"), nullable=True, index=True)
-    location: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    location: Mapped[str | None] = mapped_column(String(16), nullable=True, comment="发生位置：own=自有仓 / factory=工厂")
     source_type: Mapped[str] = mapped_column(String(32), default="manual")
     source_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
-    stock_before: Mapped[Decimal | None] = mapped_column(QUANTITY, nullable=True)
-    stock_after: Mapped[Decimal | None] = mapped_column(QUANTITY, nullable=True)
-    factory_before: Mapped[Decimal | None] = mapped_column(QUANTITY, nullable=True)
-    factory_after: Mapped[Decimal | None] = mapped_column(QUANTITY, nullable=True)
+    stock_before: Mapped[Decimal | None] = mapped_column(QUANTITY, nullable=True, comment="操作前自有仓库存")
+    stock_after: Mapped[Decimal | None] = mapped_column(QUANTITY, nullable=True, comment="操作后自有仓库存")
+    factory_before: Mapped[Decimal | None] = mapped_column(QUANTITY, nullable=True, comment="操作前工厂库存")
+    factory_after: Mapped[Decimal | None] = mapped_column(QUANTITY, nullable=True, comment="操作后工厂库存")
     note: Mapped[str] = mapped_column(Text, default="")
     occurred_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     raw: Mapped[dict] = mapped_column(JSONB, default=dict)

@@ -123,7 +123,7 @@ def run_match(
             **result,
             "created": int(match.get("created", 0)),
             "skipped": int(match.get("skipped", 0)),
-            "requiresConfirmation": False,
+            "requiresConfirmation": bool(match.get("requiresConfirmation", False)),
         }
     return service.ProcurementChainMatcher(db).run_match(auto_confirm=False)
 
@@ -272,22 +272,25 @@ def manual_link(body: LinkBody, db: Session = Depends(get_db)) -> dict:
     """人工创建 1688 订单 ↔ 入库单/结算单 关联。"""
     if body.target_type not in ("inbound", "settlement"):
         raise HTTPException(status_code=400, detail="target_type 只能是 inbound/settlement")
-    if body.target_type == "inbound" and body.consumable_usage_enabled is None:
-        raise HTTPException(status_code=400, detail="关联入库单前必须明确是否添加耗材使用")
     matcher = service.ProcurementChainMatcher(db)
+    usage_result = None
     try:
         link = matcher.manual_link(body.order_id, body.target_type, body.target_id, note=body.note)
         if body.target_type == "inbound":
-            from app.services.consumable_service import set_inbound_usage
-            set_inbound_usage(
-                db, link_id=link.id, enabled=body.consumable_usage_enabled,
-                items=[item.model_dump() for item in body.consumable_usage_items], note=body.note,
-            )
+            if body.consumable_usage_enabled is None:
+                from app.services.consumable_service import auto_apply_inbound_usage
+                usage_result = auto_apply_inbound_usage(db, link.id, note="采购入库自动按 SKU 耗材映射关联")
+            else:
+                from app.services.consumable_service import set_inbound_usage
+                set_inbound_usage(
+                    db, link_id=link.id, enabled=body.consumable_usage_enabled,
+                    items=[item.model_dump() for item in body.consumable_usage_items], note=body.note,
+                )
     except ValueError as exc:
         if 'link' in locals() and link is not None and body.target_type == "inbound":
             matcher.remove_link(link.id)
         raise HTTPException(status_code=400, detail=str(exc))
-    return {"id": link.id, "confirmed": True}
+    return {"id": link.id, "confirmed": True, "autoUsage": usage_result}
 
 
 @router.put("/links/{link_id}")
@@ -296,18 +299,20 @@ def replace_link(link_id: int, body: ReplaceLinkBody, db: Session = Depends(get_
     target_id = body.target_id
     usage_enabled = body.consumable_usage_enabled
     usage_items = [item.model_dump() for item in body.consumable_usage_items]
-    link_before = db.get(ProcurementChainLink, link_id)
-    if link_before is not None and link_before.target_type == "inbound" and usage_enabled is None:
-        raise HTTPException(status_code=400, detail="更换入库单前必须明确是否添加耗材使用")
     matcher = service.ProcurementChainMatcher(db)
+    usage_result = None
     try:
         link = matcher.replace_link(link_id, target_id, note=body.note)
         if link.target_type == "inbound":
-            from app.services.consumable_service import set_inbound_usage
-            set_inbound_usage(db, link_id=link.id, enabled=usage_enabled, items=usage_items, note=body.note)
+            if usage_enabled is None:
+                from app.services.consumable_service import auto_apply_inbound_usage
+                usage_result = auto_apply_inbound_usage(db, link.id, note="采购入库自动按 SKU 耗材映射关联")
+            else:
+                from app.services.consumable_service import set_inbound_usage
+                set_inbound_usage(db, link_id=link.id, enabled=usage_enabled, items=usage_items, note=body.note)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
-    return {"id": link.id, "confirmed": True, "targetId": link.target_id}
+    return {"id": link.id, "confirmed": True, "targetId": link.target_id, "autoUsage": usage_result}
 
 
 @router.post("/links/{link_id}/consumable-usage")
@@ -327,15 +332,20 @@ def set_link_consumable_usage(link_id: int, body: ConsumableUsageBody, db: Sessi
 def confirm_link(link_id: int, body: ConsumableUsageBody | None = Body(None), db: Session = Depends(get_db)) -> dict:
     """确认一条待确认关联。"""
     matcher = service.ProcurementChainMatcher(db)
+    usage_result = None
     try:
         link = db.get(ProcurementChainLink, link_id)
-        if link is not None and link.target_type == "inbound" and body is not None:
-            from app.services.consumable_service import set_inbound_usage
-            set_inbound_usage(db, link_id=link_id, enabled=body.enabled, items=[item.model_dump() for item in body.items], note=body.note)
+        if link is not None and link.target_type == "inbound":
+            if body is not None:
+                from app.services.consumable_service import set_inbound_usage
+                set_inbound_usage(db, link_id=link_id, enabled=body.enabled, items=[item.model_dump() for item in body.items], note=body.note)
+            elif not link.consumable_usage_decided:
+                from app.services.consumable_service import auto_apply_inbound_usage
+                usage_result = auto_apply_inbound_usage(db, link_id, note="采购入库自动按 SKU 耗材映射关联")
         link = matcher.confirm(link_id)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
-    return {"id": link.id, "confirmed": True}
+    return {"id": link.id, "confirmed": True, "autoUsage": usage_result}
 
 
 @router.delete("/links/{link_id}")

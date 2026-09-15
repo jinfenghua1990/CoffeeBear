@@ -14,9 +14,11 @@ from typing import Any
 from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
 
-from app.models.catalog import InventorySnapshot, Product, ProductSku, Store, Warehouse
+from app.models.catalog import Product, ProductSku, Store, Warehouse
 from app.models.consumable import Consumable, ConsumableSkuMapping
 from app.models.sales import AftersalesOrder, SalesOrder, SalesOrderItem
+from app.models.tax import TaxAccountingCategoryRule
+from app.services.inventory_position_service import current_positions
 from app.utils.money import quantize, to_decimal
 
 
@@ -26,6 +28,16 @@ def _money(value: Decimal | None) -> str | None:
 
 def _quantity(value: Decimal | None) -> str | None:
     return f"{to_decimal(value):f}" if value is not None else None
+
+
+def _tax_rule_label(row: TaxAccountingCategoryRule | None) -> str:
+    if row is None:
+        return ""
+    return f"{row.category_name} · {row.item_name}"
+
+
+def _tax_rule_map(db: Session) -> dict[int, TaxAccountingCategoryRule]:
+    return {row.id: row for row in db.query(TaxAccountingCategoryRule).all()}
 
 
 def _valid_sales():
@@ -116,62 +128,46 @@ def sku_ranking(db: Session, limit: int = 20, start: date | None = None, end: da
 
 
 def inventory_summary(db: Session) -> dict[str, Any]:
-    """库存概览：SKU 总数 / 有快照 SKU / 库存总量 / 各仓库。快照取最新一条。"""
+    """库存概览：独立运算 Σ采购入库 − Σ销售出库，仓库按本系统仓库档案归属。"""
     skus = db.query(ProductSku).count()
-    snap = (
-        db.query(InventorySnapshot)
-        .order_by(InventorySnapshot.snapshot_at.desc())
-        .first()
-    )
-    if not snap:
-        return {"skuCount": skus, "snapshotAt": None, "totalQuantity": None,
-                "byWarehouse": [], "note": "库存快照未同步（吉客云库存同步落地后显示）"}
-    latest_at = snap.snapshot_at
-    rows = (
-        db.query(
-            InventorySnapshot.warehouse_id,
-            func.coalesce(func.sum(InventorySnapshot.quantity), 0),
-            func.count(func.distinct(InventorySnapshot.sku_id)),
-        )
-        .filter(InventorySnapshot.snapshot_at == latest_at)
-        .group_by(InventorySnapshot.warehouse_id)
-        .all()
-    )
-    total = Decimal("0")
-    by_warehouse = []
-    for wid, qty, sku_cnt in rows:
-        total += qty
-        by_warehouse.append({"warehouseId": wid, "quantity": _quantity(qty), "skus": int(sku_cnt)})
-    return {"skuCount": skus, "snapshotAt": latest_at.isoformat(),
-            "totalQuantity": _quantity(total), "byWarehouse": by_warehouse}
+    positions = current_positions(db)
+    last_at = positions["last_document_at"]
+    if last_at is None:
+        return {"skuCount": skus, "lastDocumentAt": None, "totalQuantity": None,
+                "byWarehouse": [], "note": "暂无出入库单据；导入采购入库/销售出库单后自动累计"}
+    by_warehouse_values: dict[int | None, dict[int, Decimal]] = {}
+    for sku_id, per_warehouse in positions["by_sku_warehouse"].items():
+        for warehouse_id, quantity in per_warehouse.items():
+            by_warehouse_values.setdefault(warehouse_id, {})[sku_id] = quantity
+    wh_names = {row.id: row.name for row in db.query(Warehouse).all()}
+    total = sum(positions["by_sku"].values(), Decimal("0"))
+    by_warehouse = [
+        {
+            "warehouseId": warehouse_id,
+            "warehouseName": wh_names.get(warehouse_id) or "未映射仓库",
+            "quantity": _quantity(sum(values.values(), Decimal("0"))),
+            "skus": len(values),
+        }
+        for warehouse_id, values in sorted(by_warehouse_values.items(), key=lambda item: (item[0] is None, item[0] or 0))
+    ]
+    return {
+        "skuCount": skus,
+        "lastDocumentAt": last_at.isoformat(),
+        "totalQuantity": _quantity(total),
+        "byWarehouse": by_warehouse,
+        "positionSource": positions["source"],
+        "appliedDocumentCount": positions["applied_document_count"],
+    }
 
 
 def inventory_skus(db: Session, search: str = "", limit: int = 1000) -> list[dict[str, Any]]:
-    """SKU 级库存清单：每个货品在最新快照时点的库存总量与仓库分布。
+    """SKU 级库存清单：独立运算（采购入库 − 销售出库）的总量与仓库分布。
 
-    返回全部 SKU 档案（含无快照的），带 snapshot=false 标记；金额/数量输出 str。
+    返回全部 SKU 档案（含无单据的），带 hasMovement=false 标记；金额/数量输出 str。
     """
-    snap = (
-        db.query(InventorySnapshot)
-        .order_by(InventorySnapshot.snapshot_at.desc())
-        .first()
-    )
-    latest_at = snap.snapshot_at if snap else None
-    rows = []
-    if latest_at is not None:
-        rows = (
-            db.query(
-                InventorySnapshot.sku_id,
-                InventorySnapshot.warehouse_id,
-                func.sum(InventorySnapshot.quantity),
-            )
-            .filter(InventorySnapshot.snapshot_at == latest_at)
-            .group_by(InventorySnapshot.sku_id, InventorySnapshot.warehouse_id)
-            .all()
-        )
-    agg: dict[int, dict[int | None, Decimal]] = {}
-    for sku_id, wid, qty in rows:
-        agg.setdefault(int(sku_id), {})[wid] = qty
+    positions = current_positions(db)
+    last_at = positions["last_document_at"]
+    agg = positions["by_sku_warehouse"]
     wh_names = {w.id: w.name for w in db.query(Warehouse).all()}
 
     q = (
@@ -192,9 +188,9 @@ def inventory_skus(db: Session, search: str = "", limit: int = 1000) -> list[dic
     out: list[dict[str, Any]] = []
     for sku, product in q.limit(limit).all():
         per = agg.get(sku.id, {})
-        total = sum(per.values(), Decimal("0")) if per else Decimal("0")
+        total = positions["by_sku"].get(sku.id, Decimal("0"))
         warehouses = [
-            {"warehouseId": wid, "warehouseName": wh_names.get(wid) or "", "quantity": _quantity(qty)}
+            {"warehouseId": wid, "warehouseName": wh_names.get(wid) or "未映射仓库", "quantity": _quantity(qty)}
             for wid, qty in per.items()
         ]
         out.append({
@@ -208,9 +204,9 @@ def inventory_skus(db: Session, search: str = "", limit: int = 1000) -> list[dic
             "unit": sku.unit,
             "status": sku.status,
             "quantity": _quantity(total),
-            "hasSnapshot": bool(per),
+            "hasMovement": sku.id in positions["seen_skus"],
             "warehouses": warehouses,
-            "snapshotAt": latest_at.isoformat() if latest_at is not None else None,
+            "lastDocumentAt": last_at.isoformat() if last_at is not None else None,
         })
     return out
 
@@ -231,6 +227,7 @@ def list_products(db: Session, search: str = "", limit: int = 200) -> list[dict[
             ProductSku.barcode.ilike(pattern),
             Product.goods_name.ilike(pattern),
         ))
+    tax_rules = _tax_rule_map(db)
     return [
         {
             "id": sku.id,
@@ -246,6 +243,8 @@ def list_products(db: Session, search: str = "", limit: int = 200) -> list[dict[
             "costMode": sku.cost_mode or "fixed",
             "costTolerancePct": str(sku.cost_tolerance_pct) if sku.cost_tolerance_pct is not None else "0.0200",
             "taxCode": sku.tax_code or "",
+            "taxCategoryRuleId": sku.tax_category_rule_id,
+            "taxCategoryRuleName": _tax_rule_label(tax_rules.get(sku.tax_category_rule_id)),
             "status": sku.status,
         }
         for sku, product in q.limit(limit).all()
@@ -256,27 +255,18 @@ def catalog_unified(db: Session, kind: str = "all", search: str = "", limit: int
     """统一货品档案：正品（吉客云 SKU）+ 耗材（本平台档案）合成一份列表。
 
     - kind=all/goods/consumable；search 命中编码/名称/条码。
-    - 正品行库存取吉客云最新库存快照（只读吉客云，本系统不改动）；
+    - 正品行库存由本系统独立运算：采购入库 − 销售出库；
     - 耗材行返回 自有仓/工厂/在途 三口径 + 安全库存预警 + 关联正品。
     - 条形码允许正品/耗材相同：系统内以 (kind, id) 独立 ID 区分，不以条码作主键。
     """
     term = search.strip()
     pattern = f"%{term}%" if term else None
     items: list[dict[str, Any]] = []
+    tax_rules = _tax_rule_map(db)
 
     if kind in {"all", "goods"}:
-        # 正品库存：最新快照时点按 SKU 汇总
-        snap = db.query(InventorySnapshot).order_by(InventorySnapshot.snapshot_at.desc()).first()
-        latest_at = snap.snapshot_at if snap else None
-        agg: dict[int, Decimal] = {}
-        if latest_at is not None:
-            rows = (
-                db.query(InventorySnapshot.sku_id, func.sum(InventorySnapshot.quantity))
-                .filter(InventorySnapshot.snapshot_at == latest_at)
-                .group_by(InventorySnapshot.sku_id)
-                .all()
-            )
-            agg = {int(sku_id): to_decimal(qty) for sku_id, qty in rows}
+        positions = current_positions(db)
+        agg = positions["by_sku"]
         q = (
             db.query(ProductSku, Product)
             .outerjoin(Product, Product.id == ProductSku.product_id)
@@ -295,23 +285,26 @@ def catalog_unified(db: Session, kind: str = "all", search: str = "", limit: int
                 "kind": "goods",
                 "id": sku.id,
                 "code": sku.sku_code,
+                "jackyunSkuId": sku.jackyun_sku_id,
                 "name": sku.sku_name or (product.goods_name if product else ""),
                 "goodsName": product.goods_name if product else "",
                 "barcode": sku.barcode or "",
                 "unit": sku.unit or "",
                 "category": sku.product_type or "single",
-                "goodsCategory": (product.category if product else "") or ((product.raw or {}).get("cateName", "") if product else "") or ((sku.raw or {}).get("cateName", "")),
+                "goodsCategory": (product.category if product else "") or ((product.raw or {}).get("cateName", "") if product else "") or ((sku.raw or {}).get("goodsCategory", "")) or ((sku.raw or {}).get("cateName", "")),
                 "status": sku.status,
                 "stockOwn": _quantity(agg.get(sku.id)),
                 "stockFactory": None,
                 "stockTransit": None,
                 "minStock": None,
                 "lowStock": False,
-                "hasSnapshot": sku.id in agg,
+                "hasMovement": sku.id in positions["seen_skus"],
                 "linkedSkus": [],
                 "costMode": sku.cost_mode or "fixed",
                 "costTolerancePct": str(sku.cost_tolerance_pct) if sku.cost_tolerance_pct is not None else "0.0200",
                 "taxCode": sku.tax_code or "",
+                "taxCategoryRuleId": sku.tax_category_rule_id,
+                "taxCategoryRuleName": _tax_rule_label(tax_rules.get(sku.tax_category_rule_id)),
                 "salePrice": _money(sku.sale_price),
                 "defaultCost": _money(sku.default_cost),
             })
@@ -354,14 +347,19 @@ def catalog_unified(db: Session, kind: str = "all", search: str = "", limit: int
                 "stockFactory": _quantity(row.factory_qty),
                 "stockTransit": _quantity(row.transit_qty),
                 "minStock": _quantity(row.min_stock_qty),
-                "lowStock": (min_qty > 0 and available <= min_qty) or to_decimal(row.stock_qty) < 0,
+                "lowStock": (min_qty > 0 and available <= min_qty)
+                or to_decimal(row.stock_qty) < 0
+                or to_decimal(row.factory_qty) < 0,
                 "hasSnapshot": None,
                 "linkedSkus": links.get(row.id, []),
                 "costMode": None,
                 "costTolerancePct": None,
                 "taxCode": row.tax_code or "",
+                "taxCategoryRuleId": row.tax_category_rule_id,
+                "taxCategoryRuleName": _tax_rule_label(tax_rules.get(row.tax_category_rule_id)),
                 "salePrice": None,
                 "defaultCost": None,
+                "purchaseUnitCost": _money(row.purchase_unit_cost),
             })
 
     items.sort(key=lambda r: (r["kind"], r["code"]))
@@ -415,14 +413,38 @@ def list_orders(db: Session, status: str | None = None, limit: int = 200) -> lis
     store_map: dict[int, Store] = {}
     if store_ids:
         store_map = {s.id: s for s in db.query(Store).filter(Store.id.in_(store_ids)).all()}
+    order_ids = [o.id for o in rows]
+    item_map: dict[int, dict[str, Any]] = {}
+    item_counts: dict[int, int] = {}
+    if order_ids:
+        item_rows = (
+            db.query(SalesOrderItem)
+            .filter(SalesOrderItem.order_id.in_(order_ids))
+            .order_by(SalesOrderItem.order_id, SalesOrderItem.id)
+            .all()
+        )
+        for item in item_rows:
+            item_counts[item.order_id] = item_counts.get(item.order_id, 0) + 1
+            summary = item_map.setdefault(item.order_id, {
+                "name": (item.goods_name or "").strip() or (item.sku_code or "").strip(),
+                "quantity": Decimal("0"),
+                "has_quantity": False,
+            })
+            if item.quantity is not None:
+                summary["quantity"] += to_decimal(item.quantity)
+                summary["has_quantity"] = True
     out = []
     for o in rows:
         store = store_map.get(o.store_id) if o.store_id else None
+        item = item_map.get(o.id, {})
         out.append({
             "id": o.id, "orderNo": o.order_no, "platform": o.platform,
             "storeName": store.name if store else "",
             "orderStatus": o.order_status, "payStatus": o.pay_status,
             "orderAmount": _money(o.order_amount), "paidAmount": _money(o.paid_amount),
+            "itemName": item.get("name", ""),
+            "quantity": _quantity(item["quantity"]) if item.get("has_quantity") else None,
+            "itemCount": item_counts.get(o.id, 0),
             "orderedAt": o.ordered_at.isoformat() if o.ordered_at else None,
         })
     return out

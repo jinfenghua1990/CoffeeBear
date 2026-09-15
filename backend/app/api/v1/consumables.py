@@ -13,6 +13,7 @@ from app.db import get_db
 from app.services import consumable_service as svc
 from app.services import consumable_purchase_service as purchase_svc
 from app.services import warehouse_purchase_view as purchase_view
+from app.services import warehouse_receipt_service
 from app.models.consumable_purchase import ConsumablePurchase
 from app.utils.uploads import read_upload_limited
 
@@ -35,6 +36,7 @@ class ConsumableBody(BaseModel):
     min_stock_qty: str | None = None
     barcode: str | None = None
     tax_code: str | None = None
+    tax_category_rule_id: int | None = None
     sku_ids: list[int] | None = None
 
 
@@ -68,6 +70,7 @@ class TransactionBody(BaseModel):
     quantity: Annotated[Decimal, Field(max_digits=18, decimal_places=4)]
     unit_cost: Annotated[Decimal, Field(ge=0, max_digits=18, decimal_places=10)] | None = None
     location: Literal["own", "factory"] | None = None
+    warehouse_id: int | None = None
     source_type: Literal["manual"] = "manual"
     source_id: None = None
     request_key: UUID | None = None
@@ -161,6 +164,7 @@ class ReceiptItemBody(BaseModel):
 class ReceiptBody(BaseModel):
     request_key: UUID
     received_on: date
+    warehouse_id: int | None = None
     location: Literal["own", "factory"] = "own"
     note: str = ""
     items: list[ReceiptItemBody] = Field(min_length=1, max_length=100)
@@ -199,7 +203,16 @@ def create_purchase(body: PurchaseBody, request: Request, db: Session = Depends(
 @router.post("/purchases/{purchase_id}/receipts")
 def receive_purchase(purchase_id: int, body: ReceiptBody, request: Request, db: Session = Depends(get_db)) -> dict:
     try:
-        row = purchase_svc.receive_purchase(db, purchase_id, **{**body.model_dump(), "request_key": str(body.request_key)}, actor=current_actor(request))
+        row = warehouse_receipt_service.receive_consumable_purchase(
+            db,
+            purchase_id,
+            request_key=str(body.request_key),
+            received_on=body.received_on,
+            warehouse_id=body.warehouse_id,
+            note=body.note,
+            items=[item.model_dump() for item in body.items],
+            actor=current_actor(request),
+        )
     except ValueError as exc:
         db.rollback()
         raise HTTPException(400, str(exc))

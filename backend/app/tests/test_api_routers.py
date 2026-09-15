@@ -96,6 +96,34 @@ def test_dashboard_orders_empty(client):
     assert isinstance(r.json(), list)
 
 
+def test_dashboard_orders_include_item_summary(db_session):
+    """首页订单摘要带出真实商品名、数量和多商品行数。"""
+    from decimal import Decimal
+
+    from app.models.sales import SalesOrder, SalesOrderItem
+    from app.services.dashboard import list_orders
+
+    order = SalesOrder(
+        order_no="DASHBOARD-ITEM-SUMMARY-001",
+        platform="1688",
+        order_status="6000",
+        order_amount=Decimal("20"),
+        paid_amount=Decimal("20"),
+    )
+    db_session.add(order)
+    db_session.flush()
+    db_session.add_all([
+        SalesOrderItem(order_id=order.id, sku_code="SKU-A", goods_name="商品 A", quantity=Decimal("2")),
+        SalesOrderItem(order_id=order.id, sku_code="SKU-B", goods_name="商品 B", quantity=Decimal("1")),
+    ])
+    db_session.flush()
+
+    row = next(item for item in list_orders(db_session) if item["orderNo"] == order.order_no)
+    assert row["itemName"] == "商品 A"
+    assert row["quantity"] == "3.0000"
+    assert row["itemCount"] == 2
+
+
 def test_dashboard_sales_trend(client):
     """/dashboard/sales-trend 默认 30 天，返回 list（可能为空）。"""
     r = client.get("/api/v1/dashboard/sales-trend")

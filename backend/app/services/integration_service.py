@@ -83,7 +83,7 @@ def integration_status(db: Session) -> list[dict[str, Any]]:
                     status = "untested"
             elif not alibaba_ready:
                 status = "unconfigured"
-            elif conn.status in ("connected", "error"):
+            elif conn and conn.status in ("connected", "error"):
                 status = conn.status
             else:
                 status = "untested"
@@ -92,7 +92,7 @@ def integration_status(db: Session) -> list[dict[str, Any]]:
         elif pid == "smtp":
             if not smtp_ready:
                 status = "unconfigured"
-            elif conn.status in ("connected", "error"):
+            elif conn and conn.status in ("connected", "error"):
                 status = conn.status
             else:
                 status = "untested"

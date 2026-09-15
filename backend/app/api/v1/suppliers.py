@@ -1,0 +1,166 @@
+from typing import Any
+
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from pydantic import BaseModel, ConfigDict, Field
+from pydantic.alias_generators import to_camel
+from sqlalchemy import or_
+from sqlalchemy.orm import Session
+
+from app.api.deps import current_actor
+from app.core.audit import audit
+from app.db import get_db
+from app.models.purchase import ExternalPurchaseOrder, Supplier
+
+router = APIRouter(prefix="/suppliers", tags=["suppliers"])
+
+
+class SupplierInput(BaseModel):
+    """前端统一传 camelCase（taxNo/isTemp 等），同时兼容 snake_case。"""
+
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
+
+    name: str = Field(min_length=1, max_length=256)
+    platform: str = Field(default="", max_length=32)
+    external_shop_id: str = Field(default="", max_length=128)
+    contact: str = Field(default="", max_length=256)
+    tax_no: str = Field(default="", max_length=64)
+    phone: str = Field(default="", max_length=64)
+    address: str = Field(default="", max_length=512)
+    notes: str = Field(default="", max_length=512)
+    is_temp: bool = False
+
+
+def _serialize(row: Supplier, order_count: int | None = None) -> dict[str, Any]:
+    data: dict[str, Any] = {
+        "id": row.id,
+        "name": row.name,
+        "platform": row.platform or "",
+        "externalShopId": row.external_shop_id or "",
+        "contact": row.contact or "",
+        "taxNo": row.tax_no or "",
+        "phone": row.phone or "",
+        "address": row.address or "",
+        "notes": row.notes or "",
+        "isTemp": bool(row.is_temp),
+        "createdAt": row.created_at.isoformat() if row.created_at else None,
+    }
+    if order_count is not None:
+        data["orderCount"] = order_count
+    return data
+
+
+def _ensure_tax_no_unique(db: Session, tax_no: str, exclude_id: int | None = None) -> None:
+    if not tax_no:
+        return
+    q = db.query(Supplier).filter(Supplier.tax_no == tax_no)
+    if exclude_id is not None:
+        q = q.filter(Supplier.id != exclude_id)
+    row = q.first()
+    if row:
+        raise HTTPException(409, f"税号 {tax_no} 已被供应商「{row.name}」使用")
+
+
+@router.get("")
+def list_suppliers(
+    keyword: str = "",
+    status: str = Query("all", pattern="^(all|normal|temp)$"),
+    db: Session = Depends(get_db),
+) -> list[dict[str, Any]]:
+    q = db.query(Supplier)
+    keyword = keyword.strip()
+    if keyword:
+        like = f"%{keyword}%"
+        q = q.filter(
+            or_(
+                Supplier.name.ilike(like),
+                Supplier.tax_no.ilike(like),
+                Supplier.contact.ilike(like),
+                Supplier.phone.ilike(like),
+            )
+        )
+    if status == "normal":
+        q = q.filter(Supplier.is_temp.is_(False))
+    elif status == "temp":
+        q = q.filter(Supplier.is_temp.is_(True))
+    rows = q.order_by(Supplier.is_temp.asc(), Supplier.name.asc()).all()
+
+    counts: dict[str, int] = {}
+    for po in db.query(ExternalPurchaseOrder).all():
+        if (po.raw or {}).get("referenceOnly") is True or not po.supplier_name:
+            continue
+        counts[po.supplier_name] = counts.get(po.supplier_name, 0) + 1
+    return [_serialize(row, counts.get(row.name, 0)) for row in rows]
+
+
+@router.post("")
+def create_supplier(
+    payload: SupplierInput, request: Request, db: Session = Depends(get_db)
+) -> dict[str, Any]:
+    _ensure_tax_no_unique(db, payload.tax_no.strip())
+    row = Supplier(
+        name=payload.name.strip(),
+        platform=payload.platform.strip(),
+        external_shop_id=payload.external_shop_id.strip(),
+        contact=payload.contact.strip(),
+        tax_no=payload.tax_no.strip(),
+        phone=payload.phone.strip(),
+        address=payload.address.strip(),
+        notes=payload.notes.strip(),
+        is_temp=payload.is_temp,
+    )
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    audit(db, current_actor(request), "supplier.created", "supplier", str(row.id), {"name": row.name})
+    return _serialize(row, 0)
+
+
+@router.put("/{supplier_id}")
+def update_supplier(
+    supplier_id: int,
+    payload: SupplierInput,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    row = db.get(Supplier, supplier_id)
+    if not row:
+        raise HTTPException(404, "供应商不存在")
+    _ensure_tax_no_unique(db, payload.tax_no.strip(), exclude_id=supplier_id)
+    row.name = payload.name.strip()
+    row.platform = payload.platform.strip()
+    row.external_shop_id = payload.external_shop_id.strip()
+    row.contact = payload.contact.strip()
+    row.tax_no = payload.tax_no.strip()
+    row.phone = payload.phone.strip()
+    row.address = payload.address.strip()
+    row.notes = payload.notes.strip()
+    row.is_temp = payload.is_temp
+    db.commit()
+    db.refresh(row)
+    audit(db, current_actor(request), "supplier.updated", "supplier", str(row.id), {"name": row.name})
+    return _serialize(row)
+
+
+@router.delete("/{supplier_id}")
+def delete_supplier(
+    supplier_id: int, request: Request, db: Session = Depends(get_db)
+) -> dict[str, Any]:
+    row = db.get(Supplier, supplier_id)
+    if not row:
+        raise HTTPException(404, "供应商不存在")
+    audit(db, current_actor(request), "supplier.deleted", "supplier", str(row.id), {"name": row.name})
+    db.delete(row)
+    db.commit()
+    return {"ok": True}
+
+
+@router.post("/resolve")
+def resolve_suppliers(payload: dict[str, list[str]], db: Session = Depends(get_db)) -> dict[str, Any]:
+    """按税号识别供应商：供采购/结算等导入流程自动匹配。"""
+    tax_nos = [t.strip() for t in (payload.get("taxNos") or []) if t and t.strip()]
+    if not tax_nos:
+        return {"matched": {}, "unmatched": []}
+    rows = db.query(Supplier).filter(Supplier.tax_no.in_(list(set(tax_nos)))).all()
+    matched = {row.tax_no: {"id": row.id, "name": row.name, "isTemp": bool(row.is_temp)} for row in rows}
+    unmatched = [t for t in tax_nos if t not in matched]
+    return {"matched": matched, "unmatched": unmatched}

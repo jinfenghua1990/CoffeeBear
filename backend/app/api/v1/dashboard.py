@@ -4,14 +4,24 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.db import get_db
 from app.services import dashboard
-from app.api.deps import current_actor
+from app.api.deps import current_actor, require_roles
 from app.core.audit import audit
 from app.models.catalog import Product, ProductSku
-from app.models.consumable import Consumable
+from app.models.catalog import InventorySnapshot
+from app.models.consumable import Consumable, ConsumableSkuMapping
+from app.models.jackyun import JackyunGoodsDocumentItem
+from app.models.org import User
+from app.models.production import ProductionFinishedMovement, ProductionInboundAllocation, ProductionOrderItem
+from app.models.profit import CostSnapshot
+from app.models.purchase import PurchaseAllocationItem
+from app.models.sales import SalesOrderItem
+from app.models.tax import TaxAccountingCategoryRule
+from app.services import tax_category_rule_service
 from app.utils.money import to_decimal
 
 router = APIRouter(prefix="/dashboard", tags=["dashboard"])
@@ -85,12 +95,14 @@ class ProductSkuBody(BaseModel):
     cost_mode: str = "fixed"
     cost_tolerance_pct: str = "0.0200"
     tax_code: str = ""
+    tax_category_rule_id: int | None = None
     goods_category: str = ""
     status: str = "active"
 
 
 @router.post("/products/save")
 def save_product(body: ProductSkuBody, request: Request,
+                 _editor: User = Depends(require_roles("admin", "operator")),
                  db: Session = Depends(get_db)) -> dict[str, Any]:
     code = body.sku_code.strip()
     external_id = (body.jackyun_sku_id or code).strip()
@@ -111,6 +123,18 @@ def save_product(body: ProductSkuBody, request: Request,
         raise HTTPException(400, "售价和成本不能为负数")
     if tolerance < 0 or tolerance > 1:
         raise HTTPException(400, "成本容差必须在 0 到 1 之间")
+    tax_rule = None
+    if body.tax_category_rule_id is not None:
+        tax_rule = db.get(TaxAccountingCategoryRule, body.tax_category_rule_id)
+        if tax_rule is None:
+            raise HTTPException(404, "财务分类规则不存在")
+        tax_code = tax_rule.tax_code or ""
+    else:
+        try:
+            tax_code = tax_category_rule_service.normalize_tax_code(body.tax_code)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        tax_rule = tax_category_rule_service.unique_enabled_rule_for_tax_code(db, tax_code)
     sku = db.get(ProductSku, body.sku_id) if body.sku_id else None
     conflict = db.query(ProductSku).filter(ProductSku.jackyun_sku_id == external_id)
     if sku:
@@ -132,7 +156,8 @@ def save_product(body: ProductSkuBody, request: Request,
     sku.default_cost = default_cost
     sku.cost_mode = body.cost_mode
     sku.cost_tolerance_pct = tolerance
-    sku.tax_code = body.tax_code.strip()
+    sku.tax_code = tax_code
+    sku.tax_category_rule_id = tax_rule.id if tax_rule is not None else None
     sku.status = body.status.strip() or "active"
     sku.raw = {**(sku.raw or {}), "managedLocally": True}
     # 品类（如 咖啡豆/饼干）存在货品主档 Product.category；仅当本地档案已修改时回写
@@ -153,6 +178,7 @@ class CostPolicyBody(BaseModel):
 
 @router.post("/products/{sku_id}/cost-policy")
 def update_cost_policy(sku_id: int, body: CostPolicyBody, request: Request,
+                       _editor: User = Depends(require_roles("admin", "operator")),
                        db: Session = Depends(get_db)) -> dict[str, str | int]:
     if body.cost_mode not in {"fixed", "dynamic"}:
         raise HTTPException(400, "成本方式必须是 fixed 或 dynamic")
@@ -181,6 +207,7 @@ class CategoryBody(BaseModel):
 
 @router.post("/catalog/category")
 def update_category(body: CategoryBody, request: Request,
+                    _editor: User = Depends(require_roles("admin", "operator")),
                     db: Session = Depends(get_db)) -> dict[str, Any]:
     """行内修改品类：正品写 Product.category（吉客云同步后以本地值为准），耗材写 Consumable.category。"""
     category = body.category.strip()
@@ -222,13 +249,15 @@ class TaxCodeBulkBody(BaseModel):
 
 @router.post("/catalog/tax-code/bulk")
 def bulk_set_tax_code(body: TaxCodeBulkBody, request: Request,
+                      _editor: User = Depends(require_roles("admin", "operator")),
                       db: Session = Depends(get_db)) -> dict[str, Any]:
     """批量设置货品档案（正品 SKU / 耗材）的税收分类编码。"""
-    tax_code = body.tax_code.strip()
+    try:
+        tax_code = tax_category_rule_service.normalize_tax_code(body.tax_code)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
     if not tax_code:
         raise HTTPException(400, "税务代码不能为空")
-    if not (tax_code.isdigit() and len(tax_code) in {10, 19, 21}):
-        raise HTTPException(400, "税务代码应为 19 位税收分类编码（兼容旧 10 位简称）")
     if not body.items:
         raise HTTPException(400, "请先勾选要设置的货品")
     updated, skipped, missing = 0, 0, 0
@@ -246,11 +275,109 @@ def bulk_set_tax_code(body: TaxCodeBulkBody, request: Request,
             skipped += 1
             continue
         row.tax_code = tax_code
+        matching_rule = tax_category_rule_service.unique_enabled_rule_for_tax_code(db, tax_code)
+        row.tax_category_rule_id = matching_rule.id if matching_rule is not None else None
         updated += 1
     db.commit()
     audit(db, current_actor(request), "catalog.tax_code.bulk", "catalog", None,
           {"taxCode": tax_code, "updated": updated, "skipped": skipped, "missing": missing})
     return {"updated": updated, "skipped": skipped, "missing": missing}
+
+
+class BundleBulkDeleteBody(BaseModel):
+    ids: list[int]
+
+
+_BUNDLE_REFERENCE_SOURCES = (
+    (InventorySnapshot.sku_id, "库存快照"),
+    (ConsumableSkuMapping.sku_id, "耗材映射"),
+    (PurchaseAllocationItem.sku_id, "采购分摊"),
+    (SalesOrderItem.sku_id, "销售订单"),
+    (ProductionOrderItem.sku_id, "生产订单"),
+    (ProductionFinishedMovement.sku_id, "生产完成"),
+    (ProductionInboundAllocation.sku_id, "生产入库关联"),
+    (JackyunGoodsDocumentItem.matched_sku_id, "吉客云单据匹配"),
+    (CostSnapshot.sku_id, "成本快照"),
+)
+
+
+@router.post("/catalog/bundles/bulk-delete")
+def bulk_delete_bundles(
+    body: BundleBulkDeleteBody,
+    request: Request,
+    _admin: User = Depends(require_roles("admin")),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    """批量删除未被历史业务引用的套装档案；有引用的档案只返回阻塞原因。"""
+    ids = list(dict.fromkeys(body.ids))
+    if not ids or len(ids) > 500 or any(row_id <= 0 for row_id in ids):
+        raise HTTPException(400, "请提供 1 到 500 个有效的套装档案 ID")
+
+    rows = db.query(ProductSku).filter(ProductSku.id.in_(ids)).all()
+    by_id = {row.id: row for row in rows}
+    not_found = [row_id for row_id in ids if row_id not in by_id]
+    invalid = [
+        {"id": row.id, "skuCode": row.sku_code, "reason": "仅可删除套装或虚拟组合套装"}
+        for row in rows
+        if row.product_type not in {"bundle", "virtual_bundle"}
+    ]
+    bundle_ids = [
+        row_id for row_id in ids
+        if row_id in by_id and by_id[row_id].product_type in {"bundle", "virtual_bundle"}
+    ]
+
+    references_by_id: dict[int, list[dict[str, int | str]]] = {row_id: [] for row_id in bundle_ids}
+    for column, label in _BUNDLE_REFERENCE_SOURCES:
+        counts = (
+            db.query(column, func.count())
+            .filter(column.in_(bundle_ids))
+            .group_by(column)
+            .all()
+        ) if bundle_ids else []
+        for sku_id, count in counts:
+            if sku_id is not None and int(count) > 0:
+                references_by_id[int(sku_id)].append({"label": label, "count": int(count)})
+
+    blocked: list[dict[str, Any]] = []
+    deleted_ids: list[int] = []
+    for row_id in bundle_ids:
+        row = by_id[row_id]
+        references = references_by_id[row_id]
+        if references:
+            blocked.append({
+                "id": row.id,
+                "skuCode": row.sku_code,
+                "reason": "已有历史业务引用，不能删除",
+                "references": references,
+            })
+            continue
+        deleted_ids.append(row.id)
+        db.delete(row)
+
+    db.commit()
+    audit(
+        db,
+        current_actor(request),
+        "catalog.bundle.bulk_delete",
+        "product_skus",
+        None,
+        {
+            "requested": ids,
+            "deletedIds": deleted_ids,
+            "blocked": blocked,
+            "invalid": invalid,
+            "notFound": not_found,
+        },
+    )
+    return {
+        "ok": True,
+        "requested": len(ids),
+        "deleted": len(deleted_ids),
+        "deletedIds": deleted_ids,
+        "blocked": blocked,
+        "invalid": invalid,
+        "notFound": not_found,
+    }
 
 
 @router.get("/orders")

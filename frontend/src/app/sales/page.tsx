@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import dynamic from "next/dynamic";
+import { useSearchParams } from "next/navigation";
 import MetricCard from "@/components/metric-card";
 import { authenticatedFetch, dashboardApi, PlatformRow, SkuRow, TrendPoint } from "@/lib/api";
 import type { DetailInitial } from "./detail-view";
@@ -284,7 +285,16 @@ function SalesOverview({ onDrill }: { onDrill: (init: DetailInitial) => void }) 
                 {platforms.map((p) => (
                   <tr
                     key={p.platform}
+                    role="button"
+                    tabIndex={0}
                     onClick={() => onDrill({ platform: p.platform, start: range.start, end: range.end })}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter" || event.key === " ") {
+                        event.preventDefault();
+                        onDrill({ platform: p.platform, start: range.start, end: range.end });
+                      }
+                    }}
+                    aria-label={`查看 ${p.platform} 在本区间的销售明细`}
                     className="cursor-pointer hover:bg-indigo-50/50"
                     title={`查看 ${p.platform} 在本区间的销售明细`}
                   >
@@ -329,7 +339,16 @@ function SalesOverview({ onDrill }: { onDrill: (init: DetailInitial) => void }) 
               {skus.map((s, i) => (
                 <tr
                   key={s.skuCode}
+                  role="button"
+                  tabIndex={0}
                   onClick={() => onDrill({ sku: s.skuCode, start: range.start, end: range.end })}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter" || event.key === " ") {
+                      event.preventDefault();
+                      onDrill({ sku: s.skuCode, start: range.start, end: range.end });
+                    }
+                  }}
+                  aria-label={`查看 ${s.goodsName} 在本区间的销售明细`}
                   className="cursor-pointer hover:bg-indigo-50/50"
                   title={`查看 ${s.goodsName} 在本区间的销售明细`}
                 >
@@ -350,10 +369,25 @@ function SalesOverview({ onDrill }: { onDrill: (init: DetailInitial) => void }) 
 }
 
 export default function SalesPage() {
+  const searchParams = useSearchParams();
+  const initialQuery = searchParams.get("q")?.trim() ?? "";
   const [tab, setTab] = useState<"overview" | "detail">("overview");
   // 穿透参数 + 自增 key：每次穿透强制重挂明细组件，保证初始筛选生效
   const [drill, setDrill] = useState<DetailInitial | undefined>(undefined);
   const [drillSeq, setDrillSeq] = useState(0);
+
+  useEffect(() => {
+    if (!initialQuery) return;
+    setDrill({ q: initialQuery });
+    setDrillSeq((n) => n + 1);
+    setTab("detail");
+  }, [initialQuery]);
+
+  // 左侧二级菜单深链：/sales?tab=overview | detail 直接切换页签
+  const tabParam = searchParams.get("tab");
+  useEffect(() => {
+    if (tabParam === "overview" || tabParam === "detail") setTab(tabParam);
+  }, [tabParam]);
 
   function handleDrill(init: DetailInitial) {
     setDrill(init);

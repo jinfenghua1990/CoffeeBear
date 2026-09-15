@@ -14,21 +14,28 @@ from typing import Any
 # 1688 订单导出的标准字段映射
 FIELD_MAPPING = {
     "订单编号": "external_order_id",
+    # 本系统「采购订单」导出模板的列名：导出→修改→重新导入可直接识别。
+    "订单号": "external_order_id",
     "买家公司名": "buyer_company_name",
     "买家会员名": "buyer_member_name",
     "卖家公司名": "seller_company_name",
+    "供应商/工厂": "seller_company_name",
     "卖家会员名": "seller_member_name",
     "货品总价(元)": "goods_total",
+    "订单金额": "goods_total",
     "运费(元)": "freight",
     "涨价或折扣(元)": "discount",
     "实付款(元)": "actual_payment",
+    "实付金额": "actual_payment",
     "订单状态": "order_status",
+    "采购状态": "order_status",
     "订单备注": "order_remark",
     "买家留言": "order_remark",
     "买家备注": "order_remark",
     "备注": "order_remark",
     # 1688 官方买家订单导出使用“订单创建时间/订单付款时间”；保留短表头兼容其他导出版本。
     "下单时间": "order_time",
+    "下单日期": "order_time",
     "订单创建时间": "order_time",
     "付款时间": "pay_time",
     "订单付款时间": "pay_time",
@@ -98,9 +105,17 @@ def _parse_xlsx(content: bytes) -> ParsedAlibaba1688Export:
                 
                 result.headers = headers
                 
-                # 检查是否包含关键表头
-                required_headers = ["订单编号", "实付款(元)", "订单状态"]
-                missing = [h for h in required_headers if h not in headers]
+                # 检查是否包含关键表头（支持 1688 官方导出与本系统导出模板两套列名）
+                has_order_no = any(h in headers for h in ("订单编号", "订单号"))
+                has_payment = any(h in headers for h in ("实付款(元)", "实付金额"))
+                has_status = any(h in headers for h in ("订单状态", "采购状态"))
+                missing = []
+                if not has_order_no:
+                    missing.append("订单编号/订单号")
+                if not has_payment:
+                    missing.append("实付款(元)/实付金额")
+                if not has_status:
+                    missing.append("订单状态/采购状态")
                 if missing:
                     result.status = "failed"
                     result.error_summary = f"缺少必要表头: {', '.join(missing)}"
@@ -116,23 +131,31 @@ def _parse_xlsx(content: bytes) -> ParsedAlibaba1688Export:
                         # 提取列字母（如 A1 -> A）
                         col_letter = "".join(c for c in cell_ref if c.isalpha())
                         col_index = _col_letter_to_index(col_letter)
-                        
+
                         if col_index >= len(headers):
                             continue
-                        
+
                         header = headers[col_index]
                         field_name = FIELD_MAPPING.get(header)
                         if not field_name:
                             continue
-                        
-                        # 提取值
+
+                        # 提取值：inlineStr 直读；否则是共享字符串引用（Excel/openpyxl
+                        # 重存的标准写法），按索引还原文本。
                         inline_str = cell.find(".//ss:is/ss:t", ns)
                         value_elem = cell.find("ss:v", ns)
-                        
+
                         if inline_str is not None and inline_str.text:
                             value = inline_str.text.strip()
                         elif value_elem is not None and value_elem.text:
                             value = value_elem.text.strip()
+                            if cell.get("t") == "s":
+                                try:
+                                    value = shared_strings[int(value)].strip()
+                                except (ValueError, IndexError):
+                                    pass
+                            elif cell.get("t") == "str" or cell.get("t") == "inlineStr":
+                                pass
                         else:
                             value = ""
                         

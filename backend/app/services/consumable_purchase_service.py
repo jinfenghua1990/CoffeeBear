@@ -128,13 +128,31 @@ def create_purchase(db: Session, *, request_key: str, supplier_name: str, ordere
     return row
 
 
-def receive_purchase(db: Session, purchase_id: int, *, request_key: str, received_on: date, items: list[dict], note: str = "", actor: str = "", location: str = "own") -> ConsumablePurchase:
+def receive_purchase(
+    db: Session,
+    purchase_id: int,
+    *,
+    request_key: str,
+    received_on: date,
+    items: list[dict],
+    note: str = "",
+    actor: str = "",
+    location: str = "own",
+    warehouse_id: int | None = None,
+) -> ConsumablePurchase:
     row = db.scalar(select(ConsumablePurchase).where(ConsumablePurchase.id == purchase_id).with_for_update().execution_options(populate_existing=True))
     if row is None:
         raise ValueError("耗材采购单不存在")
     if location not in {"own", "factory"}:
         raise ValueError("到货位置必须是 own（自有仓）或 factory（工厂）")
-    digest = fingerprint(dict(purchase_id=purchase_id, received_on=received_on, items=items, note=note.strip(), location=location))
+    digest = fingerprint(dict(
+        purchase_id=purchase_id,
+        received_on=received_on,
+        items=items,
+        note=note.strip(),
+        location=location,
+        warehouse_id=warehouse_id,
+    ))
     existing = db.query(ConsumableReceipt).filter_by(request_key=request_key).first()
     if existing:
         if existing.request_fingerprint != digest:
@@ -159,7 +177,8 @@ def receive_purchase(db: Session, purchase_id: int, *, request_key: str, receive
     db.scalars(select(Consumable).where(Consumable.id.in_(material_ids)).order_by(Consumable.id).with_for_update().execution_options(populate_existing=True)).all()
     receipt = ConsumableReceipt(
         purchase_id=purchase_id, number=f"HR{received_on:%Y%m%d}-{uuid4().hex[:8].upper()}", request_key=request_key,
-        request_fingerprint=digest, received_on=received_on, location=location, note=note.strip(), created_by=actor,
+        request_fingerprint=digest, received_on=received_on, warehouse_id=warehouse_id,
+        location=location, note=note.strip(), created_by=actor,
     )
     db.add(receipt)
     db.flush()
@@ -167,7 +186,7 @@ def receive_purchase(db: Session, purchase_id: int, *, request_key: str, receive
         line = by_id[item["item_id"]]
         record_transaction(db, consumable_id=line.consumable_id, transaction_type="purchase", quantity=str(item["quantity"]),
                            unit_cost=str(line.unit_cost), source_type="consumable_receipt", source_id=receipt.id,
-                           location=location,
+                           location=location, warehouse_id=warehouse_id,
                            note=f"{row.number} / {receipt.number} {note.strip()}".strip(), commit=False)
         line.received_qty += item["quantity"]
     row.status = "received" if all(line.received_qty == line.quantity for line in lines) else "partial"

@@ -1,4 +1,5 @@
-from app.services.purchase_service import derive_invoice_status, validate_transition
+from app.models.purchase import ExternalPurchaseOrder, InboundLink
+from app.services.purchase_service import _has_actual_inbound, derive_invoice_status, validate_transition
 
 
 def test_forward_transition_valid():
@@ -34,3 +35,18 @@ def test_invoice_status_defaults_unverified():
 
 def test_zero_paid_with_links_is_partial():
     assert derive_invoice_status("0", "100", "none") == "partial"
+
+
+def test_actual_inbound_is_detected_from_legacy_link(db_session):
+    po = ExternalPurchaseOrder(
+        external_order_id="PYTEST-LEGACY-INBOUND",
+        platform="taobao",
+        purchase_status="jackyun_linked",
+    )
+    db_session.add(po)
+    db_session.flush()
+    assert not _has_actual_inbound(db_session, po)
+
+    db_session.add(InboundLink(po_id=po.id, goodsdoc_no="RK-PYTEST-001"))
+    db_session.flush()
+    assert _has_actual_inbound(db_session, po)

@@ -23,5 +23,5 @@ const modules = {
 
 export function WorkspaceModule({ view }: { view: WorkbenchView }) {
   const Panel = modules[view as keyof typeof modules];
-  return Panel ? <section className="mt-5 min-w-0 overflow-x-auto rounded-xl border border-slate-200 bg-white p-5"><Panel /></section> : null;
+  return Panel ? <div className="mt-5 min-w-0 overflow-x-auto"><Panel /></div> : null;
 }

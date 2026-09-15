@@ -417,3 +417,191 @@ def test_inbound_file_preserves_rows_and_registers_non_1688_order(db_session):
         db_session.query(JackyunFileImportRecord).filter_by(import_id=imp.id).delete(synchronize_session=False)
         db_session.delete(imp)
         db_session.commit()
+
+
+def test_inbound_file_does_not_auto_link_mismatched_sku_to_existing_order(db_session):
+    """订单已有采购明细时，SKU 完全不重合的入库申请不能自动挂单。"""
+    from app.models.jackyun import JackyunGoodsDocument, JackyunGoodsDocumentItem
+    from app.models.procurement_chain import ProcurementChainLink
+    from app.models.purchase import ExternalPurchaseOrder, PurchaseAllocationItem
+
+    import_no = "IMPORT-MISMATCH-SKU-001"
+    rk_no = "RK-MISMATCH-SKU-001"
+    order_no = "ORDER-MISMATCH-SKU-001"
+    imp = JackyunFileImport(
+        original_name="mismatch-sku.xlsx", stored_path="/t/mismatch-sku.xlsx",
+        sha256="mismatch-sku-import-001", report_type="inbound", lifecycle="active",
+    )
+    db_session.add(imp)
+    db_session.flush()
+    po = ExternalPurchaseOrder(
+        external_order_id=order_no, platform="1688", supplier_name="供方",
+    )
+    db_session.add(po)
+    db_session.flush()
+    allocation = PurchaseAllocationItem(
+        po_id=po.id, sku_id=1001, sku_code="SKU-EXPECTED", goods_name="订单货品",
+        quantity=1, unit_price=10, amount=10, source="manual",
+    )
+    document = JackyunGoodsDocument(
+        document_type="inbound", goodsdoc_no=rk_no, supplier_name="供方",
+    )
+    db_session.add_all([allocation, document])
+    db_session.flush()
+    item = JackyunGoodsDocumentItem(
+        document_id=document.id, line_no=1, goods_no="SKU-OTHER", sku_barcode="SKU-OTHER",
+        quantity=1, matched_sku_id=1002,
+    )
+    expected_item = JackyunGoodsDocumentItem(
+        document_id=document.id, line_no=2, goods_no="SKU-EXPECTED", sku_barcode="SKU-EXPECTED",
+        quantity=1, matched_sku_id=1001,
+    )
+    db_session.add(item)
+    db_session.add(expected_item)
+    db_session.add(JackyunFileImportRecord(
+        import_id=imp.id,
+        row_index=1,
+        payload={
+            "申请单号": rk_no, "货品编号": "SKU-OTHER", "入库数量": "1",
+            "含税单价": "10", "含税金额": "10", "1688采购订单": order_no,
+        },
+    ))
+    db_session.commit()
+
+    try:
+        result = jackyun_file_import_service.map_inbound_items(db_session, imp.id, actor="pytest")
+        assert result["createdLinks"] == 0
+        assert any("SKU" in row["reason"] and "不匹配" in row["reason"] for row in result["skipped"])
+        assert db_session.query(ProcurementChainLink).filter_by(
+            external_po_id=po.id, target_id=document.id,
+        ).count() == 0
+    finally:
+        db_session.query(ProcurementChainLink).filter_by(external_po_id=po.id).delete(synchronize_session=False)
+        db_session.delete(allocation)
+        db_session.delete(item)
+        db_session.delete(expected_item)
+        db_session.delete(document)
+        db_session.query(JackyunFileImportRecord).filter_by(import_id=imp.id).delete(synchronize_session=False)
+        db_session.delete(po)
+        db_session.delete(imp)
+        db_session.commit()
+
+
+def test_inbound_file_does_not_auto_link_shared_document_without_allocations(db_session):
+    """同一入库单同时标记多个订单且没有采购明细时，必须留给人工确认。"""
+    from app.models.jackyun import JackyunGoodsDocument, JackyunGoodsDocumentItem
+    from app.models.procurement_chain import ProcurementChainLink
+    from app.models.purchase import ExternalPurchaseOrder
+
+    import_no = "IMPORT-SHARED-DOC-001"
+    rk_no = "RK-SHARED-DOC-001"
+    order_a = "ORDER-SHARED-A-001"
+    order_b = "ORDER-SHARED-B-001"
+    imp = JackyunFileImport(
+        original_name="shared-document.xlsx", stored_path="/t/shared-document.xlsx",
+        sha256="shared-document-import-001", report_type="inbound", lifecycle="active",
+    )
+    db_session.add(imp)
+    db_session.flush()
+    po_a = ExternalPurchaseOrder(external_order_id=order_a, platform="1688", supplier_name="供方")
+    po_b = ExternalPurchaseOrder(external_order_id=order_b, platform="1688", supplier_name="供方")
+    document = JackyunGoodsDocument(document_type="inbound", goodsdoc_no=rk_no, supplier_name="供方")
+    db_session.add_all([po_a, po_b, document])
+    db_session.flush()
+    item_a = JackyunGoodsDocumentItem(
+        document_id=document.id, line_no=1, goods_no="SKU-A", sku_barcode="SKU-A",
+        quantity=1, matched_sku_id=1101,
+    )
+    item_b = JackyunGoodsDocumentItem(
+        document_id=document.id, line_no=2, goods_no="SKU-B", sku_barcode="SKU-B",
+        quantity=1, matched_sku_id=1102,
+    )
+    db_session.add_all([item_a, item_b])
+    db_session.add_all([
+        JackyunFileImportRecord(
+            import_id=imp.id, row_index=1,
+            payload={
+                "申请单号": rk_no, "货品编号": "SKU-A", "入库数量": "1",
+                "含税单价": "10", "含税金额": "10", "1688采购订单": order_a,
+            },
+        ),
+        JackyunFileImportRecord(
+            import_id=imp.id, row_index=2,
+            payload={
+                "申请单号": rk_no, "货品编号": "SKU-B", "入库数量": "1",
+                "含税单价": "10", "含税金额": "10", "1688采购订单": order_b,
+            },
+        ),
+    ])
+    db_session.commit()
+
+    try:
+        result = jackyun_file_import_service.map_inbound_items(db_session, imp.id, actor="pytest")
+        assert result["createdLinks"] == 0
+        assert sum("多个订单来源" in row["reason"] for row in result["skipped"]) == 2
+        assert db_session.query(ProcurementChainLink).filter(
+            ProcurementChainLink.target_id == document.id,
+        ).count() == 0
+    finally:
+        db_session.query(ProcurementChainLink).filter(
+            ProcurementChainLink.target_id == document.id,
+        ).delete(synchronize_session=False)
+        db_session.delete(item_a)
+        db_session.delete(item_b)
+        db_session.delete(document)
+        db_session.delete(po_a)
+        db_session.delete(po_b)
+        db_session.query(JackyunFileImportRecord).filter_by(import_id=imp.id).delete(synchronize_session=False)
+        db_session.delete(imp)
+        db_session.commit()
+
+
+def test_inbound_file_keeps_local_reference_as_staging_only(db_session):
+    """日期流水参考号不能被伪造成跨月复用的采购主单。"""
+    from app.models.jackyun import JackyunGoodsDocument, JackyunGoodsDocumentItem
+    from app.models.procurement_chain import ProcurementChainLink
+    from app.models.purchase import ExternalPurchaseOrder
+
+    import_no = "IMPORT-LOCAL-REFERENCE-001"
+    rk_no = "RK-LOCAL-REFERENCE-001"
+    order_no = "20260501001"
+    imp = JackyunFileImport(
+        original_name="local-reference.xlsx", stored_path="/t/local-reference.xlsx",
+        sha256="local-reference-import-001", report_type="inbound", lifecycle="active",
+    )
+    document = JackyunGoodsDocument(
+        document_type="inbound", goodsdoc_no=rk_no, supplier_name="拼多多临时采购",
+    )
+    db_session.add_all([imp, document])
+    db_session.flush()
+    item = JackyunGoodsDocumentItem(
+        document_id=document.id, line_no=1, goods_no="6901845048049", quantity=10,
+    )
+    db_session.add_all([
+        item,
+        JackyunFileImportRecord(
+            import_id=imp.id, row_index=1,
+            payload={
+                "申请单号": rk_no, "往来单位": "拼多多临时采购", "创建时间": "2026-05-01 10:00:00",
+                "货品编号": "6901845048049", "入库数量": "10", "采购总金额": "100",
+                "1688采购订单": order_no,
+            },
+        ),
+    ])
+    db_session.commit()
+
+    try:
+        result = jackyun_file_import_service.map_inbound_items(db_session, imp.id, actor="pytest")
+        assert result["createdExternalOrders"] == 0
+        assert result["createdLinks"] == 0
+        assert any(order_no in row["reason"] and "本地参考编号" in row["reason"] for row in result["skipped"])
+        assert db_session.query(ExternalPurchaseOrder).filter_by(external_order_id=order_no).count() == 0
+        assert db_session.query(ProcurementChainLink).filter_by(target_id=document.id).count() == 0
+        assert db_session.get(JackyunGoodsDocumentItem, item.id).quantity == 10
+    finally:
+        db_session.query(ProcurementChainLink).filter_by(target_id=document.id).delete(synchronize_session=False)
+        db_session.query(JackyunFileImportRecord).filter_by(import_id=imp.id).delete(synchronize_session=False)
+        db_session.delete(item)
+        db_session.delete(document)
+        db_session.delete(imp)
+        db_session.commit()

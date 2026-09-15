@@ -5,6 +5,7 @@ from decimal import Decimal
 import pytest
 
 from app.models.catalog import ProductSku
+from app.models.jackyun import JackyunGoodsDocument, JackyunGoodsDocumentItem
 from app.models.profit import CostSnapshot
 from app.models.sales import SalesOrder, SalesOrderItem
 from app.services.profit import compute, effective_cost, gross_profit, list_costs, upsert_cost
@@ -106,6 +107,52 @@ def test_compute_filters_period_and_multiplies_unit_cost_by_quantity(db_session)
     assert result["goodsCost"] == "15.00"
     assert result["grossProfit"] == "75.00"
     assert result["costMissing"] is False
+
+
+def test_compute_prefers_weighted_inbound_cost_over_default(db_session):
+    sku = ProductSku(
+        jackyun_sku_id="test-profit-weighted", sku_code="P-WEIGHTED", sku_name="加权成本",
+        default_cost=Decimal("99.00"),
+    )
+    db_session.add(sku)
+    db_session.flush()
+    first = JackyunGoodsDocument(
+        document_type="inbound", goodsdoc_no="PROFIT-WEIGHTED-1",
+        document_at=datetime(2098, 7, 1, tzinfo=timezone.utc),
+    )
+    second = JackyunGoodsDocument(
+        document_type="inbound", goodsdoc_no="PROFIT-WEIGHTED-2",
+        document_at=datetime(2098, 8, 1, tzinfo=timezone.utc),
+    )
+    db_session.add_all([first, second])
+    db_session.flush()
+    db_session.add_all([
+        JackyunGoodsDocumentItem(
+            document_id=first.id, line_no=1, goods_no=sku.sku_code,
+            sku_barcode=sku.sku_code, quantity=Decimal("2"),
+            unit_price_tax=Decimal("10"), matched_sku_id=sku.id,
+        ),
+        JackyunGoodsDocumentItem(
+            document_id=second.id, line_no=1, goods_no=sku.sku_code,
+            sku_barcode=sku.sku_code, quantity=Decimal("3"),
+            unit_price_tax=Decimal("20"), matched_sku_id=sku.id,
+        ),
+    ])
+    order = SalesOrder(
+        order_no="test-profit-weighted-order", order_status="paid",
+        ordered_at=datetime(2098, 8, 15, tzinfo=timezone.utc),
+    )
+    db_session.add(order)
+    db_session.flush()
+    db_session.add(SalesOrderItem(
+        order_id=order.id, sku_id=sku.id, quantity=Decimal("1"),
+        amount=Decimal("100"), discount_amount=Decimal("0"),
+    ))
+    db_session.commit()
+
+    result = compute(db_session, 2098, 8)
+    assert result["goodsCost"] == "16.00"  # (2*10 + 3*20) / 5
+    assert result["grossProfit"] == "84.00"
 
 
 def test_compute_uses_asia_shanghai_month_boundary(db_session):

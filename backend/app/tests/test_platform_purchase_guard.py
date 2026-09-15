@@ -48,6 +48,27 @@ def test_source_pairs_do_not_merge_taobao_same_number_into_1688(db_session):
     assert any(source_row is None and workflow.id == workflow_taobao.id for source_row, workflow in pairs)
 
 
+def test_reference_only_purchase_is_hidden_from_normal_platform_pairs(db_session):
+    reference = ExternalPurchaseOrder(
+        external_order_id="20260501001",
+        platform="pdd",
+        supplier_name="拼多多临时采购",
+        raw={"referenceOnly": True, "source": "jackyun_inbound_apply"},
+    )
+    normal = ExternalPurchaseOrder(
+        external_order_id="NORMAL-PDD-001",
+        platform="pdd",
+        supplier_name="正常拼多多采购",
+    )
+    db_session.add_all([reference, normal])
+    db_session.flush()
+
+    pairs = platform_source_pairs(db_session)
+    ids = {workflow.id for _, workflow in pairs if workflow is not None}
+    assert reference.id not in ids
+    assert normal.id in ids
+
+
 def test_1688_sync_updates_only_1688_same_number(db_session):
     workflow_1688 = ExternalPurchaseOrder(
         external_order_id="SYNC-SAME-001",

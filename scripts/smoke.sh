@@ -8,7 +8,7 @@
 
 set -euo pipefail
 
-BASE="${BASE:-http://localhost:8000}"
+BASE="${BASE:-http://127.0.0.1:8000}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 VENV="$ROOT/backend/.venv"
 
@@ -26,12 +26,14 @@ export DATA_DIR="$ROOT/data"
 
 echo "--- Smoke @ $BASE (native) ---"
 cd "$ROOT/backend"
-"$VENV/bin/python" - "$BASE" <<'PY'
+"$VENV/bin/python" -u - "$BASE" <<'PY'
 import json, os, sys, urllib.request, urllib.error
 
 base = sys.argv[1]
+SMOKE_TIMEOUT = float(os.environ.get("SMOKE_TIMEOUT", "20"))
 
-def req(path, method="GET", body=None, token=None, timeout=8):
+def req(path, method="GET", body=None, token=None, timeout=None):
+    timeout = SMOKE_TIMEOUT if timeout is None else timeout
     data = json.dumps(body).encode() if body is not None else None
     r = urllib.request.Request(base + path, data=data, method=method)
     r.add_header("Content-Type", "application/json")
@@ -42,8 +44,8 @@ def req(path, method="GET", body=None, token=None, timeout=8):
             return resp.status, resp.read()
     except urllib.error.HTTPError as e:
         return e.code, e.read()
-    except Exception:
-        return 0, b""
+    except Exception as exc:
+        return 0, f"{type(exc).__name__}: {exc}".encode()
 
 # ---- 1. 显式凭证存在时先按真实登录链路取令牌 ----
 user = os.environ.get("SMOKE_USER") or ""
@@ -85,20 +87,34 @@ if not token and not (user and pwd):
                 mode = "RBAC（服务端 5 分钟诊断令牌）"
     except Exception as exc:
         mode = f"RBAC（诊断令牌失败: {type(exc).__name__}）"
-print(f"  模式: {mode}\n")
+print(f"  模式: {mode}\n", flush=True)
 if not token:
     print("  FAIL: 无法取得鉴权令牌，停止 smoke，避免把 401 误判为通过")
     sys.exit(1)
 
 # ---- 3. 枚举全部 GET 路由并探测 ----
-with urllib.request.urlopen(base + "/openapi.json", timeout=5) as r:
-    data = json.load(r)
+openapi_code, openapi_raw = req("/openapi.json")
+if openapi_code != 200:
+    detail = openapi_raw.decode("utf-8", errors="replace")[:160]
+    print(f"  FAIL [{openapi_code}] /openapi.json: {detail}", flush=True)
+    sys.exit(1)
+try:
+    data = json.loads(openapi_raw)
+except json.JSONDecodeError as exc:
+    print(f"  FAIL [0] /openapi.json: 返回不是有效 JSON（{exc}）", flush=True)
+    sys.exit(1)
 get_paths = sorted(p for p in data["paths"] if "get" in data["paths"][p])
 
 allowed_query_4xx = {
     "/api/v1/integrations/alibaba1688/callback",
     "/api/v1/procurement-chain/candidates",
     "/api/v1/profit/compute",
+    "/api/v1/finance/sales-report/preview",
+    "/api/v1/finance/unbilled/preview",
+    "/api/v1/search/global",
+    "/api/v1/tax-accounting/monthly-ledger",
+    "/api/v1/tax-accounting/finance-summary",
+    "/api/v1/tax-accounting/finance-summary.csv",
 }
 
 
@@ -120,6 +136,7 @@ def is_expected_external_block(path, status, raw):
 
 fail, ok200, unauth, ok4xx = [], 0, 0, 0
 for p in get_paths:
+    print(f"  GET {p}", flush=True)
     c, raw = req(p, token=token)
     if 200 <= c < 300:
         ok200 += 1
@@ -132,7 +149,8 @@ for p in get_paths:
         else:
             fail.append((c, p))
     else:
-        fail.append((c, p))
+        detail = raw.decode("utf-8", errors="replace")[:160]
+        fail.append((c, f"{p}: {detail}" if detail else p))
 
 for c, p in fail:
     print(f"  FAIL [{c}] {p}")
@@ -148,6 +166,9 @@ for prefix in ("/api/v1/alibaba1688-imports", "/api/v1/jackyun-files", "/api/v1/
         c, raw = req(path, method=method, token=token)
         if c == 500:
             lifecycle_probes.append((c, f"{method} {path}"))
+        elif prefix == "/api/v1/tax-invoices" and method == "DELETE" and c == 409:
+            # 官方税务导入批次明确禁止删除，未知 id 也由该不可变资源契约返回 409。
+            pass
         elif c != 404:
             lifecycle_probes.append((c, f"{method} {path} (期望 404)"))
 
@@ -155,10 +176,10 @@ for c, p in lifecycle_probes:
     print(f"  FAIL [{c}] lifecycle {p}")
 fail.extend(lifecycle_probes)
 
-print(f"\nGET endpoints: {len(get_paths)}")
-print(f"  200 OK:        {ok200}")
-print(f"  4xx (路径参数/必填查询): {ok4xx}")
-print(f"  401/403 鉴权:  {unauth}")
-print(f"  FAIL:          {len(fail)}")
+print(f"\nGET endpoints: {len(get_paths)}", flush=True)
+print(f"  200 OK:        {ok200}", flush=True)
+print(f"  4xx (路径参数/必填查询): {ok4xx}", flush=True)
+print(f"  401/403 鉴权:  {unauth}", flush=True)
+print(f"  FAIL:          {len(fail)}", flush=True)
 sys.exit(1 if fail else 0)
 PY

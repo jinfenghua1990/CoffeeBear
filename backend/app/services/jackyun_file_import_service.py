@@ -224,11 +224,27 @@ _DETAIL_COLS = ("货品", "商品", "商品名称", "货品名称", "数量", "�
 # 入库申请单货品：列名来自吉客云官方导出及已验证历史文件。
 # 外部订单引用只接受明确写着 1688/采购订货号的字段，不把泛化“采购订单号”
 # 当作外部订单，避免把吉客云内部采购单误建成 ExternalPurchaseOrder。
-_INBOUND_APPLY_KEYS = ("申请单号", "入库申请单号", "申请单编号", "入库申请编号")
+_INBOUND_APPLY_KEYS = ("申请单号", "入库申请单号", "申请单编号", "入库申请编号", "入库单号", "入库单据号")
 _INBOUND_ITEM_NO_KEYS = ("货品编号", "货品编码", "商品编号", "商品编码", "SKU编号", "SKU编码")
 _INBOUND_BARCODE_KEYS = ("条码", "货品条码", "商品条码", "SKU条码", "条形码", "商品条形码")
 _INBOUND_ORDER_REF_KEYS = ("1688采购订单", "1688采购订单号", "1688订单号", "采购订货号", "外部采购订单号")
 _INBOUND_AMOUNT_KEYS = ("采购总金额", "价税合计", "含税金额", "入库金额", "金额")
+
+# 销售出库单导入：只接受明确的出库单号，避免把采购/销售订单号错当成库存单据。
+_OUTBOUND_NO_KEYS = ("出库单号", "出库单据号", "出库单编号", "发货单号")
+_OUTBOUND_DATE_KEYS = ("出库日期", "出库时间", "发货日期", "单据日期", "创建时间")
+_OUTBOUND_WAREHOUSE_CODE_KEYS = ("仓库编码", "仓库编号", "出库仓库编码")
+_OUTBOUND_WAREHOUSE_NAME_KEYS = ("仓库名称", "仓库", "出库仓库", "发货仓库")
+_OUTBOUND_COMPANY_KEYS = ("公司名称", "公司", "主体公司", "所属公司")
+_OUTBOUND_ITEM_NO_KEYS = (
+    "货品编号", "货品编码", "商品编号", "商品编码", "SKU编号", "SKU编码", "货号",
+)
+_OUTBOUND_BARCODE_KEYS = ("条码", "货品条码", "商品条码", "SKU条码", "条形码", "商品条形码")
+_OUTBOUND_NAME_KEYS = ("货品名称", "商品名称", "货品", "商品", "SKU名称")
+_OUTBOUND_SPEC_KEYS = ("规格", "规格名称", "SKU规格")
+_OUTBOUND_QTY_KEYS = ("出库数量", "实际出库数量", "发货数量", "数量")
+_OUTBOUND_UNIT_KEYS = ("单位", "基本单位")
+_OUTBOUND_AMOUNT_KEYS = ("含税金额", "出库金额", "金额", "价税合计")
 
 
 def _pick_cell(row: dict, aliases: tuple[str, ...]) -> str:
@@ -336,6 +352,9 @@ def map_purchase_import(db: Session, import_id: int, actor: str = "system") -> d
             "detailReport": detail_like,
             "date": date_text[:24],
         }
+        # mapped 表示本批次已处理的采购单组总数；updated 单独表示其中
+        # 命中既有主档并执行更新的数量，避免二次导入时 mapped 被误报为仅新增数。
+        mapped += 1
         if existing:
             existing.supplier_name = supplier or existing.supplier_name
             existing.status = status or existing.status
@@ -352,7 +371,6 @@ def map_purchase_import(db: Session, import_id: int, actor: str = "system") -> d
                 status=status,
                 raw=raw_meta,
             ))
-            mapped += 1
     db.commit()
     audit(db, actor, "jackyun.file_import.map_purchase", "jackyun_file_imports", import_id,
           {"groups": len(groups), "mapped": mapped, "updated": updated,
@@ -411,6 +429,8 @@ def _fill_inbound_item(item, payload: dict) -> list[str]:
 
     put("spec", ("规格", "规格名称"))
     put("unit_name", ("单位", "基本单位"))
+    # 「数量/入库数量」用于本系统入库单导出模板的回导（吉客云原始报表无此列名，不影响旧链路）。
+    put("quantity", ("数量", "入库数量"), decimal_field=True)
     put("apply_quantity", ("申请数量",), decimal_field=True)
     put("remain_quantity", ("剩余数量",), decimal_field=True)
     put("return_quantity", ("退回数量",), decimal_field=True)
@@ -451,6 +471,22 @@ def _infer_purchase_platform(rows: list[dict]) -> str:
 
 def _platform_label(platform: str) -> str:
     return {"pdd": "拼多多", "taobao": "淘宝", "1688": "1688", "other": "其他"}.get(platform, "其他")
+
+
+def _is_local_inbound_reference(order_no: str) -> bool:
+    """识别吉客云入库申请单里的本地参考编号（日期 + 三位流水）。
+
+    这不是外部平台订单号。未找到真实订单主档时，只保留文件行和入库单，
+    不创建采购主单，也不自动建立采购链路。
+    """
+    value = str(order_no or "").strip()
+    if len(value) != 11 or not value.isdigit():
+        return False
+    try:
+        datetime.strptime(value[:8], "%Y%m%d")
+    except ValueError:
+        return False
+    return True
 
 
 def map_inbound_items(db: Session, import_id: int, actor: str = "system") -> dict:
@@ -495,6 +531,11 @@ def map_inbound_items(db: Session, import_id: int, actor: str = "system") -> dic
         if order_no:
             order_rows.setdefault(order_no, []).append((rec.row_index, rec.payload))
             relation_rows.setdefault((order_no, no), []).append(rec.row_index)
+
+    payload_by_row = {rec.row_index: rec.payload for rec in records}
+    relation_orders_by_doc: dict[str, set[str]] = {}
+    for order_no, rk_no in relation_rows:
+        relation_orders_by_doc.setdefault(rk_no, set()).add(order_no)
 
     matched = 0
     filled_fields = 0
@@ -545,7 +586,7 @@ def map_inbound_items(db: Session, import_id: int, actor: str = "system") -> dic
 
     from app.models.alibaba1688_import import Alibaba1688Order
     from app.models.procurement_chain import ProcurementChainLink
-    from app.models.purchase import ExternalPurchaseOrder
+    from app.models.purchase import ExternalPurchaseOrder, PurchaseAllocationItem
     from app.services.procurement_chain_service import auto_confirm_inbound_link
 
     order_nos = set(order_rows)
@@ -556,18 +597,43 @@ def map_inbound_items(db: Session, import_id: int, actor: str = "system") -> dic
         .all()
         if row.row_status != "deleted"
     } if order_nos else {}
-    external_orders = {
-        row.external_order_id: row
-        for row in db.query(ExternalPurchaseOrder)
+    order_platforms = {
+        order_no: _infer_purchase_platform([payload for _, payload in indexed_rows])
+        for order_no, indexed_rows in order_rows.items()
+    }
+    external_order_rows = (
+        db.query(ExternalPurchaseOrder)
         .filter(ExternalPurchaseOrder.external_order_id.in_(order_nos))
         .all()
-    } if order_nos else {}
+        if order_nos else []
+    )
+    external_orders = {
+        ((row.platform or "1688"), row.external_order_id): row
+        for row in external_order_rows
+    }
+    external_orders_by_no: dict[str, list[ExternalPurchaseOrder]] = {}
+    for row in external_order_rows:
+        external_orders_by_no.setdefault(row.external_order_id, []).append(row)
+
+    def workflow_po(order_no: str, platform: str) -> ExternalPurchaseOrder | None:
+        """优先按渠道取主档；只有同号唯一时才允许兼容旧数据的渠道缺失。"""
+        exact = external_orders.get((platform, order_no))
+        if exact is not None:
+            return exact
+        candidates = external_orders_by_no.get(order_no, [])
+        return candidates[0] if len(candidates) == 1 else None
 
     created_external: list[ExternalPurchaseOrder] = []
     for order_no, indexed_rows in order_rows.items():
         if order_no in order_sources:
             continue
-        po = external_orders.get(order_no)
+        platform = order_platforms.get(order_no, "other")
+        po = workflow_po(order_no, platform)
+        if po is not None and (po.raw or {}).get("referenceOnly") is True:
+            # 旧批次已经生成过参考副本时，不再更新/复活它。
+            continue
+        if po is None and _is_local_inbound_reference(order_no):
+            continue
         payloads = [payload for _, payload in indexed_rows]
         supplier = next((_pick_cell(row, _PO_SUPPLIER_COLS) for row in payloads if _pick_cell(row, _PO_SUPPLIER_COLS)), "")
         dates = [
@@ -583,7 +649,6 @@ def map_inbound_items(db: Session, import_id: int, actor: str = "system") -> dic
             goods_name = _pick_cell(payload, ("货品名称", "商品名称", "货品", "商品"))
             if goods_name and goods_name not in goods_names:
                 goods_names.append(goods_name)
-        platform = _infer_purchase_platform(payloads)
         raw_meta = {
             "source": "jackyun_inbound_apply",
             "sourceImportId": import_id,
@@ -592,7 +657,9 @@ def map_inbound_items(db: Session, import_id: int, actor: str = "system") -> dic
             "channelInferred": platform,
             "inboundAmountTotal": str(source_amount),
             "goodsNames": goods_names[:20],
-            "referenceOnly": True,
+            # 只有日期流水这类本地编号才是 reference-only；能作为外部来源的
+            # 非 1688 订单号仍落到正常工作流主档，兼容淘宝/拼多多等入库来源。
+            "referenceOnly": _is_local_inbound_reference(order_no),
         }
         if po is None:
             po = ExternalPurchaseOrder(
@@ -607,7 +674,8 @@ def map_inbound_items(db: Session, import_id: int, actor: str = "system") -> dic
             )
             db.add(po)
             db.flush()
-            external_orders[order_no] = po
+            external_orders[(platform, order_no)] = po
+            external_orders_by_no.setdefault(order_no, []).append(po)
             created_external.append(po)
         else:
             previous_imports = list((po.raw or {}).get("sourceImports") or [])
@@ -657,7 +725,18 @@ def map_inbound_items(db: Session, import_id: int, actor: str = "system") -> dic
             skipped.append({"row": row_indexes[0], "reason": f"库内无入库单 {rk_no}", "rows": len(row_indexes)})
             continue
         source_order = order_sources.get(order_no)
-        po = external_orders.get(order_no)
+        platform = "1688" if source_order is not None else order_platforms.get(order_no, "other")
+        po = workflow_po(order_no, platform)
+        if source_order is None and (
+            _is_local_inbound_reference(order_no)
+            or (po is not None and (po.raw or {}).get("referenceOnly") is True)
+        ):
+            skipped.append({
+                "row": row_indexes[0],
+                "reason": f"订单号 {order_no} 只是入库申请单本地参考编号，未自动创建采购主单，请用真实采购单人工关联",
+                "rows": len(row_indexes),
+            })
+            continue
         if source_order is not None:
             source_key = ("order", source_order.id, doc.id)
             link_values = {"order_id": source_order.id, "external_po_id": None}
@@ -668,6 +747,56 @@ def map_inbound_items(db: Session, import_id: int, actor: str = "system") -> dic
             skipped.append({"row": row_indexes[0], "reason": f"订单号 {order_no} 未建立采购主档"})
             continue
         previous = existing_by_key.get(source_key)
+        # 订单已有采购明细时，入库申请单必须至少命中一个相同 SKU 才能自动建链。
+        # 采购明细为空的订单仍允许建链，因为这条入库关系本身可能是首次反填 SKU 的来源。
+        # 手工关联不受此保护，避免覆盖用户明确确认的特殊拆分/共用入库场景。
+        if previous is None:
+            allocations = (
+                db.query(PurchaseAllocationItem).filter_by(po_id=po.id).all()
+                if po is not None else []
+            )
+            relation_codes = {
+                _pick_cell(payload_by_row[row_index], _INBOUND_ITEM_NO_KEYS)
+                or _pick_cell(payload_by_row[row_index], _INBOUND_BARCODE_KEYS)
+                for row_index in row_indexes
+            }
+            relation_codes.discard("")
+            if not allocations and len(relation_orders_by_doc.get(rk_no, set())) > 1:
+                skipped.append({
+                    "row": row_indexes[0],
+                    "reason": f"入库单 {rk_no} 同时包含多个订单来源，未自动关联，请按明细人工确认",
+                    "rows": len(row_indexes),
+                })
+                continue
+            if allocations:
+                allocation_sku_ids = {int(item.sku_id) for item in allocations if item.sku_id is not None}
+                allocation_codes = {str(item.sku_code).strip() for item in allocations if item.sku_code}
+                if relation_codes:
+                    relation_matches = allocation_codes & relation_codes
+                else:
+                    doc_items = (
+                        db.query(JackyunGoodsDocumentItem)
+                        .filter(JackyunGoodsDocumentItem.document_id == doc.id)
+                        .all()
+                    )
+                    inbound_sku_ids = {int(item.matched_sku_id) for item in doc_items if item.matched_sku_id is not None}
+                    inbound_codes = {
+                        str(item.sku_barcode or item.goods_no).strip()
+                        for item in doc_items
+                        if str(item.sku_barcode or item.goods_no).strip()
+                    }
+                    relation_matches = (
+                        allocation_sku_ids & inbound_sku_ids
+                    ) or (
+                        allocation_codes & inbound_codes
+                    )
+                if not relation_matches:
+                    skipped.append({
+                        "row": row_indexes[0],
+                        "reason": f"入库单 {rk_no} 明细 SKU 与订单 {order_no} 当前采购明细不匹配，未自动关联",
+                        "rows": len(row_indexes),
+                    })
+                    continue
         if previous is not None:
             if previous.match_method == "rejected":
                 rejected_links += 1
@@ -789,6 +918,162 @@ def map_inbound_items(db: Session, import_id: int, actor: str = "system") -> dic
     }
 
 
+def map_outbound_documents(db: Session, import_id: int, actor: str = "system") -> dict:
+    """把吉客云销售出库报表落成真实出库单及明细，并刷新 SKU 关联。"""
+    from app.models.jackyun import JackyunGoodsDocument, JackyunGoodsDocumentItem
+    from app.services.sku_matching_service import match_inbound_items
+
+    imp = db.get(JackyunFileImport, import_id)
+    if not imp:
+        raise LookupError(f"导入记录 {import_id} 不存在")
+    if imp.lifecycle != "active":
+        raise ValueError("仅 active 批次可映射，请先在面板确认生效")
+
+    records = [
+        rec for rec in db.query(JackyunFileImportRecord)
+        .filter(JackyunFileImportRecord.import_id == import_id)
+        .order_by(JackyunFileImportRecord.row_index)
+        .all()
+        if rec.row_status == "active"
+    ]
+    if not records:
+        return {
+            "ok": True, "importId": import_id, "documents": 0, "matchedItems": 0,
+            "sourceRows": 0, "skipped": [], "matcher": match_inbound_items(db, include_outbound=True),
+        }
+
+    if not any(_pick_cell(rec.payload, _OUTBOUND_NO_KEYS) for rec in records):
+        raise ValueError("该报表不含明确的出库单号，无法映射为销售出库单")
+
+    groups: dict[str, list[tuple[int, dict]]] = {}
+    skipped: list[dict] = []
+    for rec in records:
+        number = _pick_cell(rec.payload, _OUTBOUND_NO_KEYS)
+        if not number:
+            skipped.append({"row": rec.row_index, "reason": "缺出库单号"})
+            continue
+        groups.setdefault(number, []).append((rec.row_index, rec.payload))
+
+    created = 0
+    updated = 0
+    matched_items = 0
+    documents_hit: set[int] = set()
+    for number, indexed_rows in groups.items():
+        document = (
+            db.query(JackyunGoodsDocument)
+            .filter(
+                JackyunGoodsDocument.document_type == "outbound",
+                JackyunGoodsDocument.goodsdoc_no == number,
+            )
+            .first()
+        )
+        if document is None:
+            document = JackyunGoodsDocument(document_type="outbound", goodsdoc_no=number)
+            db.add(document)
+            db.flush()
+            created += 1
+        else:
+            updated += 1
+        documents_hit.add(document.id)
+
+        payloads = [payload for _, payload in indexed_rows]
+        date_values = [_parse_date(_pick_cell(payload, _OUTBOUND_DATE_KEYS)) for payload in payloads]
+        date_values = [value for value in date_values if value is not None]
+        if date_values:
+            document.document_at = min(date_values)
+        document.warehouse_code = next(
+            (_pick_cell(payload, _OUTBOUND_WAREHOUSE_CODE_KEYS) for payload in payloads
+             if _pick_cell(payload, _OUTBOUND_WAREHOUSE_CODE_KEYS)),
+            document.warehouse_code or "",
+        )
+        document.warehouse_name = next(
+            (_pick_cell(payload, _OUTBOUND_WAREHOUSE_NAME_KEYS) for payload in payloads
+             if _pick_cell(payload, _OUTBOUND_WAREHOUSE_NAME_KEYS)),
+            document.warehouse_name or "",
+        )
+        document.company_name = next(
+            (_pick_cell(payload, _OUTBOUND_COMPANY_KEYS) for payload in payloads
+             if _pick_cell(payload, _OUTBOUND_COMPANY_KEYS)),
+            document.company_name or "",
+        )
+        total_quantity = Decimal("0")
+        has_quantity = False
+        existing_items = {
+            item.line_no: item
+            for item in db.query(JackyunGoodsDocumentItem)
+            .filter(JackyunGoodsDocumentItem.document_id == document.id)
+            .all()
+        }
+        for line_no, (_, payload) in enumerate(indexed_rows, start=1):
+            goods_no = _pick_cell(payload, _OUTBOUND_ITEM_NO_KEYS)
+            barcode = _pick_cell(payload, _OUTBOUND_BARCODE_KEYS)
+            goods_name = _pick_cell(payload, _OUTBOUND_NAME_KEYS)
+            quantity = _to_decimal(_pick_cell(payload, _OUTBOUND_QTY_KEYS))
+            if not goods_no and not barcode and not goods_name:
+                skipped.append({"row": indexed_rows[line_no - 1][0], "reason": "缺货品/SKU信息"})
+                continue
+            item = existing_items.get(line_no)
+            if item is None:
+                item = JackyunGoodsDocumentItem(document_id=document.id, line_no=line_no)
+                db.add(item)
+            item.goods_no = goods_no or item.goods_no or ""
+            item.sku_barcode = barcode or item.sku_barcode or ""
+            item.goods_name = goods_name or item.goods_name or ""
+            item.quantity = quantity
+            item.unit_name = _pick_cell(payload, _OUTBOUND_UNIT_KEYS) or item.unit_name or ""
+            item.spec = _pick_cell(payload, _OUTBOUND_SPEC_KEYS) or item.spec or ""
+            amount = _to_decimal(_pick_cell(payload, _OUTBOUND_AMOUNT_KEYS))
+            if amount is not None:
+                item.amount_tax = amount
+            item.raw = {
+                **(item.raw or {}),
+                **payload,
+                "fileImportSource": True,
+                "sourceImportId": import_id,
+            }
+            if item.match_status != "manual":
+                item.matched_sku_id = None
+                item.match_status = ""
+                item.match_note = ""
+            if quantity is not None and quantity > 0:
+                total_quantity += quantity
+                has_quantity = True
+            matched_items += 1
+        document.total_quantity = total_quantity if has_quantity else document.total_quantity
+        document.raw = {
+            **(document.raw or {}),
+            "fileImportSource": True,
+            "sourceImportId": import_id,
+            "sourceRowIndexes": [row_index for row_index, _ in indexed_rows],
+        }
+
+    db.commit()
+    matcher = match_inbound_items(db, include_outbound=True)
+    audit(
+        db,
+        actor,
+        "jackyun.file_import.map_outbound",
+        "jackyun_file_imports",
+        import_id,
+        {
+            "documents": len(documents_hit), "created": created, "updated": updated,
+            "matchedItems": matched_items, "sourceRows": len(records),
+            "skipped": len(skipped), "matcher": matcher,
+        },
+    )
+    return {
+        "ok": True,
+        "importId": import_id,
+        "documents": len(documents_hit),
+        "created": created,
+        "updated": updated,
+        "matchedItems": matched_items,
+        "sourceRows": len(records),
+        "matcher": matcher,
+        "skipped": skipped,
+    }
+
+
 def map_import(db: Session, import_id: int, actor: str = "system") -> dict:
     imp = db.get(JackyunFileImport, import_id)
     if not imp:
@@ -797,6 +1082,8 @@ def map_import(db: Session, import_id: int, actor: str = "system") -> dict:
     if imp.lifecycle != "active":
         return {"ok": True, "skipped": True, "reason": "draft 批次，确认后再映射"}
 
+    if imp.report_type == "outbound":
+        return {**map_outbound_documents(db, import_id, actor=actor), "mapper": "outbound"}
     if _pick_cell({header: header for header in headers}, _PO_NO_COLS):
         return {**map_purchase_import(db, import_id, actor=actor), "mapper": "purchase"}
     has_apply = any(_pick_cell({header: header for header in headers}, (key,)) for key in _INBOUND_APPLY_KEYS)

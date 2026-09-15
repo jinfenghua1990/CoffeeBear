@@ -23,7 +23,7 @@ from app.models.purchase import (
 )
 from app.models.tax import TaxInvoice, TaxInvoiceImport, TaxInvoiceImportRecord, TaxInvoiceLink
 from app.services import purchase_service as svc
-from app.services.procurement_chain_service import _source_pairs
+from app.services.procurement_chain_service import _source_pairs, is_reference_only_external_po
 
 router = APIRouter(prefix="/purchase", tags=["purchase"])
 
@@ -100,6 +100,8 @@ def list_orders(
     out = []
     for po in query.limit(limit).offset(offset).all():
         if po.external_order_id in removed_nos:
+            continue
+        if is_reference_only_external_po(po):
             continue
         bal = svc.balance_of(db, po)
         tax_invoice_count = db.query(TaxInvoiceLink).filter_by(
@@ -628,6 +630,20 @@ def run_inbound_auto_match(request: Request, db: Session = Depends(get_db)) -> d
         db,
         current_actor(request),
         "purchase.sku_match.auto",
+        "jackyun_goods_document_items",
+        detail=stats,
+    )
+    return {"ok": True, "stats": stats}
+
+
+@router.post("/sku-matching/outbound-auto")
+def run_outbound_auto_match(request: Request, db: Session = Depends(get_db)) -> dict[str, Any]:
+    """销售出库明细 ↔ 货品档案自动匹配；人工指定的结果不会被覆盖。"""
+    stats = match_svc.match_inbound_items(db, include_outbound=True)
+    audit(
+        db,
+        current_actor(request),
+        "purchase.sku_match.outbound_auto",
         "jackyun_goods_document_items",
         detail=stats,
     )

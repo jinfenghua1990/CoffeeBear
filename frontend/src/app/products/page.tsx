@@ -1,24 +1,48 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
-import MetricCard from "@/components/metric-card";
-import ConsumableWorkbench from "./consumable-workbench";
+import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
+import TaxCategoryRulesPanel from "@/components/tax-category-rules-panel";
 import {
+  AuthUser,
   CatalogSkuRow,
   consumablesApi,
   dashboardApi,
+  fetchMe,
   InventorySummary,
   LinkedSkuRef,
+  TaxCategoryRule,
+  taxAccountingApi,
   UnifiedCatalogRow,
+  authenticatedFetch,
+  masterDataApi,
 } from "@/lib/api";
 
 /** 类型中文：single=单品 / bundle=套装 / virtual_bundle=虚拟组合套装（不同商品不同数量组合）。 */
 const TYPE_LABEL: Record<string, string> = { single: "单品", bundle: "套装", virtual_bundle: "虚拟组合套装" };
 
-const emptyProduct = { jackyun_sku_id: "", sku_code: "", product_type: "single", sku_name: "", barcode: "", unit: "盒", sale_price: "", default_cost: "", cost_mode: "fixed", cost_tolerance_pct: "0.0200", tax_code: "", goods_category: "", status: "active" };
+type ProductForm = {
+  jackyun_sku_id: string;
+  sku_code: string;
+  product_type: string;
+  sku_name: string;
+  barcode: string;
+  unit: string;
+  sale_price: string;
+  default_cost: string;
+  cost_mode: string;
+  cost_tolerance_pct: string;
+  tax_code: string;
+  tax_category_rule_id: string;
+  goods_category: string;
+  status: string;
+};
+
+const emptyProduct: ProductForm = { jackyun_sku_id: "", sku_code: "", product_type: "single", sku_name: "", barcode: "", unit: "盒", sale_price: "", default_cost: "", cost_mode: "fixed", cost_tolerance_pct: "0.0200", tax_code: "", tax_category_rule_id: "", goods_category: "", status: "active" };
 const qty = (v: string | null) => (v == null || v === "" ? "—" : Number(v).toLocaleString("zh-CN", { maximumFractionDigits: 4 }));
 
 type KindFilter = "all" | "goods" | "consumable";
+type ProductTab = "catalog" | "bundles" | "taxRules";
+type MasterDataset = "catalog" | "bundles" | "tax_rules";
 
 type ConsumableDraft = {
   id: number | null;
@@ -30,13 +54,67 @@ type ConsumableDraft = {
   purchase_unit_cost: string;
   min_stock_qty: string;
   tax_code: string;
+  tax_category_rule_id: string;
   sku_ids: number[];
 };
 
 const emptyConsumable: ConsumableDraft = {
   id: null, code: "", name: "", barcode: "", category: "", unit: "个",
-  purchase_unit_cost: "", min_stock_qty: "", tax_code: "", sku_ids: [],
+  purchase_unit_cost: "", min_stock_qty: "", tax_code: "", tax_category_rule_id: "", sku_ids: [],
 };
+
+function MasterDataActions({
+  dataset,
+  label,
+  exporting,
+  importing,
+  canEdit,
+  onExport,
+  onImport,
+}: {
+  dataset: MasterDataset;
+  label: string;
+  exporting: MasterDataset | null;
+  importing: MasterDataset | null;
+  canEdit: boolean;
+  onExport: (dataset: MasterDataset, label: string, template?: boolean) => void;
+  onImport: (dataset: MasterDataset, label: string, file: File | undefined) => void;
+}) {
+  return (
+    <div className="flex flex-wrap items-center gap-2">
+      {canEdit ? <label className="cursor-pointer rounded-lg border border-emerald-200 bg-white px-3 py-1.5 text-xs font-medium text-emerald-700 hover:bg-emerald-50">
+          {importing === dataset ? "导入中…" : `导入${label}`}
+          <input
+            type="file"
+            accept=".xlsx,.xlsm"
+            className="hidden"
+            disabled={importing !== null}
+            onChange={(event) => {
+              onImport(dataset, label, event.target.files?.[0]);
+              event.target.value = "";
+            }}
+          />
+        </label>
+        : <span title="仅管理员或操作员可导入" className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-1.5 text-xs text-slate-400">导入{label}（无权限）</span>}
+      <button
+        type="button"
+        onClick={() => onExport(dataset, label)}
+        disabled={exporting !== null}
+        className="rounded-lg border border-blue-200 bg-white px-3 py-1.5 text-xs font-medium text-blue-600 hover:bg-blue-50 disabled:cursor-wait disabled:opacity-60"
+      >
+        {exporting === dataset ? "导出中…" : `导出${label}`}
+      </button>
+      <button
+        type="button"
+        onClick={() => onExport(dataset, label, true)}
+        disabled={exporting !== null}
+        className="rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs text-slate-600 hover:bg-slate-50 disabled:cursor-wait disabled:opacity-60"
+      >
+        下载模板
+      </button>
+    </div>
+  );
+}
 
 function KindBadge({ kind }: { kind: "goods" | "consumable" }) {
   return kind === "consumable"
@@ -46,9 +124,9 @@ function KindBadge({ kind }: { kind: "goods" | "consumable" }) {
 
 function StockCell({ row }: { row: UnifiedCatalogRow }) {
   if (row.kind === "goods") {
-    return row.hasSnapshot
+    return row.hasMovement
       ? <span className="tabular-nums text-gray-800">{qty(row.stockOwn)}</span>
-      : <span className="text-xs text-gray-300">无快照</span>;
+      : <span className="text-xs text-gray-300">无出入库</span>;
   }
   return (
     <span className="tabular-nums">
@@ -59,25 +137,31 @@ function StockCell({ row }: { row: UnifiedCatalogRow }) {
 }
 
 /** 品类单元格：点铅笔进入编辑，回车保存 / Esc 取消。 */
-function EditableCategory({ row, onSave }: { row: UnifiedCatalogRow; onSave: (row: UnifiedCatalogRow, value: string) => Promise<void> }) {
+function EditableCategory({ row, onSave, canEdit }: { row: UnifiedCatalogRow; onSave: (row: UnifiedCatalogRow, value: string) => Promise<void>; canEdit: boolean }) {
   const [editing, setEditing] = useState(false);
   const [value, setValue] = useState(row.goodsCategory || "");
   const [saving, setSaving] = useState(false);
+  if (!canEdit) {
+    return <span className="inline-block min-w-[72px] px-1 text-[11px] text-gray-600">{row.goodsCategory || <span className="text-gray-300">未设置</span>}</span>;
+  }
   if (!editing) {
     return (
-      <div className="group flex items-center gap-1">
+      <button
+        type="button"
+        onClick={() => { setValue(row.goodsCategory || ""); setEditing(true); }}
+        title="修改品类（如 咖啡豆 / 饼干）"
+        aria-label={`修改 ${row.code} 的品类，当前为 ${row.goodsCategory || "未设置"}`}
+        className="group inline-flex min-w-[72px] items-center gap-1 rounded px-1 py-0.5 text-left hover:bg-blue-50"
+      >
         <span className="text-[11px] text-gray-600">{row.goodsCategory || <span className="text-gray-300">未设置</span>}</span>
-        <button
-          onClick={() => { setValue(row.goodsCategory || ""); setEditing(true); }}
-          title="修改品类（如 咖啡 / 饼干）"
-          className="rounded p-0.5 text-gray-300 opacity-0 transition-opacity hover:bg-gray-100 hover:text-gray-600 group-hover:opacity-100"
-        >
+        <span className="rounded p-0.5 text-gray-300 transition-colors group-hover:text-blue-600" aria-hidden="true">
           <svg viewBox="0 0 16 16" className="h-3 w-3" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M11.5 2.5l2 2L6 12l-2.8.8L4 10l7.5-7.5z" strokeLinejoin="round" /></svg>
-        </button>
-      </div>
+        </span>
+      </button>
     );
   }
   const commit = async () => {
+    if (saving) return;
     if (value.trim() === (row.goodsCategory || "").trim()) { setEditing(false); return; }
     setSaving(true);
     try { await onSave(row, value.trim()); setEditing(false); } finally { setSaving(false); }
@@ -88,7 +172,7 @@ function EditableCategory({ row, onSave }: { row: UnifiedCatalogRow; onSave: (ro
       value={value}
       disabled={saving}
       onChange={(e) => setValue(e.target.value)}
-      onKeyDown={(e) => { if (e.key === "Enter") void commit(); if (e.key === "Escape") setEditing(false); }}
+      onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); void commit(); } if (e.key === "Escape") setEditing(false); }}
       onBlur={() => void commit()}
       placeholder="如 咖啡 / 饼干"
       className="h-6 w-24 rounded border border-blue-300 px-1.5 text-[11px] outline-none disabled:opacity-50"
@@ -96,8 +180,48 @@ function EditableCategory({ row, onSave }: { row: UnifiedCatalogRow; onSave: (ro
   );
 }
 
-/** 统一档案表（货品档案 / 组合套装两个页签共用）。selectionKey 形如 kind-id。 */
-function CatalogTable({ rows, onEditConsumable, onEditProduct, onToggleCostMode, onSaveCategory, selected, onToggleRow, onToggleAll }: {
+function ProductEditor({
+  form,
+  setForm,
+  onSubmit,
+  onCancel,
+  taxRules,
+  inline = false,
+}: {
+  form: ProductForm;
+  setForm: React.Dispatch<React.SetStateAction<ProductForm>>;
+  onSubmit: (event: React.FormEvent) => void;
+  onCancel: () => void;
+  taxRules: TaxCategoryRule[];
+  inline?: boolean;
+}) {
+  return (
+    <form onSubmit={onSubmit} className={`grid grid-cols-6 gap-2 rounded-lg bg-blue-50 p-3 text-xs ${inline ? "border border-blue-100" : "mt-4"}`}>
+      {inline && <div className="col-span-full flex items-center justify-between gap-3 border-b border-blue-100 pb-2"><span className="font-medium text-blue-700">编辑当前货品</span><span className="text-[11px] text-blue-500">保存后仍停留在当前货品位置</span></div>}
+      <input aria-label="吉客云 SKU ID" placeholder="吉客云 SKU ID（可空）" value={form.jackyun_sku_id} onChange={(e) => setForm({ ...form, jackyun_sku_id: e.target.value })} className="rounded border px-2 py-1.5" />
+      <input aria-label="SKU 编码" required placeholder="SKU 编码" value={form.sku_code} onChange={(e) => setForm({ ...form, sku_code: e.target.value })} className="rounded border px-2 py-1.5" />
+      <select aria-label="货品类型" value={form.product_type} onChange={(e) => setForm({ ...form, product_type: e.target.value })} className="rounded border px-2 py-1.5"><option value="single">单品</option><option value="bundle">套装</option><option value="virtual_bundle">虚拟组合套装</option></select>
+      <input aria-label="货品名称或规格" required placeholder="货品名称/规格" value={form.sku_name} onChange={(e) => setForm({ ...form, sku_name: e.target.value })} className="rounded border px-2 py-1.5" />
+      <input aria-label="条码" placeholder="条码" value={form.barcode} onChange={(e) => setForm({ ...form, barcode: e.target.value })} className="rounded border px-2 py-1.5" />
+      <input aria-label="单位" placeholder="单位" value={form.unit} onChange={(e) => setForm({ ...form, unit: e.target.value })} className="rounded border px-2 py-1.5" />
+      <input aria-label="售价" placeholder="售价" value={form.sale_price} onChange={(e) => setForm({ ...form, sale_price: e.target.value })} className="rounded border px-2 py-1.5" />
+      <input aria-label="默认成本" placeholder="默认成本" value={form.default_cost} onChange={(e) => setForm({ ...form, default_cost: e.target.value })} className="rounded border px-2 py-1.5" />
+      <select aria-label="成本方式" value={form.cost_mode} onChange={(e) => setForm({ ...form, cost_mode: e.target.value })} className="rounded border px-2 py-1.5"><option value="fixed">固定成本</option><option value="dynamic">动态成本</option></select>
+      <input aria-label="成本容差" placeholder="容差(如0.02)" value={form.cost_tolerance_pct} onChange={(e) => setForm({ ...form, cost_tolerance_pct: e.target.value })} className="rounded border px-2 py-1.5" />
+      <select aria-label="财务分类规则" value={form.tax_category_rule_id} onChange={(e) => { const id = e.target.value; const rule = taxRules.find((item) => String(item.id) === id); setForm({ ...form, tax_category_rule_id: id, tax_code: rule?.taxCode || form.tax_code }); }} className="rounded border px-2 py-1.5">
+        <option value="">不关联财务分类</option>
+        {taxRules.map((rule) => <option key={rule.id} value={rule.id}>{rule.categoryName} · {rule.itemName}{rule.taxCode ? ` · ${rule.taxCode}` : " · 未配置代码"}</option>)}
+      </select>
+      <input aria-label="税务代码" placeholder="税务代码（税收分类编码）" title="开票用商品和服务税收分类编码（19 位，兼容旧 10 位简称）" value={form.tax_code} onChange={(e) => setForm({ ...form, tax_code: e.target.value.replace(/\D/g, ""), tax_category_rule_id: "" })} className="rounded border px-2 py-1.5 font-mono" />
+      <input aria-label="品类" placeholder="品类（如 咖啡豆/饼干）" title="货品品类，来自吉客云同步，可本地修改" value={form.goods_category} onChange={(e) => setForm({ ...form, goods_category: e.target.value })} className="rounded border px-2 py-1.5" />
+      <select aria-label="档案状态" value={form.status} onChange={(e) => setForm({ ...form, status: e.target.value })} className="rounded border px-2 py-1.5"><option value="active">启用</option><option value="inactive">停用</option></select>
+      <div className="flex gap-2"><button type="submit" className="rounded bg-blue-600 px-3 py-1.5 text-white">保存</button><button type="button" onClick={onCancel} className="rounded border px-3 py-1.5">取消</button></div>
+    </form>
+  );
+}
+
+/** 统一档案表（货品档案 / 套装档案两个页签共用）。selectionKey 形如 kind-id。 */
+function CatalogTable({ rows, onEditConsumable, onEditProduct, onToggleCostMode, onSaveCategory, selected, onToggleRow, onToggleAll, editingProductId, productForm, setProductForm, onSaveProduct, onCancelProduct, taxRules, canEdit }: {
   rows: UnifiedCatalogRow[];
   onEditConsumable: (row: UnifiedCatalogRow) => void;
   onEditProduct: (row: UnifiedCatalogRow) => void;
@@ -106,6 +230,13 @@ function CatalogTable({ rows, onEditConsumable, onEditProduct, onToggleCostMode,
   selected: Set<string>;
   onToggleRow: (row: UnifiedCatalogRow) => void;
   onToggleAll: () => void;
+  editingProductId: number | null;
+  productForm: ProductForm;
+  setProductForm: React.Dispatch<React.SetStateAction<ProductForm>>;
+  onSaveProduct: (event: React.FormEvent) => void;
+  onCancelProduct: () => void;
+  taxRules: TaxCategoryRule[];
+  canEdit: boolean;
 }) {
   const allChecked = rows.length > 0 && rows.every((r) => selected.has(`${r.kind}-${r.id}`));
   return (
@@ -121,6 +252,7 @@ function CatalogTable({ rows, onEditConsumable, onEditProduct, onToggleCostMode,
             <th className="py-2">品类</th>
             <th className="py-2">编码</th>
             <th className="py-2">条码</th>
+            <th className="py-2">财务分类</th>
             <th className="py-2">税务代码</th>
             <th className="py-2">关联正品</th>
             <th className="py-2">单位</th>
@@ -132,7 +264,8 @@ function CatalogTable({ rows, onEditConsumable, onEditProduct, onToggleCostMode,
         </thead>
         <tbody className="divide-y divide-gray-100">
           {rows.map((row) => (
-            <tr key={`${row.kind}-${row.id}`} className={row.lowStock ? "bg-amber-50/60" : ""}>
+            <Fragment key={`${row.kind}-${row.id}`}>
+            <tr className={row.lowStock ? "bg-amber-50/60" : ""}>
               <td className="py-2.5">
                 <input type="checkbox" checked={selected.has(`${row.kind}-${row.id}`)} onChange={() => onToggleRow(row)} className="h-3.5 w-3.5 accent-blue-600" />
               </td>
@@ -144,9 +277,10 @@ function CatalogTable({ rows, onEditConsumable, onEditProduct, onToggleCostMode,
                 {row.kind === "goods" && row.goodsName && row.goodsName !== row.name && <div className="mt-0.5 truncate pl-6 text-[10px] text-gray-400">{row.goodsName}</div>}
               </td>
               <td className="py-2.5 text-[11px] text-gray-500">{row.kind === "goods" ? TYPE_LABEL[row.category] ?? row.category : "耗材"}</td>
-              <td className="py-2.5"><EditableCategory row={row} onSave={onSaveCategory} /></td>
+              <td className="py-2.5"><EditableCategory row={row} onSave={onSaveCategory} canEdit={canEdit} /></td>
               <td className="py-2.5 font-mono text-xs text-gray-600">{row.code}</td>
               <td className="py-2.5 font-mono text-[11px] text-gray-500">{row.barcode || "—"}</td>
+              <td className="max-w-[150px] py-2.5 text-[11px] text-gray-500">{row.taxCategoryRuleName || (row.taxCode ? <span className="text-slate-400" title="已设置直接税务代码，未关联共用财务分类规则">代码直填</span> : <span className="text-gray-300">未设置</span>)}</td>
               <td className="py-2.5 font-mono text-[11px] text-gray-500" title={row.taxCode ? "税收分类编码（开票用）" : "未设置税务代码，点「编辑」补充"}>{row.taxCode || "—"}</td>
               <td className="max-w-[160px] py-2.5">
                 {row.kind === "consumable"
@@ -167,15 +301,23 @@ function CatalogTable({ rows, onEditConsumable, onEditProduct, onToggleCostMode,
               </td>
               <td className="py-2.5 text-right">
                 {row.kind === "consumable"
-                  ? <button onClick={() => onEditConsumable(row)} className="rounded-md px-2 py-1 text-xs font-medium text-amber-600 hover:bg-amber-50">编辑</button>
+                  ? canEdit && <button onClick={() => onEditConsumable(row)} className="rounded-md px-2 py-1 text-xs font-medium text-amber-600 hover:bg-amber-50">编辑</button>
                   : <div className="flex justify-end gap-1">
-                      <button onClick={() => onEditProduct(row)} className="rounded-md px-2 py-1 text-xs text-gray-500 hover:bg-gray-100">编辑</button>
+                      {canEdit && <><button onClick={() => editingProductId === row.id ? onCancelProduct() : onEditProduct(row)} className="rounded-md px-2 py-1 text-xs text-gray-500 hover:bg-gray-100">{editingProductId === row.id ? "收起" : "编辑"}</button>
                       <button onClick={() => onToggleCostMode(row)} className="rounded-md px-2 py-1 text-xs text-blue-600 hover:bg-blue-50">
-                        切{row.costMode === "dynamic" ? "固定" : "动态"}
-                      </button>
+                          切{row.costMode === "dynamic" ? "固定" : "动态"}
+                        </button></>}
                     </div>}
               </td>
             </tr>
+            {row.kind === "goods" && editingProductId === row.id && (
+              <tr className="bg-blue-50/40">
+                <td colSpan={14} className="p-2">
+                  <ProductEditor form={productForm} setForm={setProductForm} onSubmit={onSaveProduct} onCancel={onCancelProduct} taxRules={taxRules} inline />
+                </td>
+              </tr>
+            )}
+            </Fragment>
           ))}
         </tbody>
       </table>
@@ -185,13 +327,17 @@ function CatalogTable({ rows, onEditConsumable, onEditProduct, onToggleCostMode,
 }
 
 export default function ProductsPage() {
-  const [tab, setTab] = useState<"catalog" | "bundles" | "consumables">("catalog");
+  const [tab, setTab] = useState<ProductTab>("catalog");
+  const [currentUser, setCurrentUser] = useState<AuthUser | null>(null);
   const [inv, setInv] = useState<InventorySummary | null>(null);
   const [catalog, setCatalog] = useState<UnifiedCatalogRow[]>([]);
   const [products, setProducts] = useState<CatalogSkuRow[]>([]);
-  const [consumables, setConsumables] = useState<Awaited<ReturnType<typeof consumablesApi.list>>>([]);
-  const [kind, setKind] = useState<KindFilter>("all");
-  const [search, setSearch] = useState("");
+  const [taxRules, setTaxRules] = useState<TaxCategoryRule[]>([]);
+  const [kind, setKind] = useState<KindFilter>(() => {
+    const initial = new URLSearchParams(window.location.search).get("kind");
+    return initial === "consumable" || initial === "goods" ? initial : "all";
+  });
+  const [search, setSearch] = useState(() => new URLSearchParams(window.location.search).get("q") ?? "");
   const [bundleSearch, setBundleSearch] = useState("");
   const [err, setErr] = useState("");
   const [msg, setMsg] = useState("");
@@ -205,12 +351,26 @@ export default function ProductsPage() {
   const [bulkTaxCode, setBulkTaxCode] = useState("");
   const [bulkOverwrite, setBulkOverwrite] = useState(false);
   const [bulkSaving, setBulkSaving] = useState(false);
+  const [bundleDeleting, setBundleDeleting] = useState(false);
+  const [exportingMaster, setExportingMaster] = useState<MasterDataset | null>(null);
+  const [importingMaster, setImportingMaster] = useState<MasterDataset | null>(null);
+
+  const canEdit = currentUser?.roles.some((role) => role === "admin" || role === "operator") ?? false;
+  const canDeleteBundles = currentUser?.roles.includes("admin") ?? false;
 
   useEffect(() => {
-    const productTab = new URLSearchParams(window.location.search).get("productTab");
-    if (productTab === "inventory") window.location.replace("/purchase/workbench?view=inventory_goods");
-    else if (productTab === "consumables") setTab("consumables");
+    fetchMe().then(setCurrentUser).catch(() => setCurrentUser(null));
+  }, []);
+
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const productTab = params.get("productTab");
+    if (productTab === "inventory") window.location.replace("/inventory?tab=goods");
+    else if (productTab === "consumables") window.location.replace("/products?kind=consumable");
     else if (productTab === "bundles") setTab("bundles");
+    else if (productTab === "tax-rules") setTab("taxRules");
+    const requestedKind = params.get("kind");
+    if (requestedKind === "goods" || requestedKind === "consumable") setKind(requestedKind);
   }, []);
 
   const load = useCallback(() => {
@@ -218,29 +378,32 @@ export default function ProductsPage() {
       dashboardApi.inventory(),
       dashboardApi.catalogUnified("all", search),
       dashboardApi.products(""),
-      consumablesApi.list(""),
+      taxAccountingApi.categoryRules(),
     ])
-      .then(([inventory, unified, skuRows, materialRows]) => {
-        setInv(inventory); setCatalog(unified); setProducts(skuRows); setConsumables(materialRows);
+      .then(([inventory, unified, skuRows, rulePayload]) => {
+        setInv(inventory); setCatalog(unified); setProducts(skuRows); setTaxRules(rulePayload.items || []);
       })
       .catch((e) => setErr(String(e)));
   }, [search]);
   useEffect(() => { const t = setTimeout(load, 200); return () => clearTimeout(t); }, [load]);
 
   const counts = useMemo(() => ({
-    goods: catalog.filter((r) => r.kind === "goods").length,
-    bundles: catalog.filter((r) => r.kind === "goods" && r.category === "virtual_bundle").length,
+    bundles: catalog.filter((r) => r.kind === "goods" && (r.category === "bundle" || r.category === "virtual_bundle")).length,
+    baseGoods: catalog.filter((r) => r.kind === "goods" && r.category === "single").length,
     consumable: catalog.filter((r) => r.kind === "consumable").length,
-    low: catalog.filter((r) => r.lowStock).length,
   }), [catalog]);
 
   const bundleRows = useMemo(() => {
     const term = bundleSearch.trim().toLowerCase();
-    return catalog.filter((r) => r.kind === "goods" && r.category === "virtual_bundle")
+    return catalog.filter((r) => r.kind === "goods" && (r.category === "bundle" || r.category === "virtual_bundle"))
       .filter((r) => !term || `${r.code} ${r.name} ${r.barcode}`.toLowerCase().includes(term));
   }, [catalog, bundleSearch]);
+  const selectedBundleIds = useMemo(
+    () => bundleRows.filter((row) => selected.has(`${row.kind}-${row.id}`)).map((row) => row.id),
+    [bundleRows, selected],
+  );
   const catalogRows = useMemo(() => {
-    const base = catalog.filter((r) => !(r.kind === "goods" && r.category === "virtual_bundle"));
+    const base = catalog.filter((r) => !(r.kind === "goods" && (r.category === "bundle" || r.category === "virtual_bundle")));
     if (kind === "all") return base;
     return base.filter((r) => r.kind === kind);
   }, [catalog, kind]);
@@ -267,7 +430,7 @@ export default function ProductsPage() {
       await dashboardApi.updateCategory(row.kind, row.id, value);
       setMsg(`${row.code} 品类已更新为「${value || "空"}」`);
       load();
-    } catch (e) { setErr(String(e)); }
+    } catch (e) { setErr(String(e)); throw e; }
   };
   const applyBulkTaxCode = async () => {
     const items = [...selected].map((key) => { const [kind, id] = key.split("-"); return { kind: kind as "goods" | "consumable", id: Number(id) }; });
@@ -280,23 +443,117 @@ export default function ProductsPage() {
       load();
     } catch (e) { setErr(String(e)); } finally { setBulkSaving(false); }
   };
+  const deleteSelectedBundles = async () => {
+    if (!canDeleteBundles || !selectedBundleIds.length || bundleDeleting) return;
+    const confirmed = window.confirm(
+      `确认删除选中的 ${selectedBundleIds.length} 个套装档案？已被历史业务引用的档案不会删除。`,
+    );
+    if (!confirmed) return;
+    setBundleDeleting(true);
+    setErr("");
+    try {
+      const result = await dashboardApi.bulkDeleteBundles(selectedBundleIds);
+      setSelected((prev) => {
+        const next = new Set(prev);
+        result.deletedIds.forEach((id) => next.delete(`goods-${id}`));
+        return next;
+      });
+      if (result.blocked.length) {
+        const codes = result.blocked.map((item) => item.skuCode).join("、");
+        setMsg(`套装批量删除完成：已删除 ${result.deleted} 个，${result.blocked.length} 个因历史业务引用保留`);
+        setErr(`以下档案未删除：${codes}。请保留或改为停用。`);
+      } else {
+        setMsg(`套装批量删除完成：已删除 ${result.deleted} 个`);
+      }
+      load();
+    } catch (e) {
+      setErr(String(e));
+    } finally {
+      setBundleDeleting(false);
+    }
+  };
   const saveProduct = async (event: React.FormEvent) => {
     event.preventDefault();
-    try { await dashboardApi.saveProduct({ ...productForm, sku_id: editing || undefined }); setMsg(editing ? "货品档案已修改" : "货品档案已新建"); setEditing(null); load(); } catch (e) { setErr(String(e)); }
+    try {
+      await dashboardApi.saveProduct({
+        ...productForm,
+        sku_id: editing || undefined,
+        tax_category_rule_id: productForm.tax_category_rule_id ? Number(productForm.tax_category_rule_id) : undefined,
+      });
+      setMsg(editing ? "货品档案已修改" : "货品档案已新建"); setEditing(null); load();
+    } catch (e) { setErr(String(e)); }
   };
   const startEditProduct = (row: UnifiedCatalogRow) => {
     setEditing(row.id);
-    setProductForm({ jackyun_sku_id: "", sku_code: row.code, product_type: row.category in TYPE_LABEL ? row.category : "single", sku_name: row.name, barcode: row.barcode, unit: row.unit, sale_price: row.salePrice || "", default_cost: row.defaultCost || "", cost_mode: row.costMode || "fixed", cost_tolerance_pct: row.costTolerancePct || "0.0200", tax_code: row.taxCode || "", goods_category: row.goodsCategory || "", status: row.status });
+    setProductForm({ jackyun_sku_id: "", sku_code: row.code, product_type: row.category in TYPE_LABEL ? row.category : "single", sku_name: row.name, barcode: row.barcode, unit: row.unit, sale_price: row.salePrice || "", default_cost: row.defaultCost || "", cost_mode: row.costMode || "fixed", cost_tolerance_pct: row.costTolerancePct || "0.0200", tax_code: row.taxCode || "", tax_category_rule_id: row.taxCategoryRuleId ? String(row.taxCategoryRuleId) : "", goods_category: row.goodsCategory || "", status: row.status });
   };
-  const startNewProduct = () => { setEditing(0); setProductForm(emptyProduct); setTab("catalog"); };
-  const importWorkbook = async (event: React.ChangeEvent<HTMLInputElement>) => { const file = event.target.files?.[0]; if (!file) return; try { const result = await consumablesApi.importXlsx(file); setMsg(`已导入：新增 ${result.created}、更新 ${result.updated}、映射 ${result.mappings}`); load(); } catch (e) { setErr(String(e)); } event.target.value = ""; };
+  const startNewProduct = () => { if (!canEdit) return; setEditing(0); setProductForm(emptyProduct); setTab("catalog"); };
+  const exportMasterData = async (dataset: MasterDataset, label: string, template = false) => {
+    setExportingMaster(dataset);
+    setErr("");
+    try {
+      const params = new URLSearchParams();
+      if (dataset === "catalog") {
+        if (kind !== "all") params.set("kind", kind);
+        if (search.trim()) params.set("q", search.trim());
+      } else if (dataset === "bundles" && bundleSearch.trim()) {
+        params.set("q", bundleSearch.trim());
+      }
+      if (template) params.set("template", "true");
+      const query = params.toString();
+      const endpoint = dataset === "catalog" ? "catalog" : dataset;
+      const result = await authenticatedFetch(`/api/v1/data/export/${endpoint}${query ? `?${query}` : ""}`, { cache: "no-store" });
+      if (!result.ok) {
+        const body = await result.json().catch(() => ({})) as { detail?: unknown };
+        throw new Error(typeof body.detail === "string" ? body.detail : `导出失败（${result.status}）`);
+      }
+      const blob = await result.blob();
+      const disposition = result.headers.get("content-disposition") || "";
+      const encodedName = disposition.match(/filename\*=UTF-8''([^;]+)/i)?.[1];
+      const filename = encodedName ? decodeURIComponent(encodedName) : `${label}-${template ? "模板" : "核验"}.xlsx`;
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = filename;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+      const count = result.headers.get("x-export-row-count");
+      setMsg(`${label}${template ? "模板" : "已导出"}${!template && count ? `（${count} 条）` : ""}`);
+    } catch (e) {
+      setErr(String(e));
+    } finally {
+      setExportingMaster(null);
+    }
+  };
+  const importMasterData = async (dataset: MasterDataset, label: string, file: File | undefined) => {
+    if (!file) return;
+    setImportingMaster(dataset);
+    setErr("");
+    try {
+      const result = await masterDataApi.importXlsx(dataset, file);
+      const mappings = result.mappingsCreated || result.mappingsRemoved
+        ? `，映射新增 ${result.mappingsCreated ?? 0}、移除 ${result.mappingsRemoved ?? 0}`
+        : "";
+      const linked = result.linkedProducts || result.linkedConsumables
+        ? `，已同步关联货品 ${result.linkedProducts ?? 0}、耗材 ${result.linkedConsumables ?? 0}`
+        : "";
+      setMsg(`${label}已导入：新增 ${result.created}、更新 ${result.updated}${mappings}${linked}`);
+      load();
+    } catch (e) {
+      setErr(String(e));
+    } finally {
+      setImportingMaster(null);
+    }
+  };
 
   const openConsumableEditor = (row?: UnifiedCatalogRow) => {
     if (row) {
       setConsumableDraft({
         id: row.id, code: row.code, name: row.name, barcode: row.barcode,
         category: row.category, unit: row.unit,
-        purchase_unit_cost: "", min_stock_qty: row.minStock || "", tax_code: row.taxCode || "",
+        purchase_unit_cost: "", min_stock_qty: row.minStock || "", tax_code: row.taxCode || "", tax_category_rule_id: row.taxCategoryRuleId ? String(row.taxCategoryRuleId) : "",
         sku_ids: row.linkedSkus.map((s) => s.skuId),
       });
       setConsumableEditor(row.id);
@@ -305,19 +562,6 @@ export default function ProductsPage() {
       setConsumableEditor("new");
     }
     setTab("catalog");
-    setSkuSearch("");
-  };
-  const openConsumableEditorById = (id: number) => {
-    const row = consumables.find((c) => c.id === id);
-    if (!row) return;
-    setConsumableDraft({
-      id: row.id, code: row.code, name: row.name, barcode: row.barcode || "",
-      category: row.category, unit: row.unit,
-      purchase_unit_cost: row.purchaseUnitCost ?? "", min_stock_qty: row.minStockQty,
-      tax_code: row.taxCode || "",
-      sku_ids: (row.linkedSkus || []).map((s) => s.skuId),
-    });
-    setConsumableEditor(row.id);
     setSkuSearch("");
   };
   const toggleLinkedSku = (skuId: number) => {
@@ -337,6 +581,7 @@ export default function ProductsPage() {
         purchase_unit_cost: consumableDraft.purchase_unit_cost || null,
         min_stock_qty: consumableDraft.min_stock_qty || "0",
         tax_code: consumableDraft.tax_code,
+        tax_category_rule_id: consumableDraft.tax_category_rule_id ? Number(consumableDraft.tax_category_rule_id) : undefined,
         sku_ids: consumableDraft.sku_ids,
       });
       setMsg(consumableEditor === "new" ? "耗材档案已建立（库存请通过采购收货或库存流水登记）" : "耗材档案已更新");
@@ -362,78 +607,64 @@ export default function ProductsPage() {
     <button onClick={applyBulkTaxCode} disabled={bulkSaving || !bulkTaxCode.trim()} className="rounded bg-blue-600 px-3 py-1.5 font-medium text-white hover:bg-blue-700 disabled:opacity-50">{bulkSaving ? "保存中…" : "批量设置税务代码"}</button>
     <button onClick={() => setSelected(new Set())} className="rounded border bg-white px-3 py-1.5 text-gray-600 hover:bg-gray-50">取消选择</button>
   </div>;
+  const bundleBulkBar = selectedBundleIds.length > 0 && <div className="mt-3 flex flex-wrap items-center gap-2 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-xs">
+    <span className="font-medium text-rose-700">已选 {selectedBundleIds.length} 个套装</span>
+    <span className="text-rose-600">仅删除没有历史业务引用的档案</span>
+    {canDeleteBundles
+      ? <button onClick={() => void deleteSelectedBundles()} disabled={bundleDeleting} className="rounded bg-rose-600 px-3 py-1.5 font-medium text-white hover:bg-rose-700 disabled:cursor-wait disabled:opacity-50">{bundleDeleting ? "删除中…" : "批量删除"}</button>
+      : <span title="仅管理员可批量删除套装档案" className="rounded border border-rose-200 bg-white px-3 py-1.5 text-rose-400">批量删除（仅管理员）</span>}
+    <button onClick={() => setSelected(new Set())} className="rounded border bg-white px-3 py-1.5 text-gray-600 hover:bg-gray-50">取消选择</button>
+  </div>;
+  const inventoryUpdatedLabel = inv?.lastDocumentAt ? new Date(inv.lastDocumentAt).toLocaleString("zh-CN") : "暂无";
 
   return <div>
-    <div className="sticky top-0 z-20 -mx-8 -mt-6 flex flex-wrap items-end justify-between gap-3 border-b border-gray-200 bg-white/95 px-8 py-5 backdrop-blur">
+    <div className="sticky top-0 z-20 -mx-8 -mt-6 border-b border-gray-200 bg-white/95 px-8 py-5 backdrop-blur">
       <div>
         <h1 className="text-xl font-semibold">货品档案</h1>
-        <p className="mt-1 text-sm text-gray-400">正品、耗材、组合套装的新增、编辑、关联和导入都在本页完成；业务配置不再放到系统设置。</p>
-      </div>
-      <div className="flex flex-wrap gap-2">
-        <button onClick={startNewProduct} className="rounded-lg bg-blue-600 px-3 py-2 text-sm font-medium text-white hover:bg-blue-700">+ 新建正品</button>
-        <button onClick={() => openConsumableEditor()} className="rounded-lg bg-amber-500 px-3 py-2 text-sm font-medium text-white hover:bg-amber-600">+ 新建耗材</button>
-        <label className="cursor-pointer rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm font-medium text-gray-600 hover:bg-gray-50">导入耗材档案<input type="file" accept=".xlsx,.xls" className="hidden" onChange={importWorkbook} /></label>
+        <p className="mt-1 text-sm text-gray-400">货品档案、套装档案、财务分类分别维护，并各自提供独立导入导出模板。</p>
       </div>
     </div>
 
     {err && <div className="mt-4 rounded-lg bg-red-50 p-3 text-sm text-red-700">{err}<button className="ml-3" onClick={() => setErr("")}>关闭</button></div>}
     {msg && <div className="mt-4 rounded-lg bg-green-50 p-3 text-sm text-green-700">{msg}</div>}
-    <div className="mt-5 grid grid-cols-4 gap-4">
-      <MetricCard label="正品 SKU 数" value={String(counts.goods)} />
-      <MetricCard label="组合套装" value={String(counts.bundles)} />
-      <MetricCard label="耗材种类" value={String(counts.consumable)} />
-      <MetricCard label="最新吉客云快照" value={inv?.snapshotAt ? new Date(inv.snapshotAt).toLocaleString("zh-CN") : "—"} />
-    </div>
 
     <div className="mt-6 flex gap-2 border-b border-gray-200">
-      {([["catalog", "货品档案"], ["bundles", `组合套装 ${counts.bundles}`], ["consumables", "耗材库"]] as const).map(([key, label]) => (
-        <button key={key} className={`px-4 py-2 text-sm ${tab === key ? "border-b-2 border-blue-600 font-medium text-blue-600" : "text-gray-500"}`} onClick={() => setTab(key)}>{label}</button>
+      {([["catalog", "货品档案"], ["bundles", "套装档案"], ["taxRules", "财务分类"]] as const).map(([key, label]) => (
+        <button key={key} className={`px-4 py-2 text-sm ${tab === key ? "border-b-2 border-blue-600 font-medium text-blue-600" : "text-gray-500"}`} onClick={() => { setTab(key); setSelected(new Set()); }}>{label}</button>
       ))}
     </div>
-    <p className="mt-2 text-xs text-gray-400">说明：条码允许正品与耗材相同，系统按「类型 + 编码」区分，条码不作主键；组合套装（ES 开头，A+B+C 等不同商品不同数量的组合）已单独归纳到「组合套装」页签；耗材编码建议 HC-CH- + 条形码（同品多耗材加后缀 -BX/-LB/-CT）。</p>
-
-    {tab !== "consumables" && bulkBar}
+    <p className="mt-2 text-xs text-gray-400">说明：货品档案仅包含单品和耗材；套装档案单独管理 bundle / virtual_bundle；财务分类规则独立维护并可被货品引用，条码不作主键。</p>
 
     {tab === "catalog" && <section className="mt-4 rounded-xl border border-gray-200 bg-white p-4">
       <div className="flex flex-wrap items-center justify-between gap-3">
-        <div><h2 className="text-sm font-medium text-gray-700">统一货品档案</h2><p className="mt-1 text-xs text-gray-400">正品（品）继续走吉客云流程；耗材（耗）在本系统维护采购、收货与库存。</p></div>
+        <div><h2 className="text-sm font-medium text-gray-700">货品档案</h2><p className="mt-1 text-xs text-gray-400">正品（品）继续走吉客云流程；耗材（耗）在本页维护档案和 SKU 映射，库存与流转请到仓库管理。</p><p className="mt-1 text-[11px] text-gray-400">最新库存数据：{inventoryUpdatedLabel}</p></div>
         <div className="flex flex-wrap items-center gap-2">
-          <div className="flex rounded-lg border border-gray-200 p-0.5 text-xs">{([["all", `全部 ${catalogRows.length}`], ["goods", `正品 ${counts.goods - counts.bundles}`], ["consumable", `耗材 ${counts.consumable}`]] as const).map(([key, label]) => (<button key={key} onClick={() => setKind(key)} className={`rounded-md px-2.5 py-1.5 ${kind === key ? "bg-blue-50 font-medium text-blue-600" : "text-gray-500 hover:bg-gray-50"}`}>{label}</button>))}</div>
+          {canEdit && <><button onClick={startNewProduct} className="rounded-lg bg-blue-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-blue-700">+ 新建正品</button>
+          <button onClick={() => openConsumableEditor()} className="rounded-lg bg-amber-500 px-3 py-1.5 text-xs font-medium text-white hover:bg-amber-600">+ 新建耗材</button></>}
+          <MasterDataActions dataset="catalog" label="货品档案" canEdit={canEdit} exporting={exportingMaster} importing={importingMaster} onExport={exportMasterData} onImport={importMasterData} />
+          <div className="flex rounded-lg border border-gray-200 p-0.5 text-xs">{([["all", `全部 ${catalogRows.length}`], ["goods", `正品 ${counts.baseGoods}`], ["consumable", `耗材 ${counts.consumable}`]] as const).map(([key, label]) => (<button key={key} onClick={() => setKind(key)} className={`rounded-md px-2.5 py-1.5 ${kind === key ? "bg-blue-50 font-medium text-blue-600" : "text-gray-500 hover:bg-gray-50"}`}>{label}</button>))}</div>
           <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="搜索编码、条码或名称" className="w-56 rounded-lg border px-3 py-1.5 text-sm" />
         </div>
       </div>
 
-      {editing !== null && <form onSubmit={saveProduct} className="mt-4 grid grid-cols-6 gap-2 rounded-lg bg-blue-50 p-3 text-xs">
-        <input placeholder="吉客云 SKU ID（可空）" value={productForm.jackyun_sku_id} onChange={(e) => setProductForm({ ...productForm, jackyun_sku_id: e.target.value })} className="rounded border px-2 py-1.5" />
-        <input required placeholder="SKU 编码" value={productForm.sku_code} onChange={(e) => setProductForm({ ...productForm, sku_code: e.target.value })} className="rounded border px-2 py-1.5" />
-        <select value={productForm.product_type} onChange={(e) => setProductForm({ ...productForm, product_type: e.target.value })} className="rounded border px-2 py-1.5"><option value="single">单品</option><option value="bundle">套装</option><option value="virtual_bundle">虚拟组合套装</option></select>
-        <input required placeholder="货品名称/规格" value={productForm.sku_name} onChange={(e) => setProductForm({ ...productForm, sku_name: e.target.value })} className="rounded border px-2 py-1.5" />
-        <input placeholder="条码" value={productForm.barcode} onChange={(e) => setProductForm({ ...productForm, barcode: e.target.value })} className="rounded border px-2 py-1.5" />
-        <input placeholder="单位" value={productForm.unit} onChange={(e) => setProductForm({ ...productForm, unit: e.target.value })} className="rounded border px-2 py-1.5" />
-        <input placeholder="售价" value={productForm.sale_price} onChange={(e) => setProductForm({ ...productForm, sale_price: e.target.value })} className="rounded border px-2 py-1.5" />
-        <input placeholder="默认成本" value={productForm.default_cost} onChange={(e) => setProductForm({ ...productForm, default_cost: e.target.value })} className="rounded border px-2 py-1.5" />
-        <select value={productForm.cost_mode} onChange={(e) => setProductForm({ ...productForm, cost_mode: e.target.value })} className="rounded border px-2 py-1.5"><option value="fixed">固定成本</option><option value="dynamic">动态成本</option></select>
-        <input placeholder="容差(如0.02)" value={productForm.cost_tolerance_pct} onChange={(e) => setProductForm({ ...productForm, cost_tolerance_pct: e.target.value })} className="rounded border px-2 py-1.5" />
-        <input placeholder="税务代码（税收分类编码）" title="开票用商品和服务税收分类编码（19 位，兼容旧 10 位简称）" value={productForm.tax_code} onChange={(e) => setProductForm({ ...productForm, tax_code: e.target.value })} className="rounded border px-2 py-1.5 font-mono" />
-        <input placeholder="品类（如 咖啡豆/饼干）" title="货品品类，来自吉客云同步，可本地修改" value={productForm.goods_category} onChange={(e) => setProductForm({ ...productForm, goods_category: e.target.value })} className="rounded border px-2 py-1.5" />
-        <select value={productForm.status} onChange={(e) => setProductForm({ ...productForm, status: e.target.value })} className="rounded border px-2 py-1.5"><option value="active">启用</option><option value="inactive">停用</option></select>
-        <div className="flex gap-2"><button type="submit" className="rounded bg-blue-600 px-3 py-1.5 text-white">保存</button><button type="button" onClick={() => setEditing(null)} className="rounded border px-3 py-1.5">取消</button></div>
-      </form>}
+      {editing === 0 && <ProductEditor form={productForm} setForm={setProductForm} onSubmit={saveProduct} onCancel={() => setEditing(null)} taxRules={taxRules} />}
 
       {bulkBar}
-      <CatalogTable rows={catalogRows} onEditConsumable={openConsumableEditor} onEditProduct={startEditProduct} onToggleCostMode={saveCostMode} onSaveCategory={saveCategory} selected={selected} onToggleRow={toggleRow} onToggleAll={() => toggleAll(catalogRows)} />
+      <CatalogTable rows={catalogRows} onEditConsumable={openConsumableEditor} onEditProduct={startEditProduct} onToggleCostMode={saveCostMode} onSaveCategory={saveCategory} selected={selected} onToggleRow={toggleRow} onToggleAll={() => toggleAll(catalogRows)} editingProductId={editing} productForm={productForm} setProductForm={setProductForm} onSaveProduct={saveProduct} onCancelProduct={() => setEditing(null)} taxRules={taxRules} canEdit={canEdit} />
     </section>}
 
     {tab === "bundles" && <section className="mt-4 rounded-xl border border-gray-200 bg-white p-4">
-      <div className="flex flex-wrap items-center justify-between gap-3"><div><h2 className="text-sm font-medium text-gray-700">组合套装（虚拟）</h2><p className="mt-1 text-xs text-gray-400">ES 开头的虚拟组合套装：不同商品、不同数量的组合（如 A+B+C）；库存仍归吉客云管理，此处仅做档案归纳，不出现在采购单 SKU 候选中。</p></div><input value={bundleSearch} onChange={(e) => setBundleSearch(e.target.value)} placeholder="搜索编码、条码或名称" className="w-56 rounded-lg border px-3 py-1.5 text-sm" /></div>
-      <CatalogTable rows={bundleRows} onEditConsumable={openConsumableEditor} onEditProduct={startEditProduct} onToggleCostMode={saveCostMode} onSaveCategory={saveCategory} selected={selected} onToggleRow={toggleRow} onToggleAll={() => toggleAll(bundleRows)} />
+      <div className="flex flex-wrap items-center justify-between gap-3"><div><div className="flex items-center gap-2"><h2 className="text-sm font-medium text-gray-700">套装档案</h2><span className="rounded-full bg-indigo-50 px-2 py-0.5 text-[11px] text-indigo-600">{counts.bundles} 个 SKU</span></div><p className="mt-1 text-xs text-gray-400">单独维护套装与虚拟组合套装 SKU 主档；当前系统没有套装组成明细表，因此模板只维护主档字段，不虚构组成关系。</p></div><div className="flex flex-wrap items-center gap-2"><MasterDataActions dataset="bundles" label="套装" canEdit={canEdit} exporting={exportingMaster} importing={importingMaster} onExport={exportMasterData} onImport={importMasterData} /><input value={bundleSearch} onChange={(e) => setBundleSearch(e.target.value)} placeholder="搜索编码、条码或名称" className="w-56 rounded-lg border px-3 py-1.5 text-sm" /></div></div>
+      {bundleBulkBar}
+      <CatalogTable rows={bundleRows} onEditConsumable={openConsumableEditor} onEditProduct={startEditProduct} onToggleCostMode={saveCostMode} onSaveCategory={saveCategory} selected={selected} onToggleRow={toggleRow} onToggleAll={() => toggleAll(bundleRows)} editingProductId={editing} productForm={productForm} setProductForm={setProductForm} onSaveProduct={saveProduct} onCancelProduct={() => setEditing(null)} taxRules={taxRules} canEdit={canEdit} />
     </section>}
 
-    {tab === "consumables" && <><ConsumableWorkbench rows={consumables} products={products} reload={load} notify={setMsg} fail={setErr} onImport={importWorkbook} onEdit={openConsumableEditorById} onCreate={() => openConsumableEditor()} />
-    <section className="mt-4 rounded-xl border border-gray-200 bg-white p-4"><h2 className="text-sm font-medium text-gray-700">耗材使用进度</h2><p className="mt-1 text-xs text-gray-400">使用率 = 已使用量 ÷ 采购量。</p><table className="mt-4 w-full text-sm"><thead className="text-left text-xs text-gray-500"><tr><th className="py-2">代码</th><th className="py-2">名称</th><th className="py-2 text-right">采购量</th><th className="py-2 text-right">已使用</th><th className="py-2 text-right">剩余</th><th className="py-2">进度</th></tr></thead><tbody className="divide-y divide-gray-100">{consumables.map((row) => { const rate = Math.min(Math.max(Number(row.usageRate || 0), 0), 1); return <tr key={row.id}><td className="py-2 font-mono text-xs">{row.code}</td><td className="py-2">{row.name}</td><td className="py-2 text-right">{qty(row.purchasedQty)} {row.unit}</td><td className="py-2 text-right">{qty(row.usedQty)} {row.unit}</td><td className="py-2 text-right">{qty(row.stockQty)} {row.unit}</td><td className="w-64 py-2"><div className="flex items-center gap-2"><div className="h-2 flex-1 rounded bg-gray-100"><div className="h-2 rounded bg-blue-600" style={{ width: `${rate * 100}%` }} /></div><span className="w-12 text-right text-xs text-gray-500">{(rate * 100).toFixed(1)}%</span></div></td></tr>; })}</tbody></table></section>
-    <div className="mt-4 rounded-xl border border-blue-100 bg-blue-50 px-4 py-3 text-sm text-blue-700"><span>耗材采购的 1688 订单与正常货品单同列在采购工作台跟进。</span><a href="/purchase/workbench?view=orders" className="ml-2 font-medium underline">前往订单视图</a></div></>}
+    {tab === "taxRules" && <>
+      <div className="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-indigo-100 bg-indigo-50/60 px-4 py-3"><div><h2 className="text-sm font-semibold text-indigo-900">财务分类档案</h2><p className="mt-1 text-xs text-indigo-700">分类规则、匹配方式和税务代码独立导入导出；修改已关联规则后，货品税务代码会同步更新。</p></div><MasterDataActions dataset="tax_rules" label="财务分类" canEdit={canEdit} exporting={exportingMaster} importing={importingMaster} onExport={exportMasterData} onImport={importMasterData} /></div>
+      <TaxCategoryRulesPanel onChanged={load} canEdit={canEdit} />
+    </>}
 
-    {consumableEditor !== null && <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/30 p-4" onMouseDown={(e) => { if (e.target === e.currentTarget) setConsumableEditor(null); }}>
+    {consumableEditor !== null && <div className="fixed inset-0 z-modal flex items-center justify-center bg-slate-900/30 p-4" onMouseDown={(e) => { if (e.target === e.currentTarget) setConsumableEditor(null); }}>
       <form onSubmit={saveConsumable} className="max-h-[92vh] w-full max-w-2xl overflow-auto rounded-2xl bg-white p-5 shadow-2xl">
         <div className="flex items-start justify-between"><div><h3 className="text-base font-semibold text-slate-800">{consumableEditor === "new" ? "新建耗材档案" : "编辑耗材档案"}</h3><p className="mt-1 text-xs text-slate-400">编码首次手填（建议 HC-CH- + 条形码）；库存不在此修改，请走采购收货或库存流水。</p></div><button type="button" onClick={() => setConsumableEditor(null)} className="text-xl leading-none text-slate-300 hover:text-slate-500">×</button></div>
         <div className="mt-5 grid grid-cols-2 gap-3 text-xs">
@@ -442,7 +673,8 @@ export default function ProductsPage() {
           <label>条形码<input value={consumableDraft.barcode} onChange={(e) => setConsumableDraft({ ...consumableDraft, barcode: e.target.value })} placeholder="可与正品条码相同" className="mt-1.5 h-9 w-full rounded-lg border border-slate-200 px-3 outline-none focus:border-amber-400" /></label>
           <label>单位<input required value={consumableDraft.unit} onChange={(e) => setConsumableDraft({ ...consumableDraft, unit: e.target.value })} className="mt-1.5 h-9 w-full rounded-lg border border-slate-200 px-3 outline-none focus:border-amber-400" /></label>
           <label>分类<input value={consumableDraft.category} onChange={(e) => setConsumableDraft({ ...consumableDraft, category: e.target.value })} className="mt-1.5 h-9 w-full rounded-lg border border-slate-200 px-3 outline-none focus:border-amber-400" /></label>
-          <label>税务代码<input value={consumableDraft.tax_code} onChange={(e) => setConsumableDraft({ ...consumableDraft, tax_code: e.target.value })} placeholder="税收分类编码（开票用）" className="mt-1.5 h-9 w-full rounded-lg border border-slate-200 px-3 font-mono outline-none focus:border-amber-400" /></label>
+          <label>财务分类规则<select value={consumableDraft.tax_category_rule_id} onChange={(e) => { const id = e.target.value; const rule = taxRules.find((item) => String(item.id) === id); setConsumableDraft({ ...consumableDraft, tax_category_rule_id: id, tax_code: rule?.taxCode || consumableDraft.tax_code }); }} className="mt-1.5 h-9 w-full rounded-lg border border-slate-200 bg-white px-3 outline-none focus:border-amber-400"><option value="">不关联财务分类</option>{taxRules.map((rule) => <option key={rule.id} value={rule.id}>{rule.categoryName} · {rule.itemName}{rule.taxCode ? ` · ${rule.taxCode}` : " · 未配置代码"}</option>)}</select></label>
+          <label>税务代码<input value={consumableDraft.tax_code} onChange={(e) => setConsumableDraft({ ...consumableDraft, tax_code: e.target.value.replace(/\D/g, ""), tax_category_rule_id: "" })} placeholder="税收分类编码（开票用）" className="mt-1.5 h-9 w-full rounded-lg border border-slate-200 px-3 font-mono outline-none focus:border-amber-400" /></label>
           <label>安全库存<input value={consumableDraft.min_stock_qty} onChange={(e) => setConsumableDraft({ ...consumableDraft, min_stock_qty: e.target.value })} placeholder="0 = 不预警" className="mt-1.5 h-9 w-full rounded-lg border border-slate-200 px-3 outline-none focus:border-amber-400" /></label>
           <label className="col-span-2">参考采购单价<input value={consumableDraft.purchase_unit_cost} onChange={(e) => setConsumableDraft({ ...consumableDraft, purchase_unit_cost: e.target.value })} placeholder="可空，收货时按实付更新" className="mt-1.5 h-9 w-full rounded-lg border border-slate-200 px-3 outline-none focus:border-amber-400" /></label>
         </div>

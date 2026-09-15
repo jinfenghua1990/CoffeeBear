@@ -316,7 +316,9 @@ def merge_suggestions(db: Session, limit: int = 30) -> dict[str, Any]:
         po for po in db.query(ExternalPurchaseOrder).filter(
             ExternalPurchaseOrder.purchase_status == "confirmed"
         ).order_by(ExternalPurchaseOrder.ordered_at.desc(), ExternalPurchaseOrder.id.desc()).all()
-        if po.id not in linked_order_ids and _d(po.effective_paid_amount or po.order_amount) > 0
+        if po.id not in linked_order_ids
+        and (po.raw or {}).get("referenceOnly") is not True
+        and _d(po.effective_paid_amount or po.order_amount) > 0
     ]
     jpos = [
         row for row in db.query(JackyunPurchaseOrder).order_by(JackyunPurchaseOrder.id.desc()).all()

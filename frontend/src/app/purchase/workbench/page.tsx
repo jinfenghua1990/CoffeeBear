@@ -1,7 +1,7 @@
 "use client";
 
 import NextLink from "next/link";
-import { useSearchParams } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type ComponentProps, type ReactNode } from "react";
 import { WORKBENCH_VIEWS, parseWorkbenchView, workbenchHref, type WorkbenchView } from "@/lib/workbench-navigation";
 import { WorkspaceModule } from "./workspace-modules";
@@ -9,18 +9,17 @@ import { NewPurchaseModal } from "./new-purchase-modal";
 import { RelatedRecordsPanel } from "./related-records-panel";
 import { SearchableSelect } from "./searchable-select";
 import { QuickTriage, canonicalChainOrderId } from "./quick-triage";
+import { SupplyChainReplica, type SupplyChainChannelFilter, type SupplyChainKindFilter, type SupplyChainStatusFilter } from "./supply-chain-replica";
 import { newRequestKey } from "@/lib/request-key";
 import {
   authenticatedFetch,
   consumablesApi,
   dashboardApi,
-  fetchMe,
-  logout,
   procurementBoardApi,
   procurementChainApi,
   procurementWorkbenchApi,
   skuMatchingApi,
-  type AuthUser,
+  warehousesApi,
   type BoardOverview,
   type CatalogSkuRow,
   type ConsumableMappingRow,
@@ -48,11 +47,28 @@ import {
   type WorkbenchSupplierDetail,
   type WorkbenchSupplierSummary,
   type WorkbenchSummary,
+  type WarehouseRow,
 } from "@/lib/api";
 
 type ViewMode = WorkbenchView;
-type FilterKey = "all" | "refine" | "po" | "inbound" | "invoice" | "exception" | "done";
+type FilterKey = SupplyChainStatusFilter;
 type ChainFilter = "all" | "gap" | "full";
+
+// 完整业务页保留自己的页面头和布局，避免再嵌套到采购工作台的第二层壳里。
+const STANDALONE_VIEW_ROUTES: Partial<Record<ViewMode, string>> = {
+  dashboard: "/",
+  sales: "/sales",
+  products: "/products",
+  inventory_goods: "/products/inventory-goods",
+  inventory_consumables: "/products/inventory-consumables",
+  payments: "/payments",
+  profit: "/profit",
+  finance: "/finance/monthly-send",
+  exceptions: "/exceptions",
+  automation: "/automation",
+  settings: "/settings",
+  imports: "/data-center-import",
+};
 
 /** 采购单状态流转（与 /purchase 执行中心一致） */
 const PO_STATUS: Record<string, string> = {
@@ -87,7 +103,6 @@ const STAGE_ACTION: Record<string, { href?: string; view?: ViewMode; act: string
   paid: { href: "/jackyun-import", act: "导入结算单" },
   verified: { href: "/tax-invoices", act: "查看发票清单" },
 };
-type DatePreset = "all" | "today" | "yesterday" | "week" | "month" | "custom";
 type IconName =
   | "dashboard"
   | "sales"
@@ -149,17 +164,7 @@ type InboundRow = {
 };
 
 
-const FILTERS: { key: FilterKey; label: string; summaryKey?: keyof WorkbenchSummary }[] = [
-  { key: "all", label: "全部" },
-  { key: "refine", label: "待完善", summaryKey: "pendingSku" },
-  { key: "po", label: "待生成采购单", summaryKey: "pendingPo" },
-  { key: "inbound", label: "待入库", summaryKey: "pendingInbound" },
-  { key: "invoice", label: "待开发票", summaryKey: "pendingInvoice" },
-  { key: "exception", label: "异常", summaryKey: "exceptionCount" },
-  { key: "done", label: "已完成" },
-];
-
-type ChannelKey = "all" | "1688" | "pdd" | "taobao" | "other";
+type ChannelKey = SupplyChainChannelFilter;
 
 /** 采购渠道：1688 / 拼多多 / 淘宝 / 其他。 */
 const CHANNELS: Record<string, { key: ChannelKey; label: string; dot: string; badge: string }> = {
@@ -280,7 +285,7 @@ const PURCHASE_STEP_LABELS: Record<string, string> = {
   jackyun_po: "待生成采购单",
   inbound: "待入库",
   invoice: "待发票",
-  closeout: "待收尾(发票/付款/认证)",
+  closeout: "待收尾(入库/发票/付款)",
 };
 
 function statusLabel(input: StatusInput) {
@@ -295,13 +300,13 @@ function statusLabel(input: StatusInput) {
         const state = input.stepStates?.[key];
         return state !== undefined && !state.done;
       }) ?? null;
-    // workbench 视图把收尾合并为 closeout（入库/发票/付款/认证）
+    // workbench 视图把收尾合并为 closeout（入库/发票/付款）；税务认证在 7 环节链路中单独展示
     if (!stepKey && input.stepStates.closeout && !input.stepStates.closeout.done) {
       stepKey = "closeout";
     }
   }
   if (!stepKey) return "已完成";
-  // 收尾环节拆到具体卡点：光写「待收尾」看不出是缺票还是缺认证
+  // 收尾环节拆到具体卡点：光写「待收尾」看不出是缺入库、缺票还是缺付款
   if (stepKey === "closeout" && input.closeoutStage) {
     const sub = CLOSEOUT_LABELS[input.closeoutStage];
     if (sub) return sub;
@@ -320,31 +325,8 @@ function statusClass(label: string) {
   if (label === "待收票" || label === "待开发票") return "bg-violet-50 text-violet-600";
   if (label === "待认证") return "bg-sky-50 text-sky-600";
   if (label === "待付款") return "bg-rose-50 text-rose-600";
-  if (label === "待发票" || label === "待收尾(发票/付款/认证)") return "bg-violet-50 text-violet-600";
+  if (label === "待发票" || label === "待收尾(入库/发票/付款)") return "bg-violet-50 text-violet-600";
   return "bg-orange-50 text-orange-600";
-}
-
-function groupOrders(items: WorkbenchOrderItem[]) {
-  const now = new Date();
-  const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
-  const groups: Record<string, WorkbenchOrderItem[]> = { today: [], yesterday: [], earlier: [], unknown: [] };
-  for (const item of items) {
-    const date = parseDate(item.orderDate);
-    if (!date) groups.unknown.push(item);
-    else if (date.getTime() >= todayStart) groups.today.push(item);
-    else if (date.getTime() >= todayStart - 86400000) groups.yesterday.push(item);
-    else groups.earlier.push(item);
-  }
-  const weekdays = ["日", "一", "二", "三", "四", "五", "六"];
-  const labelFor = (key: string, rows: WorkbenchOrderItem[]) => {
-    if (key === "today") return "今天　" + fmtDate(rows[0]?.orderDate).slice(5) + "（周" + weekdays[now.getDay()] + "）";
-    if (key === "yesterday") return "昨天　" + fmtDate(rows[0]?.orderDate).slice(5);
-    if (key === "earlier") return "更早采购";
-    return "未记录时间";
-  };
-  return ["today", "yesterday", "earlier", "unknown"]
-    .filter((key) => groups[key].length > 0)
-    .map((key) => ({ key, label: labelFor(key, groups[key]), items: groups[key] }));
 }
 
 function exportOrders(items: WorkbenchOrderItem[]) {
@@ -368,6 +350,7 @@ function exportOrders(items: WorkbenchOrderItem[]) {
 
 export default function PurchaseWorkbenchPage() {
   const searchParams = useSearchParams();
+  const router = useRouter();
   const initialView: ViewMode = (() => {
     const v = searchParams.get("view");
     return parseWorkbenchView(v);
@@ -378,11 +361,14 @@ export default function PurchaseWorkbenchPage() {
     const n = Number(raw);
     return Number.isInteger(n) && n !== 0 ? n : null;
   })();
+  const initialKind: SupplyChainKindFilter = (() => {
+    const kind = searchParams.get("kind");
+    return kind === "goods" || kind === "consumable" ? kind : "all";
+  })();
   const [view, setView] = useState<ViewMode>(initialView);
   const [newOrderOpen, setNewOrderOpen] = useState(false);
   const [page, setPage] = useState(1);
-  const pageSize = 20;
-  const [user, setUser] = useState<AuthUser | null>(null);
+  const pageSize = 50;
   const [summary, setSummary] = useState<WorkbenchSummary | null>(null);
   const [orders, setOrders] = useState<WorkbenchOrderItem[]>([]);
   const [outstandingTotal, setOutstandingTotal] = useState(0);
@@ -395,13 +381,14 @@ export default function PurchaseWorkbenchPage() {
   const [supplierDetail, setSupplierDetail] = useState<WorkbenchSupplierDetail | null>(null);
   const [statusFilter, setStatusFilter] = useState<FilterKey>("all");
   const [channelFilter, setChannelFilter] = useState<ChannelKey>("all");
+  const [kindFilter, setKindFilter] = useState<SupplyChainKindFilter>(initialKind);
+  const [warehouseFilter, setWarehouseFilter] = useState("");
   const [query, setQuery] = useState("");
-  const [searchDraft, setSearchDraft] = useState("");
+  const [searchDraft, setSearchDraft] = useState(() => searchParams.get("q") ?? "");
   const [supplierQuery, setSupplierQuery] = useState("");
   const [startDate, setStartDate] = useState("");
   const [endDate, setEndDate] = useState("");
-  const [datePreset, setDatePreset] = useState<DatePreset>("all");
-  const [showFilter, setShowFilter] = useState(false);
+  const [operationsOpen, setOperationsOpen] = useState(false);
   const [loading, setLoading] = useState(true);
   const [detailLoading, setDetailLoading] = useState(false);
   const [busyAction, setBusyAction] = useState("");
@@ -425,11 +412,22 @@ export default function PurchaseWorkbenchPage() {
     const orderId = Number(searchParams.get("order"));
     if (Number.isInteger(orderId) && orderId !== 0) { requestedOrder.current = orderId; setSelectedOrderId(orderId); }
     if (searchParams.get("action") === "new") setNewOrderOpen(true);
+    const status = searchParams.get("status");
+    if (["all", "refine", "po", "inbound", "invoice", "exception", "done"].includes(status ?? "")) {
+      setStatusFilter(status as FilterKey);
+    }
+    const kind = searchParams.get("kind");
+    setKindFilter(kind === "goods" || kind === "consumable" ? kind : "all");
   }, [searchParams]);
+
+  useEffect(() => {
+    const destination = STANDALONE_VIEW_ROUTES[view];
+    if (destination) router.replace(destination);
+  }, [router, view]);
 
   // 顶部固定栏高度写入 CSS 变量，sticky 详情栏据此定位，避免遮挡或漏缝
   useEffect(() => {
-    const el = document.querySelector<HTMLElement>("main > header");
+    const el = document.querySelector<HTMLElement>("main header");
     if (!el) return;
     const update = () => document.documentElement.style.setProperty("--wb-header-h", `${el.offsetHeight}px`);
     update();
@@ -438,12 +436,19 @@ export default function PurchaseWorkbenchPage() {
   }, [view]);
 
   function changeView(next: ViewMode) {
+    const standaloneRoute = STANDALONE_VIEW_ROUTES[next];
+    if (standaloneRoute) {
+      router.push(standaloneRoute);
+      return;
+    }
     setView(next);
     const params = new URLSearchParams(window.location.search);
     params.set("view", next);
     params.delete("action");
     if (selectedOrderId !== null) params.set("order", String(selectedOrderId));
-    window.history.pushState(null, "", `/purchase/workbench?${params}`);
+    if (next !== "orders") params.delete("status");
+    if (next === "suppliers") params.delete("order");
+    router.push(`/purchase/workbench?${params.toString()}`);
   }
 
   function selectOrder(orderId: number) {
@@ -453,11 +458,21 @@ export default function PurchaseWorkbenchPage() {
     params.set("view", "orders");
     params.set("order", String(orderId));
     params.delete("action");
-    window.history.replaceState(null, "", `/purchase/workbench?${params}`);
+    router.replace(`/purchase/workbench?${params.toString()}`);
     setView("orders");
   }
 
-  useEffect(() => { setPage(1); }, [statusFilter, startDate, endDate, query]);
+  function changeKind(nextKind: SupplyChainKindFilter) {
+    setKindFilter(nextKind);
+    const params = new URLSearchParams(window.location.search);
+    if (nextKind === "all") params.delete("kind");
+    else params.set("kind", nextKind);
+    router.replace(`/purchase/workbench?${params.toString()}`);
+  }
+
+  useEffect(() => { setPage(1); }, [statusFilter, channelFilter, kindFilter, warehouseFilter, startDate, endDate, query]);
+
+  useEffect(() => { setOperationsOpen(false); }, [selectedOrderId]);
 
   const loadSummary = useCallback(async () => {
     try { setSummary(await procurementWorkbenchApi.summary()); } catch { setSummary(null); }
@@ -485,6 +500,9 @@ export default function PurchaseWorkbenchPage() {
         pageSize,
         startDate: startDate || undefined,
         endDate: endDate || undefined,
+        channel: channelFilter,
+        kind: kindFilter,
+        warehouse: warehouseFilter || undefined,
       });
       const items = result.groups.flatMap((group) => group.items);
       setOrders(items);
@@ -501,7 +519,7 @@ export default function PurchaseWorkbenchPage() {
     } finally {
       setLoading(false);
     }
-  }, [endDate, query, startDate, statusFilter, page]);
+  }, [channelFilter, endDate, kindFilter, query, startDate, statusFilter, warehouseFilter, page]);
 
   const loadSuppliers = useCallback(async () => {
     setLoading(true);
@@ -632,7 +650,6 @@ export default function PurchaseWorkbenchPage() {
   }
 
   useEffect(() => {
-    fetchMe().then(setUser).catch(() => setUser(null));
     void loadSummary();
     void loadBoard();
     void loadFunnelTodos();
@@ -739,29 +756,6 @@ export default function PurchaseWorkbenchPage() {
     setBusyAction("");
   }
 
-  function applyDatePreset(preset: Exclude<DatePreset, "custom">) {
-    const today = new Date();
-    if (preset === "all") {
-      setStartDate("");
-      setEndDate("");
-    } else if (preset === "today") {
-      setStartDate(inputDate(today));
-      setEndDate(inputDate(today));
-    } else if (preset === "yesterday") {
-      const yesterday = new Date(today.getFullYear(), today.getMonth(), today.getDate() - 1);
-      setStartDate(inputDate(yesterday));
-      setEndDate(inputDate(yesterday));
-    } else if (preset === "week") {
-      const weekAgo = new Date(today.getFullYear(), today.getMonth(), today.getDate() - 6);
-      setStartDate(inputDate(weekAgo));
-      setEndDate(inputDate(today));
-    } else {
-      setStartDate(inputDate(new Date(today.getFullYear(), today.getMonth(), 1)));
-      setEndDate(inputDate(today));
-    }
-    setDatePreset(preset);
-  }
-
   const refreshSelectedOrder = useCallback(async () => {
     if (selectedOrderId === null) return;
     setDetailLoading(true);
@@ -773,6 +767,70 @@ export default function PurchaseWorkbenchPage() {
       setDetailLoading(false);
     }
   }, [loadOrders, loadSummary, selectedOrderId]);
+
+  const openOperations = useCallback(() => {
+    setOperationsOpen(true);
+  }, []);
+
+  useEffect(() => {
+    if (!operationsOpen) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setOperationsOpen(false);
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [operationsOpen]);
+
+  const resetSupplyChainFilters = useCallback(() => {
+    setStatusFilter("all");
+    setChannelFilter("all");
+    setKindFilter("all");
+    setWarehouseFilter("");
+    setStartDate("");
+    setEndDate("");
+    setQuery("");
+    setSearchDraft("");
+    setPage(1);
+  }, []);
+
+  const exportCurrentPurchaseOrders = useCallback(async () => {
+    setBusyAction("export");
+    setError("");
+    setNotice("");
+    try {
+      const params = new URLSearchParams({
+        status: statusFilter === "refine" ? "sku" : statusFilter,
+        channel: channelFilter,
+        kind: kindFilter,
+      });
+      if (query) params.set("q", query);
+      if (warehouseFilter) params.set("warehouse", warehouseFilter);
+      if (startDate) params.set("start_date", startDate);
+      if (endDate) params.set("end_date", endDate);
+      const response = await authenticatedFetch(`/api/v1/data/export/purchase_orders?${params.toString()}`, { cache: "no-store" });
+      if (!response.ok) {
+        const payload = await response.json().catch(() => ({}));
+        throw new Error(typeof payload?.detail === "string" ? payload.detail : `导出失败（${response.status}）`);
+      }
+      const blob = await response.blob();
+      const encodedName = response.headers.get("content-disposition")?.match(/filename\*=UTF-8''([^;]+)/i)?.[1];
+      const filename = encodedName ? decodeURIComponent(encodedName) : `采购订单-核验-${new Date().toISOString().slice(0, 10)}.xlsx`;
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = filename;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+      const count = response.headers.get("x-export-row-count");
+      setNotice(`采购订单核验包已导出${count ? `（${count} 条主记录）` : ""}，包含主单、采购明细和入库关联。`);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : String(caught));
+    } finally {
+      setBusyAction("");
+    }
+  }, [channelFilter, endDate, kindFilter, query, startDate, statusFilter, warehouseFilter]);
 
   // 订单被删除后：清掉选中项与 URL 上的 order 参数，重新拉列表（loadOrders 会自动选中下一张）。
   const removeDeletedOrder = useCallback(async () => {
@@ -787,20 +845,74 @@ export default function PurchaseWorkbenchPage() {
     await Promise.all([loadSummary(), loadOrders()]);
   }, [loadOrders, loadSummary]);
 
-  const groups = useMemo(() => groupOrders(orders), [orders]);
   const filteredSuppliers = useMemo(() => {
     const normalized = supplierQuery.trim().toLowerCase();
     return normalized ? suppliers.filter((supplier) => supplier.supplierName.toLowerCase().includes(normalized)) : suppliers;
   }, [supplierQuery, suppliers]);
 
+  if (view === "orders") {
+    return (
+      <>
+        <SupplyChainReplica
+          summary={summary}
+          orders={orders}
+          total={total}
+          page={page}
+          pageSize={pageSize}
+          selectedOrderId={selectedOrderId}
+          detail={orderDetail}
+          loading={loading}
+          detailLoading={detailLoading}
+          refreshBusy={busyAction === "refresh"}
+          exportBusy={busyAction === "export"}
+          statusFilter={statusFilter}
+          channelFilter={channelFilter}
+          kindFilter={kindFilter}
+          warehouseFilter={warehouseFilter}
+          startDate={startDate}
+          endDate={endDate}
+          searchDraft={searchDraft}
+          onStatusFilterChange={setStatusFilter}
+          onChannelFilterChange={setChannelFilter}
+          onKindFilterChange={changeKind}
+          onWarehouseFilterChange={setWarehouseFilter}
+          onStartDateChange={setStartDate}
+          onEndDateChange={setEndDate}
+          onSearchDraftChange={setSearchDraft}
+          onApplySearch={() => setQuery(searchDraft.trim())}
+          onReset={resetSupplyChainFilters}
+          onNewOrder={() => setNewOrderOpen(true)}
+          onExport={exportCurrentPurchaseOrders}
+          onRefresh={refresh}
+          onSelectOrder={selectOrder}
+          onPageChange={(nextPage) => { setSelectedOrderId(null); setPage(nextPage); }}
+          onOpenOperations={openOperations}
+          onCloseOperations={() => setOperationsOpen(false)}
+          operationsOpen={operationsOpen}
+          onOpenWorkbenchView={(nextView) => changeView(nextView)}
+        />
+        {(notice || error) && <div className="fixed bottom-5 right-5 z-toast max-w-md rounded-lg border border-blue-100 bg-white px-4 py-3 text-[12px] text-slate-700 shadow-xl"><div className="flex items-start gap-3"><span className={error ? "text-rose-600" : "text-blue-600"}>{error || notice}</span><button onClick={() => { setNotice(""); setError(""); }} className="shrink-0 text-slate-400 hover:text-slate-700">×</button></div></div>}
+        {operationsOpen && <div className="fixed inset-0 z-modal flex items-start justify-center overflow-y-auto bg-slate-950/35 p-3 sm:p-6" onMouseDown={(event) => { if (event.target === event.currentTarget) setOperationsOpen(false); }} role="dialog" aria-modal="true" aria-label="编辑采购订单">
+          <div className="my-auto w-full max-w-[1440px] overflow-hidden rounded-xl border border-slate-200 bg-[#f7f9fd] shadow-2xl">
+            <div className="flex items-center justify-between gap-3 border-b border-slate-200 bg-white px-4 py-3 sm:px-6"><div className="min-w-0"><h2 className="truncate text-[16px] font-semibold text-slate-800">编辑采购订单{orderDetail?.order.orderNo ? ` · ${orderDetail.order.orderNo}` : ""}</h2><p className="mt-0.5 text-[11px] text-slate-500">在弹窗内处理订单、SKU、入库关联、耗材、发票和费用分摊。</p></div><button type="button" aria-label="关闭编辑采购订单" onClick={() => setOperationsOpen(false)} className="shrink-0 rounded-md border border-slate-200 bg-white px-3 py-1.5 text-[12px] text-slate-600 hover:border-blue-300 hover:text-blue-600">关闭</button></div>
+            <div className="max-h-[calc(100vh-112px)] overflow-y-auto p-3 sm:p-5"><OrderDetailPanel key={selectedOrderId} detail={orderDetail} loading={detailLoading} onOrderChanged={refreshSelectedOrder} onOrderDeleted={(message) => { setNotice(message); setOperationsOpen(false); void removeDeletedOrder(); }} onOpenSupplier={(name) => { setOperationsOpen(false); setSelectedSupplierName(name); changeView("suppliers"); }} /></div>
+          </div>
+        </div>}
+        {newOrderOpen && <NewPurchaseModal onClose={() => { setNewOrderOpen(false); const url = new URL(window.location.href); url.searchParams.delete("action"); window.history.replaceState(null, "", url.pathname + url.search); }} onCreated={(orderId) => { setNewOrderOpen(false); resetSupplyChainFilters(); selectOrder(orderId); setNotice("采购记录已保存，可点击订单上的“编辑”打开业务操作弹窗"); void loadOrders(); void loadSummary(); }} />}
+      </>
+    );
+  }
+
+  if (STANDALONE_VIEW_ROUTES[view]) return null;
+
   return (
     <div className="min-h-screen bg-[#f7f8fc] text-[#26324b]">
-      <div className="flex min-h-screen">
-        <WorkbenchSidebar user={user} view={view} onViewChange={changeView} />
-        <main className="min-w-0 flex-1 px-5 pb-8 pt-5 sm:px-6 2xl:px-7">
-          <select aria-label="工作台功能导航" className="mb-3 w-full rounded-lg border border-slate-200 bg-white p-2 lg:hidden" value={view} onChange={event => changeView(event.target.value as ViewMode)}>
-            {Object.entries(WORKBENCH_VIEWS).map(([key, label]) => <option key={key} value={key}>{label}</option>)}
-          </select>
+      <div className="min-w-0 px-5 pb-8 pt-5 sm:px-6 2xl:px-7">
+          {!(["orders", "suppliers", "chain", "matching"] as ViewMode[]).includes(view) && (
+            <select aria-label="工作台功能导航" className="mb-3 w-full rounded-lg border border-slate-200 bg-white p-2 lg:hidden" value={view} onChange={event => changeView(event.target.value as ViewMode)}>
+              {Object.entries(WORKBENCH_VIEWS).map(([key, label]) => <option key={key} value={key}>{label}</option>)}
+            </select>
+          )}
           <WorkbenchHeader
             view={view}
             busyAction={busyAction}
@@ -827,66 +939,7 @@ export default function PurchaseWorkbenchPage() {
             />
           )}
 
-          {view === "orders" ? (
-            <div className="mt-5 grid min-w-0 grid-cols-1 items-start gap-4 xl:grid-cols-[minmax(0,4fr)_minmax(520px,6fr)]">
-              <section className="min-w-0">
-                <OrderToolbar
-                  summary={summary}
-                  total={total}
-                  statusFilter={statusFilter}
-                  channelFilter={channelFilter}
-                  startDate={startDate}
-                  endDate={endDate}
-                  searchDraft={searchDraft}
-                  query={query}
-                  showFilter={showFilter}
-                  datePreset={datePreset}
-                  onStatusChange={setStatusFilter}
-                  onChannelChange={setChannelFilter}
-                  onStartDateChange={(value) => { setStartDate(value); setDatePreset("custom"); }}
-                  onEndDateChange={(value) => { setEndDate(value); setDatePreset("custom"); }}
-                  onDatePreset={applyDatePreset}
-                  onSearchDraftChange={setSearchDraft}
-                  onToggleFilter={() => setShowFilter((shown) => !shown)}
-                  onApplySearch={() => setQuery(searchDraft.trim())}
-                  onClearSearch={() => { setSearchDraft(""); setQuery(""); }}
-                />
-                <div className="mt-4 space-y-4">
-                  {loading ? <Loading text="正在加载采购订单…" /> : groups.length === 0 ? <Empty text="没有符合条件的采购订单" /> : (() => {
-                    // 渠道筛选作用于当前页；订单接口已返回平台维度。
-                    const visibleGroups = channelFilter === "all"
-                      ? groups
-                      : groups
-                          .map((group) => ({ ...group, items: group.items.filter((item) => channelOf(item.platform) === channelFilter) }))
-                          .filter((group) => group.items.length > 0);
-                    return visibleGroups.length === 0
-                      ? <Empty text="该渠道下没有符合条件的采购订单" />
-                      : visibleGroups.map((group) => (
-                          <OrderGroup
-                            key={group.key}
-                            label={group.label}
-                            items={group.items}
-                            selectedId={selectedOrderId}
-                            onSelect={selectOrder}
-                          />
-                        ));
-                  })()}
-                </div>
-                <div className="mt-3 flex items-center justify-between px-1 text-[11px] text-slate-400">
-                  <span>{channelFilter === "all" ? `共 ${total} 条采购订单` : `本页筛出 ${groups.reduce((n, g) => n + g.items.filter((item) => channelOf(item.platform) === channelFilter).length, 0)} 条（渠道筛选仅作用于当前页）`}{outstandingTotal > 0 && <span className="ml-2 font-medium text-rose-500">未开票合计 {fmtMoney(outstandingTotal)}</span>}</span>
-                  {channelFilter === "all" && <div className="flex items-center gap-3"><button disabled={page <= 1 || loading} onClick={() => { setSelectedOrderId(null); setPage(p => p - 1); }} className="disabled:opacity-40">上一页</button><span>{page} / {Math.max(1, Math.ceil(total / pageSize))}</span><button disabled={page * pageSize >= total || loading} onClick={() => { setSelectedOrderId(null); setPage(p => p + 1); }} className="disabled:opacity-40">下一页</button><button onClick={() => exportOrders(orders)} className="font-medium text-indigo-600 hover:text-indigo-700">导出本页</button></div>}
-                </div>
-              </section>
-              <OrderDetailPanel
-                key={selectedOrderId}
-                detail={orderDetail}
-                loading={detailLoading}
-                onOrderChanged={refreshSelectedOrder}
-                onOrderDeleted={(message) => { setNotice(message); void removeDeletedOrder(); }}
-                onOpenSupplier={(name) => { setSelectedSupplierName(name); changeView("suppliers"); }}
-              />
-            </div>
-          ) : view === "chain" ? (
+          {view === "chain" ? (
             <ChainPanel
               overview={chainOverview}
               orders={chainOrders}
@@ -937,7 +990,6 @@ export default function PurchaseWorkbenchPage() {
               />
             </div>
           ) : <WorkspaceModule key={view} view={view} />}
-        </main>
       </div>
       {newOrderOpen && <NewPurchaseModal onClose={() => { setNewOrderOpen(false); const url = new URL(window.location.href); url.searchParams.delete("action"); window.history.replaceState(null, "", url.pathname + url.search); }} onCreated={(orderId) => {
         setNewOrderOpen(false);
@@ -947,120 +999,6 @@ export default function PurchaseWorkbenchPage() {
         void loadOrders(); void loadSummary();
       }} />}
     </div>
-  );
-}
-
-function WorkbenchSidebar({ user, view, onViewChange }: {
-  user: AuthUser | null;
-  view: ViewMode;
-  onViewChange: (view: ViewMode) => void;
-}) {
-  const primary = [
-    { href: "/", label: "经营总览", icon: "dashboard" as IconName },
-    { href: "/sales", label: "销售", icon: "sales" as IconName, phase: "P2" },
-    { href: "/products", label: "商品与库存", icon: "box" as IconName, phase: "P2" },
-  ];
-  const secondary = [
-    { href: "/procurement-ledger", label: "采购链路", icon: "reconcile" as IconName },
-    { href: "/payments", label: "回款与对账", icon: "wallet" as IconName },
-    { href: "/finance", label: "财务资料", icon: "receipt" as IconName },
-    { href: "/data-center-import", label: "数据接入", icon: "import" as IconName, phase: "P1" },
-    { href: "/profit", label: "数据报表", icon: "chart" as IconName, phase: "P3" },
-    { href: "/exceptions", label: "异常中心", icon: "reconcile" as IconName },
-    { href: "/automation", label: "自动化", icon: "sync" as IconName },
-    { href: "/settings", label: "系统设置", icon: "settings" as IconName, phase: "P3" },
-  ];
-  return (
-    <aside className="sticky top-0 hidden h-screen w-[220px] shrink-0 flex-col border-r border-slate-200/80 bg-white lg:flex">
-      <div className="flex h-[68px] items-center gap-2.5 px-5">
-        <span className="flex h-7 w-7 items-center justify-center rounded-lg bg-gradient-to-br from-indigo-500 to-violet-600 text-white shadow-sm">
-          <span className="h-2.5 w-2.5 rounded-[3px] border-2 border-white" />
-        </span>
-        <span className="text-[16px] font-semibold tracking-tight text-slate-900">电商经营数据平台</span>
-        <span className="rounded bg-slate-100 px-1.5 py-0.5 text-[9px] font-medium text-slate-500">V1.0</span>
-      </div>
-      <nav className="flex-1 overflow-y-auto px-2.5 pb-4">
-        <div className="space-y-1">
-          {primary.map((item) => <SidebarLink key={item.href} {...item} />)}
-          <div className="ml-[22px] space-y-0.5 border-l border-slate-100 pl-2">
-            <button
-              onClick={() => onViewChange("products")}
-              className={cx("flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left text-[12px]", view === "products" ? "bg-indigo-50 text-indigo-600" : "text-slate-500 hover:bg-slate-50")}
-            >
-              <Icon name="box" size={14} />货品档案
-            </button>
-            <button
-              onClick={() => onViewChange("inventory_goods")}
-              className={cx("flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left text-[12px]", view === "inventory_goods" ? "bg-indigo-50 text-indigo-600" : "text-slate-500 hover:bg-slate-50")}
-            >
-              <Icon name="box" size={14} />库存-正品
-            </button>
-            <button
-              onClick={() => onViewChange("inventory_consumables")}
-              className={cx("flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left text-[12px]", view === "inventory_consumables" ? "bg-indigo-50 text-indigo-600" : "text-slate-500 hover:bg-slate-50")}
-            >
-              <Icon name="box" size={14} />库存-耗材
-            </button>
-          </div>
-          <button
-            onClick={() => onViewChange("orders")}
-            className="flex w-full items-center gap-3 rounded-lg bg-indigo-50 px-3 py-2.5 text-left text-[13px] font-semibold text-indigo-600"
-          >
-            <Icon name="purchase" />
-            <span className="flex-1">采购工作台</span>
-            <span className="rounded bg-white px-1.5 py-0.5 text-[9px] font-medium text-indigo-500">P1</span>
-          </button>
-        </div>
-        <div className="ml-[22px] mt-1 space-y-0.5 border-l border-slate-100 pl-2">
-          <button
-            onClick={() => onViewChange("orders")}
-            className={cx("flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left text-[12px]", view === "orders" ? "bg-indigo-50 text-indigo-600" : "text-slate-500 hover:bg-slate-50")}
-          >
-            <Icon name="orders" size={14} />订单视图
-          </button>
-          <button
-            onClick={() => onViewChange("suppliers")}
-            className={cx("flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left text-[12px]", view === "suppliers" ? "bg-indigo-50 text-indigo-600" : "text-slate-500 hover:bg-slate-50")}
-          >
-            <Icon name="users" size={14} />供应商管理
-          </button>
-          <button
-            onClick={() => onViewChange("matching")}
-            className={cx("flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left text-[12px]", view === "matching" ? "bg-indigo-50 text-indigo-600" : "text-slate-500 hover:bg-slate-50")}
-          >
-            <Icon name="box" size={14} />SKU 匹配
-          </button>
-        </div>
-        <div className="mt-1 space-y-0.5">
-          {secondary.map((item) => <SidebarLink key={item.href} {...item} />)}
-        </div>
-      </nav>
-      <div className="border-t border-slate-100 px-4 py-4">
-        <div className="flex items-center gap-3">
-          <span className="flex h-8 w-8 items-center justify-center rounded-full bg-gradient-to-br from-indigo-500 to-violet-500 text-xs font-semibold text-white">
-            {(user?.displayName || user?.username || "管").slice(0, 1)}
-          </span>
-          <div className="min-w-0 flex-1">
-            <div className="truncate text-[12px] font-medium text-slate-700">{user?.displayName || "管理员"}</div>
-            <div className="truncate text-[10px] text-slate-400">{user?.username || "admin"}</div>
-          </div>
-          {process.env.NEXT_PUBLIC_ACCESS_MODE !== "open" && <button onClick={() => void logout().finally(() => window.location.assign("/login"))} className="text-xs text-slate-500 hover:text-indigo-600">退出</button>}
-        </div>
-      </div>
-    </aside>
-  );
-}
-
-function SidebarLink({ href, label, icon, phase }: { href: string; label: string; icon: IconName; phase?: string }) {
-  const params = useSearchParams();
-  const destination = workbenchHref(href);
-  const target = new URLSearchParams(destination.split("?")[1]);
-  const active = params.get("view") === target.get("view") && (!target.has("tab") || params.get("tab") === target.get("tab"));
-  return (
-    <Link href={destination} className={cx("flex items-center gap-3 rounded-lg px-3 py-2.5 text-[13px] transition-colors hover:bg-slate-50", active ? "bg-indigo-50 text-indigo-600" : "text-slate-600")}>
-      <Icon name={icon} /><span className="flex-1">{label}</span>
-      {phase && <span className="rounded bg-slate-100 px-1.5 py-0.5 text-[9px] font-medium text-slate-400">{phase}</span>}
-    </Link>
   );
 }
 
@@ -1077,7 +1015,7 @@ function WorkbenchHeader({ view, busyAction, onViewChange, onNewOrder, onMatch, 
     <header className="flex items-center justify-between gap-4"><div><p className="text-xs text-slate-400">电商经营数据平台 / {WORKBENCH_VIEWS[view]}</p><h1 className="mt-1 text-2xl font-semibold">{WORKBENCH_VIEWS[view]}</h1></div><HeaderButton icon="orders" onClick={() => onViewChange("orders")}>返回采购订单</HeaderButton></header>
   );
   return (
-    <header className="sticky top-0 z-30 -mx-5 -mt-5 flex flex-wrap items-center justify-between gap-4 border-b border-slate-200/60 bg-[#f7f8fc] px-5 pb-3 pt-5 sm:-mx-6 sm:px-6 2xl:-mx-7 2xl:px-7">
+    <header className="sticky top-12 z-30 -mx-5 -mt-5 flex flex-wrap items-center justify-between gap-4 border-b border-slate-200/60 bg-[#f7f8fc] px-5 pb-3 pt-5 sm:-mx-6 sm:px-6 2xl:-mx-7 2xl:px-7">
       <div className="flex flex-wrap items-center gap-4">
         <div>
           <div className="mb-1 text-[10px] text-slate-400">采购　/　采购工作台</div>
@@ -1163,6 +1101,7 @@ function KpiGrid({ summary, board, funnel, todos, onOpenChain }: {
   const steps = funnel?.steps ?? [];
   const pending = todos?.pending ?? 0;
   const doneStages = steps.filter((step) => step.pct >= 100).length;
+  const stepTotal = funnel?.stepTotal ?? steps.length;
   return (
     <section className="mt-5 grid grid-cols-2 gap-3 md:grid-cols-4 xl:grid-cols-8">
       {cards.map((card) => <KpiCard key={card.label} {...card} />)}
@@ -1171,15 +1110,15 @@ function KpiGrid({ summary, board, funnel, todos, onOpenChain }: {
           role="button"
           tabIndex={0}
           onClick={onOpenChain}
-          onKeyDown={(event) => { if (event.key === "Enter") onOpenChain?.(); }}
+          onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); onOpenChain?.(); } }}
           title={steps.map((step) => `${CIRCLED[step.no - 1] ?? step.no} ${step.label}：${step.count}/${funnel?.total ?? 0}（${step.pct}%）｜${step.act}`).join("\n")}
-          className="flex min-h-[84px] cursor-pointer flex-col justify-center gap-1 rounded-xl border border-slate-200/80 bg-white px-3 py-2.5 shadow-[0_3px_12px_rgba(40,53,85,0.04)] transition-colors hover:border-indigo-200 hover:bg-indigo-50/30"
+          className="flex min-h-[84px] cursor-pointer flex-col justify-center gap-1 rounded-xl border border-slate-200/80 bg-white px-3 py-2.5 shadow-[0_3px_12px_rgba(40,53,85,0.04)] transition-colors hover:border-indigo-200 hover:bg-indigo-50/30 focus:outline-none focus:ring-2 focus:ring-indigo-200"
         >
           <div className="flex items-center gap-1.5">
             <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-md bg-indigo-50 text-indigo-600"><Icon name="magic" size={12} /></span>
             <span className="truncate text-[10.5px] font-medium text-slate-500">环节完成度</span>
           </div>
-          <div className="text-[19px] font-semibold leading-6 tabular-nums text-slate-900">{doneStages}/7<span className="ml-1.5 text-[9.5px] font-normal text-slate-400">{pending > 0 ? <span className="font-medium text-amber-600">{pending} 个待办</span> : "暂无待办"}</span></div>
+          <div className="text-[19px] font-semibold leading-6 tabular-nums text-slate-900">{doneStages}/{stepTotal}<span className="ml-1.5 text-[9.5px] font-normal text-slate-400">{pending > 0 ? <span className="font-medium text-amber-600">{pending} 个待办</span> : "暂无待办"}</span></div>
           <div className="mt-2 flex items-end gap-1">
             {steps.map((step) => {
               const dimColor = step.dimension === "1688" ? "bg-indigo-500" : step.dimension === "purchase" ? "bg-violet-500" : step.dimension === "jackyun" ? "bg-teal-500" : "bg-amber-500";
@@ -1216,144 +1155,6 @@ function KpiCard({ label, value, hint, icon, tone }: {
       <div className="text-[19px] font-semibold leading-6 tabular-nums text-slate-900">{value}</div>
       <div className="truncate text-[9.5px] text-slate-400" title={hint}>{hint}</div>
     </article>
-  );
-}
-
-function OrderToolbar(props: {
-  summary: WorkbenchSummary | null; total: number; statusFilter: FilterKey; channelFilter: ChannelKey; startDate: string; endDate: string;
-  searchDraft: string; query: string; showFilter: boolean; datePreset: DatePreset; onStatusChange: (value: FilterKey) => void;
-  onChannelChange: (value: ChannelKey) => void;
-  onStartDateChange: (value: string) => void; onEndDateChange: (value: string) => void;
-  onDatePreset: (value: Exclude<DatePreset, "custom">) => void;
-  onSearchDraftChange: (value: string) => void; onToggleFilter: () => void; onApplySearch: () => void; onClearSearch: () => void;
-}) {
-  return (
-    <div className="space-y-2">
-      <div className="flex flex-wrap items-center gap-2">
-        {FILTERS.map((filter) => {
-          const count = filter.key === "all" ? props.summary?.totalOrders ?? props.total : filter.summaryKey ? props.summary?.[filter.summaryKey] ?? "—" : null;
-          return (
-            <button key={filter.key} onClick={() => props.onStatusChange(filter.key)} className={cx(
-              "flex h-8 items-center gap-1.5 rounded-lg border px-3 text-[11px] font-medium transition-colors",
-              props.statusFilter === filter.key ? "border-indigo-400 bg-white text-indigo-600 shadow-sm ring-1 ring-indigo-100" : "border-slate-200 bg-white text-slate-500 hover:border-slate-300"
-            )}>
-              {filter.label}
-              {count !== null && <span className={props.statusFilter === filter.key ? "text-indigo-500" : "text-slate-400"}>{count}</span>}
-            </button>
-          );
-        })}
-        <div className="ml-auto flex h-8 items-center gap-2">
-          <div className="flex h-8 items-center rounded-lg border border-slate-200 bg-white text-[10px] text-slate-400 shadow-sm">
-            <label className="px-3"><input type="date" value={props.startDate} onChange={(event) => props.onStartDateChange(event.target.value)} aria-label="开始日期" className="w-[93px] bg-transparent text-[10px] text-slate-500 outline-none" /></label>
-            <span>→</span>
-            <label className="px-3"><input type="date" value={props.endDate} onChange={(event) => props.onEndDateChange(event.target.value)} aria-label="结束日期" className="w-[93px] bg-transparent text-[10px] text-slate-500 outline-none" /></label>
-          </div>
-          <button onClick={props.onToggleFilter} className={cx(
-            "flex h-8 items-center gap-1.5 rounded-lg border px-3 text-[11px] font-medium shadow-sm",
-            props.showFilter || props.query || props.channelFilter !== "all" ? "border-indigo-300 bg-indigo-50 text-indigo-600" : "border-slate-200 bg-white text-slate-500"
-          )}><Icon name="filter" size={14} />筛选</button>
-        </div>
-      </div>
-      {props.showFilter && (
-        <div className="mt-2 rounded-lg border border-indigo-100 bg-white p-3 shadow-sm">
-          <div className="mb-2 flex flex-wrap items-center gap-1.5 px-1">
-            <span className="mr-1 text-[10px] text-slate-400">快捷日期</span>
-            {([
-              ["all", "全部日期"], ["today", "今天"], ["yesterday", "昨天"], ["week", "近7天"], ["month", "本月"],
-            ] as const).map(([value, label]) => (
-              <button key={value} onClick={() => props.onDatePreset(value)} className={cx(
-                "rounded-md px-2.5 py-1 text-[10px] transition-colors",
-                props.datePreset === value ? "bg-indigo-50 font-medium text-indigo-600" : "text-slate-500 hover:bg-slate-50"
-              )}>{label}</button>
-            ))}
-            {props.datePreset === "custom" && <span className="rounded-md bg-slate-100 px-2.5 py-1 text-[10px] text-slate-500">自定义日期</span>}
-          </div>
-          <div className="mb-2 flex flex-wrap items-center gap-1.5 px-1">
-            <span className="mr-1 text-[10px] text-slate-400">采购渠道</span>
-            {([
-              ["all", "全部渠道"], ["1688", "1688"], ["pdd", "拼多多"], ["taobao", "淘宝"], ["other", "其他"],
-            ] as const).map(([value, label]) => (
-              <button key={value} onClick={() => props.onChannelChange(value)} className={cx(
-                "flex items-center gap-1 rounded-md px-2.5 py-1 text-[10px] transition-colors",
-                props.channelFilter === value ? "bg-indigo-50 font-medium text-indigo-600" : "text-slate-500 hover:bg-slate-50"
-              )}>
-                {value !== "all" && <span className={cx("h-1.5 w-1.5 rounded-full", CHANNELS[value].dot)} />}
-                {label}
-              </button>
-            ))}
-          </div>
-          <div className="flex items-center gap-2">
-            <div className="flex min-w-0 flex-1 items-center gap-2 rounded-md bg-slate-50 px-3">
-              <Icon name="search" size={14} />
-              <input value={props.searchDraft} onChange={(event) => props.onSearchDraftChange(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") props.onApplySearch(); }} placeholder="搜索订单号或供应商" className="h-8 min-w-0 flex-1 bg-transparent text-[11px] text-slate-700 outline-none placeholder:text-slate-400" />
-            </div>
-            <button onClick={props.onApplySearch} className="h-8 rounded-md bg-indigo-600 px-4 text-[11px] font-medium text-white">应用</button>
-            {(props.searchDraft || props.query) && <button onClick={props.onClearSearch} className="h-8 px-2 text-[11px] text-slate-400 hover:text-slate-600">清空</button>}
-          </div>
-        </div>
-      )}
-    </div>
-  );
-}
-
-function OrderGroup({ label, items, selectedId, onSelect }: {
-  label: string; items: WorkbenchOrderItem[]; selectedId: number | null; onSelect: (id: number) => void;
-}) {
-  return (
-    <section>
-      <div className="mb-2 flex items-center gap-2 px-1 text-[13px] font-semibold text-slate-700"><span className="h-1.5 w-1.5 rounded-full bg-indigo-500" />{label}</div>
-      <div className="overflow-x-auto rounded-xl border border-slate-200/90 bg-white shadow-[0_3px_14px_rgba(40,53,85,0.035)]">
-        <div className="grid min-w-[720px] grid-cols-[22px_108px_minmax(190px,1fr)_96px_118px_92px] items-center gap-3 border-b border-slate-100 bg-slate-50/70 px-3.5 py-2 text-[9.5px] font-medium text-slate-400">
-          <span />
-          <span>采购时间</span>
-          <span>订单号 / 供应商</span>
-          <span className="text-right">下单金额</span>
-          <span className="text-right">开票（未开票）</span>
-          <span className="text-right">当前状态</span>
-        </div>
-        {items.map((item) => <OrderRow key={item.orderId} item={item} active={item.orderId === selectedId} onSelect={() => onSelect(item.orderId)} />)}
-      </div>
-    </section>
-  );
-}
-
-function invoiceCell(item: WorkbenchOrderItem, closed: boolean) {
-  if (closed) return <span className="text-[11px] tabular-nums text-slate-400">—</span>;
-  const outstanding = item.invoiceOutstanding ?? null;
-  const status = item.invoiceStatus ?? "none";
-  if (status === "done" || (outstanding !== null && outstanding <= 0 && (item.invoicedAmount ?? 0) > 0)) {
-    return <span className="text-[11px] font-medium tabular-nums text-emerald-600">已开票</span>;
-  }
-  if (outstanding === null || (status === "none" && !(item.invoicedAmount ?? 0))) {
-    return <span className="text-[11px] tabular-nums text-slate-400">—</span>;
-  }
-  return (
-    <span className="text-right">
-      <span className="block text-[11px] font-semibold tabular-nums text-rose-600">{fmtMoney(outstanding)}</span>
-      {status === "partial" && <span className="block text-[9px] text-slate-400">部分开票 {fmtMoney(item.invoicedAmount ?? 0)}</span>}
-    </span>
-  );
-}
-
-function OrderRow({ item, active, onSelect }: { item: WorkbenchOrderItem; active: boolean; onSelect: () => void }) {
-  const label = statusLabel(item);
-  const closed = isOrderClosed(item.orderStatus);
-  return (
-    <button onClick={onSelect} className={cx(
-      "grid w-full min-w-[720px] grid-cols-[22px_108px_minmax(190px,1fr)_96px_118px_92px] items-center gap-3 border-b border-slate-100 px-3.5 py-3 text-left transition-all last:border-b-0",
-      closed && "bg-slate-50/60",
-      active ? "relative z-[1] bg-[#fbfaff] ring-1 ring-inset ring-indigo-500" : "hover:bg-slate-50/70"
-    )}>
-      <span className={cx("flex h-4 w-4 items-center justify-center rounded-full border text-[9px]", active ? "border-indigo-500 bg-indigo-500 text-white" : "border-slate-300 text-transparent")}>✓</span>
-      <span title={fmtDateTime(item.orderDate)}><span className={cx("block text-[11px] font-semibold tabular-nums", closed ? "text-slate-500" : "text-slate-800")}>{fmtDateTime(item.orderDate)}</span></span>
-      <span className="min-w-0">
-        <span className="flex items-center gap-1.5"><PlatformBadge value={item.platform} /><OrderKindTag value={item.orderKind} /><span className={cx("truncate text-[12px] font-medium", closed ? "text-slate-500 line-through" : "text-slate-800")}>{item.supplier || "未记录供应商"}</span>{closed && <span className="shrink-0 rounded bg-slate-200 px-1 py-0.5 text-[9px] font-medium text-slate-600">已关闭</span>}{item.hasException && !closed && <span className="shrink-0 rounded bg-red-50 px-1 py-0.5 text-[9px] text-red-500">异常</span>}</span>
-        <span className="mt-1 block truncate font-mono text-[9.5px] text-slate-400">订单号：{item.orderNo}</span>
-      </span>
-      <span className="text-right"><span className={cx("block text-[13px] font-semibold tabular-nums", closed ? "text-slate-500" : "text-slate-800")}>{fmtMoney(item.amount)}</span></span>
-      <span className="text-right">{invoiceCell(item, closed)}</span>
-      <span className="text-right"><span className={cx("inline-flex rounded-md px-2 py-1 text-[9.5px] font-medium", statusClass(label))}>{label}</span>{closed && item.orderStatus && <span className="mt-1 block text-[9px] text-slate-400">{item.orderStatus}</span>}</span>
-    </button>
   );
 }
 
@@ -1527,18 +1328,27 @@ function OrderDetailPanel({ detail, loading, onOrderChanged, onOrderDeleted, onO
     || inboundLinked.every((row) => Boolean(row.consumableUsageDecided));
   const settlements = records.settlement as SettlementRow[];
   const extraAmount = expenses.reduce((sum, row) => sum + (typeof row.amount === "number" ? row.amount : 0), 0);
-  const paidAmount = settlements.reduce((sum, row) => {
+  const settlementPaid = settlements.reduce((sum, row) => {
     const amount = row.paidAmount;
     return sum + (typeof amount === "number" ? amount : 0);
   }, 0);
   // 原单总额已含运费优惠，分摊费用不再次加到应付；未知付款不算已付。
   const payable = order.paidAmount ?? order.amount ?? 0;
+  const platformPaid = order.paidOn1688 ? (order.paidAmount ?? order.amount ?? 0) : 0;
+  const paidAmount = Math.min(payable, Math.max(settlementPaid, platformPaid));
   const unpaidAmount = Math.max(0, payable - paidAmount);
   const remainingAmount = records.unallocatedAmount ?? order.paidAmount ?? order.amount;
   // 1688 源单已关闭：整单只读，不允许再确认采购内容或修改分配。
   const closed = isOrderClosed(order.orderStatus);
   const editable = !closed && (!order.purchaseStatus || order.purchaseStatus === "pending_refine");
-  const nextStatus = order.purchaseStatus ? NEXT_STATUS[order.purchaseStatus] : undefined;
+  const detailStatusLabel = statusLabel({ orderStatus: order.orderStatus, stepStates, closeoutStage: order.closeoutStage });
+  // 详情页状态必须跟工作台步骤状态一致；旧 purchaseStatus 可能仍停在 jackyun_linked，不能再渲染过时的流转按钮。
+  const operationalComplete = stepStates.closeout?.done === true || order.purchaseStatus === "done";
+  // 有真实入库事实后，状态机进入收尾阶段；不能再显示“回到生产中”的旧状态按钮。
+  const hasActualInbound = inbound.length > 0;
+  const nextStatus = !operationalComplete && !hasActualInbound && order.purchaseStatus
+    ? NEXT_STATUS[order.purchaseStatus]
+    : undefined;
   // 详情页默认全可修改；确认按钮仅作为手动推进快捷入口（SKU 分配保存后也会自动静默尝试确认）
   const canConfirm = Boolean(
     order.externalPoId && editable && allocations.length > 0 &&
@@ -1622,7 +1432,7 @@ function OrderDetailPanel({ detail, loading, onOrderChanged, onOrderDeleted, onO
     setSkuConsumableQty(mappedConsumableQty(skuQty, mapping));
     setSkuConsumableAutoQty(Boolean(mapping));
     setSkuConsumableTouched(true);
-    // 采购单价以货品维护中的固定成本为准；未维护时留空，交由人工录入。
+    // 入库前仅用货品档案成本作预估；实际入库反填后以入库明细含税单价为准。
     setSkuPrice(sku.defaultCost != null && String(sku.defaultCost).trim() !== "" ? String(sku.defaultCost) : "");
   }
 
@@ -2226,7 +2036,7 @@ async function saveInboundAmount(documentId: number, value: string, note: string
   }
 
   return (
-    <aside className="min-w-0 xl:sticky xl:top-[calc(var(--wb-header-h,162px)+8px)] xl:self-start">
+    <aside className="min-w-0 scroll-mt-4">
       <div className="overflow-hidden rounded-xl border border-slate-200/90 bg-white shadow-[0_4px_18px_rgba(40,53,85,0.045)]">
         <div className="border-b border-slate-100 px-4 py-3.5">
           <div className="flex items-center justify-between text-[11px]">
@@ -2272,10 +2082,10 @@ async function saveInboundAmount(documentId: number, value: string, note: string
                 ) : (
                   <>
                     <span
-                      className={cx("shrink-0 rounded px-1.5 py-0.5 text-[11px] font-medium", statusClass(statusLabel({ orderStatus: order.orderStatus, stepStates })))}
+                      className={cx("shrink-0 rounded px-1.5 py-0.5 text-[11px] font-medium", statusClass(statusLabel({ orderStatus: order.orderStatus, stepStates, closeoutStage: order.closeoutStage })))}
                       title="最后一步未确认的环节"
                     >
-                      {statusLabel({ orderStatus: order.orderStatus, stepStates })}
+                      {statusLabel({ orderStatus: order.orderStatus, stepStates, closeoutStage: order.closeoutStage })}
                     </span>
                     {order.externalPoId && editable && allocations.length > 0 && (
                       <>
@@ -2319,7 +2129,7 @@ async function saveInboundAmount(documentId: number, value: string, note: string
               )}
               <div className="mt-1 flex flex-wrap items-center gap-x-2.5 gap-y-0.5 text-[11px] text-slate-400" title="收货仓库 / 付款方式 / 订单状态 / 备注">
                 <span>仓库 <span className="font-medium text-slate-600">{inbound.find((row) => row.warehouseName)?.warehouseName ?? "—"}</span></span>
-                <span>付款 <span className="font-medium text-slate-600">{paidAmount > 0 ? "已关联" : "未关联"}</span></span>
+                <span>付款 <span className="font-medium text-slate-600">{order.paidOn1688 ? "1688已实付" : paidAmount > 0 ? "已关联" : "未关联"}</span></span>
                 <span>状态 <span className="font-medium text-slate-600">{order.orderStatus || "—"}</span></span>
                 <span className="min-w-0 truncate" title={order.title || undefined}>备注 <span className="font-medium text-slate-600">{order.title || "—"}</span></span>
               </div>
@@ -2739,7 +2549,7 @@ async function saveInboundAmount(documentId: number, value: string, note: string
           <RelatedRecordsPanel detail={detail} ensurePo={ensureExternalPoId} onChanged={onOrderChanged} />
           {nextStatus && !closed ? (
         <div className="flex items-center justify-between gap-2 rounded-lg border border-slate-200/80 bg-white px-3 py-2">
-          <span className="text-[12px] text-slate-500">当前状态：<span className="font-medium text-slate-700">{PO_STATUS[order.purchaseStatus ?? ""] ?? order.purchaseStatus}</span></span>
+          <span className="text-[12px] text-slate-500">当前状态：<span className="font-medium text-slate-700">{detailStatusLabel}</span></span>
           <button disabled={editorBusy || closed} onClick={() => void advanceStatus()} className="rounded-md bg-white px-2.5 py-1.5 text-[12px] font-medium text-indigo-600 ring-1 ring-slate-200 hover:bg-slate-50 disabled:opacity-40">
             流转到「{PO_STATUS[nextStatus] ?? nextStatus}」
           </button>
@@ -2748,7 +2558,7 @@ async function saveInboundAmount(documentId: number, value: string, note: string
         </div>
       </div>
       {mainEditOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/35 p-5" onMouseDown={(event) => { if (event.target === event.currentTarget) setMainEditOpen(false); }} role="dialog" aria-modal="true" aria-label="编辑订单主档">
+        <div className="fixed inset-0 z-modal-nested flex items-center justify-center bg-slate-900/35 p-5" onMouseDown={(event) => { if (event.target === event.currentTarget) setMainEditOpen(false); }} role="dialog" aria-modal="true" aria-label="编辑订单主档">
           <form onSubmit={saveMainEdit} className="max-h-[90vh] w-full max-w-xl overflow-y-auto rounded-2xl bg-white p-5 shadow-2xl">
             <div className="flex items-start justify-between">
               <div>
@@ -2808,6 +2618,8 @@ function OrderConsumableSection({ order, materials }: { order: WorkbenchOrderRow
   const [receivingId, setReceivingId] = useState<number | null>(null);
   const [receiveDate, setReceiveDate] = useState(inputDate(new Date()));
   const [receiveQtys, setReceiveQtys] = useState<Record<number, string>>({});
+  const [warehouses, setWarehouses] = useState<WarehouseRow[]>([]);
+  const [receiveWarehouseId, setReceiveWarehouseId] = useState("");
   // 单价自动均摊：单价 = 订单实付 ÷ 总数量，让合计与实付精确一致；手动改单价会自动关闭。
   const [autoUnitCost, setAutoUnitCost] = useState(true);
   // 行内编辑（采购量 / 单价 / 总金额）；整单删除 / 恢复 cancelled → ordered 的就地反馈。
@@ -2826,6 +2638,18 @@ function OrderConsumableSection({ order, materials }: { order: WorkbenchOrderRow
     finally { setLoading(false); }
   }, [sourceOrderId, order.orderNo]);
   useEffect(() => { void load(); }, [load]);
+  useEffect(() => {
+    let active = true;
+    void warehousesApi.list(false).then((rows) => {
+      if (!active) return;
+      const usable = rows.filter((row) => row.purpose === "consumable" || row.purpose === "both");
+      setWarehouses(usable);
+      setReceiveWarehouseId((current) => current || String(usable.find((row) => row.warehouseType === "factory")?.id ?? usable[0]?.id ?? ""));
+    }).catch(() => {
+      if (active) setError("仓库配置加载失败，请先到仓库管理检查耗材仓");
+    });
+    return () => { active = false; };
+  }, []);
 
   // 总进度：跨本单全部耗材入库单汇总（已取消的不计）。
   const activePurchases = purchases.filter((row) => row.status !== "cancelled");
@@ -2913,6 +2737,7 @@ function OrderConsumableSection({ order, materials }: { order: WorkbenchOrderRow
 
   function startReceive(row: ConsumablePurchaseRow) {
     setReceivingId(row.id);
+    setReceiveWarehouseId((current) => current || String(warehouses.find((warehouse) => warehouse.warehouseType === "factory")?.id ?? warehouses[0]?.id ?? ""));
     setReceiveDate(inputDate(new Date()));
     setReceiveQtys(Object.fromEntries(row.items.map((line) => [line.id, ""])));
     setError(""); setMessage("");
@@ -2924,11 +2749,13 @@ function OrderConsumableSection({ order, materials }: { order: WorkbenchOrderRow
       .filter((line) => (receiveQtys[line.id] ?? "").trim() !== "" && Number(receiveQtys[line.id]) !== 0)
       .map((line) => ({ item_id: line.id, quantity: receiveQtys[line.id] }));
     if (!items.length) { setError("请填写本次实收数量，未到货的耗材留空"); return; }
+    if (!receiveWarehouseId) { setError("请选择收货仓库"); return; }
     setBusy(true); setError("");
     try {
-      await consumablesApi.receivePurchase(row.id, {
+      await warehousesApi.receiveConsumablePurchase(row.id, {
         request_key: newRequestKey(),
         received_on: receiveDate || inputDate(new Date()),
+        warehouse_id: Number(receiveWarehouseId),
         note: `来源${CHANNELS[channelOf(order.platform)].label}订单 ${order.orderNo}`,
         items,
       });
@@ -3224,6 +3051,12 @@ function OrderConsumableSection({ order, materials }: { order: WorkbenchOrderRow
                 </table>
                 {receiving && (
                   <div className="flex flex-wrap items-center justify-end gap-2 border-t border-slate-100 px-3 py-2">
+                    <label className="text-[10px] text-slate-500">收货仓库
+                      <select value={receiveWarehouseId} onChange={(event) => setReceiveWarehouseId(event.target.value)} className={cx(inputCls, "ml-1 inline-block min-w-40")}>
+                        <option value="">请选择仓库</option>
+                        {warehouses.map((warehouse) => <option key={warehouse.id} value={warehouse.id}>{warehouse.name} · {warehouse.code}</option>)}
+                      </select>
+                    </label>
                     <label className="text-[10px] text-slate-500">收货日期
                       <input type="date" value={receiveDate} onChange={(event) => setReceiveDate(event.target.value)} className={cx(inputCls, "ml-1 inline-block w-32")} />
                     </label>

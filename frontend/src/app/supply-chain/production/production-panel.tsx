@@ -320,10 +320,6 @@ export default function ProductionPanel() {
               {importing ? "导入中…" : "导入1688订单"}
               <input type="file" accept=".xlsx,.xls,.csv" className="hidden" onChange={import1688} />
             </label>
-            <Link href="/supply-chain/material-flow" className="rounded-lg border border-indigo-200 px-3 py-2 text-sm font-medium text-indigo-700 hover:bg-indigo-50">耗材流转</Link>
-            <Link href="/supply-chain/in-transit" className="rounded-lg border border-indigo-200 px-3 py-2 text-sm font-medium text-indigo-700 hover:bg-indigo-50">生产 / 在途</Link>
-            <Link href="/products" className="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-600 hover:bg-slate-50">货品档案</Link>
-            <Link href="/supply-chain/warehouses" className="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-600 hover:bg-slate-50">仓库</Link>
           </div>
         </div>
 

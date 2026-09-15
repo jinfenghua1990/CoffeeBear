@@ -168,6 +168,21 @@ def map_purchase(
         raise HTTPException(400, str(exc))
 
 
+@router.post("/imports/{import_id}/map-outbound")
+def map_outbound(
+    request: Request,
+    import_id: int,
+    db: Session = Depends(get_db),
+) -> dict:
+    """把已确认的销售出库报表映射为吉客云出库单及货品明细。"""
+    try:
+        return service.map_outbound_documents(db, import_id, actor=current_actor(request))
+    except LookupError as exc:
+        raise HTTPException(404, str(exc))
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+
+
 @router.get("/purchase-orders")
 def list_purchase_orders(
     q: str = Query("", description="按采购单号/供应商名过滤"),

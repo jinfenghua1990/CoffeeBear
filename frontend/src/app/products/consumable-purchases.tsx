@@ -144,7 +144,7 @@ export default function ConsumablePurchases({ materials, reload, initialPurchase
       <div><h2 className="text-lg font-semibold text-slate-800">耗材采购</h2><p className="mt-1 text-sm text-slate-500">建采购单 → 分批收货 → 选择仓库入库。仓库可在设置中自行维护。</p></div>
       <button onClick={() => void openNew()} disabled={!materials.length || busy} className="rounded-lg bg-indigo-600 px-4 py-2.5 text-sm font-medium text-white hover:bg-indigo-700 disabled:opacity-50">+ 新建耗材采购单</button>
     </div>
-    {sourceOrderId && <div className="mt-3 flex items-center justify-between rounded-lg bg-indigo-50 px-4 py-3 text-sm text-indigo-700"><span>正在查看所选 1688 订单关联的耗材采购</span><a href="/purchase/workbench?view=products&productTab=consumables" className="underline">前往耗材库</a></div>}
+    {sourceOrderId && <div className="mt-3 flex items-center justify-between rounded-lg bg-indigo-50 px-4 py-3 text-sm text-indigo-700"><span>正在查看所选 1688 订单关联的耗材采购</span><a href="/products?kind=consumable" className="underline">前往耗材档案</a></div>}
     {notice && <div role="status" className="mt-4 rounded-lg bg-emerald-50 p-3 text-sm text-emerald-800">{notice}</div>}
     {error && !creating && <div role="alert" className="mt-4 rounded-lg bg-red-50 p-3 text-sm text-red-700">{error}</div>}
     <div className="mt-5 flex flex-wrap gap-3">
@@ -165,7 +165,7 @@ export default function ConsumablePurchases({ materials, reload, initialPurchase
         </tr>)}</tbody>
       </table>
       {loading && <p className="p-8 text-center text-sm text-slate-400">正在加载采购单…</p>}
-      {!loading && !visible.length && <div className="p-12 text-center"><p className="font-medium text-slate-600">{orders.length ? "暂无符合条件的采购单" : "还没有耗材采购单"}</p><p className="mt-2 text-sm text-slate-400">已有耗材库存仍保留在耗材库，新采购从这里登记。</p></div>}
+      {!loading && !visible.length && <div className="p-12 text-center"><p className="font-medium text-slate-600">{orders.length ? "暂无符合条件的采购单" : "还没有耗材采购单"}</p><p className="mt-2 text-sm text-slate-400">已有耗材库存请到仓库管理查看，新采购从这里登记。</p></div>}
     </div>
 
     {detail && <section className="mt-5 rounded-xl border border-indigo-100 bg-white p-5">
@@ -188,7 +188,7 @@ export default function ConsumablePurchases({ materials, reload, initialPurchase
       </div>
     </section>}
 
-    {creating && <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/35 p-5" role="dialog" aria-modal="true" aria-label="新建耗材采购单">
+    {creating && <div className="fixed inset-0 z-modal flex items-center justify-center bg-slate-900/35 p-5" role="dialog" aria-modal="true" aria-label="新建耗材采购单">
       <form onSubmit={savePurchase} className="max-h-[90vh] w-full max-w-4xl overflow-y-auto rounded-2xl bg-white p-6 shadow-xl"><div className="flex justify-between"><div><h3 className="text-lg font-semibold">新建耗材采购单</h3><p className="mt-1 text-sm text-slate-500">填写采购内容，后续按实际到货分批入库。</p></div><button type="button" disabled={busy} aria-label="关闭新建采购单" onClick={() => setCreating(false)} className="self-start px-2 text-2xl text-slate-400">×</button></div>
         {error && <div role="alert" className="mt-4 rounded-lg bg-red-50 p-3 text-sm text-red-700">{error}</div>}
         <div className="mt-5 grid grid-cols-1 gap-4 sm:grid-cols-2">

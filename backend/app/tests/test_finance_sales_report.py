@@ -7,7 +7,9 @@ from zoneinfo import ZoneInfo
 from openpyxl import load_workbook
 
 from app.config import settings
-from app.models.sales import AftersalesOrder, SalesOrder, SalesOrderItem
+from app.models.catalog import ProductSku
+from app.models.jackyun import JackyunGoodsDocument, JackyunGoodsDocumentItem
+from app.models.sales import SalesOrder, SalesOrderItem
 from app.services import finance_sales_report_service as svc
 
 
@@ -20,13 +22,11 @@ def test_default_fields_are_configurable_and_stable():
     keys = [row["key"] for row in fields]
     enabled = {row["key"] for row in fields if row["enabled"]}
     assert len(keys) == len(set(keys))
-    assert "platform" in enabled
-    assert "order_no" in enabled
-    assert "refund_amount" in enabled
-    assert "source_provider" in keys
+    assert enabled == set(svc.DEFAULT_FIELD_KEYS)
+    assert {"period", "warehouse", "tax_code", "total_quantity", "total_sales", "total_cost"} <= set(keys)
 
 
-def test_monthly_sales_report_uses_valid_sales_and_does_not_duplicate_order_values(db_session):
+def test_monthly_sales_report_summarizes_by_warehouse(db_session):
     tz = ZoneInfo(settings.TZ)
     order_no = _order_no("FIN")
     ignored_no = _order_no("UNPAID")
@@ -36,81 +36,221 @@ def test_monthly_sales_report_uses_valid_sales_and_does_not_duplicate_order_valu
         order_amount=Decimal("110"), paid_amount=Decimal("100"),
         ordered_at=datetime(2026, 8, 15, 12, 0, tzinfo=tz),
         paid_at=datetime(2026, 8, 15, 12, 1, tzinfo=tz),
+        raw={"warehouseName": "常州-示范仓"},
+    )
+    other_wh = SalesOrder(
+        order_no=_order_no("FIN2"), platform="拼多多", order_status="paid",
+        ordered_at=datetime(2026, 8, 16, 12, 0, tzinfo=tz),
+        raw={"warehouseName": "杭州仓"},
     )
     ignored = SalesOrder(
         order_no=ignored_no, platform="拼多多", order_status="待付款", pay_status="unpaid",
         ordered_at=datetime(2026, 8, 16, 12, 0, tzinfo=tz),
+        raw={"warehouseName": "常州-示范仓"},
     )
-    db_session.add_all([paid, ignored])
+    db_session.add_all([paid, other_wh, ignored])
     db_session.flush()
     db_session.add_all([
         SalesOrderItem(order_id=paid.id, sku_code="SKU-A", goods_name="商品A",
                        quantity=Decimal("2"), unit_price=Decimal("30"), amount=Decimal("60"), discount_amount=Decimal("10")),
         SalesOrderItem(order_id=paid.id, sku_code="SKU-B", goods_name="商品B",
                        quantity=Decimal("1"), unit_price=Decimal("50"), amount=Decimal("50"), discount_amount=Decimal("0")),
+        SalesOrderItem(order_id=other_wh.id, sku_code="SKU-B", goods_name="商品B",
+                       quantity=Decimal("3"), unit_price=Decimal("50"), amount=Decimal("150"), discount_amount=Decimal("0")),
         SalesOrderItem(order_id=ignored.id, sku_code="SKU-X", goods_name="未支付商品",
                        quantity=Decimal("99"), amount=Decimal("999"), discount_amount=Decimal("0")),
-        AftersalesOrder(aftersale_no=_order_no("AFTER"), order_no=order_no, type="refund", status="已完成",
-                        refund_amount=Decimal("20"), created_at_src=datetime(2026, 8, 20, 10, 0, tzinfo=tz)),
-        AftersalesOrder(aftersale_no=_order_no("CANCEL"), order_no=order_no, type="refund", status="已取消",
-                        refund_amount=Decimal("500"), created_at_src=datetime(2026, 8, 21, 10, 0, tzinfo=tz)),
+        ProductSku(jackyun_sku_id=f"sku-{uuid4().hex}", sku_code="SKU-A", default_cost=Decimal("12"),
+                   tax_code="3040205000000000000"),
+        ProductSku(jackyun_sku_id=f"sku-{uuid4().hex}", sku_code="SKU-B", default_cost=Decimal("8"),
+                   tax_code="3040205000000000000"),
+        ProductSku(jackyun_sku_id=f"sku-{uuid4().hex}", sku_code="SKU-X"),
+    ])
+    db_session.flush()
+
+    company = f"pytest-{uuid4().hex}"
+    template = svc.get_or_create_template(db_session, company)
+    report = svc.build_report(db_session, 2026, 8, template)
+
+    assert report["summary"]["orderCount"] == 2
+    assert report["summary"]["warehouseCount"] == 2
+    assert report["summary"]["totalQuantity"] == "6.0000"
+    assert report["summary"]["salesAmount"] == "250.00"
+    assert report["summary"]["costAmount"] == "56.00"  # 2*12 + 1*8 + 3*8
+
+    by_wh = {row["warehouse"]: row for row in report["rows"]}
+    assert set(by_wh) == {"常州-示范仓", "杭州仓"}
+    cz = by_wh["常州-示范仓"]
+    assert cz["period"] == "2026-08"
+    assert cz["tax_code"] == "3040205000000000000"
+    assert cz["total_quantity"] == "3.0000"
+    assert cz["total_sales"] == "100.00"
+    assert cz["total_cost"] == "32.00"
+    hz = by_wh["杭州仓"]
+    assert hz["total_sales"] == "150.00"
+    assert hz["total_cost"] == "24.00"
+
+    workbook = load_workbook(BytesIO(svc.to_xlsx(report)), data_only=True)
+    assert workbook.sheetnames == ["销售汇总"]
+    sheet = workbook["销售汇总"]
+    headers = [cell.value for cell in sheet[1]]
+    assert headers == ["月度时间", "仓库", "税务编号", "发货总数量", "销售总金额", "销售总成本"]
+    # 最后一行是合计
+    assert sheet.cell(row=sheet.max_row, column=2).value == "合计"
+    assert sheet.cell(row=sheet.max_row, column=5).value == 250.0
+
+
+def test_monthly_report_prefers_weighted_inbound_cost_before_default_cost(db_session):
+    tz = ZoneInfo(settings.TZ)
+    sku = ProductSku(
+        jackyun_sku_id=f"sku-{uuid4().hex}", sku_code=f"INBOUND-COST-{uuid4().hex[:8]}",
+        sku_name="入库成本商品", default_cost=Decimal("99"),
+        tax_code="3040205000000000000",
+    )
+    db_session.add(sku)
+    db_session.flush()
+    old_doc = JackyunGoodsDocument(
+        document_type="inbound", goodsdoc_no=f"RK-{uuid4().hex}",
+        document_at=datetime(2026, 7, 20, 10, 0, tzinfo=tz),
+    )
+    current_doc = JackyunGoodsDocument(
+        document_type="inbound", goodsdoc_no=f"RK-{uuid4().hex}",
+        document_at=datetime(2026, 8, 10, 10, 0, tzinfo=tz),
+    )
+    future_doc = JackyunGoodsDocument(
+        document_type="inbound", goodsdoc_no=f"RK-{uuid4().hex}",
+        document_at=datetime(2026, 9, 1, 10, 0, tzinfo=tz),
+    )
+    db_session.add_all([old_doc, current_doc, future_doc])
+    db_session.flush()
+    db_session.add_all([
+        JackyunGoodsDocumentItem(
+            document_id=old_doc.id, line_no=1, goods_no=sku.sku_code,
+            sku_barcode=sku.sku_code, goods_name=sku.sku_name,
+            quantity=Decimal("2"), unit_price_tax=Decimal("10"), matched_sku_id=sku.id,
+        ),
+        JackyunGoodsDocumentItem(
+            document_id=current_doc.id, line_no=1, goods_no=sku.sku_code,
+            sku_barcode=sku.sku_code, goods_name=sku.sku_name,
+            quantity=Decimal("3"), unit_price_tax=Decimal("20"), matched_sku_id=sku.id,
+        ),
+        JackyunGoodsDocumentItem(
+            document_id=future_doc.id, line_no=1, goods_no=sku.sku_code,
+            sku_barcode=sku.sku_code, goods_name=sku.sku_name,
+            quantity=Decimal("100"), unit_price_tax=Decimal("100"), matched_sku_id=sku.id,
+        ),
+    ])
+    order = SalesOrder(
+        order_no=_order_no("WEIGHTED"), platform="淘宝", order_status="已完成", pay_status="已支付",
+        ordered_at=datetime(2026, 8, 20, 12, 0, tzinfo=tz), raw={"warehouseName": "常州-示范仓"},
+    )
+    db_session.add(order)
+    db_session.flush()
+    db_session.add(SalesOrderItem(
+        order_id=order.id, sku_code=sku.sku_code, goods_name=sku.sku_name,
+        quantity=Decimal("1"), amount=Decimal("100"), discount_amount=Decimal("0"),
+        sku_id=sku.id,
+    ))
+    db_session.flush()
+
+    company = f"pytest-{uuid4().hex}"
+    template = svc.get_or_create_template(db_session, company)
+    report = svc.build_report(db_session, 2026, 8, template)
+    assert report["summary"]["costAmount"] == "16.00"  # (2*10 + 3*20) / 5
+
+    unbilled = svc.build_unbilled_income_report(db_session, 2026, 8, company=company)
+    assert unbilled["details"][0]["cost"] == "16.00"
+
+
+def test_multiple_tax_codes_joined_and_missing_cost_is_zero(db_session):
+    tz = ZoneInfo(settings.TZ)
+    order = SalesOrder(
+        order_no=_order_no("FIN"), platform="淘宝", order_status="已完成", pay_status="已支付",
+        ordered_at=datetime(2026, 8, 15, 12, 0, tzinfo=tz),
+        raw={"warehouseName": "常州-示范仓"},
+    )
+    db_session.add(order)
+    db_session.flush()
+    db_session.add_all([
+        SalesOrderItem(order_id=order.id, sku_code="SKU-A", goods_name="商品A",
+                       quantity=Decimal("1"), amount=Decimal("30"), discount_amount=Decimal("0")),
+        SalesOrderItem(order_id=order.id, sku_code="SKU-B", goods_name="商品B",
+                       quantity=Decimal("1"), amount=Decimal("40"), discount_amount=Decimal("0")),
+        ProductSku(jackyun_sku_id=f"sku-{uuid4().hex}", sku_code="SKU-A", default_cost=None,
+                   tax_code="3040205000000000000"),
+        ProductSku(jackyun_sku_id=f"sku-{uuid4().hex}", sku_code="SKU-B", default_cost=Decimal("5"),
+                   tax_code="1090101020000000000"),
     ])
     db_session.flush()
 
     company = f"pytest-{uuid4().hex}"
     template = svc.get_or_create_template(db_session, company)
     template = svc.save_template(
-        db_session, company=company,
-        fields=[
-            {"key": "order_no", "label": "财务订单号", "enabled": True},
-            {"key": "sku_code", "label": "商品编码", "enabled": True},
-            {"key": "paid_amount", "label": "实收", "enabled": True},
-            {"key": "refund_amount", "label": "退款", "enabled": True},
-        ],
-        rules={"refund_mode": "recorded_non_cancelled"},
-        to_addrs=["finance@example.com"], cc_addrs=[], auto_send=False, send_day=3, send_hour=10,
+        db_session, company=company, fields=svc.default_fields(), rules={},
+        to_addrs=[], cc_addrs=[], auto_send=False, send_day=3, send_hour=10,
     )
-
     report = svc.build_report(db_session, 2026, 8, template)
-    assert report["summary"] == {
-        "orderCount": 1,
-        "totalQuantity": "3.0000",
-        "salesAmount": "100.00",
-        "refundAmount": "20.00",
-        "netAfterRefund": "80.00",
-    }
-    assert len(report["rows"]) == 2
-    assert report["rows"][0]["paid_amount"] == "100"
-    assert report["rows"][1]["paid_amount"] == ""
-    assert report["rows"][0]["refund_amount"] == "20.0000"
-    assert report["rows"][1]["refund_amount"] == ""
-    assert all(row["order_no"] == order_no for row in report["rows"])
-
-    workbook = load_workbook(BytesIO(svc.to_xlsx(report)), data_only=True)
-    assert workbook.sheetnames == ["销售汇总", "销售明细"]
-    headers = [cell.value for cell in workbook["销售明细"][1]]
-    assert headers == ["财务订单号", "商品编码", "实收", "退款"]
+    assert len(report["rows"]) == 1
+    row = report["rows"][0]
+    assert row["tax_code"] == "1090101020000000000 / 3040205000000000000"
+    assert row["total_quantity"] == "2.0000"
+    assert row["total_sales"] == "70.00"
+    assert row["total_cost"] == "5.00"
 
 
-def test_refund_can_be_disabled_by_template_rule(db_session):
+def test_legacy_template_auto_upgrades_to_warehouse_fields(db_session):
+    company = f"pytest-{uuid4().hex}"
+    template = svc.get_or_create_template(db_session, company)
+    # 模拟旧版订单明细口径模板：字段不在当前注册表时自动迁移为仓库汇总默认字段
+    template.fields = [
+        {"key": "platform", "label": "平台", "enabled": True},
+        {"key": "order_no", "label": "财务订单号", "enabled": True},
+        {"key": "refund_amount", "label": "退款", "enabled": True},
+    ]
+    db_session.commit()
+    template = svc.get_or_create_template(db_session, company)
+    enabled = {row["key"] for row in template.fields if row["enabled"]}
+    assert enabled == set(svc.DEFAULT_FIELD_KEYS)
+
+
+def test_unbilled_adjustment_persists_selected_details_and_version(db_session):
     tz = ZoneInfo(settings.TZ)
-    order_no = _order_no("NOREF")
-    order = SalesOrder(order_no=order_no, platform="京东", order_status="finished", paid_amount=Decimal("30"),
-                       ordered_at=datetime(2026, 7, 10, 12, 0, tzinfo=tz))
+    order = SalesOrder(
+        order_no=_order_no("UNBILLED"), platform="淘宝", order_status="已完成", pay_status="已支付",
+        ordered_at=datetime(2098, 8, 15, 12, 0, tzinfo=tz),
+        raw={"warehouseName": "常州-示范仓"},
+    )
     db_session.add(order)
     db_session.flush()
-    db_session.add(SalesOrderItem(order_id=order.id, sku_code="SKU-1", goods_name="商品",
-                                  quantity=Decimal("1"), amount=Decimal("30"), discount_amount=Decimal("0")))
-    db_session.add(AftersalesOrder(aftersale_no=_order_no("REF"), order_no=order_no, type="refund",
-                                   status="done", refund_amount=Decimal("10")))
+    sku_a = f"UNBILLED-A-{uuid4().hex[:8]}"
+    sku_b = f"UNBILLED-B-{uuid4().hex[:8]}"
+    db_session.add_all([
+        SalesOrderItem(order_id=order.id, sku_code=sku_a, goods_name="商品A", quantity=Decimal("2"),
+                       amount=Decimal("20"), discount_amount=Decimal("0")),
+        SalesOrderItem(order_id=order.id, sku_code=sku_b, goods_name="商品B", quantity=Decimal("3"),
+                       amount=Decimal("30"), discount_amount=Decimal("0")),
+        ProductSku(jackyun_sku_id=f"sku-{uuid4().hex}", sku_code=sku_a, sku_name="商品A",
+                   default_cost=Decimal("4"), tax_code="3010101000000000000"),
+        ProductSku(jackyun_sku_id=f"sku-{uuid4().hex}", sku_code=sku_b, sku_name="商品B",
+                   default_cost=Decimal("5"), tax_code="3010102000000000000"),
+    ])
     db_session.flush()
 
     company = f"pytest-{uuid4().hex}"
-    template = svc.get_or_create_template(db_session, company)
-    template = svc.save_template(
-        db_session, company=company, fields=svc.default_fields(), rules={"refund_mode": "ignore_refund"},
-        to_addrs=[], cc_addrs=[], auto_send=False, send_day=3, send_hour=10,
+    base = svc.build_unbilled_income_report(db_session, 2098, 8, company=company)
+    assert base["sourceCount"] == 2
+    selected_key = svc.unbilled_detail_key(base["details"][0])
+
+    saved = svc.save_unbilled_adjustment(
+        db_session, company=company, year=2098, month=8,
+        selected_keys=[selected_key], actor="pytest-adjuster",
     )
-    report = svc.build_report(db_session, 2026, 7, template)
-    assert report["summary"]["refundAmount"] == "0.00"
-    assert report["summary"]["netAfterRefund"] == "30.00"
+    current = svc.build_unbilled_income_report(db_session, 2098, 8, company=company)
+
+    assert saved["version"] == 1
+    assert current["adjusted"] is True
+    assert current["version"] == saved["version"]
+    assert current["sourceCount"] == 2
+    assert current["selectedCount"] == 1
+    assert current["selectedKeys"] == [selected_key]
+    assert len(current["details"]) == 1
+    assert svc.unbilled_detail_key(current["details"][0]) == selected_key

@@ -1,8 +1,9 @@
 """SKU 匹配服务：入库明细自动匹配 + 1688 订单 SKU 人工配置辅助。
 
 规则（2026-09-04 与用户对齐）：
-- 入库明细 ↔ 货品档案：goodsNo 直接命中 → auto；金额按 default_cost × 数量校验（容差 2%）。
-  异常打标：missing（档案无此货号）/ price_mismatch（命中但金额对不上），提示人工干预。
+- 入库明细 ↔ 货品档案：goodsNo 直接命中 → auto；入库金额是实际成本事实，
+  不再与货品档案的历史 default_cost 比较并阻塞入库链路。
+  异常打标保留给 missing（档案无此货号）和人工明确标记的成本核验。
 - 1688 订单 ↔ SKU：导入源数据无商品标题，天然人工配置。本服务只提供候选排序
   （同供应商历史入库货品优先）与金额平衡校验，配错提示异常。
 """
@@ -18,7 +19,7 @@ from app.models.catalog import Product, ProductSku
 from app.models.jackyun import JackyunGoodsDocument, JackyunGoodsDocumentItem
 from app.models.purchase import ExternalPurchaseOrder, PurchaseAllocationItem
 from app.core.audit import audit
-from app.services.procurement_chain_service import amount_close, normalize_name
+from app.services.procurement_chain_service import normalize_name
 
 AMOUNT_TOLERANCE = Decimal("0.02")
 ABS_EPS = Decimal("0.5")
@@ -84,28 +85,13 @@ def match_inbound_items(db: Session, include_outbound: bool = False) -> dict[str
             item.match_note = f"命中货品「{product.goods_name if product else goods_no}」但无法唯一确定 SKU，需人工指定"
             stats["auto"] += 1
             continue
-        # 金额校验：固定成本才与档案成本比较；动态成本以实际入库单价为准。
+        # 入库单金额/数量是本次采购成本事实；default_cost 只是没有入库数据时的兜底。
         amount = item.amount_tax
-        cost = sku.default_cost
         qty = item.quantity
-        if sku.cost_mode == "dynamic":
-            item.match_status = "auto"
-            item.match_note = "动态成本：以本次实际入库单价沉淀成本"
-            stats["auto"] += 1
-        elif amount is not None and cost is not None and qty is not None and amount > 0 and cost > 0 and qty > 0:
-            expected = cost * qty
-            tolerance = sku.cost_tolerance_pct if sku.cost_tolerance_pct is not None else AMOUNT_TOLERANCE
-            if amount_close(amount, expected, tolerance):
-                item.match_status = "price_ok"
-                item.match_note = ""
-                stats["price_ok"] += 1
-            else:
-                item.match_status = "price_mismatch"
-                item.match_note = (
-                    f"金额异常：入库 {amount:.2f} vs 档案成本×数量 {expected:.2f}"
-                    f"（成本 {cost:.2f} × {qty:g}），需人工核对"
-                )
-                stats["price_mismatch"] += 1
+        if amount is not None and qty is not None and amount >= 0 and qty > 0:
+            item.match_status = "price_ok"
+            item.match_note = "采购入库金额是实际成本事实；货品档案成本仅作无入库数据时的兜底"
+            stats["price_ok"] += 1
         else:
             item.match_status = "auto"
             item.match_note = "" if amount is not None else "金额信息不全，未做金额校验"
@@ -247,9 +233,10 @@ def allocation_balance(db: Session, po: ExternalPurchaseOrder) -> dict[str, Any]
 # ---------- 成本确认（1688 采购单锚定，2026-09-04 用户确认口径） ----------
 
 def _linked_order_ratio(db: Session, document_id: int) -> tuple[Decimal, Decimal] | None:
-    """入库单若已挂 1688 订单，返回 (订单实付, 入库单金额) 供比例分摊。"""
+    """入库单若已挂采购主单，返回 (采购实付, 入库单金额) 供比例分摊。"""
     from app.models.procurement_chain import ProcurementChainLink
     from app.models.alibaba1688_import import Alibaba1688Order
+    from app.models.purchase import ExternalPurchaseOrder
 
     link = (
         db.query(ProcurementChainLink)
@@ -258,11 +245,19 @@ def _linked_order_ratio(db: Session, document_id: int) -> tuple[Decimal, Decimal
     )
     if not link:
         return None
-    order = db.get(Alibaba1688Order, link.order_id)
-    doc = db.get(JackyunGoodsDocument, document_id)
-    if not order or not order.actual_payment or not doc or not doc.total_amount or doc.total_amount <= 0:
+    paid = None
+    if link.order_id is not None:
+        order = db.get(Alibaba1688Order, link.order_id)
+        paid = order.actual_payment if order is not None else None
+    elif link.external_po_id is not None:
+        external = db.get(ExternalPurchaseOrder, link.external_po_id)
+        paid = external.effective_paid_amount if external is not None else None
+    else:
         return None
-    return Decimal(str(order.actual_payment)), Decimal(str(doc.total_amount))
+    doc = db.get(JackyunGoodsDocument, document_id)
+    if paid is None or not doc or not doc.total_amount or doc.total_amount <= 0:
+        return None
+    return Decimal(str(paid)), Decimal(str(doc.total_amount))
 
 
 def _confirm_candidate_cost(db: Session, item: JackyunGoodsDocumentItem) -> dict[str, Any] | None:

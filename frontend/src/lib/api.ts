@@ -57,6 +57,12 @@ function detailToMessage(detail: unknown, fallback: string): string {
   return fallback;
 }
 
+/** 读取带认证请求失败时的 detail 文案。 */
+async function readErrorDetail(res: Response, fallback = "请求失败"): Promise<string> {
+  const body = (await res.json().catch(() => ({}))) as { detail?: unknown };
+  return detailToMessage(body.detail, `${fallback}（${res.status}）`);
+}
+
 // ---------- 认证 ----------
 
 export type AuthUser = {
@@ -136,11 +142,24 @@ export type Overview = {
   metrics: Record<string, number | null>;
 };
 
+export type SystemHealth = {
+  status: "ready" | "degraded" | string;
+  components: Record<string, "up" | "down" | string>;
+};
+
 export async function getOverview(): Promise<Overview> {
   const res = await authenticatedFetch("/api/v1/system/overview", {
     cache: "no-store",
   });
   if (!res.ok) throw new Error(`overview ${res.status}`);
+  return res.json();
+}
+
+export async function getSystemHealth(): Promise<SystemHealth> {
+  const res = await authenticatedFetch("/api/v1/system/health", {
+    cache: "no-store",
+  });
+  if (!res.ok) throw new Error(`health ${res.status}`);
   return res.json();
 }
 
@@ -344,9 +363,11 @@ export type PlatformRow = { platform: string; orders: number; salesAmount: strin
 export type SkuRow = { skuCode: string; goodsName: string; orders: number; salesAmount: string | null };
 export type InventorySummary = {
   skuCount: number;
-  snapshotAt: string | null;
+  lastDocumentAt: string | null;
   totalQuantity: string | null;
-  byWarehouse: { warehouseId: number | null; quantity: string | null; skus: number }[];
+  byWarehouse: { warehouseId: number | null; warehouseName?: string; quantity: string | null; skus: number }[];
+  positionSource?: string;
+  appliedDocumentCount?: number;
   note?: string;
 };
 export type InventorySkuRow = {
@@ -360,14 +381,15 @@ export type InventorySkuRow = {
   unit: string;
   status: string;
   quantity: string | null;
-  hasSnapshot: boolean;
+  hasMovement: boolean;
   warehouses: { warehouseId: number | null; warehouseName: string; quantity: string | null }[];
-  snapshotAt: string | null;
+  lastDocumentAt: string | null;
 };
 export type SalesOrderRow = {
   id: number; orderNo: string; platform: string; storeName: string;
   orderStatus: string; payStatus: string;
   orderAmount: string | null; paidAmount: string | null; orderedAt: string | null;
+  itemName: string; quantity: string | null; itemCount: number;
 };
 export type AftersaleRow = {
   id: number; aftersaleNo: string; orderNo: string; type: string; status: string;
@@ -377,28 +399,54 @@ export type CatalogSkuRow = {
   id: number; jackyunSkuId: string; skuCode: string; skuName: string; goodsName: string;
   productType: "single" | "bundle" | "virtual_bundle";
   barcode: string; unit: string; salePrice: string | null; defaultCost: string | null;
-  costMode: "fixed" | "dynamic"; costTolerancePct: string; taxCode: string; status: string;
+  costMode: "fixed" | "dynamic"; costTolerancePct: string; taxCode: string;
+  taxCategoryRuleId: number | null; taxCategoryRuleName: string; status: string;
+};
+
+export type TaxCategoryRule = {
+  id: number; pattern: string; categoryName: string; itemName: string; taxCode: string;
+  matchKeyword: string; matchMode: "contains" | "exact" | "prefix";
+  priority: number; enabled: boolean; note: string;
 };
 
 export type LinkedSkuRef = { skuId: number; skuCode: string; skuName: string };
+
+export type BundleBulkDeleteResult = {
+  ok: boolean;
+  requested: number;
+  deleted: number;
+  deletedIds: number[];
+  blocked: Array<{
+    id: number;
+    skuCode: string;
+    reason: string;
+    references: Array<{ label: string; count: number }>;
+  }>;
+  invalid: Array<{ id: number; skuCode: string; reason: string }>;
+  notFound: number[];
+};
 
 /** 统一货品档案行：kind=goods（正品，库存读吉客云快照）/ kind=consumable（耗材，库存本系统三仓维护）。 */
 export type UnifiedCatalogRow = {
   kind: "goods" | "consumable";
   id: number; code: string; name: string; goodsName: string;
+  jackyunSkuId?: string;
   barcode: string; unit: string; category: string; goodsCategory: string; status: string;
-  stockOwn: string | null;   // 正品=吉客云快照库存；耗材=自有仓
+  stockOwn: string | null;   // 正品=独立运算库存；耗材=自有仓
   stockFactory: string | null; // 仅耗材：工厂仓
   stockTransit: string | null; // 仅耗材：在途
   minStock: string | null;   // 仅耗材：安全库存
   lowStock: boolean;         // 仅耗材：可用≤安全库存或负库存
-  hasSnapshot: boolean | null;
+  hasMovement?: boolean;     // 仅正品：是否存在已纳入运算的出入库单据
   linkedSkus: LinkedSkuRef[];
   costMode: "fixed" | "dynamic" | null;
   costTolerancePct: string | null;
   taxCode: string;
+  taxCategoryRuleId: number | null;
+  taxCategoryRuleName: string;
   salePrice: string | null;
   defaultCost: string | null;
+  purchaseUnitCost?: string | null;
 };
 
 export type ConsumableRow = {
@@ -406,6 +454,7 @@ export type ConsumableRow = {
   purchaseUnitCost: string | null; purchasedQty: string; usedQty: string;
   stockQty: string; factoryQty: string; transitQty: string; availableQty: string;
   minStockQty: string; usageRate: string; taxCode: string;
+  taxCategoryRuleId: number | null; taxCategoryRuleName: string;
   status: string; mappingCount: number; linkedSkus: LinkedSkuRef[]; lowStock: boolean;
 };
 export type ConsumableMappingRow = {
@@ -415,7 +464,7 @@ export type ConsumableMappingRow = {
 };
 export type ConsumableTransactionRow = {
   id: number; transactionType: string; quantity: string; unitCost: string | null;
-  location: string | null;
+  location: string | null; warehouseId: number | null; warehouseCode: string; warehouseName: string;
   stockBefore: string | null; stockAfter: string | null;
   factoryBefore: string | null; factoryAfter: string | null;
   sourceType: string; sourceId: number | null; note: string; occurredAt: string | null;
@@ -434,9 +483,15 @@ export type ConsumablePurchaseRow = {
 };
 export type ConsumablePurchaseDetail = ConsumablePurchaseRow & {
   receipts: Array<{ id: number; number: string; receivedOn: string; note: string; createdBy: string; location: string;
+    warehouseId?: number | null; warehouseCode?: string; warehouseName?: string;
     items: Array<{ consumableId: number; name: string; quantity: string; unit: string }> }>;
 };
 export type ConsumablePurchaseSource = { id: number; orderNo: string; supplierName: string };
+export type WarehouseRow = {
+  id: number; code: string; name: string; warehouseType: "factory" | "b2c" | "other";
+  purpose: "goods" | "consumable" | "both"; isSellable: boolean; status: "active" | "inactive";
+  note: string; jackyunWarehouseId: string | null;
+};
 
 export const dashboardApi = {
   salesTrend: (days = 30, start?: string, end?: string) =>
@@ -468,6 +523,10 @@ export const dashboardApi = {
     jsonFetch<{ updated: number; skipped: number; missing: number }>("/api/v1/dashboard/catalog/tax-code/bulk", {
       method: "POST", body: JSON.stringify({ items, tax_code: taxCode, overwrite }),
     }),
+  bulkDeleteBundles: (ids: number[]) =>
+    jsonFetch<BundleBulkDeleteResult>("/api/v1/dashboard/catalog/bundles/bulk-delete", {
+      method: "POST", body: JSON.stringify({ ids }),
+    }),
   updateCategory: (kind: "goods" | "consumable", id: number, category: string) =>
     jsonFetch<{ ok: boolean; category: string }>("/api/v1/dashboard/catalog/category", {
       method: "POST", body: JSON.stringify({ kind, id, category }),
@@ -475,6 +534,10 @@ export const dashboardApi = {
   orders: (status?: string) =>
     jsonFetch<SalesOrderRow[]>(`/api/v1/dashboard/orders${status ? `?status=${encodeURIComponent(status)}` : ""}`),
   aftersales: () => jsonFetch<AftersaleRow[]>("/api/v1/dashboard/aftersales"),
+};
+
+export const taxAccountingApi = {
+  categoryRules: () => jsonFetch<{ items: TaxCategoryRule[] }>("/api/v1/tax-accounting/category-rules?include_disabled=true"),
 };
 
 export const consumablesApi = {
@@ -500,6 +563,15 @@ export const consumablesApi = {
   reopenPurchase: (id: number) => jsonFetch<ConsumablePurchaseDetail>(`/api/v1/consumables/purchases/${id}/reopen`, { method: "POST" }),
   updatePurchase: (id: number, body: Record<string, unknown>) => jsonFetch<ConsumablePurchaseDetail>(`/api/v1/consumables/purchases/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
   deletePurchase: (id: number) => jsonFetch<{ ok: boolean; purchaseId: number }>(`/api/v1/consumables/purchases/${id}`, { method: "DELETE" }),
+};
+
+export const warehousesApi = {
+  list: (includeInactive = false) =>
+    jsonFetch<WarehouseRow[]>(`/api/v1/warehouses?include_inactive=${includeInactive ? "true" : "false"}`),
+  receiveConsumablePurchase: (purchaseId: number, body: Record<string, unknown>) =>
+    jsonFetch<ConsumablePurchaseDetail>(`/api/v1/warehouses/consumable-purchases/${purchaseId}/receipts`, {
+      method: "POST", body: JSON.stringify(body),
+    }),
 };
 
 // ---------- 期初初始化（Phase 6） ----------
@@ -664,6 +736,68 @@ export type JackyunFileImportRow = {
   };
 };
 
+export type SupplierRecord = {
+  id: number;
+  name: string;
+  platform: string;
+  externalShopId: string;
+  contact: string;
+  taxNo: string;
+  phone: string;
+  address: string;
+  notes: string;
+  isTemp: boolean;
+  orderCount?: number;
+  createdAt: string | null;
+};
+
+export type SupplierInput = {
+  name: string;
+  platform?: string;
+  externalShopId?: string;
+  contact?: string;
+  taxNo?: string;
+  phone?: string;
+  address?: string;
+  notes?: string;
+  isTemp?: boolean;
+};
+
+export const supplierApi = {
+  list: (keyword = "", status = "all") =>
+    jsonFetch<SupplierRecord[]>(
+      `/api/v1/suppliers?keyword=${encodeURIComponent(keyword)}&status=${encodeURIComponent(status)}`,
+    ),
+  create: async (payload: SupplierInput) => {
+    const res = await authenticatedFetch("/api/v1/suppliers", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    if (!res.ok) throw new Error(await readErrorDetail(res));
+    return (await res.json()) as SupplierRecord;
+  },
+  update: async (id: number, payload: SupplierInput) => {
+    const res = await authenticatedFetch(`/api/v1/suppliers/${id}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    if (!res.ok) throw new Error(await readErrorDetail(res));
+    return (await res.json()) as SupplierRecord;
+  },
+  remove: async (id: number) => {
+    const res = await authenticatedFetch(`/api/v1/suppliers/${id}`, { method: "DELETE" });
+    if (!res.ok) throw new Error(await readErrorDetail(res));
+    return (await res.json()) as { ok: boolean };
+  },
+  resolve: (taxNos: string[]) =>
+    jsonFetch<{ matched: Record<string, { id: number; name: string; isTemp: boolean }>; unmatched: string[] }>(
+      "/api/v1/suppliers/resolve",
+      { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ taxNos }) },
+    ),
+};
+
 export const jackyunFileApi = {
   imports: (lifecycle?: string) => {
     const q = lifecycle ? `?lifecycle=${encodeURIComponent(lifecycle)}` : "";
@@ -697,6 +831,34 @@ export const jackyunFileApi = {
       `/api/v1/jackyun-files/imports/${id}/records/${rowIndex}/restore`,
       { method: "POST" }
     ),
+};
+
+export type MasterDataImportResult = {
+  ok: boolean;
+  dataset: string;
+  sheet: string;
+  rows: number;
+  skipped?: number;
+  created: number;
+  updated: number;
+  mappingsCreated?: number;
+  mappingsRemoved?: number;
+  linkedProducts?: number;
+  linkedConsumables?: number;
+  ignoredInventoryFields?: string[];
+};
+
+export const masterDataApi = {
+  importXlsx: async (dataset: "catalog" | "bundles" | "tax_rules" | "warehouses" | "suppliers" | "external_orders", file: File) => {
+    const form = new FormData();
+    form.append("file", file);
+    const res = await authenticatedFetch(`/api/v1/data/import/${dataset}`, { method: "POST", body: form });
+    if (!res.ok) {
+      const body = (await res.json().catch(() => ({}))) as { detail?: unknown };
+      throw new Error(detailToMessage(body.detail, `回导失败（${res.status}）`));
+    }
+    return res.json() as Promise<MasterDataImportResult>;
+  },
 };
 
 // ---------- 其他渠道采购订单主档 ----------
@@ -1528,6 +1690,14 @@ export type WorkbenchSummary = {
   pendingInbound: number;
   pendingInvoice: number;
   exceptionCount: number;
+  goodsOrders: number;
+  consumableOrders: number;
+  goodsProducing: number;
+  goodsInbound: number;
+  consumableTransit: number;
+  consumableInbound: number;
+  transitOrders: number;
+  completedOrders: number;
 };
 
 export type WorkbenchOrderItem = {
@@ -1542,6 +1712,7 @@ export type WorkbenchOrderItem = {
   orderKindOverride?: string;
   supplier: string;
   amount: number | null;
+  paidAmount?: number | null;
   freight: number | null;
   orderDate: string | null;
   orderStatus: string;
@@ -1562,6 +1733,18 @@ export type WorkbenchOrderItem = {
   invoicedAmount?: number | null;
   /** 未开票金额 = 实付 - 已收票（负数归 0） */
   invoiceOutstanding?: number | null;
+  /** 供应链工作台表格：由已确认 SKU / 原始商品行汇总得到。 */
+  productName?: string;
+  productQuantity?: number | null;
+  productUnit?: string;
+  itemCount?: number;
+  warehouseName?: string;
+  logisticsNo?: string;
+  logisticsCompany?: string;
+  expectedArrival?: string;
+  shipAt?: string;
+  jackyunInboundNo?: string;
+  remark?: string;
 };
 
 export type WorkbenchOrderGroup = { label: string; items: WorkbenchOrderItem[] };
@@ -1593,16 +1776,23 @@ export type WorkbenchOrder = {
   freight: number | null;
   discount: number | null;
   paidAmount: number | null;
+  /** 1688 源单有付款时间且实付大于 0，表示平台付款事实已确认。 */
+  paidOn1688?: boolean;
+  paidOn1688At?: string | null;
   /** 1688 微调金额：红包等导致开票金额与订单实付的零头差；平衡目标 = 实付 + 微调 */
   adjustmentAmount?: number | null;
   adjustmentNote?: string;
   orderDate: string | null;
   orderStatus: string | null;
   purchaseStatus: string;
+  /** 后端根据入库/发票/付款事实计算出的收尾卡点。 */
+  closeoutStage?: string | null;
   /** 采购单步骤按 Excel 口径跳过（吉客云未建采购单、入库闭环即放行） */
   jackyunPoBypassed?: boolean;
   title: string | null;
   hasException: boolean;
+  logistics?: Record<string, unknown>;
+  shipStatus?: string;
 };
 
 export type WorkbenchDetail = {
@@ -1610,6 +1800,8 @@ export type WorkbenchDetail = {
   stepStates: Record<string, WorkbenchStepState>;
   detail: {
     allocations: unknown[];
+    orderItems?: unknown[];
+    consumable?: unknown | null;
     expenses: unknown[];
     purchaseOrders: unknown[];
     poAmountClosure?: { relevant: boolean; allocTotal: number | null; gap: number | null; closed: boolean } | null;
@@ -1619,6 +1811,13 @@ export type WorkbenchDetail = {
     unallocatedAmount: number | null;
   };
   stepTotal: number;
+  warehouse?: {
+    warehouseName: string;
+    jackyunWarehouseId: string;
+    isSellable: boolean | null;
+    currentStock: number | null;
+    inTransitQty: number;
+  } | null;
   supplierHistory: {
     orderCount: number;
     totalPurchase: number;
@@ -1678,6 +1877,9 @@ export const procurementWorkbenchApi = {
       pageSize?: number;
       startDate?: string;
       endDate?: string;
+      channel?: "all" | "1688" | "pdd" | "taobao" | "other";
+      kind?: "all" | "goods" | "consumable";
+      warehouse?: string;
     } = {}
   ) => {
     const sp = new URLSearchParams();
@@ -1688,6 +1890,9 @@ export const procurementWorkbenchApi = {
     if (params.pageSize) sp.set("page_size", String(params.pageSize));
     if (params.startDate) sp.set("start_date", params.startDate);
     if (params.endDate) sp.set("end_date", params.endDate);
+    if (params.channel && params.channel !== "all") sp.set("channel", params.channel);
+    if (params.kind && params.kind !== "all") sp.set("kind", params.kind);
+    if (params.warehouse) sp.set("warehouse", params.warehouse);
     const qs = sp.toString();
     return jsonFetch<WorkbenchOrderList>(`/api/v1/procurement-workbench/orders${qs ? "?" + qs : ""}`);
   },
@@ -1935,6 +2140,11 @@ export const skuMatchingApi = {
   runInboundAuto: () =>
     jsonFetch<{ ok: boolean; stats: Record<string, number> }>(
       "/api/v1/purchase/sku-matching/inbound-auto",
+      { method: "POST" }
+    ),
+  runOutboundAuto: () =>
+    jsonFetch<{ ok: boolean; stats: Record<string, number> }>(
+      "/api/v1/purchase/sku-matching/outbound-auto",
       { method: "POST" }
     ),
   pending: (limit = 50) =>

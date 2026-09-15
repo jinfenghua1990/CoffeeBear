@@ -4,8 +4,9 @@
 - 字段、别名、顺序保存在数据库模板中；后台月度任务与前端共用同一模板。
 - 有效销售订单口径与 profit.compute 对齐：订单已支付/完成，或支付状态已成功。
 - 销售净额按 SalesOrderItem.amount - discount_amount，避免另造利润口径。
-- 退款使用本地 AftersalesOrder 已记录的有效退款；取消/关闭/拒绝/作废的售后不计。
-- 订单级金额和退款只在该订单第一条明细行输出，避免 Excel 汇总时重复累计。
+- 按仓库汇总：每行一个仓库，输出 月度时间 / 仓库 / 税务编号 / 发货总数量 / 销售总金额 / 销售总成本。
+- 仓库取订单原始来源的 warehouseName；税务编号取货品档案，成本优先取账期截止前
+  采购入库明细的数量加权平均含税单价，再以货品档案 default_cost 兜底，缺失数据显示为空值或 0。
 """
 from __future__ import annotations
 
@@ -18,52 +19,35 @@ from typing import Any
 from openpyxl import Workbook
 from openpyxl.styles import Font
 from openpyxl.utils import get_column_letter
-from sqlalchemy import or_
+from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
 
 from app.config import settings
-from app.models.finance import ArchiveFile, FinanceSalesReportTemplate
-from app.models.sales import AftersalesOrder, SalesOrder, SalesOrderItem
+from app.core.audit import audit
+from app.models.catalog import ProductSku
+from app.models.finance import ArchiveFile, FinanceSalesReportTemplate, FinanceUnbilledAdjustment
+from app.models.sales import SalesOrder, SalesOrderItem
 from app.services import finance_service
+from app.services.inbound_cost_service import weighted_inbound_costs
 from app.services.monthly_core import month_bounds
 from app.utils.money import quantize
 
 FIELD_REGISTRY: dict[str, dict[str, str]] = {
-    "platform": {"label": "平台", "type": "text"},
-    "store_id": {"label": "店铺ID", "type": "text"},
-    "source_provider": {"label": "数据来源", "type": "text"},
-    "order_no": {"label": "订单号", "type": "text"},
-    "ordered_at": {"label": "下单时间", "type": "datetime"},
-    "paid_at": {"label": "支付时间", "type": "datetime"},
-    "order_type": {"label": "订单类型", "type": "text"},
-    "order_status": {"label": "订单状态", "type": "text"},
-    "pay_status": {"label": "支付状态", "type": "text"},
-    "sku_code": {"label": "SKU编码", "type": "text"},
-    "goods_name": {"label": "商品名称", "type": "text"},
-    "quantity": {"label": "销售数量", "type": "number"},
-    "unit_price": {"label": "单价", "type": "money"},
-    "item_amount": {"label": "商品金额", "type": "money"},
-    "discount_amount": {"label": "优惠金额", "type": "money"},
-    "item_net_amount": {"label": "商品净销售额", "type": "money"},
-    "order_amount": {"label": "订单金额", "type": "money"},
-    "paid_amount": {"label": "实付金额", "type": "money"},
-    "refund_amount": {"label": "有效退款金额", "type": "money"},
-    "currency": {"label": "币种", "type": "text"},
+    "period": {"label": "月度时间", "type": "text"},
+    "warehouse": {"label": "仓库", "type": "text"},
+    "tax_code": {"label": "税务编号", "type": "text"},
+    "total_quantity": {"label": "发货总数量", "type": "number"},
+    "total_sales": {"label": "销售总金额", "type": "money"},
+    "total_cost": {"label": "销售总成本", "type": "money"},
 }
 
 DEFAULT_FIELD_KEYS = [
-    "platform",
-    "order_no",
-    "ordered_at",
-    "sku_code",
-    "goods_name",
-    "quantity",
-    "unit_price",
-    "item_amount",
-    "discount_amount",
-    "item_net_amount",
-    "paid_amount",
-    "refund_amount",
+    "period",
+    "warehouse",
+    "tax_code",
+    "total_quantity",
+    "total_sales",
+    "total_cost",
 ]
 
 DEFAULT_RULES: dict[str, Any] = {
@@ -72,10 +56,6 @@ DEFAULT_RULES: dict[str, Any] = {
     "timezone": settings.TZ,
     "order_level_value_mode": "first_item_only",
 }
-
-INVALID_REFUND_STATUS_WORDS = (
-    "取消", "关闭", "拒绝", "驳回", "作废", "cancel", "closed", "reject", "void"
-)
 
 
 def default_fields() -> list[dict[str, Any]]:
@@ -140,6 +120,13 @@ def get_or_create_template(db: Session, company: str = finance_service.DEFAULT_C
         db.add(row)
         db.commit()
         db.refresh(row)
+    else:
+        # 旧版本模板字段（订单明细口径）不是当前注册字段时，自动升级为仓库汇总默认字段。
+        stored_keys = {f.get("key") for f in (row.fields or []) if isinstance(f, dict)}
+        if not (stored_keys & set(FIELD_REGISTRY)):
+            row.fields = default_fields()
+            db.commit()
+            db.refresh(row)
     return row
 
 
@@ -205,15 +192,12 @@ def save_template(
 
 def _valid_order_condition():
     """与 app.services.profit.compute 的有效销售口径保持一致。"""
+    from sqlalchemy import or_
+
     return or_(
         SalesOrder.order_status.in_(["paid", "done", "finished", "已支付", "已完成"]),
         SalesOrder.pay_status.in_(["paid", "success", "已支付"]),
     )
-
-
-def _is_valid_refund(row: AftersalesOrder) -> bool:
-    status = (row.status or "").strip().lower()
-    return not any(word in status for word in INVALID_REFUND_STATUS_WORDS)
 
 
 def _money(value: Decimal | None) -> Decimal:
@@ -224,8 +208,18 @@ def _string_decimal(value: Decimal | None) -> str:
     return str(quantize(value or Decimal("0"), Decimal("0.01")))
 
 
-def _dt(value: datetime | None) -> str:
-    return value.isoformat() if value else ""
+UNBILLED_KEY_SEPARATOR = "\x1f"
+
+
+def unbilled_detail_key(detail: dict[str, Any]) -> str:
+    """返回可持久化的明细键；无票收入明细已按税务编号 + 产品聚合。"""
+    return f"{str(detail.get('taxCode') or '').strip()}{UNBILLED_KEY_SEPARATOR}{str(detail.get('product') or '').strip()}"
+
+
+def _warehouse_of(order: SalesOrder) -> str:
+    raw = order.raw or {}
+    name = str(raw.get("warehouseName") or raw.get("warehouse") or "").strip()
+    return name or "未标记仓库"
 
 
 def build_report(
@@ -247,8 +241,8 @@ def build_report(
         .all()
     )
     order_ids = [row.id for row in orders]
-    order_nos = [row.order_no for row in orders]
     items_by_order: dict[int, list[SalesOrderItem]] = defaultdict(list)
+    sku_codes: set[str] = set()
     if order_ids:
         for item in (
             db.query(SalesOrderItem)
@@ -257,76 +251,70 @@ def build_report(
             .all()
         ):
             items_by_order[item.order_id].append(item)
+            if item.sku_code:
+                sku_codes.add(item.sku_code)
 
-    refunds_by_order: dict[str, Decimal] = defaultdict(lambda: Decimal("0"))
-    if order_nos and rules.get("refund_mode") != "ignore_refund":
-        for refund in db.query(AftersalesOrder).filter(AftersalesOrder.order_no.in_(order_nos)).all():
-            if refund.refund_amount is not None and _is_valid_refund(refund):
-                refunds_by_order[refund.order_no] += refund.refund_amount
+    sku_meta: dict[str, dict[str, Any]] = {}
+    if sku_codes:
+        for sku in (
+            db.query(ProductSku)
+            .filter(ProductSku.sku_code.in_(sku_codes))
+            .all()
+        ):
+            sku_meta[sku.sku_code] = {
+                "id": sku.id,
+                "cost": sku.default_cost,
+                "tax_code": (sku.tax_code or "").strip(),
+            }
+    inbound_costs = weighted_inbound_costs(
+        db,
+        as_of=nxt,
+        sku_ids={int(meta["id"]) for meta in sku_meta.values()},
+    )
 
-    total_quantity = Decimal("0")
-    total_sales = Decimal("0")
-    total_refunds = Decimal("0")
-    rows: list[dict[str, Any]] = []
-    platform_summary: dict[str, dict[str, Any]] = {}
-
+    aggregates: dict[str, dict[str, Any]] = {}
     for order in orders:
-        platform = order.platform or "未标记平台"
-        summary = platform_summary.setdefault(platform, {
-            "platform": platform, "orderCount": 0, "quantity": Decimal("0"),
-            "salesAmount": Decimal("0"), "refundAmount": Decimal("0"),
+        warehouse = _warehouse_of(order)
+        agg = aggregates.setdefault(warehouse, {
+            "quantity": Decimal("0"),
+            "sales": Decimal("0"),
+            "cost": Decimal("0"),
+            "tax_codes": set(),
         })
-        summary["orderCount"] += 1
-        refund_amount = refunds_by_order.get(order.order_no, Decimal("0"))
-        total_refunds += refund_amount
-        summary["refundAmount"] += refund_amount
-
-        items = items_by_order.get(order.id) or [None]
-        for index, item in enumerate(items):
+        for item in items_by_order.get(order.id) or [None]:
             quantity = _money(item.quantity if item else None)
             item_amount = _money(item.amount if item else None)
             discount = _money(item.discount_amount if item else None)
-            item_net = item_amount - discount
-            total_quantity += quantity
-            total_sales += item_net
-            summary["quantity"] += quantity
-            summary["salesAmount"] += item_net
-            first = index == 0
-            rows.append({
-                "platform": order.platform or "",
-                "store_id": str(order.store_id or ""),
-                "source_provider": order.source_provider or "",
-                "order_no": order.order_no,
-                "ordered_at": _dt(order.ordered_at),
-                "paid_at": _dt(order.paid_at),
-                "order_type": order.order_type or "",
-                "order_status": order.order_status or "",
-                "pay_status": order.pay_status or "",
-                "sku_code": item.sku_code if item else "",
-                "goods_name": item.goods_name if item else "",
-                "quantity": str(item.quantity) if item and item.quantity is not None else "",
-                "unit_price": str(item.unit_price) if item and item.unit_price is not None else "",
-                "item_amount": str(item.amount) if item and item.amount is not None else "",
-                "discount_amount": str(item.discount_amount) if item and item.discount_amount is not None else "",
-                "item_net_amount": str(item_net) if item and (item.amount is not None or item.discount_amount is not None) else "",
-                # 订单级值只在第一条明细展示，防止 Excel 用户直接求和时重复。
-                "order_amount": str(order.order_amount) if first and order.order_amount is not None else "",
-                "paid_amount": str(order.paid_amount) if first and order.paid_amount is not None else "",
-                "refund_amount": str(refund_amount) if first and refund_amount else ("0" if first else ""),
-                "currency": order.currency or "CNY",
-            })
+            agg["quantity"] += quantity
+            agg["sales"] += item_amount - discount
+            if item and item.sku_code:
+                meta = sku_meta.get(item.sku_code)
+                if meta:
+                    unit_cost = inbound_costs.get(meta["id"], meta["cost"])
+                    if unit_cost is not None:
+                        agg["cost"] += quantity * unit_cost
+                    if meta["tax_code"]:
+                        agg["tax_codes"].add(meta["tax_code"])
+
+    rows: list[dict[str, Any]] = []
+    for warehouse, agg in sorted(aggregates.items(), key=lambda kv: kv[1]["sales"], reverse=True):
+        rows.append({
+            "period": f"{year}-{month:02d}",
+            "warehouse": warehouse,
+            "tax_code": " / ".join(sorted(agg["tax_codes"])),
+            "total_quantity": str(agg["quantity"]),
+            "total_sales": _string_decimal(agg["sales"]),
+            "total_cost": _string_decimal(agg["cost"]),
+        })
 
     enabled_fields = [f for f in _normalize_fields(template.fields) if f["enabled"]]
-    summary_rows = []
-    for item in sorted(platform_summary.values(), key=lambda x: x["salesAmount"], reverse=True):
-        summary_rows.append({
-            "platform": item["platform"],
-            "orderCount": item["orderCount"],
-            "quantity": str(item["quantity"]),
-            "salesAmount": _string_decimal(item["salesAmount"]),
-            "refundAmount": _string_decimal(item["refundAmount"]),
-            "netAfterRefund": _string_decimal(item["salesAmount"] - item["refundAmount"]),
-        })
+    summary = {
+        "orderCount": len(orders),
+        "warehouseCount": len(rows),
+        "totalQuantity": str(sum((Decimal(row["total_quantity"] or "0") for row in rows), Decimal("0"))),
+        "salesAmount": _string_decimal(sum((Decimal(row["total_sales"] or "0") for row in rows), Decimal("0"))),
+        "costAmount": _string_decimal(sum((Decimal(row["total_cost"] or "0") for row in rows), Decimal("0"))),
+    }
     return {
         "year": year,
         "month": month,
@@ -334,14 +322,7 @@ def build_report(
         "template": serialize_template(template),
         "fields": enabled_fields,
         "rules": rules,
-        "summary": {
-            "orderCount": len(orders),
-            "totalQuantity": str(total_quantity),
-            "salesAmount": _string_decimal(total_sales),
-            "refundAmount": _string_decimal(total_refunds),
-            "netAfterRefund": _string_decimal(total_sales - total_refunds),
-        },
-        "byPlatform": summary_rows,
+        "summary": summary,
         "rows": rows,
     }
 
@@ -360,50 +341,43 @@ def _as_excel_value(key: str, raw: Any) -> Any:
 
 def to_xlsx(report: dict[str, Any]) -> bytes:
     wb = Workbook()
-    summary_ws = wb.active
-    summary_ws.title = "销售汇总"
-    summary_ws.append(["账期", f"{report['year']}-{report['month']:02d}"])
-    summary_ws.append(["订单数", report["summary"]["orderCount"]])
-    summary_ws.append(["销售数量", float(report["summary"]["totalQuantity"] or 0)])
-    summary_ws.append(["商品净销售额", float(report["summary"]["salesAmount"] or 0)])
-    summary_ws.append(["有效退款金额", float(report["summary"]["refundAmount"] or 0)])
-    summary_ws.append(["退款后净销售额", float(report["summary"]["netAfterRefund"] or 0)])
-    summary_ws.append([])
-    summary_ws.append(["平台", "订单数", "销售数量", "商品净销售额", "有效退款金额", "退款后净销售额"])
-    for row in report.get("byPlatform", []):
-        summary_ws.append([
-            row["platform"], row["orderCount"], float(row["quantity"] or 0),
-            float(row["salesAmount"] or 0), float(row["refundAmount"] or 0),
-            float(row["netAfterRefund"] or 0),
-        ])
-    summary_ws[8][0].font = Font(bold=True)
-    for cell in summary_ws[8]:
-        cell.font = Font(bold=True)
-    for col in range(4, 7):
-        for row in range(2, summary_ws.max_row + 1):
-            summary_ws.cell(row=row, column=col).number_format = "0.00"
-    summary_ws.freeze_panes = "A8"
-
-    detail_ws = wb.create_sheet("销售明细")
+    ws = wb.active
+    ws.title = "销售汇总"
     fields = report.get("fields", [])
-    detail_ws.append([field["label"] for field in fields])
-    for cell in detail_ws[1]:
+    ws.append([field["label"] for field in fields])
+    for cell in ws[1]:
         cell.font = Font(bold=True)
     for row in report.get("rows", []):
-        detail_ws.append([_as_excel_value(field["key"], row.get(field["key"])) for field in fields])
-    detail_ws.freeze_panes = "A2"
-    if fields:
-        detail_ws.auto_filter.ref = detail_ws.dimensions
-        for idx, field in enumerate(fields, start=1):
-            field_type = FIELD_REGISTRY.get(field["key"], {}).get("type")
-            if field_type == "money":
-                for row_idx in range(2, detail_ws.max_row + 1):
-                    detail_ws.cell(row=row_idx, column=idx).number_format = "0.00"
-            max_len = max(
-                len(str(detail_ws.cell(row=r, column=idx).value or ""))
-                for r in range(1, min(detail_ws.max_row, 200) + 1)
-            )
-            detail_ws.column_dimensions[get_column_letter(idx)].width = min(max(max_len + 2, 10), 28)
+        ws.append([_as_excel_value(field["key"], row.get(field["key"])) for field in fields])
+
+    # 合计行：只对数值列累加，其余留空；仓库列显示「合计」。
+    summary = report.get("summary", {})
+    sum_by_key = {
+        "total_quantity": summary.get("totalQuantity"),
+        "total_sales": summary.get("salesAmount"),
+        "total_cost": summary.get("costAmount"),
+    }
+    total_row = [""] * len(fields)
+    for index, field in enumerate(fields):
+        if field["key"] == "warehouse":
+            total_row[index] = "合计"
+        elif field["key"] in sum_by_key and sum_by_key[field["key"]] is not None:
+            total_row[index] = float(sum_by_key[field["key"]])
+    ws.append(total_row)
+    for cell in ws[ws.max_row]:
+        cell.font = Font(bold=True)
+
+    for idx, field in enumerate(fields, start=1):
+        field_type = FIELD_REGISTRY.get(field["key"], {}).get("type")
+        if field_type == "money":
+            for row_idx in range(2, ws.max_row + 1):
+                ws.cell(row=row_idx, column=idx).number_format = "0.00"
+        max_len = max(
+            len(str(ws.cell(row=r, column=idx).value or ""))
+            for r in range(1, min(ws.max_row, 200) + 1)
+        )
+        ws.column_dimensions[get_column_letter(idx)].width = min(max(max_len + 2, 10), 28)
+    ws.freeze_panes = "A2"
 
     output = BytesIO()
     wb.save(output)
@@ -412,6 +386,339 @@ def to_xlsx(report: dict[str, Any]) -> bytes:
 
 def generated_filename(year: int, month: int) -> str:
     return f"销售汇总_{year}{month:02d}.xlsx"
+
+
+def _tax_name_map(db: Session) -> dict[str, str]:
+    """税务编号 → 税收分类名称。
+
+    名称取自「税务做账 → 分类规则」中用户维护的 category_name / item_name
+    （如 软饮料 · 咖啡），仅用已启用规则，不编造；同一编码取优先级最高的一条。
+    """
+    from app.models.tax import TaxAccountingCategoryRule
+
+    names: dict[str, str] = {}
+    rows = (
+        db.query(TaxAccountingCategoryRule)
+        .filter(TaxAccountingCategoryRule.enabled.is_(True))
+        .order_by(TaxAccountingCategoryRule.priority, TaxAccountingCategoryRule.id)
+        .all()
+    )
+    for row in rows:
+        code = (row.tax_code or "").strip()
+        if not code or code in names:
+            continue
+        parts: list[str] = []
+        category = (row.category_name or "").strip()
+        item = (row.item_name or "").strip()
+        if category and category != "全部":
+            parts.append(category)
+        if item and item != "全部" and item != category:
+            parts.append(item)
+        if parts:
+            names[code] = " · ".join(parts)
+    return names
+
+
+def _unbilled_detail_rows(db: Session, year: int, month: int) -> list[dict[str, Any]]:
+    """无票收入明细：按 税务编号 + 产品 聚合当月有效销售（与销售汇总同口径）。
+
+    - 税务编号/产品/成本取自货品档案（ProductSku + Product.goods_name）；
+    - 档案缺失的行保留 sku_code，税务编号显示空值，不编造；
+    - 金额 = 商品金额 − 优惠金额，成本 = 数量 × 档案默认成本。
+    """
+    from app.models.catalog import Product
+
+    start, nxt = month_bounds(year, month)
+    orders = (
+        db.query(SalesOrder)
+        .filter(_valid_order_condition())
+        .filter(SalesOrder.ordered_at >= start, SalesOrder.ordered_at < nxt)
+        .all()
+    )
+    order_ids = [o.id for o in orders]
+    items_by_order: dict[int, list[SalesOrderItem]] = defaultdict(list)
+    sku_codes: set[str] = set()
+    if order_ids:
+        for item in (
+            db.query(SalesOrderItem)
+            .filter(SalesOrderItem.order_id.in_(order_ids))
+            .all()
+        ):
+            items_by_order[item.order_id].append(item)
+            if item.sku_code:
+                sku_codes.add(item.sku_code)
+
+    sku_info: dict[str, dict[str, Any]] = {}
+    if sku_codes:
+        for sku, goods_name, goods_category in (
+            db.query(ProductSku, Product.goods_name, Product.category)
+            .outerjoin(Product, Product.id == ProductSku.product_id)
+            .filter(ProductSku.sku_code.in_(sku_codes))
+            .all()
+        ):
+            sku_info[sku.sku_code] = {
+                "id": sku.id,
+                "tax_code": (sku.tax_code or "").strip(),
+                "product": (sku.sku_name or goods_name or sku.sku_code).strip(),
+                "category": (goods_category or "").strip(),
+                "cost": sku.default_cost,
+            }
+    inbound_costs = weighted_inbound_costs(
+        db,
+        as_of=month_bounds(year, month)[1],
+        sku_ids={int(info["id"]) for info in sku_info.values()},
+    )
+
+    tax_names = _tax_name_map(db)
+    groups: dict[tuple[str, str], dict[str, Any]] = {}
+    for order in orders:
+        for item in items_by_order.get(order.id) or []:
+            info = sku_info.get(item.sku_code or "")
+            tax_code = (info or {}).get("tax_code", "")
+            product = (info or {}).get("product") or (item.sku_code or "未匹配货品档案")
+            # 税收分类名称：优先分类规则（用户维护），无规则时兜底用货品档案品类。
+            tax_name = tax_names.get(tax_code, "") or (info or {}).get("category", "")
+            quantity = _money(item.quantity)
+            sales = _money(item.amount) - _money(item.discount_amount)
+            cost = Decimal("0")
+            info_cost = None
+            if info:
+                info_cost = inbound_costs.get(info["id"], info.get("cost"))
+            if info_cost is not None:
+                cost = quantity * info_cost
+            agg = groups.setdefault(
+                (tax_code, product),
+                {"quantity": Decimal("0"), "sales": Decimal("0"), "cost": Decimal("0"), "tax_name": tax_name},
+            )
+            agg["quantity"] += quantity
+            agg["sales"] += sales
+            agg["cost"] += cost
+
+    return [
+        {
+            "period": f"{year}-{month:02d}",
+            "taxCode": tax_code,
+            "taxName": agg["tax_name"],
+            "product": product,
+            "quantity": str(agg["quantity"]),
+            "sales": _string_decimal(agg["sales"]),
+            "cost": _string_decimal(agg["cost"]),
+        }
+        for (tax_code, product), agg in sorted(groups.items(), key=lambda kv: kv[1]["sales"], reverse=True)
+    ]
+
+
+def _latest_unbilled_adjustment(
+    db: Session,
+    *,
+    company: str,
+    year: int,
+    month: int,
+) -> FinanceUnbilledAdjustment | None:
+    return (
+        db.query(FinanceUnbilledAdjustment)
+        .filter_by(company=company, period_year=year, period_month=month)
+        .order_by(FinanceUnbilledAdjustment.version.desc())
+        .first()
+    )
+
+
+def _unbilled_details_for_period(
+    db: Session,
+    *,
+    company: str,
+    year: int,
+    month: int,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[str], FinanceUnbilledAdjustment | None]:
+    """返回原始明细、当前明细和当前选择键；历史版本永远不改写。"""
+    source_details = _unbilled_detail_rows(db, year, month)
+    adjustment = _latest_unbilled_adjustment(db, company=company, year=year, month=month)
+    source_keys = [unbilled_detail_key(row) for row in source_details]
+    if adjustment is None:
+        return source_details, source_details, source_keys, None
+
+    selected_set = {str(key) for key in (adjustment.selected_keys or [])}
+    selected_details = [row for row in source_details if unbilled_detail_key(row) in selected_set]
+    current_keys = [unbilled_detail_key(row) for row in selected_details]
+    return source_details, selected_details, current_keys, adjustment
+
+
+def _latest_sales_summary_version(db: Session, *, company: str, year: int, month: int) -> int:
+    value = (
+        db.query(func.max(ArchiveFile.version))
+        .filter_by(company=company, period_year=year, period_month=month, category="sales_summary")
+        .scalar()
+    )
+    return int(value or 0)
+
+
+def save_unbilled_adjustment(
+    db: Session,
+    *,
+    company: str,
+    year: int,
+    month: int,
+    selected_keys: list[str],
+    actor: str = "system",
+    note: str = "",
+) -> dict[str, Any]:
+    """保存本月保留的无票收入明细，并以新版本记录调整。"""
+    if not 1 <= month <= 12:
+        raise ValueError("非法月份")
+    source_details = _unbilled_detail_rows(db, year, month)
+    available = {unbilled_detail_key(row) for row in source_details}
+    normalized = list(dict.fromkeys(str(key).strip() for key in selected_keys if str(key).strip()))
+    unknown = [key for key in normalized if key not in available]
+    if unknown:
+        raise ValueError("明细已发生变化，请刷新后重新选择")
+    if source_details and not normalized:
+        raise ValueError("至少保留一条明细")
+
+    previous = (
+        db.query(func.max(FinanceUnbilledAdjustment.version))
+        .filter_by(company=company, period_year=year, period_month=month)
+        .scalar()
+    )
+    version = max(int(previous or 0), _latest_sales_summary_version(db, company=company, year=year, month=month)) + 1
+    row = FinanceUnbilledAdjustment(
+        company=company,
+        period_year=year,
+        period_month=month,
+        version=version,
+        selected_keys=normalized,
+        actor=(actor or "system")[:64],
+        note=(note or "")[:500],
+    )
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    audit(
+        db,
+        actor,
+        "finance.unbilled.adjustment",
+        "finance_unbilled_adjustments",
+        row.id,
+        {"company": company, "year": year, "month": month, "version": version, "selectedCount": len(normalized)},
+    )
+    return {
+        "id": row.id,
+        "version": row.version,
+        "selectedKeys": normalized,
+        "selectedCount": len(normalized),
+        "sourceCount": len(source_details),
+        "updatedAt": row.updated_at.isoformat() if row.updated_at else None,
+    }
+
+
+def build_unbilled_income_report(
+    db: Session,
+    year: int,
+    month: int,
+    company: str = finance_service.DEFAULT_COMPANY,
+) -> dict[str, Any]:
+    """无票收入 = 销售总金额 − 已开票金额（销项价税合计，含红字冲减）。
+
+    - 销售总金额复用 build_report 的 summary.salesAmount（与发给财务的销售汇总同口径）。
+    - 已开票金额直接汇总官方销项发票（tax_export，direction=output，issued/red）的
+      价税合计，不依赖发票分类规则（分类缺失不应影响无票收入）。
+    - 缺失发票导入时已开票金额为 0，无票收入等于销售总金额，不臆造。
+    """
+    from app.models.tax import TaxInvoice
+    from app.services.monthly_core import month_bounds
+
+    sales = build_report(db, year, month, get_or_create_template(db, company))
+    start, nxt = month_bounds(year, month)
+    invoiced_total = (
+        db.query(func.coalesce(func.sum(TaxInvoice.total_amount), 0))
+        .filter(
+            TaxInvoice.source_system == "tax_export",
+            TaxInvoice.direction == "output",
+            TaxInvoice.status.in_(("issued", "red")),
+            TaxInvoice.issue_date >= start,
+            TaxInvoice.issue_date < nxt,
+        )
+        .scalar()
+    )
+    invoiced_total = Decimal(invoiced_total or "0")
+    sales_total = Decimal(sales["summary"]["salesAmount"] or "0")
+    unbilled = sales_total - invoiced_total
+    source_details, details, selected_keys, adjustment = _unbilled_details_for_period(
+        db, company=company, year=year, month=month,
+    )
+    version = adjustment.version if adjustment is not None else _latest_sales_summary_version(
+        db, company=company, year=year, month=month,
+    )
+    return {
+        "period": f"{year}-{month:02d}",
+        "year": year,
+        "month": month,
+        "salesAmount": _string_decimal(sales_total),
+        "invoicedAmount": _string_decimal(invoiced_total),
+        "unbilledAmount": _string_decimal(unbilled),
+        "version": version or None,
+        "adjusted": adjustment is not None,
+        "selectedKeys": selected_keys,
+        "sourceCount": len(source_details),
+        "selectedCount": len(details),
+        "updatedAt": adjustment.updated_at.isoformat() if adjustment and adjustment.updated_at else None,
+        "details": details,
+    }
+
+
+def unbilled_income_xlsx(report: dict[str, Any]) -> bytes:
+    """无票收入表：上半部分汇总（销售总额 − 已开票 = 无票收入），下半部分为
+    「税务编号 + 产品」明细（月度时间/税务编号/产品/发货数量/销售金额/销售成本 + 合计）。"""
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "无票收入"
+    head = Font(bold=True, size=13)
+    bold = Font(bold=True)
+    gray = Font(size=9, color="999999")
+
+    ws["A1"] = f"{report['year']}年{report['month']:02d}月销售出库-无票收入"
+    ws["A1"].font = head
+    summary_rows = [
+        ("月度时间", report["period"], None),
+        ("销售总金额", float(report["salesAmount"]), "0.00"),
+        ("已开票金额", float(report["invoicedAmount"]), "0.00"),
+        ("无票收入", float(report["unbilledAmount"]), "0.00"),
+    ]
+    for label, value, fmt in summary_rows:
+        ws.append([label, value])
+        ws.cell(row=ws.max_row, column=1).font = bold
+        if fmt:
+            ws.cell(row=ws.max_row, column=2).number_format = fmt
+    ws.append(["口径：无票收入 = 销售总金额 − 已开票金额（销项发票价税合计）"])
+    ws.cell(row=ws.max_row, column=1).font = gray
+    ws.append([])
+
+    details = report.get("details") or []
+    ws.append(["月度时间", "税务编号", "税收分类名称", "产品", "发货数量", "销售金额", "销售成本"])
+
+    header_row = ws.max_row
+    for cell in ws[header_row]:
+        cell.font = bold
+    totals = {"quantity": 0.0, "sales": 0.0, "cost": 0.0}
+    for d in details:
+        quantity, sales, cost = float(d["quantity"]), float(d["sales"]), float(d["cost"])
+        totals["quantity"] += quantity
+        totals["sales"] += sales
+        totals["cost"] += cost
+        ws.append([d["period"], d["taxCode"], d.get("taxName", ""), d["product"], quantity, sales, cost])
+    ws.append(["", "", "", "合计", totals["quantity"], totals["sales"], totals["cost"]])
+    for cell in ws[ws.max_row]:
+        cell.font = bold
+    for col in (5, 6, 7):
+        for row_idx in range(header_row, ws.max_row + 1):
+            ws.cell(row=row_idx, column=col).number_format = "0.00" if col != 5 else "0.####"
+
+    for idx, width in ((1, 14), (2, 26), (3, 18), (4, 34), (5, 12), (6, 14), (7, 14)):
+        ws.column_dimensions[get_column_letter(idx)].width = width
+    ws.freeze_panes = f"A{header_row + 1}"
+
+    output = BytesIO()
+    wb.save(output)
+    return output.getvalue()
 
 
 def has_generated_report(db: Session, company: str, year: int, month: int) -> bool:

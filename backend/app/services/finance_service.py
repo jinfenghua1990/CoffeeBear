@@ -27,9 +27,23 @@ from app.models.finance import (
 )
 
 DEFAULT_COMPANY = "浙江柴本网络科技有限公司"
-CATEGORIES = ("bank", "jackyun", "invoice", "sales_summary", "other")
+CATEGORIES = (
+    "bank", "jackyun", "invoice", "sales_summary",
+    "purchase_inbound", "sales_query", "other",
+)
 # 只用于新建账期；历史账期继续使用自己已保存的 required_types，不追溯改口径。
-DEFAULT_REQUIRED = {"bank": 1, "invoice": 0, "jackyun": 0, "sales_summary": 1, "other": 0}
+# 交付包固定 3 张表（交易明细 + 回单详情 + 无票收入），故银行类必备 2 个文件；
+DELIVERY_TABLES = ("交易明细", "回单详情", "无票收入")
+# 销售汇总/出库 CSV 为系统自动台账，不作为打包前置条件。
+DEFAULT_REQUIRED = {
+    "bank": 2,
+    "invoice": 0,
+    "jackyun": 0,
+    "sales_summary": 0,
+    "purchase_inbound": 0,
+    "sales_query": 0,
+    "other": 0,
+}
 
 
 def validate_period(year: int, month: int) -> None:
@@ -41,15 +55,32 @@ def validate_period(year: int, month: int) -> None:
 
 
 def managed_data_file(path: str | Path, *, label: str) -> Path:
-    """仅允许读取 DATA_DIR 内真实存在的普通文件，拒绝越界路径和外链符号链接。"""
+    """仅允许读取 DATA_DIR 内真实存在的普通文件，拒绝越界路径和外链符号链接。
+
+    兼容历史数据：早期部署（Docker）写入的绝对路径根可能已迁移（如 /data →
+    本地 DATA_DIR）。若原路径失效，按 `finance/` 之后的相对分支在 DATA_DIR 下
+    重查，避免历史归档文件无法下载、打包或发送。
+    """
     root = Path(settings.DATA_DIR).resolve()
-    try:
-        resolved = Path(path).resolve(strict=True)
-    except FileNotFoundError as exc:
-        raise RuntimeError(f"{label}缺失（存储被移动或删除）") from exc
-    if not resolved.is_relative_to(root) or not resolved.is_file():
-        raise RuntimeError(f"{label}不在受管数据目录内")
-    return resolved
+    p = Path(path)
+    if p.is_absolute():
+        try:
+            resolved = p.resolve()
+            if resolved.is_relative_to(root) and resolved.is_file():
+                return resolved
+        except (OSError, RuntimeError):
+            pass
+        if "finance" in p.parts:
+            candidate = root.joinpath(*p.parts[p.parts.index("finance"):])
+            try:
+                candidate_resolved = candidate.resolve()
+                if candidate_resolved.is_relative_to(root) and candidate_resolved.is_file():
+                    return candidate_resolved
+            except (OSError, RuntimeError):
+                pass
+        if p.exists():
+            raise RuntimeError(f"{label}不在受管数据目录内")
+    raise RuntimeError(f"{label}缺失（存储被移动或删除）")
 
 
 def _write_new_file(target: Path, content: bytes) -> None:
@@ -166,20 +197,132 @@ def store_upload(
     return row
 
 
+def delete_archive_file(db: Session, file_id: int, actor: str = "system") -> dict[str, Any]:
+    """删除归档文件（不可恢复）：数据库记录 + 物理文件（存在时）。
+
+    物理文件缺失或历史路径失效时仅删记录，不视为失败；删除后刷新账期状态。
+    """
+    row = db.get(ArchiveFile, file_id)
+    if row is None:
+        raise ValueError(f"归档文件不存在：{file_id}")
+    stored_path, company, year, month = row.stored_path, row.company, row.period_year, row.period_month
+    name, version = row.original_name, row.version
+    db.delete(row)
+    db.commit()
+    audit(db, actor, "finance.file.delete", "archive_files", file_id,
+          {"name": name, "period": f"{year}-{month:02d}", "version": version})
+    file_removed = False
+    if stored_path:
+        try:
+            managed_data_file(stored_path, label="原始归档文件").unlink(missing_ok=True)
+            file_removed = True
+        except Exception:
+            file_removed = False
+    refresh_period_status(db, company, year, month)
+    return {"ok": True, "id": file_id, "fileRemoved": file_removed}
+
+
+def delete_delivery_package(db: Session, package_id: int, actor: str = "system") -> dict[str, Any]:
+    """删除交付包记录及磁盘 ZIP（不可恢复）。已发送记录同样可删，仅移除记录与文件。"""
+    row = db.get(FinanceDeliveryPackage, package_id)
+    if row is None:
+        raise ValueError(f"交付包不存在：{package_id}")
+    zip_path, version, status = row.zip_path, row.version, row.status
+    db.delete(row)
+    db.commit()
+    audit(db, actor, "finance.package.delete", "finance_delivery_packages", package_id,
+          {"version": version, "status": status, "zip": Path(zip_path).name if zip_path else ""})
+    file_removed = False
+    if zip_path:
+        try:
+            managed_data_file(zip_path, label="ZIP 文件").unlink(missing_ok=True)
+            file_removed = True
+        except Exception:
+            file_removed = False
+    return {"ok": True, "id": package_id, "fileRemoved": file_removed}
+
+
+def _delivery_filename(year: int, month: int, f: ArchiveFile) -> str | None:
+    """原始归档文件 → 发给财务的中文表名（带月份、去公司全称/版本号）。
+
+    交付包只含 3 张表：银行交易明细、银行回单详情、销售出库-无票收入。
+    不在此范围内的文件（如销售汇总/出库 CSV 的内部账期台账）不进入交付包。
+    """
+    name = f.original_name or ""
+    ext = Path(name).suffix or ""
+    prefix = f"{month}月"
+    if "交易明细" in name:
+        return f"{prefix}-银行交易明细{ext}"
+    if "回单详情" in name:
+        return f"{prefix}-银行回单详情{ext}"
+    return None
+
+
 def package_period(db: Session, company: str, year: int, month: int,
-                   actor: str = "system") -> FinanceDeliveryPackage:
-    """资料齐全才可打包；每次打包生成新版本号，ZIP 落 output/V{n}，绝不覆盖。"""
+                   actor: str = "system", include: list[str] | None = None) -> FinanceDeliveryPackage:
+    """打包账期交付 ZIP；每次生成新版本号，ZIP 落 output/V{n}，绝不覆盖。
+
+    include 为空（None）时打包全部 3 张表并要求资料齐全（自动发送路径）；
+    手动打包可传子集（交易明细/回单详情/无票收入），只校验所选表的文件。
+    """
     validate_period(year, month)
+    selective = include is not None
+    if selective:
+        include = [x.strip() for x in include if x and x.strip()]
+        unknown = [x for x in include if x not in DELIVERY_TABLES]
+        if unknown:
+            raise ValueError(f"未知的交付内容：{'、'.join(unknown)}")
+        if not include:
+            raise ValueError("请至少选择一张交付表")
+    else:
+        include = list(DELIVERY_TABLES)
+    want_tx, want_receipt, want_unbilled = (
+        "交易明细" in include, "回单详情" in include, "无票收入" in include)
+
     period = get_or_create_period(db, company, year, month)
     files = db.query(ArchiveFile).filter_by(company=company, period_year=year, period_month=month).all()
     status, summary = evaluate_completeness(files, period.required_types or DEFAULT_REQUIRED)
-    if status != "READY" or not files:
+    if not selective and (status != "READY" or not files):
         raise ValueError(f"资料不完整，禁止打包，缺少: {summary['missing']}")
+
+    # 同名文件保留最高版本（银行交易明细/回单详情等会随重新上传递增版本，
+    # 历史版本只留存档供追溯，不进入发给财务的交付包，避免旧格式混淆）。
+    latest_by_name: dict[tuple[str, str], ArchiveFile] = {}
+    for f in files:
+        key = (f.category, f.original_name)
+        current = latest_by_name.get(key)
+        if current is None or f.version > current.version:
+            latest_by_name[key] = f
+
+    # 只取交付需要的表；销售汇总/出库 CSV 等系统台账不进入财务交付包。
+    selected: list[tuple[ArchiveFile, str]] = []
+    for f in sorted(latest_by_name.values(), key=lambda f: (f.category, f.original_name, f.version)):
+        arc_name = _delivery_filename(year, month, f)
+        if not arc_name:
+            continue
+        if "交易明细" in arc_name and not want_tx:
+            continue
+        if "回单详情" in arc_name and not want_receipt:
+            continue
+        selected.append((f, arc_name))
+    if want_tx and not any("交易明细" in name for _, name in selected):
+        raise ValueError("缺少「银行交易明细」文件，请先上传")
+    if want_receipt and not any("回单详情" in name for _, name in selected):
+        raise ValueError("缺少「银行回单详情」文件，请先上传")
+
+    # 无票收入 = 销售总金额 − 已开票金额，勾选时打包动态生成。
+    unbilled_content: bytes | None = None
+    if want_unbilled:
+        from app.services import finance_sales_report_service as sales_report_service
+        unbilled_content = sales_report_service.unbilled_income_xlsx(
+            sales_report_service.build_unbilled_income_report(db, year, month, company=company)
+        )
+    unbilled_name = f"{month}月销售出库-无票收入.xlsx"
 
     # 归档表的 stored_path 也属于不可信持久化数据：打包前再次做目录边界校验。
     source_files = [
-        (f, managed_data_file(f.stored_path, label="原始归档文件"))
-        for f in files
+        (f, arc_name, managed_data_file(f.stored_path, label="原始归档文件"))
+        for f, arc_name in selected
     ]
 
     prev = (
@@ -204,9 +347,11 @@ def package_period(db: Session, company: str, year: int, month: int,
             continue
         zip_path = candidate
         created_zip = True
-        with archive as zf:
-            for f, source_path in source_files:  # 原样打包，不做二次加工
-                zf.write(source_path, arcname=f"{f.category}/{source_path.name}")
+        with archive as zf:  # 原样打包，不做二次加工
+            for f, arc_name, source_path in source_files:
+                zf.write(source_path, arcname=arc_name)
+            if unbilled_content is not None:
+                zf.writestr(unbilled_name, unbilled_content)
         break
 
     try:
@@ -217,7 +362,7 @@ def package_period(db: Session, company: str, year: int, month: int,
         )
         db.add(pkg)
         db.flush()
-        for f in files:
+        for f, _, _ in source_files:
             db.add(FinanceDeliveryFile(package_id=pkg.id, archive_file_id=f.id))
         period.status = "PACKAGED"
         db.commit()
@@ -227,7 +372,7 @@ def package_period(db: Session, company: str, year: int, month: int,
             zip_path.unlink(missing_ok=True)
         raise
     audit(db, actor, "finance.package.create", "finance_delivery_packages", pkg.id,
-          {"version": version, "files": len(files), "sha256": pkg.zip_sha256[:16]})
+          {"version": version, "files": len(source_files), "sha256": pkg.zip_sha256[:16]})
     return pkg
 
 
@@ -301,11 +446,13 @@ def send_delivery(db: Session, company: str, year: int, month: int, *,
     """发送财务交付包；首次发送与重发分别留痕。"""
     from app.adapters.mail import MailAdapter
     from app.models.finance import EmailDeliveryLog
+    from app.services.monthly_intake_service import require_ready
 
     adapter = MailAdapter()
     adapter.ensure_configured()
 
     period = get_or_create_period(db, company, year, month)
+    require_ready(db, company=company, year=year, month=month)
     q = db.query(FinanceDeliveryPackage).filter_by(period_id=period.id)
     if version:
         q = q.filter_by(version=version)

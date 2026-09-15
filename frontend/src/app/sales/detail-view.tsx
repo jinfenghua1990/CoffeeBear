@@ -106,6 +106,7 @@ function cellText(row: DetailRow, col: (typeof COLUMNS)[number]): string {
 /** 全部销售明细：订单 × 货品行级台账，字段可自选（本地记忆），手工导入与 API 通道同库同源。 */
 /** 总览点击穿透带来的初始筛选（平台/SKU/区间）。 */
 export type DetailInitial = {
+  q?: string;
   platform?: string;
   sku?: string;
   start?: string;
@@ -116,7 +117,7 @@ export default function SalesDetailView({ initial }: { initial?: DetailInitial }
   const [data, setData] = useState<DetailResp | null>(null);
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState("");
-  const [q, setQ] = useState("");
+  const [q, setQ] = useState(initial?.q ?? "");
   const [platform, setPlatform] = useState(initial?.platform ?? "");
   const [skuFilter, setSkuFilter] = useState(initial?.sku ?? "");
   const [status, setStatus] = useState("");
@@ -289,7 +290,7 @@ export default function SalesDetailView({ initial }: { initial?: DetailInitial }
             显示字段（{cols.length}/{COLUMNS.length}）
           </button>
           {pickerOpen && (
-            <div className="absolute right-0 z-30 mt-1 w-64 rounded-lg border border-slate-200 bg-white p-3 shadow-lg">
+            <div className="absolute right-0 z-dropdown mt-1 w-64 rounded-lg border border-slate-200 bg-white p-3 shadow-lg">
               <div className="mb-2 flex items-center justify-between text-[11px]">
                 <button onClick={() => setVisible(COLUMNS.map((c) => c.key as string))} className="text-indigo-600 hover:underline">全选</button>
                 <button onClick={() => setVisible(DEFAULT_VISIBLE)} className="text-slate-500 hover:underline">恢复默认</button>

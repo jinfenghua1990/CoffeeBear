@@ -11,7 +11,8 @@ from sqlalchemy.orm import Session
 
 from app.api.deps import current_actor
 from app.db import get_db
-from app.models.catalog import InventorySnapshot, Product, ProductSku
+from app.models.catalog import Product, ProductSku
+from app.models.jackyun import JackyunGoodsDocument, JackyunGoodsDocumentItem
 from app.models.production import ProductionOrder, ProductionOrderItem
 from app.models.purchase import ExternalPurchaseOrder, PurchaseAllocationItem
 from app.models.sales import SalesOrder, SalesOrderItem
@@ -24,6 +25,7 @@ from app.services.production_service import (
     recalculate_production_materials,
 )
 from app.utils.money import to_decimal
+from app.services.inventory_position_service import _resolve_sku_id, _sku_lookup, current_positions
 
 router = APIRouter(prefix="/supply-chain", tags=["supply-chain"])
 
@@ -99,21 +101,42 @@ def replenishment(
     入库后才从生产待供应中退出，避免生产完成瞬间重复触发补货。
 
     建议补货 = max(日均销量 × (交期天数 + 安全天数) - 当前库存 - 待供应, 0)。
-    无库存快照或观察期无销量时不伪造建议数量，返回 null 并给出原因。
+    无出入库单据或观察期无销量时不伪造建议数量，返回 null 并给出原因。
     """
     now = datetime.now(timezone.utc)
     since = now - timedelta(days=days)
 
-    latest_at = db.query(func.max(InventorySnapshot.snapshot_at)).scalar()
-    inventory_by_sku: dict[int, Decimal] = {}
-    if latest_at is not None:
-        inventory_rows = (
-            db.query(InventorySnapshot.sku_id, func.coalesce(func.sum(InventorySnapshot.quantity), 0))
-            .filter(InventorySnapshot.snapshot_at == latest_at)
-            .group_by(InventorySnapshot.sku_id)
-            .all()
+    positions = current_positions(db)
+    last_document_at = positions["last_document_at"]
+    inventory_by_sku = positions["by_sku"]
+
+    # 近销优先使用真实销售出库单；仅对尚无匹配出库单的 SKU 回退到销售订单。
+    # 这样不会把同一笔销售同时计入两套来源。
+    sku_lookup, sku_by_id = _sku_lookup(db)
+    outbound_rows = (
+        db.query(JackyunGoodsDocumentItem, JackyunGoodsDocument)
+        .join(JackyunGoodsDocument, JackyunGoodsDocument.id == JackyunGoodsDocumentItem.document_id)
+        .filter(
+            JackyunGoodsDocument.document_type == "outbound",
+            JackyunGoodsDocument.document_at >= since,
         )
-        inventory_by_sku = {int(sku_id): to_decimal(quantity) for sku_id, quantity in inventory_rows}
+        .all()
+    )
+    outbound_by_sku: dict[int, Decimal] = {}
+    outbound_document_ids: set[int] = set()
+    matched_outbound_items = 0
+    unmatched_outbound_items = 0
+    for item, document in outbound_rows:
+        quantity = to_decimal(item.quantity)
+        if quantity <= 0:
+            continue
+        outbound_document_ids.add(document.id)
+        sku_id = _resolve_sku_id(item, sku_lookup, sku_by_id)
+        if sku_id is None:
+            unmatched_outbound_items += 1
+            continue
+        outbound_by_sku[sku_id] = outbound_by_sku.get(sku_id, Decimal("0")) + quantity
+        matched_outbound_items += 1
 
     sales_rows = (
         db.query(
@@ -203,7 +226,13 @@ def replenishment(
     suggested_count = 0
 
     for sku, product in query.limit(limit).all():
-        sold = sales_by_id.get(sku.id, sales_by_code.get(sku.sku_code, Decimal("0")))
+        outbound_sold = outbound_by_sku.get(sku.id, Decimal("0"))
+        if outbound_sold > 0:
+            sold = outbound_sold
+            sales_source = "sales_outbound"
+        else:
+            sold = sales_by_id.get(sku.id, sales_by_code.get(sku.sku_code, Decimal("0")))
+            sales_source = "sales_order_fallback" if sold > 0 else "none"
         purchase_open = purchase_open_by_id.get(
             sku.id,
             purchase_open_by_code.get(sku.sku_code, Decimal("0")),
@@ -223,8 +252,8 @@ def replenishment(
         stockout_date: str | None = None
 
         if current is None:
-            risk = "no_snapshot"
-            reason = "该 SKU 没有最新库存快照，暂不计算补货数量"
+            risk = "no_data"
+            reason = "该 SKU 没有任何出入库单据，暂不计算补货数量"
         elif avg_daily <= 0:
             risk = "no_sales"
             reason = f"近 {days} 天没有有效销量，暂不自动给出补货数量"
@@ -260,6 +289,7 @@ def replenishment(
             "unit": sku.unit or "",
             "currentInventory": _qty(current),
             "soldQuantity": _qty(sold),
+            "salesSource": sales_source,
             "averageDailySales": _qty(avg_daily),
             "purchaseOpenSupplyQuantity": _qty(purchase_open),
             "productionOpenSupplyQuantity": _qty(production_open),
@@ -282,8 +312,12 @@ def replenishment(
             "formula": "日均销量 × (交期天数 + 安全天数) - 当前库存 - 待供应",
         },
         "data": {
-            "inventorySnapshotAt": latest_at.isoformat() if latest_at is not None else None,
+            "lastDocumentAt": last_document_at.isoformat() if last_document_at is not None else None,
+            "inventoryPositionSource": positions["source"],
             "salesSince": since.isoformat(),
+            "outboundDocumentCount": len(outbound_document_ids),
+            "matchedOutboundItemCount": matched_outbound_items,
+            "unmatchedOutboundItemCount": unmatched_outbound_items,
             "generatedAt": now.isoformat(),
         },
         "summary": {

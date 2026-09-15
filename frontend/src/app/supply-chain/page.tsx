@@ -13,17 +13,6 @@ type FlowStep = {
   href: string;
 };
 
-const QUICK_NAV = [
-  { label: "补货", href: "#replenishment" },
-  { label: "生产订单", href: "/supply-chain/production" },
-  { label: "耗材流转", href: "/supply-chain/material-flow" },
-  { label: "采购订单", href: "/purchase/workbench" },
-  { label: "生产 / 在途", href: "/supply-chain/in-transit" },
-  { label: "到货入库", href: "/supply-chain/receiving" },
-  { label: "仓库", href: "/supply-chain/warehouses" },
-  { label: "货品档案", href: "/products" },
-];
-
 const MODULES: ModuleCard[] = [
   {
     title: "补货工作台",
@@ -68,9 +57,9 @@ const MODULES: ModuleCard[] = [
     badge: "基础资料",
   },
   {
-    title: "正品 / 耗材库存",
-    description: "正品和耗材继续分开看库存，但货品档案统一维护，并保留正品与耗材关联关系。",
-    href: "/products",
+    title: "库存管理",
+    description: "一个入口切换正品独立运算库存与耗材台账；库存预警、SKU 穿透和供应链执行都落到同一套库存页面。",
+    href: "/inventory",
     badge: "货品基础",
   },
 ];
@@ -96,24 +85,13 @@ export default function SupplyChainPage() {
             <p className="mt-1 text-sm text-slate-500">从库存判断到生产、采购、耗材、在途、到货和入库，一个入口完成。</p>
           </div>
           <div className="flex items-center gap-2">
-            <span className="rounded-full bg-emerald-50 px-3 py-1.5 text-xs font-medium text-emerald-700">V1.6.2 · 业务版</span>
+            <span className="rounded-full bg-emerald-50 px-3 py-1.5 text-xs font-medium text-emerald-700">V1.6.3 · 业务版</span>
             <Link href="/supply-chain/production" className="rounded-lg bg-indigo-600 px-3 py-2 text-sm font-medium text-white transition hover:bg-indigo-700">
               新建生产单
             </Link>
           </div>
         </div>
 
-        <nav className="mt-3 flex gap-1 overflow-x-auto pb-0.5 text-sm whitespace-nowrap">
-          {QUICK_NAV.map((item) => (
-            <Link
-              key={`${item.label}-${item.href}`}
-              href={item.href}
-              className="rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-slate-600 transition hover:border-indigo-200 hover:bg-indigo-50 hover:text-indigo-700"
-            >
-              {item.label}
-            </Link>
-          ))}
-        </nav>
       </header>
 
       <section className="rounded-2xl border border-slate-200 bg-white p-4">
@@ -149,8 +127,8 @@ export default function SupplyChainPage() {
             <h2 className="text-base font-semibold text-slate-900">业务入口</h2>
             <p className="mt-1 text-xs text-slate-500">不做折叠，常用功能全部直接展示；能在一页完成的操作尽量不拆步骤。</p>
           </div>
-          <Link href="/purchase/workbench?view=suppliers" className="text-xs font-medium text-indigo-600 hover:text-indigo-700">
-            查看供应商视图 →
+          <Link href="/suppliers" className="text-xs font-medium text-indigo-600 hover:text-indigo-700">
+            供应商档案 →
           </Link>
         </div>
 
@@ -179,7 +157,7 @@ export default function SupplyChainPage() {
       <section className="rounded-xl border border-slate-200 bg-slate-950 px-4 py-3 text-slate-200">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div>
-            <div className="text-sm font-semibold text-white">V1.6.2 供应链中心</div>
+            <div className="text-sm font-semibold text-white">V1.6.3 供应链中心</div>
             <div className="mt-1 text-xs leading-5 text-slate-400">
               采购、生产、耗材、仓库、在途、到货已统一到同一业务入口；历史兼容路由保留，但后续新增功能只围绕这一套主流程继续扩展。
             </div>

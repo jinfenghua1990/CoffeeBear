@@ -110,7 +110,7 @@ def _beat_schedule() -> dict:
     sched: dict = {}
     sched.update(_jackyun_schedules())
     sched.update(_jackyun_daily_schedules())
-    sched.update({
+    core_sched: dict = {
         "recycle-bin-purge-daily": {
             "task": "tasks.recycle_bin_purge",
             "schedule": crontab(hour=4, minute=15),
@@ -119,10 +119,15 @@ def _beat_schedule() -> dict:
             "task": "tasks.sync_1688",
             "schedule": crontab(hour=7, minute=30),
         },
-        "jky-procurement-inbound-tracking-2h": {
+    }
+    # 吉客云采购入库轻量跟踪走开放平台配额；手动模式下停用，入库单以客户端导出上传为准。
+    if settings.JACKYUN_SYNC_MODE != "manual":
+        core_sched["jky-procurement-inbound-tracking-2h"] = {
             "task": "tasks.sync_jky_procurement_tracking",
             "schedule": crontab(minute=20, hour="8-22/2"),
-        },
+        }
+    sched.update(core_sched)
+    sched.update({
         # 先保留吉客云销售出库底稿，再生成用户自定义销售汇总。
         "sales-outbound-monthly": {
             "task": "tasks.generate_monthly_sales_outbound",

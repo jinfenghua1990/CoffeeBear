@@ -12,11 +12,13 @@ from __future__ import annotations
 
 from datetime import date, datetime, timedelta
 from decimal import Decimal
+from typing import Any
 
 from sqlalchemy.orm import Session
 
 from app.core.audit import audit
 from app.models.alibaba1688_import import Alibaba1688Order
+from app.models.catalog import Warehouse
 from app.models.consumable import Consumable
 from app.models.ops import ExceptionRecord
 from app.models.purchase import ExternalPurchaseOrder
@@ -66,6 +68,93 @@ def _order_kind(order_no: str | None, supplier: str | None, consumable_nos: set[
         return "consumable"
     name = supplier or ""
     return "consumable" if any(k in name for k in _CONSUMABLE_SELLER_KEYWORDS) else "goods"
+
+
+def _number(value: Any) -> float | None:
+    """把订单明细中的 Decimal / 字符串安全转成前端可用数字。"""
+    if value in (None, ""):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _channel_key(platform: str | None) -> str:
+    value = (platform or "").strip().lower()
+    if value == "1688" or "阿里" in value:
+        return "1688"
+    if "pdd" in value or "拼多多" in value or "duoduo" in value:
+        return "pdd"
+    if "taobao" in value or "淘宝" in value or "tmall" in value or "天猫" in value:
+        return "taobao"
+    return "other"
+
+
+def _logistics_value(logistics: dict[str, Any], *keys: str) -> str:
+    """兼容不同渠道的物流 JSON 字段，缺失时保持为空而不伪造物流事实。"""
+    for key in keys:
+        value = logistics.get(key)
+        if value not in (None, ""):
+            return str(value).strip()
+    return ""
+
+
+def _supply_chain_list_fields(row: dict[str, Any]) -> dict[str, Any]:
+    """把采购主单折叠成供应链工作台表格所需的跨维度字段。
+
+    优先使用已确认的 SKU 分配，其次才回退到 1688 原始商品行；仓库和入库单只从
+    已关联的真实入库单读取。这样视觉表格里的每一个字段都能追溯到现有业务事实。
+    """
+    allocations = row.get("allocations") or []
+    consumable = row.get("consumable") or {}
+    order_items = row.get("orderItems") or []
+    if allocations:
+        item_rows = allocations
+        product_name = str(item_rows[0].get("goodsName") or item_rows[0].get("skuCode") or "")
+        product_unit = ""
+    elif consumable.get("items"):
+        item_rows = consumable.get("items") or []
+        product_name = str(item_rows[0].get("name") or item_rows[0].get("code") or "")
+        product_unit = str(item_rows[0].get("unit") or "")
+    else:
+        item_rows = order_items
+        product_name = str(item_rows[0].get("productName") or item_rows[0].get("productNumber") or row.get("title") or "") if item_rows else str(row.get("title") or "")
+        product_unit = ""
+
+    quantity_total = sum(_number(item.get("quantity")) or 0 for item in item_rows)
+    if len(item_rows) > 1 and product_name:
+        product_name = f"{product_name} 等 {len(item_rows)} 款"
+
+    inbound = row.get("inbound") or []
+    primary_inbound = inbound[0] if inbound else {}
+    warehouse_name = str(
+        primary_inbound.get("warehouseName")
+        or consumable.get("warehouseName")
+        or (consumable.get("location") if consumable.get("location") not in {"own", "factory"} else "")
+        or ""
+    )
+    inbound_numbers: list[str] = []
+    for inbound_row in inbound:
+        number = str(inbound_row.get("goodsdocNo") or "").strip()
+        if number and number not in inbound_numbers:
+            inbound_numbers.append(number)
+    inbound_no = "、".join(inbound_numbers) or str(consumable.get("receiptNo") or "")
+    logistics = row.get("logistics") or {}
+    if not isinstance(logistics, dict):
+        logistics = {}
+    return {
+        "productName": product_name,
+        "productQuantity": quantity_total or None,
+        "productUnit": product_unit,
+        "itemCount": len(item_rows),
+        "warehouseName": warehouse_name,
+        "logisticsNo": _logistics_value(logistics, "trackingNo", "tracking_no", "logisticsNo", "logistics_no", "waybillNo", "waybill_no", "logisticNo", "logistic_no"),
+        "logisticsCompany": _logistics_value(logistics, "company", "logisticsCompany", "logistics_company", "logisticName", "logistic_name", "carrier"),
+        "expectedArrival": _logistics_value(logistics, "expectedArrival", "expected_arrival", "eta", "estimatedArrival"),
+        "shipAt": _logistics_value(logistics, "shipAt", "ship_at", "shippedAt", "shipped_at", "shippingTime"),
+        "jackyunInboundNo": inbound_no,
+    }
 
 
 def edit_order_main_fields(
@@ -232,7 +321,7 @@ WORKBENCH_STEPS: list[dict] = [
     {"key": "content",    "no": 2, "label": "确认采购内容",    "short": "采购内容", "dimension": "purchase", "href": "/purchase",          "act": "去采购中心细化"},
     {"key": "sku",        "no": 3, "label": "选择吉客云货品",  "short": "选货品",   "dimension": "purchase", "href": "/purchase",          "act": "关联吉客云 SKU"},
     {"key": "jackyun_po", "no": 4, "label": "生成采购单",      "short": "采购单",   "dimension": "jackyun",  "href": "/jackyun-import",    "act": "导入吉客云采购单"},
-    {"key": "closeout",   "no": 5, "label": "入库/发票/税务",  "short": "入库发票", "dimension": "jackyun",  "href": "/jackyun-import",    "act": "查看入库/发票"},
+    {"key": "closeout",   "no": 5, "label": "入库/发票/付款",  "short": "收尾",     "dimension": "jackyun",  "href": "/jackyun-import",    "act": "查看入库/付款/发票"},
 ]
 WORKBENCH_TOTAL = len(WORKBENCH_STEPS)
 
@@ -397,38 +486,89 @@ def todos(db: Session) -> dict:
     }
 
 
+def _pending_queue(row: dict) -> str | None:
+    """返回订单当前唯一的待处理队列，保证统计卡与圆环可以加总。"""
+    allocations = row.get("allocations") or []
+    if not row.get("purchaseContentComplete") or not allocations or any(
+        not allocation.get("skuId") for allocation in allocations
+    ):
+        return "refine"
+
+    purchase_orders = row.get("purchaseOrders") or []
+    if not purchase_orders and not row.get("jackyunPoBypassed"):
+        return "po"
+
+    inbound = row.get("inbound") or []
+    inbound_ready = (
+        bool(inbound) and all(item.get("consumableUsageDecided") for item in inbound)
+    ) or bool((row.get("consumable") or {}).get("received"))
+    if purchase_orders and not inbound_ready:
+        return "inbound"
+
+    invoice_status = str(row.get("invoiceStatus") or "").strip().lower()
+    invoice_outstanding = float(row.get("invoiceOutstanding") or 0)
+    invoice_done = bool(row.get("invoice")) and invoice_status == "done" and invoice_outstanding <= 0.005
+    if inbound_ready and not invoice_done:
+        return "invoice"
+    return None
+
+
 def summary(db: Session) -> dict:
-    """采购工作台六项待办指标，全部基于本地已落库事实。"""
+    """采购工作台统计指标，全部基于本地已落库事实。"""
     pf = ChainPrefetch(db)
     rows = [_order_row(db, o, ext, pf=pf) for o, ext in _source_pairs(db)]
     today = datetime.now().date()
+    consumable_nos = _consumable_source_nos(db)
     new_orders = 0
     pending_sku = 0
     pending_po = 0
     pending_inbound = 0
     pending_invoice = 0
+    goods_orders = 0
+    consumable_orders = 0
+    goods_producing = 0
+    goods_inbound = 0
+    consumable_transit = 0
+    consumable_inbound = 0
+    transit_orders = 0
+    completed_orders = 0
     for row in rows:
         order_date = _parse_dt(row.get("orderDate"))
         if order_date is not None and order_date.date() == today:
             new_orders += 1
-        allocations = row.get("allocations") or []
-        if not allocations or any(not allocation.get("skuId") for allocation in allocations):
+        queue = _pending_queue(row)
+        if queue == "refine":
             pending_sku += 1
-        purchase_orders = row.get("purchaseOrders") or []
-        sku_complete = bool(allocations) and all(allocation.get("skuId") for allocation in allocations)
-        if row.get("purchaseContentComplete") and sku_complete and not purchase_orders \
-                and not row.get("jackyunPoBypassed"):
+        elif queue == "po":
             pending_po += 1
-        inbound = row.get("inbound") or []
-        consumable_received = bool((row.get("consumable") or {}).get("received"))
-        inbound_ready = (
-            bool(inbound) and all(item.get("consumableUsageDecided") for item in inbound)
-        ) or consumable_received
-        if purchase_orders and not inbound_ready:
+        elif queue == "inbound":
             pending_inbound += 1
-        invoice = row.get("invoice") or []
-        if inbound_ready and not invoice:
+        elif queue == "invoice":
             pending_invoice += 1
+        if queue is None:
+            completed_orders += 1
+
+        kind = _order_kind(
+            row.get("orderNo"), row.get("supplier"), consumable_nos,
+            row.get("orderKindOverride", ""), bool(row.get("consumable")),
+        )
+        purchase_status = str(row.get("purchaseStatus") or "").strip()
+        inbound_ready = bool(row.get("inbound")) or bool((row.get("consumable") or {}).get("received"))
+        in_transit = purchase_status in {"shipped", "arrived"}
+        if in_transit:
+            transit_orders += 1
+        if kind == "goods":
+            goods_orders += 1
+            if purchase_status == "producing":
+                goods_producing += 1
+            if inbound_ready:
+                goods_inbound += 1
+        else:
+            consumable_orders += 1
+            if in_transit:
+                consumable_transit += 1
+            if inbound_ready:
+                consumable_inbound += 1
     exception_ids = _exception_order_ids(db)
     exception_count = sum(
         1 for row in rows
@@ -442,6 +582,14 @@ def summary(db: Session) -> dict:
         "pendingInbound": pending_inbound,
         "pendingInvoice": pending_invoice,
         "exceptionCount": exception_count,
+        "goodsOrders": goods_orders,
+        "consumableOrders": consumable_orders,
+        "goodsProducing": goods_producing,
+        "goodsInbound": goods_inbound,
+        "consumableTransit": consumable_transit,
+        "consumableInbound": consumable_inbound,
+        "transitOrders": transit_orders,
+        "completedOrders": completed_orders,
     }
 
 
@@ -508,26 +656,15 @@ def _matches_status(row: dict, states: dict[str, dict], first: str | None, statu
     if status == "all":
         return True
     if status == "done":
-        return first is None
-    if status in ("refine", "content"):
-        return not row.get("purchaseContentComplete")
-    allocations = row.get("allocations") or []
-    purchase_orders = row.get("purchaseOrders") or []
-    inbound = row.get("inbound") or []
-    invoice = row.get("invoice") or []
-    sku_complete = bool(allocations) and all(allocation.get("skuId") for allocation in allocations)
-    inbound_ready = (
-        bool(inbound) and all(item.get("consumableUsageDecided") for item in inbound)
-    ) or bool((row.get("consumable") or {}).get("received"))
-    if status == "sku":
-        return not allocations or not sku_complete
+        return _pending_queue(row) is None
+    if status in ("refine", "content", "sku"):
+        return _pending_queue(row) == "refine"
     if status in ("po", "jackyun_po"):
-        return bool(row.get("purchaseContentComplete")) and sku_complete and not purchase_orders \
-            and not row.get("jackyunPoBypassed")
+        return _pending_queue(row) == "po"
     if status == "inbound":
-        return bool(purchase_orders) and not inbound_ready
+        return _pending_queue(row) == "inbound"
     if status == "invoice":
-        return (row.get("invoiceOutstanding") or 0) > 0 or not invoice
+        return _pending_queue(row) == "invoice"
     if status == "exception":
         return row.get("orderId") in exception_ids or row.get("externalPoId") in exception_ids
     if status == "pending":
@@ -544,6 +681,9 @@ def list_orders(
     page_size: int = 20,
     start_date: date | None = None,
     end_date: date | None = None,
+    channel: str = "all",
+    kind: str = "all",
+    warehouse: str = "",
 ) -> dict:
     """按下单时间倒序、按时间标签分组的订单列表；支持状态和日期筛选。"""
     status = status if status in _VALID_STATUSES else "all"
@@ -552,11 +692,19 @@ def list_orders(
     today = datetime.now().date()
     exception_ids = _exception_order_ids(db)
     consumable_nos = _consumable_source_nos(db)
+    channel = channel if channel in {"all", "1688", "pdd", "taobao", "other"} else "all"
+    kind = kind if kind in {"all", "goods", "consumable"} else "all"
+    warehouse = warehouse.strip()
     out: list[dict] = []
     for row in rows:
         states = _step_states(row)
         first = _first_undone_step(states)
         first_step = next((s for s in WORKBENCH_STEPS if s["key"] == first), None)
+        order_kind = _order_kind(
+            row.get("orderNo"), row.get("supplier"), consumable_nos,
+            row.get("orderKindOverride", ""), bool(row.get("consumable")),
+        )
+        list_fields = _supply_chain_list_fields(row)
         order_date = _parse_dt(row.get("orderDate"))
         order_day = order_date.date() if order_date is not None else None
         if start_date is not None and (order_day is None or order_day < start_date):
@@ -564,6 +712,12 @@ def list_orders(
         if end_date is not None and (order_day is None or order_day > end_date):
             continue
         if not _matches_status(row, states, first, status, exception_ids):
+            continue
+        if channel != "all" and _channel_key(row.get("platform")) != channel:
+            continue
+        if kind != "all" and order_kind != kind:
+            continue
+        if warehouse and list_fields["warehouseName"] != warehouse:
             continue
         if q:
             ql = q.lower()
@@ -576,9 +730,10 @@ def list_orders(
             "externalPoId": row.get("externalPoId"),
             "orderNo": row["orderNo"],
             "platform": row.get("platform") or "other",
-            "orderKind": _order_kind(row.get("orderNo"), row.get("supplier"), consumable_nos, row.get("orderKindOverride", ""), bool(row.get("consumable"))),
+            "orderKind": order_kind,
             "supplier": row.get("supplier") or "",
             "amount": row.get("amount"),
+            "paidAmount": row.get("paidAmount"),
             "freight": row.get("freight"),
             "orderDate": row.get("orderDate"),
             "orderStatus": row.get("orderStatus") or "",
@@ -599,6 +754,8 @@ def list_orders(
             "invoicedAmount": row.get("invoicedAmount"),
             "invoiceOutstanding": row.get("invoiceOutstanding"),
             "closeoutStage": closeout_stage(row, states),
+            "remark": row.get("adjustmentNote") or row.get("title") or "",
+            **list_fields,
         })
 
     if sort_by == "amount":
@@ -648,7 +805,9 @@ def workbench(db: Session, order_id: int) -> dict | None:
         row = _order_row(db, None, external, pf=pf)
     else:
         row = _order_row(db, order, external, pf=pf)
+    _enrich_allocation_inventory(db, row)
     states = _step_states(row)
+    closeout_stage_value = closeout_stage(row, states)
     supplier = row.get("supplier") or ""
     exception_ids = _exception_order_ids(db)
     consumable_nos = _consumable_source_nos(db)
@@ -668,17 +827,22 @@ def workbench(db: Session, order_id: int) -> dict | None:
             "freight": row.get("freight"),
             "discount": row.get("discount"),
             "paidAmount": row.get("paidAmount"),
+            "paidOn1688": bool(row.get("paidOn1688")),
+            "paidOn1688At": row.get("paidOn1688At"),
             "adjustmentAmount": row.get("adjustmentAmount"),
             "adjustmentNote": row.get("adjustmentNote"),
             "orderDate": row.get("orderDate"),
             "orderStatus": row.get("orderStatus"),
             "purchaseStatus": row.get("purchaseStatus") or "",
+            "closeoutStage": closeout_stage_value,
             "jackyunPoBypassed": bool(external is not None and (external.raw or {}).get("jackyunPoBypassed")),
             "invoiceStatus": row.get("invoiceStatus") or "none",
             "invoicedAmount": row.get("invoicedAmount"),
             "invoiceOutstanding": row.get("invoiceOutstanding"),
             "title": row.get("title"),
             "hasException": row.get("orderId") in exception_ids or row.get("externalPoId") in exception_ids,
+            "logistics": row.get("logistics") or {},
+            "shipStatus": row.get("shipStatus") or "",
         },
         "stepStates": states,
         "detail": {
@@ -694,8 +858,114 @@ def workbench(db: Session, order_id: int) -> dict | None:
             "unallocatedAmount": row.get("unallocatedAmount"),
         },
         "stepTotal": WORKBENCH_TOTAL,
+        "warehouse": _warehouse_block(db, row),
         "supplierHistory": order_supplier_history(db, supplier, exclude_order_id=row["orderId"]) if supplier else None,
     }
+
+
+def _warehouse_block(db: Session, row: dict[str, Any]) -> dict[str, Any]:
+    """仓库信息卡：目标仓库 + 吉客云仓库ID + 是否可售 + 当前库存 + 在途数量。
+
+    全部来自本地已落库事实：仓库主档（Warehouses）、独立运算库存（采购入库 − 销售出库）、
+    订单 SKU 分配与入库状态。缺失数据如实返回 None / 0，不伪造。
+    """
+    inbound = row.get("inbound") or []
+    consumable = row.get("consumable") or {}
+    warehouse_name = str(
+        (inbound[0].get("warehouseName") if inbound else "")
+        or consumable.get("warehouseName")
+        or (consumable.get("location") if consumable.get("location") not in {"own", "factory"} else "")
+        or ""
+    )
+    allocations = row.get("allocations") or []
+    sku_ids = [a.get("skuId") for a in allocations if a.get("skuId")]
+    ordered_qty = sum(float(a.get("quantity") or 0) for a in allocations)
+
+    wh = db.query(Warehouse).filter(Warehouse.name == warehouse_name).first() if warehouse_name else None
+    jackyun_wh_id = (wh.jackyun_warehouse_id or "") if wh else ""
+    is_sellable = bool(wh.is_sellable) if wh else None
+
+    current_stock: float | None = None
+    if wh is not None and sku_ids:
+        from app.services.inventory_position_service import current_positions
+        positions = current_positions(db)
+        current_stock = float(sum(
+            positions["by_sku_warehouse"].get(sku_id, {}).get(wh.id, Decimal("0"))
+            for sku_id in sku_ids
+        ))
+
+    purchase_status = str(row.get("purchaseStatus") or "")
+    inbound_done = bool(inbound) or bool(consumable.get("received"))
+    # 在途数量：已发货/到货但尚未入库时，等于本单分配数量；其余为 0。
+    in_transit = 0.0 if inbound_done else (ordered_qty if purchase_status in {"shipped", "arrived"} else 0.0)
+
+    return {
+        "warehouseName": warehouse_name,
+        "jackyunWarehouseId": jackyun_wh_id,
+        "isSellable": is_sellable,
+        "currentStock": current_stock,
+        "inTransitQty": in_transit,
+    }
+
+
+def _enrich_allocation_inventory(db: Session, row: dict[str, Any]) -> None:
+    """给详情中的每条采购明细补充其对应仓库的当前库存。
+
+    订单可能包含多个 SKU 或多张入库单，订单级 ``warehouse.currentStock`` 只是总览，
+    不能直接复用到每一行；这里按「分配行 → 入库单 → 仓库 → SKU」逐行计算。
+    """
+    allocations = row.get("allocations") or []
+    if not allocations:
+        return
+
+    from app.services.inventory_position_service import current_positions
+
+    positions = current_positions(db)
+    warehouse_rows = db.query(Warehouse).all()
+    warehouse_lookup: dict[str, Warehouse] = {}
+    for warehouse in warehouse_rows:
+        for value in (warehouse.name, warehouse.code, warehouse.jackyun_warehouse_id):
+            key = str(value or "").strip().lower()
+            if key:
+                warehouse_lookup.setdefault(key, warehouse)
+
+    inbound_by_id = {
+        int(item.get("documentId")) if item.get("documentId") is not None else int(item.get("targetId")):
+        item
+        for item in row.get("inbound") or []
+        if item.get("documentId") is not None or item.get("targetId") is not None
+    }
+    inbound = row.get("inbound") or []
+    consumable = row.get("consumable") or {}
+    default_name = str(
+        (inbound[0].get("warehouseName") if inbound else "")
+        or consumable.get("warehouseName")
+        or ""
+    )
+    default_warehouse = warehouse_lookup.get(default_name.strip().lower()) if default_name else None
+
+    for allocation in allocations:
+        raw_sku_id = allocation.get("skuId")
+        try:
+            sku_id = int(raw_sku_id) if raw_sku_id is not None else None
+        except (TypeError, ValueError):
+            sku_id = None
+        inbound_id = allocation.get("inboundDocumentId")
+        inbound_row = inbound_by_id.get(int(inbound_id)) if inbound_id is not None else None
+        warehouse_name = str(
+            (inbound_row or {}).get("warehouseName")
+            or default_name
+            or ""
+        )
+        warehouse = warehouse_lookup.get(warehouse_name.strip().lower()) if warehouse_name else default_warehouse
+        allocation["warehouseId"] = warehouse.id if warehouse is not None else None
+        allocation["warehouseName"] = warehouse.name if warehouse is not None else warehouse_name
+        if positions["last_document_at"] is None or sku_id is None or warehouse is None:
+            allocation["currentStock"] = None
+            continue
+        allocation["currentStock"] = float(
+            positions["by_sku_warehouse"].get(sku_id, {}).get(warehouse.id, Decimal("0"))
+        )
 
 
 def suppliers(db: Session, limit: int = 200, offset: int = 0) -> dict:

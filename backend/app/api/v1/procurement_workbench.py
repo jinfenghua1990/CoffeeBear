@@ -53,6 +53,9 @@ def orders(
     page_size: int = Query(20, ge=1, le=100),
     start_date: date | None = Query(None),
     end_date: date | None = Query(None),
+    channel: str = Query("all", pattern="^(all|1688|pdd|taobao|other)$"),
+    kind: str = Query("all", pattern="^(all|goods|consumable)$"),
+    warehouse: str = Query(""),
     db: Session = Depends(get_db),
 ) -> dict:
     """按下单时间倒序、按时间标签分组的订单列表；支持状态筛选与排序。"""
@@ -67,6 +70,9 @@ def orders(
         page_size=page_size,
         start_date=start_date,
         end_date=end_date,
+        channel=channel,
+        kind=kind,
+        warehouse=warehouse,
     )
 
 

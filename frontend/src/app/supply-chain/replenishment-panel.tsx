@@ -12,6 +12,7 @@ type ReplenishmentRow = {
   unit: string;
   currentInventory: string | null;
   soldQuantity: string | null;
+  salesSource: "sales_outbound" | "sales_order_fallback" | "none";
   averageDailySales: string | null;
   openSupplyQuantity: string | null;
   targetStock: string | null;
@@ -19,7 +20,7 @@ type ReplenishmentRow = {
   currentCoverDays: string | null;
   effectiveCoverDays: string | null;
   estimatedStockoutDate: string | null;
-  risk: "urgent" | "attention" | "ok" | "no_snapshot" | "no_sales";
+  risk: "urgent" | "attention" | "ok" | "no_data" | "no_sales";
   reason: string;
 };
 
@@ -32,8 +33,12 @@ type ReplenishmentResponse = {
     formula: string;
   };
   data: {
-    inventorySnapshotAt: string | null;
+    lastDocumentAt: string | null;
+    inventoryPositionSource?: string;
     salesSince: string;
+    outboundDocumentCount?: number;
+    matchedOutboundItemCount?: number;
+    unmatchedOutboundItemCount?: number;
     generatedAt: string;
   };
   summary: {
@@ -49,7 +54,7 @@ const RISK_META: Record<ReplenishmentRow["risk"], { label: string; cls: string }
   urgent: { label: "紧急补货", cls: "bg-red-50 text-red-700 ring-red-200" },
   attention: { label: "需要关注", cls: "bg-amber-50 text-amber-700 ring-amber-200" },
   ok: { label: "库存正常", cls: "bg-emerald-50 text-emerald-700 ring-emerald-200" },
-  no_snapshot: { label: "缺库存快照", cls: "bg-slate-100 text-slate-600 ring-slate-200" },
+  no_data: { label: "缺库存数据", cls: "bg-slate-100 text-slate-600 ring-slate-200" },
   no_sales: { label: "无近销依据", cls: "bg-blue-50 text-blue-700 ring-blue-200" },
 };
 
@@ -100,7 +105,7 @@ export default function ReplenishmentPanel() {
 
   const rows = useMemo(() => {
     if (!data) return [];
-    const priority: Record<ReplenishmentRow["risk"], number> = { urgent: 0, attention: 1, no_snapshot: 2, no_sales: 3, ok: 4 };
+    const priority: Record<ReplenishmentRow["risk"], number> = { urgent: 0, attention: 1, no_data: 2, no_sales: 3, ok: 4 };
     return [...data.rows].sort((a, b) => {
       const risk = priority[a.risk] - priority[b.risk];
       if (risk !== 0) return risk;
@@ -117,7 +122,7 @@ export default function ReplenishmentPanel() {
             <span className="rounded-full bg-indigo-50 px-2.5 py-1 text-[10px] font-medium text-indigo-700">真实数据</span>
           </div>
           <p className="mt-1 text-xs leading-5 text-slate-500">
-            建议补货 = 日均销量 ×（交期 + 安全天数）- 当前库存 - 待供应。无库存快照或无近销时不自动给数量。
+            建议补货 = 日均销量 ×（交期 + 安全天数）- 当前库存 - 待供应。无库存数据或无近销时不自动给数量。
           </p>
         </div>
         <div className="flex flex-wrap items-end gap-2">
@@ -188,7 +193,12 @@ export default function ReplenishmentPanel() {
                     <div className="mt-1 font-mono text-[10px] text-slate-400">{row.skuCode}{row.barcode ? ` · ${row.barcode}` : ""}</div>
                   </td>
                   <td className="px-3 py-3 text-right align-top font-medium tabular-nums text-slate-800">{numberText(row.currentInventory)}</td>
-                  <td className="px-3 py-3 text-right align-top tabular-nums text-slate-700">{numberText(row.soldQuantity)}</td>
+                  <td className="px-3 py-3 text-right align-top tabular-nums text-slate-700">
+                    <div>{numberText(row.soldQuantity)}</div>
+                    <div className="mt-1 text-[10px] text-slate-400">
+                      {row.salesSource === "sales_outbound" ? "销售出库单" : row.salesSource === "sales_order_fallback" ? "销售订单兜底" : "无销量来源"}
+                    </div>
+                  </td>
                   <td className="px-3 py-3 text-right align-top tabular-nums text-slate-600">{numberText(row.averageDailySales, 2)}</td>
                   <td className="px-3 py-3 text-right align-top tabular-nums text-slate-700">{numberText(row.openSupplyQuantity)}</td>
                   <td className="px-3 py-3 text-right align-top tabular-nums text-slate-700">{numberText(row.currentCoverDays)}{row.currentCoverDays ? " 天" : ""}</td>
@@ -208,7 +218,10 @@ export default function ReplenishmentPanel() {
 
       {data && (
         <div className="mt-3 flex flex-wrap items-center justify-between gap-2 text-[10px] leading-5 text-slate-400">
-          <span>库存快照：{data.data.inventorySnapshotAt ? new Date(data.data.inventorySnapshotAt).toLocaleString("zh-CN") : "暂无"}</span>
+          <span>
+            数据更新时间：{data.data.lastDocumentAt ? new Date(data.data.lastDocumentAt).toLocaleString("zh-CN") : "暂无"}
+            {data.data.outboundDocumentCount !== undefined ? ` · 出库单 ${data.data.outboundDocumentCount} 张` : ""}
+          </span>
           <span>{data.policy.formula}</span>
         </div>
       )}

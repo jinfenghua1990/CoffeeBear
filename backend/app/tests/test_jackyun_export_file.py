@@ -1,12 +1,15 @@
 """吉客云客户端官方导出文件解析测试，不使用真实业务数据。"""
 import io
 from pathlib import Path
+from uuid import uuid4
 
 import pytest
 
 from app.adapters.jackyun_export_file import parse_jackyun_export
 from app.config import settings
 from app.models.jackyun_import import JackyunFileImportRecord
+from app.models.jackyun import JackyunGoodsDocument, JackyunGoodsDocumentItem
+from app.models.catalog import ProductSku
 from app.models.sales import SalesOrder
 from app.services import jackyun_file_import_service as service
 
@@ -96,3 +99,59 @@ def test_upload_endpoint_enforces_its_own_smaller_limit(client, monkeypatch):
         files={"file": ("too-large.csv", b"1234", "text/csv")},
     )
     assert response.status_code == 413
+
+
+def test_outbound_import_maps_document_lines_and_sku(db_session):
+    sku = ProductSku(
+        jackyun_sku_id=f"pytest-outbound-{uuid4().hex}",
+        sku_code=f"PYTEST-OUTBOUND-{uuid4().hex[:8]}",
+        sku_name="出库导入测试 SKU",
+        barcode="BAR-OUTBOUND",
+        status="active",
+    )
+    db_session.add(sku)
+    db_session.flush()
+    import_row = service.JackyunFileImport(
+        original_name="销售出库.xlsx",
+        stored_path="/tmp/pytest-outbound.xlsx",
+        sha256=uuid4().hex,
+        report_type="outbound",
+        status="parsed",
+        lifecycle="active",
+        headers=["出库单号", "出库日期", "仓库名称", "货品编号", "货品名称", "出库数量"],
+        row_count=1,
+        staged_row_count=1,
+    )
+    db_session.add(import_row)
+    db_session.flush()
+    db_session.add(JackyunFileImportRecord(
+        import_id=import_row.id,
+        row_index=1,
+        payload={
+            "出库单号": "OUT-IMPORT-001",
+            "出库日期": "2026-09-09",
+            "仓库名称": "常州-示范仓",
+            "货品编号": sku.sku_code,
+            "货品名称": sku.sku_name,
+            "出库数量": "7",
+        },
+    ))
+    db_session.commit()
+
+    result = service.map_import(db_session, import_row.id, actor="pytest")
+    document = db_session.query(JackyunGoodsDocument).filter_by(
+        document_type="outbound", goodsdoc_no="OUT-IMPORT-001"
+    ).one()
+    item = db_session.query(JackyunGoodsDocumentItem).filter_by(document_id=document.id).one()
+
+    assert result["mapper"] == "outbound"
+    assert result["documents"] == 1
+    assert item.quantity == 7
+    assert item.matched_sku_id == sku.id
+    assert item.match_status in {"auto", "price_ok"}
+
+    second = service.map_import(db_session, import_row.id, actor="pytest")
+    assert second["documents"] == 1
+    assert db_session.query(JackyunGoodsDocument).filter_by(
+        document_type="outbound", goodsdoc_no="OUT-IMPORT-001"
+    ).count() == 1

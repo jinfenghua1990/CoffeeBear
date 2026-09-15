@@ -1,7 +1,7 @@
 from decimal import Decimal
 from datetime import datetime
 
-from sqlalchemy import BigInteger, DateTime, Numeric, String, Text, UniqueConstraint
+from sqlalchemy import BigInteger, Boolean, DateTime, Numeric, String, Text, UniqueConstraint
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -19,6 +19,11 @@ class Supplier(Base, PkMixin, TimestampMixin):
     external_shop_id: Mapped[str] = mapped_column(String(128), default="", index=True)
     name: Mapped[str] = mapped_column(String(256), index=True, nullable=False)
     contact: Mapped[str] = mapped_column(String(256), default="")
+    tax_no: Mapped[str] = mapped_column(String(64), default="", index=True)
+    phone: Mapped[str] = mapped_column(String(64), default="")
+    address: Mapped[str] = mapped_column(String(512), default="")
+    notes: Mapped[str] = mapped_column(String(512), default="")
+    is_temp: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false", nullable=False)
 
 
 class ExternalPurchaseOrder(Base, PkMixin, TimestampMixin):
@@ -47,7 +52,10 @@ class ExternalPurchaseOrder(Base, PkMixin, TimestampMixin):
     adjustment_note: Mapped[str] = mapped_column(String(256), default="")
     # 订单类型人工覆盖：goods=正品 / consumable=耗材；空=按自动判定
     # （耗材档案 Excel 的「采购订货号」可能填错，自动判定仅作默认值）
-    order_kind_override: Mapped[str] = mapped_column(String(16), default="")
+    order_kind_override: Mapped[str] = mapped_column(
+        String(16), default="",
+        comment="订单类型人工覆盖：goods=正品 / consumable=耗材；空=按自动判定",
+    )
     currency: Mapped[str] = mapped_column(String(8), default="CNY")
     order_status: Mapped[str] = mapped_column(String(64), default="", index=True)
     pay_status: Mapped[str] = mapped_column(String(64), default="")
@@ -104,7 +112,10 @@ class PurchaseAllocationItem(Base, PkMixin, TimestampMixin):
     # 来源入库单明细行 ID（入库反填时写入）。默认自动反填仍保持单行排他；
     # 合并采购单场景可通过显式“入库分摊”把同一明细行按数量分给多个采购订单，
     # 但所有采购单分摊数量之和不得超过吉客云实际入库数量。
-    source_item_id: Mapped[int | None] = mapped_column(BigInteger, index=True, nullable=True)
+    source_item_id: Mapped[int | None] = mapped_column(
+        BigInteger, index=True, nullable=True,
+        comment="来源入库单明细行 ID（jackyun_goods_document_items.id）；人工行/历史行为空",
+    )
 
 
 class PurchaseExtraExpense(Base, PkMixin, TimestampMixin):
@@ -163,8 +174,14 @@ class JackyunPurchaseOrderLink(Base, PkMixin, TimestampMixin):
     # 合并/拆分标注：'' 普通（一单一采购单）；merged 多张线上采购单共用一张吉客云采购单；
     # split 一张线上采购单拆成多张吉客云采购单。alloc_amount 为本订单在该采购单中的分摊金额，
     # 合并/拆分时用于金额闭环核对（Σ alloc_amount vs 订单实付）。
-    relation_kind: Mapped[str] = mapped_column(String(16), default="", nullable=False)
-    alloc_amount: Mapped[Decimal | None] = mapped_column(Numeric(18, 4), nullable=True)
+    relation_kind: Mapped[str] = mapped_column(
+        String(16), default="", nullable=False,
+        comment="'' 普通 / merged 合并（多1688单共1采购单）/ split 拆分（1单分多采购单）",
+    )
+    alloc_amount: Mapped[Decimal | None] = mapped_column(
+        Numeric(18, 4), nullable=True,
+        comment="本订单在该吉客云采购单中的分摊金额（合并/拆分场景必填用于金额闭环）",
+    )
     note: Mapped[str] = mapped_column(String(256), default="", nullable=False)
 
 

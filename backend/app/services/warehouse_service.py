@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from app.models.catalog import Warehouse
+from app.models.catalog import InventorySnapshot, Warehouse
+from app.models.consumable import ConsumableTransaction
+from app.models.consumable_purchase import ConsumableReceipt
 
 WAREHOUSE_TYPES = {"factory", "b2c", "other"}
 PURPOSES = {"goods", "consumable", "both"}
@@ -133,6 +136,27 @@ def update_warehouse(
     return row
 
 
+def delete_warehouse(db: Session, warehouse_id: int) -> Warehouse:
+    """物理删除没有任何业务引用的仓库，历史仓库只能停用。"""
+    row = db.get(Warehouse, warehouse_id)
+    if row is None:
+        raise LookupError("仓库不存在")
+
+    references = {
+        "库存快照": db.query(func.count(InventorySnapshot.id)).filter(InventorySnapshot.warehouse_id == warehouse_id).scalar() or 0,
+        "耗材收货单": db.query(func.count(ConsumableReceipt.id)).filter(ConsumableReceipt.warehouse_id == warehouse_id).scalar() or 0,
+        "耗材库存流水": db.query(func.count(ConsumableTransaction.id)).filter(ConsumableTransaction.warehouse_id == warehouse_id).scalar() or 0,
+    }
+    used_by = [f"{label} {count} 条" for label, count in references.items() if count]
+    if used_by:
+        usage_text = "、".join(used_by)
+        raise ValueError(f"仓库「{row.name}」已被{usage_text}引用，不能物理删除；如不再使用请先停用。")
+
+    db.delete(row)
+    db.commit()
+    return row
+
+
 def get_active(db: Session, warehouse_id: int) -> Warehouse:
     row = db.get(Warehouse, warehouse_id)
     if row is None or row.status != "active":
@@ -147,6 +171,25 @@ def default_for_type(db: Session, warehouse_type: str) -> Warehouse | None:
         .order_by(Warehouse.id)
         .first()
     )
+
+
+def active_for_purpose(db: Session, purpose: str) -> list[Warehouse]:
+    """返回当前可承接指定库存用途的启用仓库。"""
+    return (
+        db.query(Warehouse)
+        .filter(
+            Warehouse.status == "active",
+            Warehouse.purpose.in_((purpose, "both")),
+        )
+        .order_by(Warehouse.id)
+        .all()
+    )
+
+
+def default_for_consumable(db: Session) -> Warehouse | None:
+    """仅在耗材仓唯一时提供默认仓，避免无提示地写入错误仓库。"""
+    rows = active_for_purpose(db, "consumable")
+    return rows[0] if len(rows) == 1 else None
 
 
 def legacy_location(row: Warehouse) -> str:

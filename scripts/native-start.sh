@@ -15,10 +15,44 @@ export PATH="/Users/gino/.workbuddy/binaries/node/versions/22.22.2-2/bin:/opt/ho
 # ---------- 后端：api / worker / beat ----------
 source "$VENV/bin/activate"
 cd /Users/gino/ecommerce-dashboard/backend
+
+# launchd 重启脚本时会向本脚本发送 TERM；显式回收子进程，避免旧 uvicorn
+# 继续占用 8000，导致新版本 API 启动失败而页面悄悄继续使用旧代码。
+api_pid=""
+worker_pid=""
+beat_pid=""
+cleanup() {
+  trap - TERM INT EXIT
+  for pid in "$api_pid" "$worker_pid" "$beat_pid"; do
+    if [ -n "$pid" ]; then
+      kill -TERM "$pid" 2>/dev/null || true
+    fi
+  done
+  wait 2>/dev/null || true
+}
+trap cleanup TERM INT EXIT
+
 python -m app.seed > /tmp/ecom_seed.log 2>&1
+# ``launchctl kickstart -k`` 可能只回收托管脚本，留下已经脱离父进程的旧 uvicorn。
+# 只清理本项目、当前工作目录且确实监听 8000 的进程，避免新版本静默撞端口。
+for listener_pid in $(/usr/sbin/lsof -t -nP -iTCP:8000 -sTCP:LISTEN 2>/dev/null); do
+  listener_command=$(ps -p "$listener_pid" -o command= 2>/dev/null || true)
+  listener_cwd=$(/usr/sbin/lsof -a -p "$listener_pid" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p')
+  if [[ "$listener_cwd" == "/Users/gino/ecommerce-dashboard/backend" && "$listener_command" == *"uvicorn app.main:app --host 0.0.0.0 --port 8000"* ]]; then
+    echo "[native-start] 回收脱离托管的旧 API 进程 $listener_pid"
+    kill -TERM "$listener_pid" 2>/dev/null || true
+    for wait_count in 1 2 3 4 5 6 7 8 9 10; do
+      kill -0 "$listener_pid" 2>/dev/null || break
+      sleep 0.2
+    done
+  fi
+done
 uvicorn app.main:app --host 0.0.0.0 --port 8000 >> /tmp/ecom_api.log 2>&1 &
+api_pid=$!
 celery -A app.celery_app worker -l info --concurrency 2 >> /tmp/ecom_worker.log 2>&1 &
+worker_pid=$!
 celery -A app.celery_app beat -l info --schedule /tmp/celerybeat-schedule >> /tmp/ecom_beat.log 2>&1 &
+beat_pid=$!
 deactivate
 
 # ---------- 前端（静态导出，由后端 8000 同口托管，不再单独跑 next start） ----------

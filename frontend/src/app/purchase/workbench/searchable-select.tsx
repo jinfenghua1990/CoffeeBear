@@ -57,7 +57,7 @@ export function SearchableSelect({
         <span className="shrink-0 text-slate-300" aria-hidden>▾</span>
       </button>
       {open && (
-        <div className={`absolute z-30 mt-1 w-full min-w-[200px] rounded-md border border-slate-200 bg-white shadow-lg ${align === "right" ? "right-0" : "left-0"}`}>
+        <div className={`absolute z-dropdown mt-1 w-full min-w-[200px] rounded-md border border-slate-200 bg-white shadow-lg ${align === "right" ? "right-0" : "left-0"}`}>
           <input
             autoFocus
             value={query}

@@ -48,7 +48,7 @@ export function NewPurchaseModal({ onClose, onCreated }: {
     }
   }
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/30 p-4">
+    <div className="fixed inset-0 z-modal flex items-center justify-center bg-slate-950/30 p-4">
       <form onSubmit={submit} role="dialog" aria-modal="true" aria-labelledby="new-purchase-title" className="w-full max-w-lg rounded-2xl bg-white p-6 shadow-xl">
         <div className="flex items-center justify-between"><h2 id="new-purchase-title" className="text-lg font-semibold">新建采购记录</h2><button type="button" onClick={onClose} disabled={busy} aria-label="关闭新建采购">×</button></div>
         <div className="mt-4 grid gap-3 text-sm">
