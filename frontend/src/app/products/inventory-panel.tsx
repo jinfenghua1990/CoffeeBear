@@ -7,8 +7,11 @@ const qty = (v: string | null | undefined) =>
   v == null || v === "" ? "—" : Number(v).toLocaleString("zh-CN", { maximumFractionDigits: 4 });
 
 /** 库存-正品：吉客云最新快照（本系统只读，不改动）。 */
+const isBundleRow = (row: InventorySkuRow) => row.productType === "bundle" || row.productType === "virtual_bundle";
+
 export function GoodsInventoryPanel({ initialSearch = "" }: { initialSearch?: string } = {}) {
   const [rows, setRows] = useState<InventorySkuRow[]>([]);
+  const [view, setView] = useState<"single" | "bundle">("single");
   const [search, setSearch] = useState(initialSearch);
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState("");
@@ -22,6 +25,9 @@ export function GoodsInventoryPanel({ initialSearch = "" }: { initialSearch?: st
   }, [search]);
   useEffect(() => { const timer = setTimeout(load, 200); return () => clearTimeout(timer); }, [load]);
 
+  const visible = rows.filter((row) => (view === "bundle" ? isBundleRow(row) : !isBundleRow(row)));
+  const singleCount = rows.filter((row) => !isBundleRow(row)).length;
+  const bundleCount = rows.length - singleCount;
   const totalQty = rows.reduce((sum, row) => sum + (row.hasMovement ? Number(row.quantity || 0) : 0), 0);
   const snapAt = rows.find((row) => row.lastDocumentAt)?.lastDocumentAt ?? null;
 
@@ -34,11 +40,17 @@ export function GoodsInventoryPanel({ initialSearch = "" }: { initialSearch?: st
             正品库存（采购入库 − 销售出库）
           </h2>
           <p className="mt-1 text-xs text-gray-400">
-            本系统独立运算：Σ采购入库 − Σ销售出库，不读吉客云库存；共 {rows.length} 个货品，合计 {qty(String(totalQty))} 件
+            本系统独立运算：Σ采购入库 − Σ销售出库，不读吉客云库存；共 {rows.length} 个货品（单品 {singleCount} · 组合套装 {bundleCount}），合计 {qty(String(totalQty))} 件
             {snapAt ? <> · 最后单据 {new Date(snapAt).toLocaleString("zh-CN")}</> : " · 暂无出入库单据"}
           </p>
         </div>
-        <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="搜索 SKU、货品或条码" className="w-72 rounded-lg border px-3 py-1.5 text-sm outline-none focus:border-blue-400" />
+        <div className="flex items-center gap-2">
+          <div className="flex overflow-hidden rounded-lg border border-gray-200 text-xs">
+            <button type="button" onClick={() => setView("single")} className={`px-3 py-1.5 transition ${view === "single" ? "bg-blue-600 text-white" : "bg-white text-gray-500 hover:text-gray-800"}`}>单品（{singleCount}）</button>
+            <button type="button" onClick={() => setView("bundle")} className={`px-3 py-1.5 transition ${view === "bundle" ? "bg-blue-600 text-white" : "bg-white text-gray-500 hover:text-gray-800"}`}>组合套装（{bundleCount}）</button>
+          </div>
+          <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="搜索 SKU、货品或条码" className="w-72 rounded-lg border px-3 py-1.5 text-sm outline-none focus:border-blue-400" />
+        </div>
       </div>
       {err && <div className="mt-3 rounded-lg bg-red-50 p-3 text-sm text-red-700">{err}</div>}
       <div className="mt-3 overflow-x-auto">
@@ -55,7 +67,7 @@ export function GoodsInventoryPanel({ initialSearch = "" }: { initialSearch?: st
             </tr>
           </thead>
           <tbody className="divide-y divide-gray-100">
-            {rows.map((row) => (
+            {visible.map((row) => (
               <tr key={row.skuId} className={row.status !== "active" ? "text-gray-400" : ""}>
                 <td className="py-2.5 font-mono text-xs font-medium text-gray-800">{row.skuCode}</td>
                 <td className="max-w-[220px] py-2.5">
@@ -97,7 +109,7 @@ export function GoodsInventoryPanel({ initialSearch = "" }: { initialSearch?: st
           </tbody>
         </table>
         {loading && <p className="p-6 text-center text-sm text-gray-400">正在加载库存…</p>}
-        {!loading && !rows.length && <p className="p-8 text-center text-sm text-gray-400">没有匹配的货品</p>}
+        {!loading && !visible.length && <p className="p-8 text-center text-sm text-gray-400">{view === "bundle" ? "暂无组合套装" : "没有匹配的货品"}</p>}
       </div>
     </section>
   );
