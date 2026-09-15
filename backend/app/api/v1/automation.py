@@ -44,7 +44,7 @@ SCHEDULE = [
     {"task": "tasks.sync_jackyun", "args": "inbound", "label": "吉客云 入库单", "frequency": _daily_jky_frequency},
     {"task": "tasks.sync_jackyun", "args": "outbound", "label": "吉客云 出库单", "frequency": _daily_jky_frequency},
     {"task": "tasks.sync_jky_web", "args": "", "label": "吉客云 档案（商品/SKU/仓库）", "frequency": _daily_jky_frequency},
-    {"task": "tasks.sync_1688", "args": "", "label": "1688 订单", "frequency": "每天 07:30"},
+    {"task": "tasks.sync_1688", "args": "", "label": "1688 订单", "frequency": "已停用定时（改采购执行中心手动采集）"},
     {"task": "tasks.monthly_verify", "args": "", "label": "月初完整校验", "frequency": "每月 1 日 06:00"},
     {"task": "tasks.generate_monthly_accounting_summary", "args": "", "label": "财务 销售开票分类汇总", "frequency": "每月 2 日 04:10"},
 ]

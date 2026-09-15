@@ -115,10 +115,7 @@ def _beat_schedule() -> dict:
             "task": "tasks.recycle_bin_purge",
             "schedule": crontab(hour=4, minute=15),
         },
-        "alibaba1688-daily": {
-            "task": "tasks.sync_1688",
-            "schedule": crontab(hour=7, minute=30),
-        },
+        # 1688 采集按运营要求改为纯手动：采购执行中心页面按钮触发，不再每天 07:30 自动跑。
     }
     # 吉客云采购入库轻量跟踪走开放平台配额；手动模式下停用，入库单以客户端导出上传为准。
     if settings.JACKYUN_SYNC_MODE != "manual":
