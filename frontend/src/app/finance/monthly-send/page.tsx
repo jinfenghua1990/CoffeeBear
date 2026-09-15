@@ -80,6 +80,55 @@ type IntakeStatus = {
   sources: IntakeSource[];
 };
 type MailStatus = { configured: boolean; host: string; port: number; username: string; from: string };
+type PaymentMatchInvoice = {
+  linkId: number | null;
+  invoiceId: number;
+  invoiceNumber: string;
+  sellerName: string;
+  issueDate: string;
+  totalAmount: string;
+  allocatedAmount: string | null;
+};
+type PaymentMatchRow = {
+  id: number;
+  txnDate: string;
+  counterpartyName: string;
+  amount: string;
+  voucherNo: string;
+  summary: string;
+  invoices: PaymentMatchInvoice[];
+  matchedAmount: string;
+  remaining: string;
+  status: "matched" | "partial" | "unmatched" | string;
+  suggestedInvoiceIds: number[];
+};
+type PaymentMatchPoolInvoice = {
+  id: number;
+  invoiceNumber: string;
+  sellerName: string;
+  issueDate: string;
+  totalAmount: string;
+  bankLinkedAmount: string;
+  remaining: string;
+  matchStatus: string;
+  suggested: boolean;
+};
+type PaymentMatchOverview = {
+  year: number;
+  month: number;
+  payments: PaymentMatchRow[];
+  invoicePool: PaymentMatchPoolInvoice[];
+  summary: {
+    paymentTotal: string;
+    matchedTotal: string;
+    unmatchedTotal: string;
+    txnCount: number;
+    matchedCount: number;
+    partialCount: number;
+    unmatchedCount: number;
+  };
+};
+type PickerInvoice = { id: number; invoiceNumber: string; sellerName: string; issueDate: string; totalAmount: string; remaining: string; suggested: boolean };
 
 function previousMonthValue() {
   const now = new Date();
@@ -150,7 +199,13 @@ export default function MonthlySendPage() {
   const [unbilled, setUnbilled] = useState<Unbilled | null>(null);
   const [mailStatus, setMailStatus] = useState<MailStatus | null>(null);
   const [mailOpen, setMailOpen] = useState(false);
-  const [financeTab, setFinanceTab] = useState<"monthly" | "records" | "archive" | "ledger">("monthly");
+  const [financeTab, setFinanceTab] = useState<"monthly" | "records" | "archive" | "ledger" | "match">("monthly");
+  const [matchData, setMatchData] = useState<PaymentMatchOverview | null>(null);
+  const [matchLoading, setMatchLoading] = useState(false);
+  const [pickerTxn, setPickerTxn] = useState<PaymentMatchRow | null>(null);
+  const [pickerQuery, setPickerQuery] = useState("");
+  const [pickerScope, setPickerScope] = useState<"month" | "all">("month");
+  const [allInvoices, setAllInvoices] = useState<PickerInvoice[]>([]);
   /** 发送内容勾选：打包时只包含勾选的表（自动发送仍走全部 3 张）。 */
   const [includeSel, setIncludeSel] = useState<string[]>(["交易明细", "回单详情", "无票收入"]);
   const [showUnbilledDetail, setShowUnbilledDetail] = useState(false);
@@ -216,6 +271,16 @@ export default function MonthlySendPage() {
       .catch(() => {});
   }, [sel]);
 
+  const loadMatch = useCallback(() => {
+    if (!sel) return;
+    setMatchLoading(true);
+    authenticatedFetch(`/api/v1/finance/payment-invoice-match/${sel.year}/${sel.month}`, { cache: "no-store" })
+      .then((r) => (r.ok ? r.json() : null))
+      .then(setMatchData)
+      .catch(() => setMatchData(null))
+      .finally(() => setMatchLoading(false));
+  }, [sel]);
+
   const loadMailStatus = useCallback(() => {
     authenticatedFetch("/api/v1/finance/mail-status", { cache: "no-store" })
       .then((r) => r.json())
@@ -229,6 +294,23 @@ export default function MonthlySendPage() {
     void loadMailStatus();
   }, [loadTemplate, loadPeriods, loadMailStatus]);
   useEffect(() => { loadFiles(); loadIntake(); loadUnbilled(); }, [loadFiles, loadIntake, loadUnbilled]);
+  useEffect(() => { if (financeTab === "match") loadMatch(); }, [financeTab, loadMatch]);
+  // 弹层切"全部未配发票"时拉取全量未匹配进项票（端点上限 500，靠搜索缩小范围）
+  useEffect(() => {
+    if (!pickerTxn || pickerScope !== "all") return;
+    authenticatedFetch("/api/v1/tax-invoices?direction=input&match_status=unmatched&limit=500", { cache: "no-store" })
+      .then((r) => (r.ok ? r.json() : []))
+      .then((rows: Array<Record<string, unknown>>) => setAllInvoices(rows.map((row) => ({
+        id: Number(row.id),
+        invoiceNumber: String(row.invoiceNumber || ""),
+        sellerName: String(row.sellerName || ""),
+        issueDate: String(row.issueDate || "").slice(0, 10),
+        totalAmount: String(row.totalAmount || "0"),
+        remaining: String(row.totalAmount || "0"),
+        suggested: false,
+      }))))
+      .catch(() => setAllInvoices([]));
+  }, [pickerTxn, pickerScope]);
   useEffect(() => {
     if (!unbilled) {
       setUnbilledSelectedKeys([]);
@@ -274,9 +356,11 @@ export default function MonthlySendPage() {
     try {
       const res = await authenticatedFetch("/api/v1/finance/files", { method: "POST", body: fd });
       const d = await res.json();
-      setMsg(res.ok ? `${uploadKind.current} 已归档 v${d.version}` : `上传失败：${d.detail}`);
+      setMsg(res.ok
+        ? `${uploadKind.current} 已归档 v${d.version}${d.bankImport ? ` · 流水入库：新增 ${d.bankImport.created}，重复 ${d.bankImport.duplicates}` : ""}${d.bankImportError ? ` · 流水解析失败：${d.bankImportError}` : ""}`
+        : `上传失败：${d.detail}`);
       if (fileRef.current) fileRef.current.value = "";
-    } finally { setBusy(false); loadFiles(); loadPeriods(); }
+    } finally { setBusy(false); loadFiles(); loadPeriods(); if (uploadKind.current === "交易明细") loadMatch(); }
   }
 
   /** 月度业务源文件：先归档原件，再由后端调用对应的真实导入器。 */
@@ -311,6 +395,45 @@ export default function MonthlySendPage() {
     } else {
       void uploadBank(file);
     }
+  }
+
+  /** 标记已开票：分配金额 = min(发票价税合计, 付款剩余)，多张票分次标记即可拆分。 */
+  async function markInvoiced(txn: PaymentMatchRow, inv: PickerInvoice) {
+    const remain = Number(txn.remaining) || 0;
+    const total = Number(inv.totalAmount) || 0;
+    const alloc = Math.min(remain, total);
+    if (alloc <= 0) { setMsg("该发票可分配金额为 0，无法标记"); return; }
+    setBusy(true); setMsg("");
+    try {
+      const res = await authenticatedFetch("/api/v1/finance/payment-invoice-match/link", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ txn_id: txn.id, invoice_id: inv.id, allocated_amount: alloc.toFixed(2) }),
+      });
+      const d = await res.json();
+      if (!res.ok) throw new Error(d.detail || "标记失败");
+      setMsg(`已标记：发票 ${inv.invoiceNumber}（${money(alloc)}）配到 ${txn.txnDate} 付款（${txn.counterpartyName || "对方未名"}）`);
+      setPickerTxn(null);
+      setPickerQuery("");
+      loadMatch();
+    } catch (e) {
+      setMsg(`标记失败：${e instanceof Error ? e.message : String(e)}`);
+    } finally { setBusy(false); }
+  }
+
+  async function unlinkPayment(linkId: number) {
+    setBusy(true); setMsg("");
+    try {
+      const res = await authenticatedFetch(`/api/v1/finance/payment-invoice-match/link/${linkId}`, { method: "DELETE" });
+      if (!res.ok) {
+        const d = await res.json();
+        throw new Error(d.detail || "解除失败");
+      }
+      setMsg("已解除标记，付款回到未配票状态。");
+      loadMatch();
+    } catch (e) {
+      setMsg(`解除失败：${e instanceof Error ? e.message : String(e)}`);
+    } finally { setBusy(false); }
   }
 
   /** 手动发送 = 每次都用最新资料重新打包（新版本），再发给财务；保证收到的一定是最新数据。 */
@@ -548,6 +671,7 @@ export default function MonthlySendPage() {
         <span className="shrink-0 px-1 text-slate-300">›</span>
         {([
           ["monthly", "本月入库与发送"],
+          ["match", "付款发票匹配"],
           ["records", "发送记录"],
           ["archive", "资料归档"],
           ["ledger", "销售汇总台账"],
@@ -624,6 +748,78 @@ export default function MonthlySendPage() {
       {financeTab === "archive" && <section className={`${CARD} overflow-hidden`}><div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 px-4 py-4"><div><h2 className="text-base font-semibold text-slate-900">资料归档</h2><p className="mt-1 text-xs text-slate-400">业务源文件、银行资料、系统生成资料和历史版本都保留在当前账期。</p></div><button type="button" onClick={() => { uploadKind.current = "交易明细"; fileRef.current?.click(); }} disabled={busy} className="rounded-lg border border-blue-200 px-3 py-2 text-xs font-medium text-blue-600 hover:bg-blue-50 disabled:opacity-50">＋ 新增资料</button></div>{!files.length ? <div className="px-4 py-12 text-center text-sm text-slate-400">该账期暂无归档文件</div> : <div className="overflow-x-auto"><table className="w-full min-w-[760px] text-sm"><thead className="bg-slate-50 text-left text-xs text-slate-500"><tr><th className="px-4 py-2.5 font-medium">文件</th><th className="px-4 py-2.5 font-medium">类型</th><th className="px-4 py-2.5 font-medium">版本</th><th className="px-4 py-2.5 font-medium">归档时间</th><th className="px-4 py-2.5 text-right font-medium">操作</th></tr></thead><tbody className="divide-y divide-slate-100">{[...files].sort((a, b) => a.originalName.localeCompare(b.originalName) || a.version - b.version).map((row) => <tr key={row.id}><td className="px-4 py-3">{deliveryName(sel?.month ?? 0, row.originalName)}<span className="ml-2 text-[10px] text-slate-300">{row.originalName}</span></td><td className="px-4 py-3 text-xs text-slate-500">{row.category === "sales_summary" ? "系统生成" : row.category === "bank" ? "银行资料" : row.category === "purchase_inbound" ? "采购入库源文件" : row.category === "sales_query" ? "销售数量源文件" : "外部数据导入"}</td><td className="px-4 py-3 text-xs text-slate-500">v{row.version}</td><td className="px-4 py-3 text-xs text-slate-400">{formatDate(row.uploadedAt)}</td><td className="px-4 py-3 text-right"><button type="button" onClick={() => void downloadFile(row)} disabled={busy} className="text-xs font-medium text-blue-600 hover:underline disabled:opacity-50">下载</button><button type="button" onClick={() => void deleteFile(row)} disabled={busy} className="ml-4 text-xs font-medium text-rose-500 hover:underline disabled:opacity-50">删除</button></td></tr>)}</tbody></table></div>}<div className="border-t border-slate-100 px-4 py-3 text-[11px] text-slate-400">每次上传 / 生成都会留版本；业务源文件用于本地入库计算，财务交付包只取所选交付资料。</div><input ref={fileRef} type="file" accept=".xlsx,.xls,.csv,.pdf" className="hidden" onChange={(e) => { const file = e.target.files?.[0]; if (file) handleUploadSelection(file); }} /></section>}
 
       {financeTab === "ledger" && <section className={`${CARD} overflow-hidden`}><div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 px-4 py-4"><div><h2 className="text-base font-semibold text-slate-900">销售汇总台账</h2><p className="mt-1 text-xs text-slate-400">月度时间 / 仓库 / 税务编号 / 发货总数量 / 销售总金额 / 销售总成本；无票收入表自动引用销售总金额。</p></div><div className="flex gap-2"><button type="button" onClick={previewSales} disabled={busy} className="rounded-lg border border-slate-200 px-3 py-2 text-xs text-slate-600 hover:bg-slate-50 disabled:opacity-50">预览</button><button type="button" onClick={() => setShowFields((v) => !v)} className="rounded-lg border border-slate-200 px-3 py-2 text-xs text-slate-600 hover:bg-slate-50">字段配置</button><button type="button" onClick={generateSales} disabled={busy} className="rounded-lg bg-blue-600 px-3 py-2 text-xs font-medium text-white hover:bg-blue-700 disabled:opacity-50">生成并归档</button></div></div>{showFields && template && <div className="border-b border-slate-100 bg-slate-50/70 p-4"><div className="grid gap-2 lg:grid-cols-2">{template.fields.map((field, index) => <div key={field.key} className={`grid grid-cols-[28px_1fr_auto] items-center gap-2 rounded-lg border px-2 py-2 ${field.enabled ? "border-blue-100 bg-blue-50/30" : "border-slate-100 bg-white"}`}><input type="checkbox" checked={field.enabled} onChange={(e) => updateField(index, { enabled: e.target.checked })} /><div className="flex min-w-0 items-center gap-2"><span className="w-28 shrink-0 truncate font-mono text-[10px] text-slate-400">{field.key}</span><input value={field.label} onChange={(e) => updateField(index, { label: e.target.value })} className="min-w-0 flex-1 rounded border border-slate-200 bg-white px-2 py-1 text-xs" /></div><div className="flex gap-1"><button type="button" onClick={() => moveField(index, -1)} disabled={index === 0} className="rounded border border-slate-200 px-2 py-1 text-[10px] text-slate-500 disabled:opacity-30">↑</button><button type="button" onClick={() => moveField(index, 1)} disabled={index === template.fields.length - 1} className="rounded border border-slate-200 px-2 py-1 text-[10px] text-slate-500 disabled:opacity-30">↓</button></div></div>)}</div><div className="mt-3 flex justify-end"><button type="button" onClick={saveTemplate} disabled={busy} className="rounded-lg bg-blue-600 px-4 py-2 text-xs font-medium text-white disabled:opacity-50">保存字段配置</button></div></div>}{preview && <div className="p-4"><div className="grid grid-cols-2 gap-px overflow-hidden rounded-xl border border-slate-200 bg-slate-200 md:grid-cols-5">{[["订单数", preview.summary.orderCount], ["仓库数", preview.summary.warehouseCount], ["发货总数量", Number(preview.summary.totalQuantity).toLocaleString("zh-CN")], ["销售总金额", money(preview.summary.salesAmount)], ["销售总成本", money(preview.summary.costAmount)]] .map(([label, value]) => <div key={String(label)} className="bg-white p-3"><div className="text-[10px] text-slate-400">{label}</div><div className="mt-1 text-lg font-semibold text-slate-800">{value}</div></div>)}</div><div className="mt-3 overflow-x-auto rounded-xl border border-slate-200"><table className="w-full min-w-[900px] text-xs"><thead className="bg-slate-50 text-left text-slate-500"><tr>{preview.fields.map((field) => <th key={field.key} className="whitespace-nowrap px-3 py-2 font-medium">{field.label}</th>)}</tr></thead><tbody className="divide-y divide-slate-100">{preview.rows.slice(0, 12).map((row, index) => <tr key={index}>{preview.fields.map((field) => <td key={field.key} className="max-w-[220px] truncate px-3 py-2 text-slate-600">{row[field.key] || "—"}</td>)}</tr>)}</tbody></table><div className="px-3 py-2 text-[10px] text-slate-400">预览前 {Math.min(12, preview.rows.length)} 行 · 本月共 {preview.rowCount} 个仓库</div></div></div>}{!preview && <div className="px-4 py-12 text-center text-sm text-slate-400">点击“预览”查看当前账期数据，字段配置可直接调整导出列。</div>}</section>}
+
+      {financeTab === "match" && <section className={`${CARD} overflow-hidden`}>
+        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 px-4 py-4">
+          <div>
+            <h2 className="text-base font-semibold text-slate-900">付款发票匹配</h2>
+            <p className="mt-1 text-xs text-slate-400">当月银行支出的每笔付款，对方把发票开过来后在这里标记；选择发票时同名同金额的排最前。手工标记才落库，可随时解除。</p>
+          </div>
+          <button type="button" onClick={loadMatch} disabled={matchLoading} className="rounded-lg border border-slate-200 px-3 py-2 text-xs text-slate-600 hover:bg-slate-50 disabled:opacity-50">刷新</button>
+        </div>
+        {matchData && (
+          <div className="grid grid-cols-2 gap-px bg-slate-100 sm:grid-cols-5">
+            {([
+              ["付款总额", money(matchData.summary.paymentTotal), `${matchData.summary.txnCount} 笔支出`],
+              ["已配票金额", money(matchData.summary.matchedTotal), `${matchData.summary.matchedCount + matchData.summary.partialCount} 笔`],
+              ["未配票金额", money(matchData.summary.unmatchedTotal), `${matchData.summary.unmatchedCount} 笔待处理`],
+              ["当月进项发票", String(matchData.invoicePool.length), "对方开来"],
+              ["部分配票", String(matchData.summary.partialCount), "金额未配平"],
+            ] as const).map(([label, value, hint]) => (
+              <div key={label} className="bg-white px-4 py-3">
+                <div className="text-[10px] text-slate-400">{label}</div>
+                <div className="mt-1 text-base font-semibold text-slate-800">{value}</div>
+                <div className="mt-0.5 text-[10px] text-slate-400">{hint}</div>
+              </div>
+            ))}
+          </div>
+        )}
+        {matchLoading && <div className="px-4 py-10 text-center text-sm text-slate-400">加载中…</div>}
+        {matchData && !matchData.payments.length && <div className="px-4 py-12 text-center text-sm text-slate-400">当前账期没有银行支出流水；请先在「本月入库与发送」上传银行交易明细（XLSX）。</div>}
+        {matchData && Boolean(matchData.payments.length) && (
+          <div className="overflow-x-auto">
+            <table className="w-full min-w-[900px] text-sm">
+              <thead className="bg-slate-50 text-left text-xs text-slate-500">
+                <tr><th className="px-4 py-2.5 font-medium">付款日期</th><th className="px-4 py-2.5 font-medium">对方户名</th><th className="px-4 py-2.5 text-right font-medium">金额</th><th className="px-4 py-2.5 font-medium">凭证号</th><th className="px-4 py-2.5 font-medium">已配发票</th><th className="px-4 py-2.5 font-medium">状态</th><th className="px-4 py-2.5 text-right font-medium">操作</th></tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100">
+                {matchData.payments.map((row) => (
+                  <tr key={row.id} className={row.status === "unmatched" ? "bg-rose-50/30" : ""}>
+                    <td className="whitespace-nowrap px-4 py-3 text-xs text-slate-600">{row.txnDate}</td>
+                    <td className="max-w-[200px] truncate px-4 py-3 text-slate-800">{row.counterpartyName || <span className="text-slate-300">对方未名</span>}</td>
+                    <td className="whitespace-nowrap px-4 py-3 text-right font-medium text-slate-800">{money(row.amount)}</td>
+                    <td className="px-4 py-3 font-mono text-xs text-slate-400">{row.voucherNo || "—"}</td>
+                    <td className="px-4 py-3">
+                      {row.invoices.length ? (
+                        <div className="space-y-1">
+                          {row.invoices.map((inv) => (
+                            <div key={`${inv.linkId}-${inv.invoiceId}`} className="flex items-center gap-2 text-xs">
+                              <span className="font-mono text-slate-600">{inv.invoiceNumber}</span>
+                              <span className="text-slate-500">{money(inv.allocatedAmount ?? inv.totalAmount)}</span>
+                              <button type="button" onClick={() => inv.linkId && void unlinkPayment(inv.linkId)} disabled={busy} className="text-[10px] text-rose-500 hover:underline disabled:opacity-40">解除</button>
+                            </div>
+                          ))}
+                          {row.status !== "matched" && <div className="text-[10px] text-amber-600">剩余 {money(row.remaining)} 未配</div>}
+                        </div>
+                      ) : <span className="text-xs text-slate-300">未配票</span>}
+                    </td>
+                    <td className="px-4 py-3">
+                      <span className={`inline-flex items-center gap-1 rounded-full px-2 py-1 text-[10px] font-medium ring-1 ring-inset ${row.status === "matched" ? "bg-emerald-50 text-emerald-700 ring-emerald-200" : row.status === "partial" ? "bg-amber-50 text-amber-700 ring-amber-200" : "bg-slate-100 text-slate-500 ring-slate-200"}`}>
+                        <span className={`h-1.5 w-1.5 rounded-full ${row.status === "matched" ? "bg-emerald-500" : row.status === "partial" ? "bg-amber-500" : "bg-slate-400"}`} />
+                        {row.status === "matched" ? "已配票" : row.status === "partial" ? "部分配票" : "未配票"}
+                      </span>
+                    </td>
+                    <td className="px-4 py-3 text-right">
+                      <button type="button" onClick={() => { setPickerQuery(""); setPickerScope("month"); setPickerTxn(row); }} disabled={busy} className="rounded-md border border-blue-200 px-2.5 py-1.5 text-[11px] font-medium text-blue-600 hover:bg-blue-50 disabled:opacity-50">标记已开票</button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+        {!matchData && !matchLoading && <div className="px-4 py-12 text-center text-sm text-slate-400">请先选择账期；加载失败时可点「刷新」重试。</div>}
+      </section>}
 
       {showUnbilledDetail && (
         <div
@@ -814,6 +1010,66 @@ export default function MonthlySendPage() {
           </div>
         </div>
       )}
+
+      {pickerTxn && (() => {
+        const query = pickerQuery.trim().toLowerCase();
+        const monthRows: PickerInvoice[] = (matchData?.invoicePool || [])
+          .filter((row) => Number(row.remaining) > 0.01 || row.suggested)
+          .map((row) => ({ id: row.id, invoiceNumber: row.invoiceNumber, sellerName: row.sellerName, issueDate: row.issueDate, totalAmount: row.totalAmount, remaining: row.remaining, suggested: row.suggested }));
+        const sourceRows = pickerScope === "month" ? monthRows : allInvoices;
+        const rows = sourceRows
+          .filter((row) => !query || row.invoiceNumber.toLowerCase().includes(query) || row.sellerName.toLowerCase().includes(query))
+          .sort((a, b) => Number(b.suggested) - Number(a.suggested) || Number(b.remaining) - Number(a.remaining));
+        return (
+          <div
+            className="fixed inset-0 z-modal flex items-end justify-center bg-slate-950/35 p-3 sm:p-6"
+            onMouseDown={(event) => { if (event.target === event.currentTarget) setPickerTxn(null); }}
+            role="dialog"
+            aria-modal="true"
+            aria-label="选择发票标记已开票"
+          >
+            <div className="flex max-h-[80vh] w-full max-w-[860px] flex-col overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-2xl">
+              <div className="flex items-center justify-between gap-3 border-b border-slate-200 px-5 py-4">
+                <div className="min-w-0">
+                  <h2 className="text-base font-semibold text-slate-900">选择发票 · 标记已开票</h2>
+                  <p className="mt-1 text-xs text-slate-400">
+                    付款 {pickerTxn.txnDate} · {pickerTxn.counterpartyName || "对方未名"} · {money(pickerTxn.amount)} · 剩余 {money(pickerTxn.remaining)}；分配金额按 min(发票金额, 付款剩余)。
+                  </p>
+                </div>
+                <button type="button" onClick={() => setPickerTxn(null)} aria-label="关闭发票选择" className="rounded-lg p-2 text-xl leading-none text-slate-400 hover:bg-slate-100 hover:text-slate-700">×</button>
+              </div>
+              <div className="flex flex-wrap items-center gap-2 border-b border-slate-100 bg-slate-50/60 px-5 py-3">
+                <div className="flex overflow-hidden rounded-lg border border-slate-200 text-xs">
+                  <button type="button" onClick={() => setPickerScope("month")} className={`px-3 py-1.5 transition ${pickerScope === "month" ? "bg-blue-600 text-white" : "bg-white text-slate-500 hover:text-slate-800"}`}>当月发票</button>
+                  <button type="button" onClick={() => setPickerScope("all")} className={`px-3 py-1.5 transition ${pickerScope === "all" ? "bg-blue-600 text-white" : "bg-white text-slate-500 hover:text-slate-800"}`}>全部未配发票</button>
+                </div>
+                <input value={pickerQuery} onChange={(e) => setPickerQuery(e.target.value)} placeholder="搜索发票号 / 销方名称" className="min-w-[200px] flex-1 rounded-lg border border-slate-200 px-3 py-1.5 text-sm outline-none focus:border-blue-400" />
+              </div>
+              <div className="min-h-[200px] flex-1 overflow-y-auto">
+                {!rows.length && <div className="px-5 py-10 text-center text-sm text-slate-400">{pickerScope === "month" ? "当月没有可用的进项发票；可切「全部未配发票」搜索。" : "没有匹配的未配发票"}</div>}
+                <div className="divide-y divide-slate-100">
+                  {rows.map((row) => {
+                    const suggestedSame = pickerScope === "month" && row.suggested;
+                    return (
+                      <div key={row.id} className={`flex flex-wrap items-center gap-3 px-5 py-3 ${suggestedSame ? "bg-blue-50/50" : ""}`}>
+                        <div className="min-w-0 flex-1">
+                          <div className="flex flex-wrap items-center gap-2 text-sm">
+                            <span className="font-mono text-slate-700">{row.invoiceNumber}</span>
+                            {suggestedSame && <span className="rounded bg-blue-600 px-1.5 py-0.5 text-[10px] font-medium text-white">同名同金额</span>}
+                            <span className={`rounded px-1.5 py-0.5 text-[10px] ${Number(row.remaining) > 0.01 ? "bg-slate-100 text-slate-500" : "bg-slate-100 text-slate-400"}`}>可分摊 {money(row.remaining)}</span>
+                          </div>
+                          <div className="mt-0.5 text-xs text-slate-400">{row.sellerName || "销方未名"} · {row.issueDate || "开票日期未知"} · 价税合计 {money(row.totalAmount)}</div>
+                        </div>
+                        <button type="button" onClick={() => void markInvoiced(pickerTxn, row)} disabled={busy || Number(row.remaining) <= 0.01} className="rounded-md bg-blue-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-40">选用</button>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
 
       {mailOpen && <div className="fixed inset-0 z-modal flex items-start justify-center overflow-y-auto bg-slate-950/40 p-4 sm:p-8" onMouseDown={(event) => { if (event.target === event.currentTarget) setMailOpen(false); }} role="dialog" aria-modal="true" aria-label="设置邮箱"><div className="my-auto w-full max-w-lg overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-2xl"><div className="flex items-center justify-between gap-3 border-b border-slate-200 px-5 py-4"><div><h2 className="text-base font-semibold text-slate-900">设置邮箱</h2><p className="mt-0.5 text-[11px] text-slate-500">收件人保存后，自动发送与手动发送都会使用</p></div><button type="button" onClick={() => setMailOpen(false)} className="rounded-md border border-slate-200 px-2.5 py-1 text-xs text-slate-600 hover:border-slate-300">关闭</button></div><div className="space-y-4 p-5"><div className="rounded-xl border border-slate-200 bg-slate-50/70 p-3"><div className="text-[11px] font-medium text-slate-500">发件邮箱（服务器 .env 配置，不支持在此修改）</div><div className="mt-1.5 text-sm text-slate-800">{mailStatus?.from || "未配置"}</div><div className="mt-1 text-[11px] text-slate-400">{mailStatus?.configured ? `SMTP：${mailStatus.host}:${mailStatus.port} · 账号 ${mailStatus.username}` : "SMTP 未配置，发送会失败"}</div></div><label className="block text-xs text-slate-500">财务收件人<input value={toText} onChange={(e) => setToText(e.target.value)} placeholder="finance@example.com" className="mt-1.5 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm" /></label><label className="block text-xs text-slate-500">抄送（可选）<input value={ccText} onChange={(e) => setCcText(e.target.value)} placeholder="多个邮箱用逗号分隔" className="mt-1.5 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm" /></label></div><div className="flex items-center justify-end gap-2 border-t border-slate-200 bg-slate-50/60 px-5 py-3"><button type="button" onClick={() => setMailOpen(false)} className="rounded-lg border border-slate-200 bg-white px-3.5 py-2 text-sm text-slate-600">取消</button><button type="button" onClick={() => { void saveTemplate().then(() => setMailOpen(false)); }} disabled={busy || !template} className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-40">保存邮箱设置</button></div></div></div>}
     </div>

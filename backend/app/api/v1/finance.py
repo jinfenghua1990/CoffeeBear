@@ -8,9 +8,13 @@ from sqlalchemy.orm import Session
 from app.api.deps import current_actor
 from app.config import settings
 from app.db import get_db
+from app.models.bank import BankTransaction
+from app.models.tax import TaxInvoice
 from app.services import finance_sales_report_service as sales_report_service
 from app.services import finance_service
 from app.services import monthly_intake_service
+from app.services import payment_invoice_match_service as payment_match_service
+from app.services import reconciliation as reconciliation_service
 from app.utils.uploads import UploadTooLargeError, read_upload_limited
 
 router = APIRouter(prefix="/finance", tags=["finance"])
@@ -36,6 +40,13 @@ class SalesReportTemplateInput(BaseModel):
 
 class UnbilledAdjustmentInput(BaseModel):
     selected_keys: list[str] = Field(default_factory=list)
+    note: str = Field(default="", max_length=500)
+
+
+class PaymentMatchLinkBody(BaseModel):
+    txn_id: int
+    invoice_id: int
+    allocated_amount: str | None = None
     note: str = Field(default="", max_length=500)
 
 
@@ -181,10 +192,80 @@ async def upload_file(
         raise HTTPException(413, str(exc))
     except (ValueError, RuntimeError) as exc:
         raise HTTPException(400, str(exc))
-    return {
+    result: dict[str, Any] = {
         "id": row.id, "version": row.version, "sha256": row.sha256,
         "size": row.size,
     }
+    # 银行交易明细上传即解析入流水表（指纹幂等，重复上传无害）；
+    # 回单详情同为 category=bank，必须用 original_name 区分，避免误解析。
+    display_name = original_name.strip() or file.filename or ""
+    if (
+        category == "bank"
+        and "交易明细" in display_name
+        and display_name.lower().endswith(".xlsx")
+    ):
+        try:
+            bank_result = reconciliation_service.import_bank_xlsx(
+                db, account_no="ZJRC-001", content=content,
+                period_year=period_year, period_month=period_month,
+                file_name=display_name, archive_file_id=row.id,
+                actor=current_actor(request),
+            )
+            result["bankImport"] = bank_result
+        except (ValueError, RuntimeError) as exc:
+            # 原件归档已成功，解析失败不让上传整体失败，仅提示
+            result["bankImportError"] = str(exc)
+    return result
+
+
+@router.get("/payment-invoice-match/{year}/{month}")
+def payment_invoice_match_overview(
+    year: int,
+    month: int,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    """当月银行付款 ↔ 对方进项发票 匹配清单（推导展示，手工标记才落库）。"""
+    try:
+        return payment_match_service.overview(db, year, month)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.post("/payment-invoice-match/link")
+def payment_invoice_match_link(
+    payload: PaymentMatchLinkBody,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    """标记已开票：把银行付款挂到进项发票（tax_invoice_links, target_type=bank_transaction）。"""
+    if db.get(BankTransaction, payload.txn_id) is None:
+        raise HTTPException(status_code=404, detail="银行流水不存在")
+    if db.get(TaxInvoice, payload.invoice_id) is None:
+        raise HTTPException(status_code=404, detail="发票不存在")
+    try:
+        return payment_match_service.link(
+            db,
+            txn_id=payload.txn_id,
+            invoice_id=payload.invoice_id,
+            allocated_amount=payload.allocated_amount,
+            note=payload.note,
+            actor=current_actor(request),
+        )
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
+@router.delete("/payment-invoice-match/link/{link_id}")
+def payment_invoice_match_unlink(
+    link_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    """解除标记（软删可审计，同一对可再次标记）。"""
+    try:
+        return payment_match_service.unlink(db, link_id, actor=current_actor(request))
+    except ValueError as exc:
+        raise HTTPException(404, str(exc)) from exc
 
 
 @router.get("/{year}/{month}/intake")
