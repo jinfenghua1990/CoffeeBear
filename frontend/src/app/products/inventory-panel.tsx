@@ -60,7 +60,9 @@ export function GoodsInventoryPanel({ initialSearch = "" }: { initialSearch?: st
                 <td className="py-2.5 font-mono text-xs font-medium text-gray-800">{row.skuCode}</td>
                 <td className="max-w-[220px] py-2.5">
                   <div className="truncate">{row.goodsName || row.skuName || "—"}</div>
-                  <div className="mt-0.5 text-[10px] text-gray-400">{row.skuName}</div>
+                  {row.skuName && row.skuName !== (row.goodsName || row.skuName) && (
+                    <div className="mt-0.5 text-[10px] text-gray-400">{row.skuName}</div>
+                  )}
                 </td>
                 <td className="py-2.5 font-mono text-[11px] text-gray-500">{row.barcode || "—"}</td>
                 <td className="py-2.5 text-gray-500">{row.unit || "—"}</td>
