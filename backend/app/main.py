@@ -103,4 +103,7 @@ async def spa_fallback(full_path: str):
         if not os.path.isfile(index_path):
             raise HTTPException(status_code=404, detail="Frontend build not available")
         file_path = index_path
-    return FileResponse(file_path)
+    # HTML 页面（SPA 路由与 .html）禁用启发式缓存：前端重新构建后浏览器必须
+    # 重新拉取页面外壳，否则会一直显示旧版界面（/_next 资源带内容哈希可长缓存）。
+    headers = {"Cache-Control": "no-cache"} if file_path.endswith(".html") else None
+    return FileResponse(file_path, headers=headers)

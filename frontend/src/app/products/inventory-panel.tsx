@@ -231,9 +231,11 @@ export function ConsumableInventoryPanel({ initialSearch = "" }: { initialSearch
           <tbody className="divide-y divide-gray-100">
             {materials.map((m) => (
               <tr key={m.id} className={m.lowStock ? "bg-amber-50/60" : ""}>
-                <td className="max-w-[200px] py-2.5">
-                  <div className="truncate text-gray-800">{m.name}</div>
-                  <div className="mt-0.5 text-[10px] text-gray-400">{m.category || "未分类"} · {m.unit}</div>
+                <td className="max-w-[220px] py-2.5">
+                  <div className="truncate text-gray-800">
+                    {m.name}
+                    <span className="ml-1.5 text-[10px] text-gray-400">{m.category || "未分类"} · {m.unit}</span>
+                  </div>
                 </td>
                 <td className="py-2.5 font-mono text-xs text-gray-600">{m.code}</td>
                 <td className="max-w-[160px] py-2.5">
