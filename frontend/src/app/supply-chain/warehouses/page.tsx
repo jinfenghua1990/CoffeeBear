@@ -150,7 +150,7 @@ export default function WarehousesPage() {
         <div className="flex flex-wrap items-center justify-between gap-4">
           <div className="min-w-0">
             <div className="flex items-center gap-2 text-[11px] font-medium text-indigo-600">
-              <span>货品中心</span><span className="text-slate-300">/</span><span>库存管理</span><span className="text-slate-300">/</span><span>仓库档案</span>
+              <span>库存中心</span><span className="text-slate-300">/</span><span>仓库档案</span>
             </div>
             <div className="mt-1 flex flex-wrap items-center gap-2.5">
               <h1 className="text-2xl font-semibold tracking-tight text-slate-900">仓库档案</h1>

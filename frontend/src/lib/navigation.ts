@@ -48,14 +48,13 @@ export const MODULES: ModuleDef[] = [
   },
   {
     key: "products",
-    label: "货品",
-    title: "货品中心",
+    label: "基础货品",
+    title: "基础货品",
     href: "/products",
     match: (p) =>
-      p.startsWith("/products") ||
-      p.startsWith("/inventory") ||
-      p.startsWith("/supply-chain/warehouses") ||
-      p.startsWith("/settings/warehouses"),
+      p.startsWith("/products")
+      && !p.startsWith("/products/inventory-goods")
+      && !p.startsWith("/products/inventory-consumables"),
     groups: [
       {
         label: "基础档案",
@@ -65,15 +64,24 @@ export const MODULES: ModuleDef[] = [
           { href: "/products?tab=taxRules", label: "财务分类", icon: "tax" },
         ],
       },
-      {
-        label: "库存管理",
-        items: [
-          { href: "/inventory", label: "库存总览", icon: "inventory" },
-          { href: "/supply-chain/warehouses", label: "仓库档案", icon: "warehouse" },
-          { href: "/inventory/transactions", label: "库存流水", icon: "flow" },
-          { href: "/inventory/adjustments", label: "库存调整", icon: "settings" },
-        ],
-      },
+    ],
+  },
+  {
+    key: "inventory",
+    label: "库存",
+    title: "库存中心",
+    href: "/inventory",
+    match: (p) =>
+      p.startsWith("/inventory")
+      || p.startsWith("/products/inventory-goods")
+      || p.startsWith("/products/inventory-consumables")
+      || p.startsWith("/supply-chain/warehouses")
+      || p.startsWith("/settings/warehouses"),
+    items: [
+      { href: "/inventory", label: "库存总览", icon: "inventory" },
+      { href: "/supply-chain/warehouses", label: "仓库档案", icon: "warehouse" },
+      { href: "/inventory/transactions", label: "库存流水", icon: "flow" },
+      { href: "/inventory/adjustments", label: "库存调整", icon: "settings" },
     ],
   },
   {
@@ -136,8 +144,8 @@ export const MODULES: ModuleDef[] = [
   },
 ];
 
-/** 解析当前一级模块。顺序敏感：/supply-chain/warehouses、/inventory 要先于 /supply-chain 判断。 */
-const RESOLVE_ORDER = ["home", "sales", "products", "supply", "finance", "logistics", "data"];
+/** 解析当前一级模块。顺序敏感：库存路由要先于 products / supply 判断。 */
+const RESOLVE_ORDER = ["home", "sales", "inventory", "products", "supply", "finance", "logistics", "data"];
 
 export function resolveModule(pathname: string): ModuleDef {
   for (const key of RESOLVE_ORDER) {

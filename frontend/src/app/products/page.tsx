@@ -774,7 +774,7 @@ export default function ProductsPage() {
     <header className="rounded-2xl border border-slate-200 bg-white px-5 py-4 shadow-sm">
       <div className="flex flex-wrap items-start justify-between gap-4">
         <div>
-          <div className="text-[11px] font-medium tracking-wide text-blue-600">货品中心 / 基础档案</div>
+          <div className="text-[11px] font-medium tracking-wide text-blue-600">基础货品 / 基础档案</div>
           <h1 className="mt-1 text-2xl font-semibold tracking-tight text-slate-900">货品档案</h1>
           <p className="mt-1 max-w-3xl text-sm leading-6 text-slate-500">统一维护正品、耗材与套装基础资料；库存、仓库与流水统一收口到库存管理。</p>
         </div>

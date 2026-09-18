@@ -65,7 +65,7 @@ export default function InventoryAdjustmentsPage() {
 
   return (
     <div className="mx-auto max-w-[1120px] space-y-4 pb-8">
-      <header className="rounded-2xl border border-slate-200 bg-white px-5 py-4 shadow-sm"><div className="flex flex-wrap items-start justify-between gap-4"><div><div className="text-[11px] font-medium tracking-wide text-blue-600">货品中心 / 库存管理</div><h1 className="mt-1 text-2xl font-semibold tracking-tight text-slate-900">库存调整</h1><p className="mt-1 text-sm leading-6 text-slate-500">耗材正常入库来自采购单实际收货；正品实际入库后，系统按货品映射自动生成耗材耗用。本页仅用于盘点差异与包装损耗校正。</p></div><Link href="/inventory" className="rounded-lg border border-slate-200 px-3.5 py-2 text-xs font-medium text-slate-600 hover:border-blue-200 hover:text-blue-600">返回库存总览</Link></div></header>
+      <header className="rounded-2xl border border-slate-200 bg-white px-5 py-4 shadow-sm"><div className="flex flex-wrap items-start justify-between gap-4"><div><div className="text-[11px] font-medium tracking-wide text-blue-600">库存中心 / 库存调整</div><h1 className="mt-1 text-2xl font-semibold tracking-tight text-slate-900">库存调整</h1><p className="mt-1 text-sm leading-6 text-slate-500">耗材正常入库来自采购单实际收货；正品实际入库后，系统按货品映射自动生成耗材耗用。本页仅用于盘点差异与包装损耗校正。</p></div><Link href="/inventory" className="rounded-lg border border-slate-200 px-3.5 py-2 text-xs font-medium text-slate-600 hover:border-blue-200 hover:text-blue-600">返回库存总览</Link></div></header>
       {message && <div role="status" className="rounded-xl border border-emerald-100 bg-emerald-50 px-4 py-3 text-sm text-emerald-700">{message}</div>}
       {error && <div role="alert" className="rounded-xl border border-rose-100 bg-rose-50 px-4 py-3 text-sm text-rose-700">{error}</div>}
 
