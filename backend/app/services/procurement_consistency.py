@@ -1,8 +1,7 @@
-"""采购合并组与完成闭环校验（V1.6.3）。
+"""采购完成闭环校验与共用入库拆分。
 
 目标：
-- 多张线上采购订单可以原子地合并关联到 1 张吉客云采购单；
-- 合并金额必须双向闭环：吉客云主单 = 各来源单分摊；每个来源单在吉客云侧的分摊总额 = 来源单实付；
+- 采购关联支持合并/拆分标注（relation_kind），分摊金额必须闭环；
 - 共用入库明细允许显式按数量拆给多个来源单，但总量不得超过吉客云实际入库；
 - “完成”不再只看有没有单据，而是校验入库 / 发票 / 付款 / 认证覆盖率。
 
@@ -13,7 +12,6 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from decimal import Decimal
-from itertools import combinations
 from typing import Any
 
 from sqlalchemy import or_
@@ -40,7 +38,6 @@ from app.utils.money import to_decimal
 
 MONEY_EPS = Decimal("0.05")
 QTY_EPS = Decimal("0.0001")
-MATCH_WINDOW_DAYS = 45
 
 
 def _d(value: Any) -> Decimal:
@@ -198,195 +195,6 @@ def jackyun_group_summary(db: Session, jackyun_po_id: int) -> dict[str, Any]:
         "orderCount": len(links),
         "orders": rows,
     }
-
-
-def merge_orders_to_jackyun_po(
-    db: Session,
-    *,
-    purch_no: str,
-    allocations: list[dict[str, Any]],
-    actor: str = "system",
-    note: str = "",
-) -> dict[str, Any]:
-    """原子建立 N:1 合并组。失败时不会只留下半组关联。"""
-    purch_no = (purch_no or "").strip()
-    if not purch_no:
-        raise ValueError("请填写吉客云采购单号")
-    jpo = db.query(JackyunPurchaseOrder).filter(or_(
-        JackyunPurchaseOrder.purch_no == purch_no,
-        JackyunPurchaseOrder.jackyun_purch_id == purch_no,
-    )).first()
-    if jpo is None:
-        raise ValueError("吉客云采购单不存在，请先同步吉客云采购单")
-    if len(allocations) < 2:
-        raise ValueError("合并采购至少选择 2 张线上采购订单")
-
-    proposed: dict[int, Decimal] = {}
-    for item in allocations:
-        po_id = int(item.get("po_id") or item.get("poId") or 0)
-        if po_id <= 0 or po_id in proposed:
-            raise ValueError("采购订单选择无效或存在重复")
-        amount = _d(item.get("alloc_amount") if "alloc_amount" in item else item.get("allocAmount"))
-        if amount <= 0:
-            raise ValueError("每张来源采购单都必须填写大于 0 的分摊金额")
-        proposed[po_id] = amount
-
-    existing_group = db.query(JackyunPurchaseOrderLink).filter_by(jackyun_po_id=jpo.id).all()
-    existing_ids = {row.po_id for row in existing_group}
-    if existing_ids - set(proposed):
-        raise ValueError("这张吉客云采购单已经关联其他来源单，请把该合并组的全部来源订单一起提交")
-
-    jpo_amount = _d(jpo.amount)
-    proposed_total = sum(proposed.values(), Decimal("0"))
-    if jpo_amount <= 0:
-        raise ValueError("吉客云采购单缺少有效金额，不能建立合并组")
-    if abs(proposed_total - jpo_amount) > MONEY_EPS:
-        raise ValueError(f"合并分摊合计 {proposed_total} 与吉客云采购单金额 {jpo_amount} 不一致")
-
-    pos: dict[int, ExternalPurchaseOrder] = {}
-    for po_id, amount in proposed.items():
-        po = db.get(ExternalPurchaseOrder, po_id)
-        if po is None:
-            raise ValueError(f"采购订单 #{po_id} 不存在")
-        if po.purchase_status not in ("confirmed", "jackyun_linked"):
-            raise ValueError(f"订单 {po.external_order_id} 当前状态为 {po.purchase_status}，请先完成采购内容确认再合并")
-        target = _d(po.effective_paid_amount if po.effective_paid_amount is not None else po.order_amount)
-        other_allocated = sum((
-            _d(row.alloc_amount)
-            for row in db.query(JackyunPurchaseOrderLink).filter(
-                JackyunPurchaseOrderLink.po_id == po.id,
-                JackyunPurchaseOrderLink.jackyun_po_id != jpo.id,
-            ).all()
-        ), Decimal("0"))
-        if target > 0 and other_allocated + amount > target + _tol(target):
-            raise ValueError(
-                f"订单 {po.external_order_id} 的吉客云分摊累计将超过订单金额："
-                f"{other_allocated + amount} > {target}"
-            )
-        pos[po_id] = po
-
-    try:
-        for po_id, amount in proposed.items():
-            link = db.query(JackyunPurchaseOrderLink).filter_by(
-                po_id=po_id, jackyun_po_id=jpo.id
-            ).first()
-            if link is None:
-                link = JackyunPurchaseOrderLink(po_id=po_id, jackyun_po_id=jpo.id)
-                db.add(link)
-            link.relation_kind = "merged"
-            link.alloc_amount = amount
-            link.note = (note or "合并采购：多张线上订单共用一张吉客云采购单")[:256]
-            po = pos[po_id]
-            if po.purchase_status == "confirmed":
-                po.purchase_status = "jackyun_linked"
-        db.commit()
-    except Exception:
-        db.rollback()
-        raise
-
-    summary = jackyun_group_summary(db, jpo.id)
-    if not summary["balanced"]:
-        raise ValueError("合并组保存后金额未闭环，系统已拒绝继续使用该组")
-    audit(
-        db,
-        actor,
-        "purchase.po.merge_group",
-        "jackyun_purchase_orders",
-        jpo.id,
-        {
-            "purchNo": summary["purchNo"],
-            "amount": summary["amount"],
-            "orderIds": sorted(proposed),
-            "allocations": {str(key): str(value) for key, value in proposed.items()},
-        },
-    )
-    return summary
-
-
-def _normalize_supplier(value: str | None) -> str:
-    from app.services.procurement_chain_service import normalize_name
-    return normalize_name(value)
-
-
-def merge_suggestions(db: Session, limit: int = 30) -> dict[str, Any]:
-    """只推荐、不自动合并：同供应商 + 45 天内 + 2~4 张订单金额之和命中吉客云主单。"""
-    linked_order_ids = {row.po_id for row in db.query(JackyunPurchaseOrderLink).all()}
-    linked_jpo_ids = {row.jackyun_po_id for row in db.query(JackyunPurchaseOrderLink).all()}
-    orders = [
-        po for po in db.query(ExternalPurchaseOrder).filter(
-            ExternalPurchaseOrder.purchase_status == "confirmed"
-        ).order_by(ExternalPurchaseOrder.ordered_at.desc(), ExternalPurchaseOrder.id.desc()).all()
-        if po.id not in linked_order_ids
-        and (po.raw or {}).get("referenceOnly") is not True
-        and _d(po.effective_paid_amount or po.order_amount) > 0
-    ]
-    jpos = [
-        row for row in db.query(JackyunPurchaseOrder).order_by(JackyunPurchaseOrder.id.desc()).all()
-        if row.id not in linked_jpo_ids and _d(row.amount) > 0
-    ]
-    suggestions: list[dict[str, Any]] = []
-    for jpo in jpos:
-        supplier = _normalize_supplier(jpo.supplier_name)
-        if not supplier:
-            continue
-        jpo_date = None
-        raw_date = (jpo.raw or {}).get("date")
-        if isinstance(raw_date, str):
-            try:
-                jpo_date = datetime.fromisoformat(raw_date.replace("Z", "+00:00"))
-            except ValueError:
-                jpo_date = None
-        if jpo_date is None:
-            jpo_date = jpo.created_at
-        candidates: list[ExternalPurchaseOrder] = []
-        for po in orders:
-            if _normalize_supplier(po.supplier_name) != supplier:
-                continue
-            if po.ordered_at is not None and jpo_date is not None:
-                try:
-                    days = abs((po.ordered_at - jpo_date).total_seconds()) / 86400
-                except TypeError:
-                    days = abs((po.ordered_at.replace(tzinfo=None) - jpo_date.replace(tzinfo=None)).total_seconds()) / 86400
-                if days > MATCH_WINDOW_DAYS:
-                    continue
-            candidates.append(po)
-        candidates = candidates[:10]
-        target = _d(jpo.amount)
-        found = None
-        for size in range(2, min(4, len(candidates)) + 1):
-            for combo in combinations(candidates, size):
-                total = sum((_d(po.effective_paid_amount or po.order_amount) for po in combo), Decimal("0"))
-                if abs(total - target) <= _tol(target):
-                    found = (combo, total)
-                    break
-            if found:
-                break
-        if not found:
-            continue
-        combo, total = found
-        suggestions.append({
-            "jackyunPoId": jpo.id,
-            "purchNo": jpo.purch_no or jpo.jackyun_purch_id,
-            "supplier": jpo.supplier_name or "",
-            "jackyunAmount": str(target),
-            "ordersAmount": str(total),
-            "difference": str(target - total),
-            "confidence": 0.96 if abs(target - total) <= MONEY_EPS else 0.90,
-            "orders": [
-                {
-                    "poId": po.id,
-                    "platform": po.platform or "other",
-                    "orderNo": po.external_order_id,
-                    "supplier": po.supplier_name or "",
-                    "amount": str(po.effective_paid_amount or po.order_amount or Decimal("0")),
-                    "orderedAt": po.ordered_at.isoformat() if po.ordered_at else None,
-                }
-                for po in combo
-            ],
-        })
-        if len(suggestions) >= limit:
-            break
-    return {"total": len(suggestions), "items": suggestions}
 
 
 def assign_shared_inbound_item(
@@ -729,12 +537,14 @@ def _platform_aware_create_external_po(
     buyer_account: str = "",
     platform: str = "1688",
     raw: dict | None = None,
+    warehouse_id: int | None = None,
     actor: str = "system",
 ) -> ExternalPurchaseOrder:
     """替代旧的“订单号全局唯一”幂等：改为 渠道+订单号。"""
     from app.services import purchase_service as svc
 
     platform = svc.normalize_platform(platform)
+    warehouse = svc._validate_target_warehouse(db, warehouse_id)
     external_order_id = (external_order_id or "").strip()
     if not external_order_id:
         raise ValueError("采购订单号不能为空")
@@ -742,6 +552,26 @@ def _platform_aware_create_external_po(
         platform=platform, external_order_id=external_order_id
     ).first()
     if po is not None:
+        if isinstance(po.raw, dict) and po.raw.get("referenceOnly") is True:
+            svc.promote_reference_only_po(
+                po,
+                supplier_name=supplier_name,
+                title=title,
+                ordered_at=ordered_at,
+                order_amount=order_amount,
+                paid_amount=paid_amount,
+                buyer_account=buyer_account,
+                warehouse=warehouse,
+                raw=raw,
+            )
+            from app.services.supplier_sync_service import ensure_supplier
+            ensure_supplier(db, po.supplier_name, platform=po.platform)
+            db.commit()
+            audit(db, actor, "purchase.po.promote_reference_only", "external_purchase_orders", po.id,
+                  {"orderNo": po.external_order_id, "platform": po.platform})
+            from app.services.inbound_allocation_seed import seed_allocations_for_po
+            seed_allocations_for_po(db, po)
+            return po
         po.order_status = po.order_status or ""
         po.synced_at = datetime.now(timezone.utc)
         if raw:
@@ -759,6 +589,7 @@ def _platform_aware_create_external_po(
         ordered_at=ordered_at,
         order_amount=_d(order_amount) if order_amount is not None else None,
         paid_amount=_d(paid_amount) if paid_amount is not None else None,
+        warehouse_id=warehouse.id if warehouse is not None else None,
         buyer_account=buyer_account,
         synced_at=datetime.now(timezone.utc),
         raw=raw or {},

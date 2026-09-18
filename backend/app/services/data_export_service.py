@@ -26,7 +26,7 @@ from app.services import dashboard
 from app.services import production_service
 from app.services import procurement_workbench_service as procurement
 from app.services import tax_category_rule_service
-from app.services.procurement_chain_service import ChainPrefetch, _order_row, _source_pairs
+from app.services.procurement_chain_service import ChainPrefetch, _order_row, _source_pairs, chain_snapshot
 from app.services.production_purchase_view import list_production_purchase_rows
 from app.services.warehouse_service import list_warehouses
 
@@ -125,8 +125,8 @@ def _purchase_export(
     # workbench（每单会重复扫描整套链路，48 单导出会拖到近一分钟）。
     detail_by_id: dict[int, dict[str, Any]] = {}
     if selected_ids:
-        prefetch = ChainPrefetch(db)
-        for source_order, external in _source_pairs(db):
+        prefetch_pairs, prefetch = chain_snapshot(db)
+        for source_order, external in prefetch_pairs:
             order_id = source_order.id if source_order is not None else -external.id
             if order_id in selected_ids:
                 detail_by_id[order_id] = _order_row(db, source_order, external, pf=prefetch)
@@ -204,7 +204,7 @@ def _purchase_export(
                 "明细行数": inbound_item.get("itemCount"),
                 "关联方式": inbound_item.get("matchMethod"),
                 "匹配置信度": inbound_item.get("confidence"),
-                "耗材使用": "已使用" if usage and inbound_item.get("consumableUsageEnabled") else "本次不使用" if usage else "待确认",
+                "耗材使用": "已自动扣减" if usage and inbound_item.get("consumableUsageEnabled") else "待维护耗材映射" if not inbound_item.get("consumableUsageEnabled") else "待处理",
                 "备注": inbound_item.get("note"),
             })
 

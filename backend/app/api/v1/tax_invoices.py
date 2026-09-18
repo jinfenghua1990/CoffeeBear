@@ -1,6 +1,8 @@
 """税务系统官方发票清单导入与台账查询。"""
 from __future__ import annotations
 
+from decimal import Decimal
+
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
@@ -161,20 +163,52 @@ def get_summary(db: Session = Depends(get_db)) -> dict:
     return service.summary(db)
 
 
+CATEGORY_V2_PATTERN = r"^(goods|platform_fee|operating_other|reimburse_advance|reimburse_operating|excluded|buyer_sales|platform_service|)$"
+
+
 @router.get("")
 def get_invoices(
     direction: str | None = Query(None, pattern="^(input|output|unknown)$"),
     status: str | None = Query(None, pattern="^(issued|void|red|unknown)$"),
     match_status: str | None = Query(None, pattern="^(matched|unmatched|needs_review)$"),
+    processing_status: str | None = Query(None, pattern="^(pending|required|not_required)$"),
+    category: str | None = Query(None, pattern=CATEGORY_V2_PATTERN, description="v2 分类（空=待判断）"),
     verified: bool | None = Query(None, description="true=仅已认证 / false=仅未认证"),
     limit: int = Query(200, ge=1, le=500),
     offset: int = Query(0, ge=0),
     db: Session = Depends(get_db),
 ) -> list[dict]:
-    return service.list_invoices(
-        db, direction=direction, status=status, match_status=match_status, verified=verified,
-        limit=limit, offset=offset,
-    )
+    try:
+        return service.list_invoices(
+            db, direction=direction, status=status, match_status=match_status,
+            processing_status=processing_status, category=category, verified=verified,
+            limit=limit, offset=offset,
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+class ProcessingStatusBody(BaseModel):
+    processing_status: str
+
+
+@router.patch("/{invoice_id}/processing-status")
+def update_processing_status(
+    invoice_id: int,
+    body: ProcessingStatusBody,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> dict:
+    """保留发票和明细，只更新进项发票的业务处理结论。"""
+    try:
+        invoice = service.set_processing_status(
+            db, invoice_id, body.processing_status, actor=current_actor(request)
+        )
+    except LookupError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return service.serialize_invoice(invoice, db=db)
 
 
 class BulkVerifyBody(BaseModel):
@@ -205,3 +239,111 @@ def bulk_verify_invoices(
             items.append({"invoiceId": invoice_id, "error": str(exc)})
     db.commit()
     return {"ok": True, "processed": len(items), "items": items}
+
+
+class BulkCategoryBody(BaseModel):
+    invoice_ids: list[int]
+    category: str
+
+
+@router.post("/bulk-category")
+def bulk_set_category(
+    body: BulkCategoryBody,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> dict:
+    """批量把选中的发票移动到指定分类（进项 6+1；销项 buyer_sales/platform_service；空=待判断）。"""
+    try:
+        updated = service.set_invoice_categories(
+            db, body.invoice_ids, body.category, actor=current_actor(request)
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return {"ok": True, "processed": len(updated)}
+
+
+class BulkPaymentMethodBody(BaseModel):
+    invoice_ids: list[int]
+    payment_method: str
+
+
+@router.post("/bulk-payment-method")
+def bulk_set_payment_method(
+    body: BulkPaymentMethodBody,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> dict:
+    """批量设置销项发票支付方式：corporate=对公账户支出；personal=个人垫付；空=清除。"""
+    try:
+        updated = service.set_invoice_payment_methods(
+            db, body.invoice_ids, body.payment_method, actor=current_actor(request)
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return {"ok": True, "processed": len(updated)}
+
+
+@router.get("/{invoice_id}/lines")
+def get_invoice_lines(
+    invoice_id: int,
+    db: Session = Depends(get_db),
+) -> dict:
+    """一张发票的货物明细行（来自官方清单导入记录，一票多行）。"""
+    try:
+        return service.invoice_detail_lines(db, invoice_id)
+    except LookupError as exc:
+        raise HTTPException(404, str(exc)) from exc
+
+
+@router.get("/{invoice_id}/purchase-link-candidates")
+def get_purchase_link_candidates(
+    invoice_id: int,
+    keyword: str = Query("", max_length=128),
+    limit: int = Query(20, ge=1, le=100),
+    db: Session = Depends(get_db),
+) -> list[dict]:
+    """人工关联候选：销项发票按单号/买家搜销售订单；采购类发票按单号/供应商搜 1688 订单与吉客云采购单。"""
+    try:
+        return service.purchase_link_candidates(db, invoice_id, keyword=keyword, limit=limit)
+    except LookupError as exc:
+        raise HTTPException(404, str(exc)) from exc
+
+
+class PurchaseLinkBody(BaseModel):
+    target_type: str
+    target_id: int
+    allocated_amount: Decimal | None = None
+    note: str = ""
+
+
+@router.post("/{invoice_id}/purchase-links")
+def create_purchase_link(
+    invoice_id: int,
+    body: PurchaseLinkBody,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> dict:
+    """人工关联业务单据（销项→销售订单；采购类发票→采购单；软删行复活，同对幂等）。"""
+    try:
+        return service.link_purchase_order(
+            db, invoice_id, body.target_type, body.target_id,
+            allocated_amount=body.allocated_amount, note=body.note, actor=current_actor(request),
+        )
+    except LookupError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@router.delete("/{invoice_id}/purchase-links/{link_id}")
+def delete_purchase_link(
+    invoice_id: int,
+    link_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> dict:
+    """解除采购单/销售订单关联（软删可审计；同对可再次关联）。"""
+    try:
+        return service.unlink_purchase(db, link_id, actor=current_actor(request))
+    except LookupError as exc:
+        raise HTTPException(404, str(exc)) from exc

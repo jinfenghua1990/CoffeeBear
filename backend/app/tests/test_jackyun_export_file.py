@@ -1,5 +1,7 @@
 """吉客云客户端官方导出文件解析测试，不使用真实业务数据。"""
 import io
+from datetime import datetime
+from decimal import Decimal
 from pathlib import Path
 from uuid import uuid4
 
@@ -7,11 +9,12 @@ import pytest
 
 from app.adapters.jackyun_export_file import parse_jackyun_export
 from app.config import settings
-from app.models.jackyun_import import JackyunFileImportRecord
+from app.models.jackyun_import import JackyunFileImport, JackyunFileImportRecord
 from app.models.jackyun import JackyunGoodsDocument, JackyunGoodsDocumentItem
-from app.models.catalog import ProductSku
+from app.models.catalog import ProductSku, Warehouse
 from app.models.sales import SalesOrder
 from app.services import jackyun_file_import_service as service
+from app.services.inbound_document_view import list_inbound_documents
 
 
 def _xlsx(rows: list[list[object]]) -> bytes:
@@ -44,6 +47,148 @@ def test_parse_csv_classifies_sales_and_keeps_original_headers():
     parsed = parse_jackyun_export(content, "销售订单.csv", max_rows=100)
     assert parsed.report_type == "sales"
     assert parsed.rows[0]["订单编号"] == "SO-001"
+
+
+def test_parse_inbound_apply_products_as_inbound():
+    content = _xlsx([
+        ["申请单号", "入库类型", "货品编号", "货品名称", "入库数量"],
+        ["RK-IMPORT-001", "采购入库", "SKU-001", "测试商品", 3],
+    ])
+    parsed = parse_jackyun_export(content, "入库申请单货品.xlsx", max_rows=100)
+    assert parsed.report_type == "inbound"
+
+
+def test_fill_inbound_item_uses_purchase_total_and_derives_unit_price():
+    item = JackyunGoodsDocumentItem(quantity=Decimal("197"), raw={})
+
+    filled = service._fill_inbound_item(
+        item,
+        {
+            "入库数量": "197",
+            "采购总金额": "1940",
+            "1688采购订单": "PO-DERIVE-001",
+        },
+    )
+
+    assert "amount_tax" in filled
+    assert item.amount_tax == Decimal("1940")
+    assert item.unit_price_tax == Decimal("9.8477")
+    assert item.raw["_1688采购订单"] == "PO-DERIVE-001"
+
+
+def test_inbound_mapping_calculates_document_total_from_purchase_totals(db_session):
+    import_row = JackyunFileImport(
+        original_name="采购入库金额.xlsx", stored_path="/tmp/采购入库金额.xlsx",
+        sha256=f"inbound-amount-{uuid4().hex}", report_type="inbound", lifecycle="active",
+        headers=["申请单号", "货品编号", "货品名称", "入库数量", "采购总金额"],
+        row_count=2, staged_row_count=2,
+    )
+    db_session.add(import_row)
+    db_session.flush()
+    db_session.add_all([
+        JackyunFileImportRecord(
+            import_id=import_row.id, row_index=1,
+            payload={"申请单号": "RK-AMOUNT-001", "货品编号": "SKU-AMOUNT-001", "货品名称": "金额测试1", "入库数量": "100", "采购总金额": "1950"},
+        ),
+        JackyunFileImportRecord(
+            import_id=import_row.id, row_index=2,
+            payload={"申请单号": "RK-AMOUNT-001", "货品编号": "SKU-AMOUNT-002", "货品名称": "金额测试2", "入库数量": "50", "采购总金额": "850"},
+        ),
+    ])
+    db_session.commit()
+
+    document = None
+    try:
+        result = service.map_inbound_items(db_session, import_row.id, actor="pytest")
+        document = db_session.query(JackyunGoodsDocument).filter_by(
+            document_type="inbound", goodsdoc_no="RK-AMOUNT-001",
+        ).one()
+        items = db_session.query(JackyunGoodsDocumentItem).filter_by(document_id=document.id).order_by(JackyunGoodsDocumentItem.line_no).all()
+        assert result["documents"] == 1
+        assert [item.amount_tax for item in items] == [Decimal("1950"), Decimal("850")]
+        assert [item.unit_price_tax for item in items] == [Decimal("19.5000"), Decimal("17.0000")]
+        assert document.total_amount == Decimal("2800.0000")
+    finally:
+        if document:
+            db_session.query(JackyunGoodsDocumentItem).filter_by(document_id=document.id).delete(synchronize_session=False)
+            db_session.delete(document)
+        db_session.query(JackyunFileImportRecord).filter_by(import_id=import_row.id).delete(synchronize_session=False)
+        db_session.delete(import_row)
+        db_session.commit()
+
+
+def test_inbound_match_does_not_accept_missing_amount_as_price_ok(db_session):
+    from app.services.sku_matching_service import match_inbound_items
+
+    sku = ProductSku(
+        jackyun_sku_id=f"J-AMOUNT-MISSING-{uuid4().hex}",
+        sku_code=f"SKU-AMOUNT-MISSING-{uuid4().hex[:8]}",
+        sku_name="缺少金额测试 SKU",
+        status="active",
+    )
+    document = JackyunGoodsDocument(
+        document_type="inbound", goodsdoc_no=f"RK-AMOUNT-MISSING-{uuid4().hex[:8]}",
+    )
+    db_session.add_all([sku, document])
+    db_session.flush()
+    item = JackyunGoodsDocumentItem(
+        document_id=document.id, line_no=1, goods_no=sku.sku_code,
+        goods_name=sku.sku_name, quantity=Decimal("1"), amount_tax=Decimal("0"), raw={},
+    )
+    db_session.add(item)
+    db_session.commit()
+
+    try:
+        match_inbound_items(db_session)
+        assert item.match_status == "auto"
+        assert "金额信息不全" in item.match_note
+    finally:
+        db_session.delete(item)
+        db_session.delete(document)
+        db_session.delete(sku)
+        db_session.commit()
+
+
+def test_inbound_import_normalizes_warehouse_code_to_master_name(db_session):
+    warehouse = Warehouse(code="WH-IMPORT-001", name="导入中文仓", status="active")
+    import_row = JackyunFileImport(
+        original_name="采购入库仓库编号.xlsx", stored_path="/tmp/采购入库仓库编号.xlsx",
+        sha256=f"warehouse-normalize-{uuid4().hex}", report_type="inbound", lifecycle="active",
+        headers=["申请单号", "仓库编号", "货品编号", "货品名称", "入库数量"],
+        row_count=1, staged_row_count=1,
+    )
+    db_session.add_all([warehouse, import_row])
+    db_session.flush()
+    db_session.add(JackyunFileImportRecord(
+        import_id=import_row.id,
+        row_index=1,
+        payload={
+            "申请单号": "RK-WAREHOUSE-NORMALIZE-001",
+            "仓库编号": "WH-IMPORT-001",
+            "货品编号": "SKU-WAREHOUSE-001",
+            "货品名称": "仓库匹配测试货品",
+            "入库数量": "2",
+        },
+    ))
+    db_session.commit()
+
+    document = None
+    try:
+        result = service.map_inbound_items(db_session, import_row.id, actor="pytest")
+        document = db_session.query(JackyunGoodsDocument).filter_by(
+            document_type="inbound", goodsdoc_no="RK-WAREHOUSE-NORMALIZE-001",
+        ).one()
+        assert result["documents"] == 1
+        assert document.warehouse_code == "WH-IMPORT-001"
+        assert document.warehouse_name == "导入中文仓"
+    finally:
+        if document:
+            db_session.query(JackyunGoodsDocumentItem).filter_by(document_id=document.id).delete(synchronize_session=False)
+            db_session.delete(document)
+        db_session.query(JackyunFileImportRecord).filter_by(import_id=import_row.id).delete(synchronize_session=False)
+        db_session.delete(import_row)
+        db_session.delete(warehouse)
+        db_session.commit()
 
 
 def test_parser_rejects_unsupported_extension():
@@ -155,3 +300,136 @@ def test_outbound_import_maps_document_lines_and_sku(db_session):
     assert db_session.query(JackyunGoodsDocument).filter_by(
         document_type="outbound", goodsdoc_no="OUT-IMPORT-001"
     ).count() == 1
+
+
+def test_inbound_import_wins_over_purchase_column(db_session):
+    """采购入库报表同时带采购单号时，仍必须走入库明细映射。"""
+    import_row = service.JackyunFileImport(
+        original_name="采购入库单.xlsx", stored_path="/tmp/采购入库单.xlsx",
+        sha256=f"inbound-dispatch-{uuid4().hex}", report_type="inbound", lifecycle="active",
+        headers=["入库单号", "采购单号", "货品编号", "入库数量", "含税金额"],
+        row_count=1, staged_row_count=1,
+    )
+    document = JackyunGoodsDocument(
+        document_type="inbound", goodsdoc_no="RK-DISPATCH-001", supplier_name="测试供应商",
+    )
+    db_session.add_all([import_row, document])
+    db_session.flush()
+    item = JackyunGoodsDocumentItem(
+        document_id=document.id, line_no=1, goods_no="SKU-DISPATCH-001", quantity=2,
+    )
+    db_session.add(item)
+    db_session.add(JackyunFileImportRecord(
+        import_id=import_row.id,
+        row_index=1,
+        payload={
+            "入库单号": "RK-DISPATCH-001", "采购单号": "PO-DISPATCH-001",
+            "货品编号": "SKU-DISPATCH-001", "入库数量": "2", "含税金额": "20",
+        },
+    ))
+    db_session.commit()
+
+    try:
+        result = service.map_import(db_session, import_row.id, actor="pytest")
+        assert result["mapper"] == "inbound_items"
+        assert result["documents"] == 1
+        assert result["matched"] == 1
+    finally:
+        db_session.query(JackyunFileImportRecord).filter_by(import_id=import_row.id).delete(synchronize_session=False)
+        db_session.delete(item)
+        db_session.delete(document)
+        db_session.delete(import_row)
+        db_session.commit()
+
+
+def test_inbound_import_creates_missing_document_and_items(db_session):
+    """只有入库申请单货品文件、库内没有主单时，也要落成可查看的入库单明细。"""
+    from app.models.jackyun import JackyunGoodsDocument, JackyunGoodsDocumentItem
+    from app.models.procurement_chain import ProcurementChainLink
+    from app.models.purchase import ExternalPurchaseOrder
+
+    import_no = "IMPORT-MISSING-DOCUMENT-001"
+    rk_no = "RK-MISSING-DOCUMENT-001"
+    order_no = "PO-MISSING-DOCUMENT-001"
+    imp = JackyunFileImport(
+        original_name="入库申请单货品.xlsx", stored_path="/tmp/missing-document.xlsx",
+        sha256=f"missing-document-{uuid4().hex}", report_type="products", lifecycle="active",
+        headers=["申请单号", "往来单位", "创建时间", "货品编号", "货品名称", "入库数量", "1688采购订单"],
+        row_count=1, staged_row_count=1,
+    )
+    db_session.add(imp)
+    db_session.flush()
+    db_session.add(JackyunFileImportRecord(
+        import_id=imp.id,
+        row_index=1,
+        payload={
+            "申请单号": rk_no, "往来单位": "1688测试供应商", "创建时间": "2026-09-15 10:00:00",
+            "货品编号": "SKU-MISSING-001", "货品名称": "导入测试商品", "入库数量": "3",
+            "1688采购订单": order_no,
+        },
+    ))
+    db_session.commit()
+
+    try:
+        result = service.map_inbound_items(db_session, imp.id, actor="pytest")
+        document = db_session.query(JackyunGoodsDocument).filter_by(
+            document_type="inbound", goodsdoc_no=rk_no,
+        ).one()
+        item = db_session.query(JackyunGoodsDocumentItem).filter_by(document_id=document.id).one()
+        po = db_session.query(ExternalPurchaseOrder).filter_by(external_order_id=order_no).one()
+
+        assert result["createdDocuments"] == 1
+        assert result["createdDocumentItems"] == 1
+        assert result["documents"] == 1
+        assert result["matched"] == 1
+        assert document.supplier_name == "1688测试供应商"
+        assert item.goods_no == "SKU-MISSING-001"
+        assert item.quantity == 3
+        assert item.raw["1688采购订单"] == order_no
+        assert db_session.query(ProcurementChainLink).filter_by(
+            external_po_id=po.id, target_id=document.id, target_type="inbound",
+        ).count() == 1
+    finally:
+        po = db_session.query(ExternalPurchaseOrder).filter_by(external_order_id=order_no).first()
+        document = db_session.query(JackyunGoodsDocument).filter_by(goodsdoc_no=rk_no).first()
+        if document:
+            db_session.query(ProcurementChainLink).filter_by(target_id=document.id).delete(synchronize_session=False)
+            db_session.query(JackyunGoodsDocumentItem).filter_by(document_id=document.id).delete(synchronize_session=False)
+            db_session.delete(document)
+        db_session.query(JackyunFileImportRecord).filter_by(import_id=imp.id).delete(synchronize_session=False)
+        if po:
+            db_session.delete(po)
+        db_session.delete(imp)
+        db_session.commit()
+
+
+def test_inbound_document_view_returns_master_and_detail_rows(db_session):
+    """到仓入库单列表按真实入库主单聚合，并把数量差异带到明细。"""
+    document = JackyunGoodsDocument(
+        document_type="inbound", goodsdoc_no="RK-VIEW-001", supplier_name="视图测试供应商",
+        warehouse_name="视图测试仓", document_at=datetime(2026, 9, 15, 10, 0),
+    )
+    db_session.add(document)
+    db_session.flush()
+    db_session.add(JackyunGoodsDocumentItem(
+        document_id=document.id, line_no=1, goods_no="SKU-VIEW-001", goods_name="视图测试货品",
+        quantity=4, apply_quantity=5, match_status="matched",
+    ))
+    db_session.commit()
+
+    try:
+        payload = list_inbound_documents(db_session, q="RK-VIEW-001", limit=10)
+        assert payload["total"] == 1
+        assert payload["stats"]["pending"] == 1
+        row = payload["rows"][0]
+        assert row["inboundNo"] == "RK-VIEW-001"
+        assert row["productCount"] == 1
+        assert row["arrivedQuantity"] == 5
+        assert row["actualQuantity"] == 4
+        assert row["status"] == "部分入库"
+        assert row["items"][0]["difference"] == 1
+        assert list_inbound_documents(db_session, q="SKU-VIEW-001", limit=10)["total"] == 1
+    finally:
+        db_session.query(JackyunGoodsDocumentItem).filter_by(document_id=document.id).delete(synchronize_session=False)
+        db_session.delete(document)
+        db_session.commit()

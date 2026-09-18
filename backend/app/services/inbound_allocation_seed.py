@@ -17,9 +17,11 @@ from typing import Iterable
 
 from sqlalchemy.orm import Session
 
+from app.core.audit import audit
 from app.models.alibaba1688_import import Alibaba1688Order
 from app.models.catalog import ProductSku
 from app.models.jackyun import JackyunGoodsDocument, JackyunGoodsDocumentItem
+from app.models.ops import ExceptionRecord
 from app.models.procurement_chain import ProcurementChainLink
 from app.models.purchase import (
     ExternalPurchaseOrder,
@@ -30,6 +32,61 @@ from app.services.allocation import balance_check
 
 
 SEEDABLE_PO_STATUSES = ("pending_refine", "draft")
+
+
+def _payment_gap(
+    po: ExternalPurchaseOrder,
+    allocation_total: Decimal,
+) -> Decimal | None:
+    """Return an unconfirmed difference between inbound amount and 1688 paid."""
+    if (po.platform or "1688").lower() != "1688":
+        return None
+    paid = po.effective_paid_amount
+    if allocation_total <= 0 or paid is None:
+        return None
+    gap = (allocation_total - paid).quantize(Decimal("0.0001"))
+    return gap if abs(gap) > Decimal("0.01") else None
+
+
+def _ensure_payment_gap_exception(
+    db: Session,
+    po: ExternalPurchaseOrder,
+    allocation_total: Decimal,
+    gap: Decimal,
+) -> None:
+    """Put an amount difference in the exception center without auto-approving it."""
+    detail = {
+        "poId": po.id,
+        "orderId": po.id,
+        "externalOrderId": po.external_order_id,
+        "paidAmount": str(po.effective_paid_amount),
+        "inboundAmount": str(allocation_total),
+        "difference": str(gap),
+        "suggestedAdjustment": str(gap),
+        "reason": "实际入库金额与 1688 实际付款金额不一致，可能包含红包/优惠",
+        "actionRequired": "请确认后再继续采购流程",
+    }
+    row = db.query(ExceptionRecord).filter(
+        ExceptionRecord.code == "PURCHASE_PAYMENT_GAP",
+        ExceptionRecord.ref_table == "external_purchase_orders",
+        ExceptionRecord.ref_id == str(po.id),
+        ExceptionRecord.status.in_(("pending", "confirmed")),
+    ).order_by(ExceptionRecord.id.desc()).first()
+    if row is None:
+        db.add(ExceptionRecord(
+            code="PURCHASE_PAYMENT_GAP",
+            type="PURCHASE_PAYMENT_GAP",
+            severity="medium",
+            title="1688 实付与入库金额差异待确认",
+            detail=detail,
+            status="pending",
+            source="system",
+            ref_table="external_purchase_orders",
+            ref_id=str(po.id),
+        ))
+    elif row.status == "pending":
+        row.detail = detail
+    db.commit()
 
 
 def _po_from_link(db: Session, link: ProcurementChainLink) -> ExternalPurchaseOrder | None:
@@ -134,7 +191,6 @@ def release_inbound_seeds_for_link(
 
     from app.services.procurement_chain_service import parse_inbound_doc_id
     from app.core.audit import audit
-
     item_ids = {
         i.id
         for i in db.query(JackyunGoodsDocumentItem.id)
@@ -313,7 +369,9 @@ def seed_allocations_for_po(
             goods_name=sku.sku_name,
             quantity=qty,
             unit_price=price,
-            amount=(qty * price).quantize(Decimal("0.0001")),
+            # 文件导入的“采购总金额”是金额事实。优先保留它，避免四位单价
+            # 反算后产生尾差；没有金额时才按数量 × 单价计算。
+            amount=(it.amount_tax if it.amount_tax is not None else qty * price).quantize(Decimal("0.0001")),
             source="inbound_auto",
             match_confidence=None,
             note=f"由入库单 #{it.document_id} 明细自动反填",
@@ -337,6 +395,13 @@ def seed_allocations_for_po(
     # 入库明细已为每行识别出真实 SKU 且金额平衡时，采购内容直接完成；
     # 只有价格/数量/金额不平或存在未匹配行才留给人工处理。
     allocation_rows = db.query(PurchaseAllocationItem).filter_by(po_id=po.id).all()
+    allocation_total = sum(
+        (Decimal(str(row.amount or 0)) for row in allocation_rows),
+        Decimal("0"),
+    )
+    payment_gap = _payment_gap(po, allocation_total)
+    if payment_gap is not None:
+        _ensure_payment_gap_exception(db, po, allocation_total, payment_gap)
     from app.services.cost_policy import allocation_cost_anomalies
     cost_anomalies = allocation_cost_anomalies(db, po) if allocation_rows else []
     if cost_anomalies:
@@ -370,7 +435,13 @@ def seed_allocations_for_po(
         po.allocated_goods_amount = totals["goods_allocated"]
         po.allocated_expense_amount = totals["expense_allocated"]
         db.commit()
-    return {"seeded": seeded, "skipped": skipped, "skippedTaken": skipped_taken, "doc_ids": sorted(doc_ids)}
+    return {
+        "seeded": seeded,
+        "skipped": skipped,
+        "skippedTaken": skipped_taken,
+        "paymentGap": str(payment_gap) if payment_gap is not None else None,
+        "doc_ids": sorted(doc_ids),
+    }
 
 
 def seed_allocations_for_order_numbers(db: Session, order_numbers: Iterable[str]) -> dict:
@@ -497,8 +568,20 @@ def sync_allocation_to_inbound(db: Session, po: ExternalPurchaseOrder,
         if allocation.source_item_id is not None:
             # 新口径：按来源明细行精确回写，避免同单同 SKU 多行时改错行
             item = db.get(JackyunGoodsDocumentItem, allocation.source_item_id)
-            if item is None or item.document_id != doc_id or item.matched_sku_id != allocation.sku_id:
+            if item is None or item.document_id != doc_id:
                 continue
+            old_sku_id = None
+            if was_inbound_auto and item.matched_sku_id != allocation.sku_id:
+                # 换货品：允许连同入库明细行的 SKU 匹配一起修正（吉客云行录错货品的场景）
+                old_sku_id = item.matched_sku_id
+                item.matched_sku_id = allocation.sku_id
+                item.match_status = "manual_adjust"
+                audit(db, actor, "jackyun.inbound.item.rematch", "jackyun_goods_document_items", item.id, {
+                    "documentId": doc_id,
+                    "reason": "工作台分摊换货品，自动联动修正入库明细匹配",
+                    "old": {"matchedSkuId": old_sku_id},
+                    "new": {"matchedSkuId": allocation.sku_id, "skuCode": allocation.sku_code},
+                })
         else:
             item = (
                 db.query(JackyunGoodsDocumentItem)
@@ -521,7 +604,10 @@ def sync_allocation_to_inbound(db: Session, po: ExternalPurchaseOrder,
         item.amount_tax = (qty * price).quantize(_D("0.0001"))
         if item.match_status in ("price_mismatch", "auto"):
             item.match_status = "manual_adjust"
-        item.match_note = f"按工作台 SKU 分配人工修正 {allocation.sku_code} 数量/单价（原 {old}）"
+        if old_sku_id is not None:
+            item.match_note = f"按工作台 SKU 分配人工修正货品为 {allocation.sku_code}（原匹配 SKU id {old_sku_id}）并调整 数量/单价（原 {old}）"
+        else:
+            item.match_note = f"按工作台 SKU 分配人工修正 {allocation.sku_code} 数量/单价（原 {old}）"
         updated.append({"documentId": doc_id, "itemId": item.id, "old": old})
     if updated:
         db.commit()

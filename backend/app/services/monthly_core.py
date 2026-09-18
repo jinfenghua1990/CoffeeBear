@@ -10,13 +10,13 @@ from decimal import Decimal
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.models.payment import SettlementRecord
 from app.models.sales import AftersalesOrder, SalesOrder
 from app.services.reconciliation import settled_amounts_by_settlement
+from app.services.sales_scope import deal_orders_condition
 from app.utils.money import quantize, to_decimal
 
 
@@ -42,11 +42,7 @@ def month_bounds(year: int, month: int) -> tuple[datetime, datetime]:
 def sales_overview(db: Session, year: int, month: int) -> dict[str, Any]:
     """指定月份销售/退款首屏指标；不读取其他月份。"""
     start, end = month_bounds(year, month)
-    valid_sales = ~or_(
-        SalesOrder.order_status.like("已取消%"),
-        SalesOrder.order_status.like("作废%"),
-        SalesOrder.order_status == "待审核",
-    )
+    valid_sales = deal_orders_condition()
     period_filter = (
         SalesOrder.ordered_at >= start,
         SalesOrder.ordered_at < end,

@@ -22,6 +22,7 @@ from sqlalchemy.orm import Session
 from app.config import settings
 from app.models.sales import SalesOrder, SalesOrderItem
 from app.models.tax import TaxInvoice, TaxInvoiceImport, TaxInvoiceLink
+from app.services.tax_invoice_service import is_effective_for_accounting
 from app.utils.money import to_decimal
 
 
@@ -186,7 +187,7 @@ def monthly_ledger(db: Session, year: int, month: int) -> dict[str, Any]:
 
     for invoice in rows:
         direction = invoice.direction if invoice.direction in {"input", "output"} else "unknown"
-        is_effective = invoice.status in {"issued", "red"}
+        is_effective = is_effective_for_accounting(invoice)
         if direction in totals and is_effective:
             totals[direction]["amountExclTax"] += to_decimal(invoice.amount_excl_tax)
             totals[direction]["taxAmount"] += to_decimal(invoice.tax_amount)
@@ -281,8 +282,8 @@ def monthly_ledger(db: Session, year: int, month: int) -> dict[str, Any]:
         },
         "summary": {
             "invoiceCount": len(rows),
-            "outputInvoiceCount": sum(1 for row in rows if row.direction == "output" and row.status in {"issued", "red"}),
-            "inputInvoiceCount": sum(1 for row in rows if row.direction == "input" and row.status in {"issued", "red"}),
+            "outputInvoiceCount": sum(1 for row in rows if row.direction == "output" and is_effective_for_accounting(row)),
+            "inputInvoiceCount": sum(1 for row in rows if row.direction == "input" and is_effective_for_accounting(row)),
             "outputAmountExclTax": _money(totals["output"]["amountExclTax"]),
             "outputTaxAmount": _money(output_tax),
             "outputTotalAmount": _money(totals["output"]["totalAmount"]),

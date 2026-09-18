@@ -138,7 +138,17 @@ def sync_jackyun(self, job_type: str, force: bool = False) -> dict[str, Any]:
 
 
 @celery_app.task(name="tasks.sync_1688", bind=True, max_retries=2, default_retry_delay=180)
-def sync_1688(self) -> dict[str, Any]:
+def sync_1688(
+    self,
+    mode: str = "incremental",
+    start_date: str | None = None,
+    end_date: str | None = None,
+    order_no: str | None = None,
+    supplier: str | None = None,
+    keyword: str | None = None,
+    only_unfinished: bool = False,
+    time_field: str = "order_time",
+) -> dict[str, Any]:
     """1688 订单同步：浏览器直采为主通道，开放平台 OAuth 保留为备用。"""
     db = SessionLocal()
     try:
@@ -148,7 +158,18 @@ def sync_1688(self) -> dict[str, Any]:
             from app.services.alibaba1688_browser_sync_service import BrowserCaptureError, sync_orders
 
             try:
-                return sync_orders(db, actor="system")
+                return sync_orders(
+                    db,
+                    actor="system",
+                    mode=mode,
+                    start_date=start_date,
+                    end_date=end_date,
+                    order_no=order_no,
+                    supplier=supplier,
+                    keyword=keyword,
+                    only_unfinished=only_unfinished,
+                    time_field=time_field,
+                )
             except BrowserCaptureError as exc:
                 raise self.retry(exc=exc, countdown=180 * (2 ** self.request.retries))
         if not s.alibaba_1688_configured:

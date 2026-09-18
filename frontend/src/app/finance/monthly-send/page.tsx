@@ -1,7 +1,9 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import Link from "next/link";
 import { authenticatedFetch } from "@/lib/api";
+import { useTabScopedState, useTabTitle } from "@/lib/workspace/tab-store";
 
 type Pkg = { id: number; version: number; status: string; sha256: string; createdAt: string | null };
 type Period = {
@@ -32,7 +34,7 @@ type SalesPreview = {
   month: number;
   rowCount: number;
   fields: SalesField[];
-  summary: { orderCount: number; warehouseCount: number; totalQuantity: string; salesAmount: string; costAmount: string };
+  summary: { orderCount: number; warehouseCount: number; totalQuantity: string; salesAmount: string; costAmount: string; costIncomplete?: boolean; costMissingDetail?: { skuCode: string; skuName: string; quantity: string }[] };
   rows: Array<Record<string, string>>;
 };
 type Unbilled = {
@@ -46,7 +48,9 @@ type Unbilled = {
   salesAmount: string;
   invoicedAmount: string;
   unbilledAmount: string;
-  details: Array<{ period: string; taxCode: string; taxName: string; product: string; quantity: string; sales: string; cost: string }>;
+  rowInvoicedTotal?: string;
+  unattributedInvoiced?: string;
+  details: Array<{ period: string; taxCode: string; taxName: string; product: string; quantity: string; sales: string; invoiced?: string; unbilled?: string; cost: string }>;
 };
 type FileRow = {
   id: number;
@@ -173,6 +177,20 @@ function num(value: string | number | undefined) {
   return Number.isFinite(n) ? n.toLocaleString("zh-CN", { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : "—";
 }
 
+/** 行已开票金额；缺失返回 null（展示为 —）。 */
+function invoicedValue(detail: { invoiced?: string }): number | null {
+  if (detail.invoiced == null || detail.invoiced === "") return null;
+  return Number(detail.invoiced);
+}
+
+/** 行无票收入：后端缺省但有已开票时，前端按 sales − invoiced 兜底（不为负）。 */
+function unbilledValue(detail: { sales: string; invoiced?: string; unbilled?: string }): number | null {
+  const invoiced = invoicedValue(detail);
+  if (invoiced === null) return null;
+  if (detail.unbilled != null && detail.unbilled !== "") return Number(detail.unbilled);
+  return Math.max(Number(detail.sales) - invoiced, 0);
+}
+
 /** 归档文件 → 交付表名（与后端打包映射一致）。 */
 function deliveryName(month: number, name: string) {
   if (name.includes("交易明细")) return `${month}月-银行交易明细`;
@@ -184,11 +202,12 @@ const CARD = "rounded-xl border border-slate-200 bg-white shadow-sm";
 
 export default function MonthlySendPage() {
   // 全页唯一的账期选择器：选一次，下面所有卡片都跟着它走。
-  const [sendMonth, setSendMonth] = useState(previousMonthValue());
+  const [sendMonth, setSendMonth] = useTabScopedState("monthly.month", previousMonthValue);
   const sel = useMemo(() => {
     const [year, mm] = sendMonth.split("-").map(Number);
     return year && mm ? { year, month: mm } : null;
   }, [sendMonth]);
+  useTabTitle(sel ? `月度资料 · ${sendMonth}` : null);
 
   const [template, setTemplate] = useState<SalesTemplate | null>(null);
   const [toText, setToText] = useState("");
@@ -199,7 +218,7 @@ export default function MonthlySendPage() {
   const [unbilled, setUnbilled] = useState<Unbilled | null>(null);
   const [mailStatus, setMailStatus] = useState<MailStatus | null>(null);
   const [mailOpen, setMailOpen] = useState(false);
-  const [financeTab, setFinanceTab] = useState<"monthly" | "records" | "archive" | "ledger" | "match">("monthly");
+  const [financeTab, setFinanceTab] = useTabScopedState<"monthly" | "records" | "archive" | "ledger" | "match">("monthly.tab", "monthly");
   const [matchData, setMatchData] = useState<PaymentMatchOverview | null>(null);
   const [matchLoading, setMatchLoading] = useState(false);
   const [pickerTxn, setPickerTxn] = useState<PaymentMatchRow | null>(null);
@@ -667,7 +686,7 @@ export default function MonthlySendPage() {
   return (
     <div className="mx-auto w-full max-w-[1500px] space-y-4 pb-8">
       <nav aria-label="月度资料入库导航" className="sticky top-0 z-20 -mx-2 flex min-h-12 items-center gap-1 overflow-x-auto border-b border-slate-200 bg-white px-2 shadow-[0_1px_0_rgba(15,23,42,0.02)] sm:-mx-4 sm:px-4">
-        <a href="/finance/monthly-send" className="mr-2 inline-flex shrink-0 items-center gap-2 px-1 py-3 text-sm font-semibold text-slate-800"><span className="inline-flex h-6 w-6 items-center justify-center rounded-md bg-blue-600 text-white"><svg viewBox="0 0 24 24" className="h-4 w-4" fill="none"><path d="M7 4h10v16H7V4Zm3 3h4M10 11h4M10 15h3" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" /></svg></span>月度资料入库</a>
+        <Link href="/finance/monthly-send" className="mr-2 inline-flex shrink-0 items-center gap-2 px-1 py-3 text-sm font-semibold text-slate-800"><span className="inline-flex h-6 w-6 items-center justify-center rounded-md bg-blue-600 text-white"><svg viewBox="0 0 24 24" className="h-4 w-4" fill="none"><path d="M7 4h10v16H7V4Zm3 3h4M10 11h4M10 15h3" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" /></svg></span>月度资料入库</Link>
         <span className="shrink-0 px-1 text-slate-300">›</span>
         {([
           ["monthly", "本月入库与发送"],
@@ -747,7 +766,7 @@ export default function MonthlySendPage() {
 
       {financeTab === "archive" && <section className={`${CARD} overflow-hidden`}><div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 px-4 py-4"><div><h2 className="text-base font-semibold text-slate-900">资料归档</h2><p className="mt-1 text-xs text-slate-400">业务源文件、银行资料、系统生成资料和历史版本都保留在当前账期。</p></div><button type="button" onClick={() => { uploadKind.current = "交易明细"; fileRef.current?.click(); }} disabled={busy} className="rounded-lg border border-blue-200 px-3 py-2 text-xs font-medium text-blue-600 hover:bg-blue-50 disabled:opacity-50">＋ 新增资料</button></div>{!files.length ? <div className="px-4 py-12 text-center text-sm text-slate-400">该账期暂无归档文件</div> : <div className="overflow-x-auto"><table className="w-full min-w-[760px] text-sm"><thead className="bg-slate-50 text-left text-xs text-slate-500"><tr><th className="px-4 py-2.5 font-medium">文件</th><th className="px-4 py-2.5 font-medium">类型</th><th className="px-4 py-2.5 font-medium">版本</th><th className="px-4 py-2.5 font-medium">归档时间</th><th className="px-4 py-2.5 text-right font-medium">操作</th></tr></thead><tbody className="divide-y divide-slate-100">{[...files].sort((a, b) => a.originalName.localeCompare(b.originalName) || a.version - b.version).map((row) => <tr key={row.id}><td className="px-4 py-3">{deliveryName(sel?.month ?? 0, row.originalName)}<span className="ml-2 text-[10px] text-slate-300">{row.originalName}</span></td><td className="px-4 py-3 text-xs text-slate-500">{row.category === "sales_summary" ? "系统生成" : row.category === "bank" ? "银行资料" : row.category === "purchase_inbound" ? "采购入库源文件" : row.category === "sales_query" ? "销售数量源文件" : "外部数据导入"}</td><td className="px-4 py-3 text-xs text-slate-500">v{row.version}</td><td className="px-4 py-3 text-xs text-slate-400">{formatDate(row.uploadedAt)}</td><td className="px-4 py-3 text-right"><button type="button" onClick={() => void downloadFile(row)} disabled={busy} className="text-xs font-medium text-blue-600 hover:underline disabled:opacity-50">下载</button><button type="button" onClick={() => void deleteFile(row)} disabled={busy} className="ml-4 text-xs font-medium text-rose-500 hover:underline disabled:opacity-50">删除</button></td></tr>)}</tbody></table></div>}<div className="border-t border-slate-100 px-4 py-3 text-[11px] text-slate-400">每次上传 / 生成都会留版本；业务源文件用于本地入库计算，财务交付包只取所选交付资料。</div><input ref={fileRef} type="file" accept=".xlsx,.xls,.csv,.pdf" className="hidden" onChange={(e) => { const file = e.target.files?.[0]; if (file) handleUploadSelection(file); }} /></section>}
 
-      {financeTab === "ledger" && <section className={`${CARD} overflow-hidden`}><div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 px-4 py-4"><div><h2 className="text-base font-semibold text-slate-900">销售汇总台账</h2><p className="mt-1 text-xs text-slate-400">月度时间 / 仓库 / 税务编号 / 发货总数量 / 销售总金额 / 销售总成本；无票收入表自动引用销售总金额。</p></div><div className="flex gap-2"><button type="button" onClick={previewSales} disabled={busy} className="rounded-lg border border-slate-200 px-3 py-2 text-xs text-slate-600 hover:bg-slate-50 disabled:opacity-50">预览</button><button type="button" onClick={() => setShowFields((v) => !v)} className="rounded-lg border border-slate-200 px-3 py-2 text-xs text-slate-600 hover:bg-slate-50">字段配置</button><button type="button" onClick={generateSales} disabled={busy} className="rounded-lg bg-blue-600 px-3 py-2 text-xs font-medium text-white hover:bg-blue-700 disabled:opacity-50">生成并归档</button></div></div>{showFields && template && <div className="border-b border-slate-100 bg-slate-50/70 p-4"><div className="grid gap-2 lg:grid-cols-2">{template.fields.map((field, index) => <div key={field.key} className={`grid grid-cols-[28px_1fr_auto] items-center gap-2 rounded-lg border px-2 py-2 ${field.enabled ? "border-blue-100 bg-blue-50/30" : "border-slate-100 bg-white"}`}><input type="checkbox" checked={field.enabled} onChange={(e) => updateField(index, { enabled: e.target.checked })} /><div className="flex min-w-0 items-center gap-2"><span className="w-28 shrink-0 truncate font-mono text-[10px] text-slate-400">{field.key}</span><input value={field.label} onChange={(e) => updateField(index, { label: e.target.value })} className="min-w-0 flex-1 rounded border border-slate-200 bg-white px-2 py-1 text-xs" /></div><div className="flex gap-1"><button type="button" onClick={() => moveField(index, -1)} disabled={index === 0} className="rounded border border-slate-200 px-2 py-1 text-[10px] text-slate-500 disabled:opacity-30">↑</button><button type="button" onClick={() => moveField(index, 1)} disabled={index === template.fields.length - 1} className="rounded border border-slate-200 px-2 py-1 text-[10px] text-slate-500 disabled:opacity-30">↓</button></div></div>)}</div><div className="mt-3 flex justify-end"><button type="button" onClick={saveTemplate} disabled={busy} className="rounded-lg bg-blue-600 px-4 py-2 text-xs font-medium text-white disabled:opacity-50">保存字段配置</button></div></div>}{preview && <div className="p-4"><div className="grid grid-cols-2 gap-px overflow-hidden rounded-xl border border-slate-200 bg-slate-200 md:grid-cols-5">{[["订单数", preview.summary.orderCount], ["仓库数", preview.summary.warehouseCount], ["发货总数量", Number(preview.summary.totalQuantity).toLocaleString("zh-CN")], ["销售总金额", money(preview.summary.salesAmount)], ["销售总成本", money(preview.summary.costAmount)]] .map(([label, value]) => <div key={String(label)} className="bg-white p-3"><div className="text-[10px] text-slate-400">{label}</div><div className="mt-1 text-lg font-semibold text-slate-800">{value}</div></div>)}</div><div className="mt-3 overflow-x-auto rounded-xl border border-slate-200"><table className="w-full min-w-[900px] text-xs"><thead className="bg-slate-50 text-left text-slate-500"><tr>{preview.fields.map((field) => <th key={field.key} className="whitespace-nowrap px-3 py-2 font-medium">{field.label}</th>)}</tr></thead><tbody className="divide-y divide-slate-100">{preview.rows.slice(0, 12).map((row, index) => <tr key={index}>{preview.fields.map((field) => <td key={field.key} className="max-w-[220px] truncate px-3 py-2 text-slate-600">{row[field.key] || "—"}</td>)}</tr>)}</tbody></table><div className="px-3 py-2 text-[10px] text-slate-400">预览前 {Math.min(12, preview.rows.length)} 行 · 本月共 {preview.rowCount} 个仓库</div></div></div>}{!preview && <div className="px-4 py-12 text-center text-sm text-slate-400">点击“预览”查看当前账期数据，字段配置可直接调整导出列。</div>}</section>}
+      {financeTab === "ledger" && <section className={`${CARD} overflow-hidden`}><div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 px-4 py-4"><div><h2 className="text-base font-semibold text-slate-900">销售汇总台账</h2><p className="mt-1 text-xs text-slate-400">月度时间 / 仓库 / 税务编号 / 发货总数量 / 销售总金额 / 销售总成本；无票收入表自动引用销售总金额。</p></div><div className="flex gap-2"><button type="button" onClick={previewSales} disabled={busy} className="rounded-lg border border-slate-200 px-3 py-2 text-xs text-slate-600 hover:bg-slate-50 disabled:opacity-50">预览</button><button type="button" onClick={() => setShowFields((v) => !v)} className="rounded-lg border border-slate-200 px-3 py-2 text-xs text-slate-600 hover:bg-slate-50">字段配置</button><button type="button" onClick={generateSales} disabled={busy} className="rounded-lg bg-blue-600 px-3 py-2 text-xs font-medium text-white hover:bg-blue-700 disabled:opacity-50">生成并归档</button></div></div>{showFields && template && <div className="border-b border-slate-100 bg-slate-50/70 p-4"><div className="grid gap-2 lg:grid-cols-2">{template.fields.map((field, index) => <div key={field.key} className={`grid grid-cols-[28px_1fr_auto] items-center gap-2 rounded-lg border px-2 py-2 ${field.enabled ? "border-blue-100 bg-blue-50/30" : "border-slate-100 bg-white"}`}><input type="checkbox" checked={field.enabled} onChange={(e) => updateField(index, { enabled: e.target.checked })} /><div className="flex min-w-0 items-center gap-2"><span className="w-28 shrink-0 truncate font-mono text-[10px] text-slate-400">{field.key}</span><input value={field.label} onChange={(e) => updateField(index, { label: e.target.value })} className="min-w-0 flex-1 rounded border border-slate-200 bg-white px-2 py-1 text-xs" /></div><div className="flex gap-1"><button type="button" onClick={() => moveField(index, -1)} disabled={index === 0} className="rounded border border-slate-200 px-2 py-1 text-[10px] text-slate-500 disabled:opacity-30">↑</button><button type="button" onClick={() => moveField(index, 1)} disabled={index === template.fields.length - 1} className="rounded border border-slate-200 px-2 py-1 text-[10px] text-slate-500 disabled:opacity-30">↓</button></div></div>)}</div><div className="mt-3 flex justify-end"><button type="button" onClick={saveTemplate} disabled={busy} className="rounded-lg bg-blue-600 px-4 py-2 text-xs font-medium text-white disabled:opacity-50">保存字段配置</button></div></div>}{preview && <div className="p-4"><div className="grid grid-cols-2 gap-px overflow-hidden rounded-xl border border-slate-200 bg-slate-200 md:grid-cols-5">{[["订单数", preview.summary.orderCount], ["仓库数", preview.summary.warehouseCount], ["发货总数量", Number(preview.summary.totalQuantity).toLocaleString("zh-CN")], ["销售总金额", money(preview.summary.salesAmount)], ["销售总成本", money(preview.summary.costAmount)]] .map(([label, value]) => <div key={String(label)} className="bg-white p-3"><div className="text-[10px] text-slate-400">{label}</div><div className="mt-1 text-lg font-semibold text-slate-800">{value}</div></div>)}</div>{preview.summary.costIncomplete && <div className="mt-3 flex flex-wrap items-center justify-between gap-2 rounded-lg bg-amber-50 px-3 py-2 text-[11px] text-amber-700 ring-1 ring-inset ring-amber-200"><span>部分 SKU 没有采购入库成本（{(preview.summary.costMissingDetail || []).map((d) => d.skuCode).join("、") || "—"}），销售总成本只含已覆盖部分，实际成本会更高。请补充采购入库成本后重新生成。</span><Link href="/data-center-import?tab=jackyun" className="shrink-0 font-medium text-amber-800 underline">去补充入库成本</Link></div>}<div className="mt-3 overflow-x-auto rounded-xl border border-slate-200"><table className="w-full min-w-[900px] text-xs"><thead className="bg-slate-50 text-left text-slate-500"><tr>{preview.fields.map((field) => <th key={field.key} className="whitespace-nowrap px-3 py-2 font-medium">{field.label}</th>)}</tr></thead><tbody className="divide-y divide-slate-100">{preview.rows.slice(0, 12).map((row, index) => <tr key={index}>{preview.fields.map((field) => <td key={field.key} className="max-w-[220px] truncate px-3 py-2 text-slate-600">{row[field.key] || "—"}</td>)}</tr>)}</tbody></table><div className="px-3 py-2 text-[10px] text-slate-400">预览前 {Math.min(12, preview.rows.length)} 行 · 本月共 {preview.rowCount} 个仓库</div></div></div>}{!preview && <div className="px-4 py-12 text-center text-sm text-slate-400">点击“预览”查看当前账期数据，字段配置可直接调整导出列。</div>}</section>}
 
       {financeTab === "match" && <section className={`${CARD} overflow-hidden`}>
         <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 px-4 py-4">
@@ -931,12 +950,16 @@ export default function MonthlySendPage() {
                         <th className="border-b border-slate-200 px-3 py-2 font-medium">产品</th>
                         <th className="border-b border-slate-200 px-3 py-2 text-right font-medium">发货数量</th>
                         <th className="border-b border-slate-200 px-3 py-2 text-right font-medium">销售金额</th>
+                        <th className="border-b border-slate-200 px-3 py-2 text-right font-medium">已开票金额</th>
+                        <th className="border-b border-slate-200 px-3 py-2 text-right font-medium">无票收入</th>
                         <th className="border-b border-slate-200 px-3 py-2 text-right font-medium">销售成本</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-100">
                       {filteredUnbilledDetails.map((detail, index) => {
                         const key = unbilledDetailKey(detail);
+                        const rowInvoiced = invoicedValue(detail);
+                        const rowUnbilled = unbilledValue(detail);
                         return (
                           <tr key={key || index} className={unbilledSelectedKeys.includes(key) ? "" : "bg-slate-50/70 text-slate-400"}>
                             <td className="px-3 py-2">
@@ -954,6 +977,8 @@ export default function MonthlySendPage() {
                             <td className="max-w-[260px] truncate px-3 py-2">{detail.product}</td>
                             <td className="px-3 py-2 text-right tabular-nums">{Number(detail.quantity).toLocaleString("zh-CN")}</td>
                             <td className="px-3 py-2 text-right tabular-nums">{num(detail.sales)}</td>
+                            <td className="px-3 py-2 text-right tabular-nums">{rowInvoiced === null ? "—" : num(rowInvoiced)}</td>
+                            <td className="px-3 py-2 text-right tabular-nums text-amber-700">{rowUnbilled === null ? "—" : num(rowUnbilled)}</td>
                             <td className="px-3 py-2 text-right tabular-nums text-amber-700">{num(detail.cost)}</td>
                           </tr>
                         );
@@ -967,6 +992,18 @@ export default function MonthlySendPage() {
                         </td>
                         <td className="px-3 py-2 text-right tabular-nums">
                           {num(filteredUnbilledDetails.reduce((sum, detail) => sum + Number(detail.sales || 0), 0))}
+                        </td>
+                        <td className="px-3 py-2 text-right tabular-nums">
+                          {num(filteredUnbilledDetails.reduce((sum, detail) => {
+                            const v = invoicedValue(detail);
+                            return sum + (v === null ? 0 : v);
+                          }, 0))}
+                        </td>
+                        <td className="px-3 py-2 text-right tabular-nums text-amber-700">
+                          {num(filteredUnbilledDetails.reduce((sum, detail) => {
+                            const v = unbilledValue(detail);
+                            return sum + (v === null ? 0 : v);
+                          }, 0))}
                         </td>
                         <td className="px-3 py-2 text-right tabular-nums text-amber-700">
                           {num(filteredUnbilledDetails.reduce((sum, detail) => sum + Number(detail.cost || 0), 0))}
@@ -982,6 +1019,11 @@ export default function MonthlySendPage() {
               <div className="mr-auto text-xs text-slate-500">
                 已选择 {unbilledSelectedKeys.length} / {unbilled?.sourceCount ?? unbilled?.details.length ?? 0} 条 · 当前筛选 {filteredUnbilledDetails.length} 条 · 当前筛选合计{" "}
                 {money(filteredUnbilledDetails.reduce((sum, detail) => sum + Number(detail.sales || 0), 0))}
+                {Number(unbilled?.unattributedInvoiced || 0) > 0 ? (
+                  <span className="ml-2 text-amber-700">
+                    已开票 {money(unbilled?.invoicedAmount)} 中有 {money(unbilled?.unattributedInvoiced)} 未关联到具体销售订单，仅计入总额、不摊入明细行
+                  </span>
+                ) : null}
               </div>
               <button
                 type="button"

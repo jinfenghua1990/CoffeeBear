@@ -1,4 +1,4 @@
-"""采购全链路模型：1688 订单 ↔ 吉客云入库单 / 付款结算单 的关联。"""
+"""采购全链路模型：1688 订单 ↔ 本系统采购入库 / 外部历史单 / 付款结算单 的关联。"""
 
 from decimal import Decimal
 from typing import TYPE_CHECKING
@@ -15,7 +15,7 @@ if TYPE_CHECKING:
 class ProcurementChainLink(Base, PkMixin, TimestampMixin):
     """1688 订单与入库/付款单据的可审计关联。
 
-    - target_type="inbound"：关联 jackyun_goods_documents.id（吉客云入库单）
+    - target_type="inbound"：关联 jackyun_goods_documents.id（本系统采购入库或外部历史入库）
     - target_type="settlement"：关联 jackyun_purchase_settlements.id（吉客云采购结算单）
     - 发票与 1688 订单的关联继续走 tax_invoice_links（target_type="alibaba1688_order"）
     """

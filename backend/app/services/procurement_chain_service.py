@@ -10,11 +10,14 @@ import unicodedata
 from datetime import datetime
 from decimal import Decimal
 
-from sqlalchemy import or_
+from sqlalchemy import event, or_
 from sqlalchemy.orm import Session
 
 from app.core.audit import audit
 from app.models.alibaba1688_import import Alibaba1688FileImport, Alibaba1688Order
+from app.models.catalog import Warehouse
+from app.models.consumable import Consumable, InboundConsumableUsage
+from app.models.consumable_purchase import ConsumablePurchase, ConsumablePurchaseItem, ConsumableReceipt
 from app.models.jackyun import JackyunGoodsDocument, JackyunGoodsDocumentItem, JackyunPurchaseSettlement
 from app.models.procurement_chain import ProcurementChainLink
 from app.models.purchase import (
@@ -26,6 +29,7 @@ from app.models.purchase import (
     PurchaseExtraExpense,
     PurchaseInvoice,
     PurchaseInvoiceLink,
+    Supplier,
 )
 from app.models.tax import TaxInvoice, TaxInvoiceImport, TaxInvoiceLink
 from app.services.allocation import balance_check
@@ -36,14 +40,14 @@ from app.services.tax_invoice_service import filter_visible_invoices
 AMOUNT_TOLERANCE = Decimal("0.02")  # 金额容差 2%
 
 # 采购全链路 7 环节定义（前后端统一口径，顺序即链路顺序）：
-# ① 1688 订单 → ② 实际采购内容/SKU → ③ 吉客云采购单 → ④ 入库 → ⑤ 发票 → ⑥ 付款 → ⑦ 税务认证
+# ① 1688 订单 → ② 实际采购内容/SKU → ③ 本系统采购单 → ④ 本系统入库 → ⑤ 发票 → ⑥ 付款 → ⑦ 税务认证
 # dimension 表示该环节的数据归属维度：
-#   1688 = 1688 导出订单，purchase = 本平台采购中心（SKU 分配），jackyun = 吉客云，tax = 税务
+#   1688 = 1688 导出订单，purchase = 本平台采购中心/入库，jackyun = 吉客云历史数据，tax = 税务
 CHAIN_STAGES: list[dict] = [
     {"key": "order", "no": 1, "label": "1688 订单", "short": "订单", "dimension": "1688"},
     {"key": "sku", "no": 2, "label": "实际采购内容 / SKU", "short": "SKU", "dimension": "purchase"},
-    {"key": "jackyunPo", "no": 3, "label": "吉客云采购单", "short": "采购单", "dimension": "jackyun"},
-    {"key": "inbound", "no": 4, "label": "入库", "short": "入库", "dimension": "jackyun"},
+    {"key": "jackyunPo", "no": 3, "label": "本系统采购单", "short": "采购单", "dimension": "purchase"},
+    {"key": "inbound", "no": 4, "label": "本系统入库", "short": "入库", "dimension": "purchase"},
     {"key": "invoice", "no": 5, "label": "发票", "short": "发票", "dimension": "tax"},
     {"key": "paid", "no": 6, "label": "付款", "short": "付款", "dimension": "jackyun"},
     {"key": "verified", "no": 7, "label": "税务认证", "short": "认证", "dimension": "tax"},
@@ -85,6 +89,13 @@ def normalize_name(name: str | None) -> str:
     for suffix in ("有限责任公司", "股份有限公司", "有限公司", "（普通合伙）", "(普通合伙)", "经营部", "商行", "公司"):
         s = s.replace(suffix, "")
     return re.sub(r"[\s（）()<>《》\-_【】\[\]·,，.。]", "", s)
+
+
+def normalize_tax_no(value: str | None) -> str:
+    """供应商税号归一化：仅清理全角字符与空白，不改变税号本身。"""
+    if not value:
+        return ""
+    return re.sub(r"\s+", "", unicodedata.normalize("NFKC", str(value))).upper()
 
 
 def amount_close(a, b, tolerance: Decimal = AMOUNT_TOLERANCE) -> bool:
@@ -149,26 +160,36 @@ def _document_order_refs(raw: dict | None) -> set[str]:
     return refs
 
 
-def auto_confirm_inbound_link(link: ProcurementChainLink) -> bool:
-    """确认入库关联，并在没有耗材来源信息时明确记为“不使用耗材”。
+def _inbound_source_fields(document: JackyunGoodsDocument) -> dict:
+    """返回入库单来源元数据，区分本系统主单和吉客云历史/外部单。"""
+    raw = document.raw if isinstance(document.raw, dict) else {}
+    source = str(raw.get("source") or "jackyun").strip() or "jackyun"
+    return {
+        "source": source,
+        "isLocal": source == "local_purchase_inbound",
+        "platformPurchaseOrderNo": raw.get("platformPurchaseOrderNo") or raw.get("externalOrderId") or "",
+        "externalReferenceNo": raw.get("externalReferenceNo") or raw.get("goodsdocNo") or "",
+    }
 
-    自动化不能凭空扣减耗材库存，所以只有已有明确 ``enabled=True`` 的记录才
-    保留耗材使用；未决记录统一落成已决定但不使用，不产生库存变动。
+
+def auto_confirm_inbound_link(link: ProcurementChainLink) -> bool:
+    """确认入库关联；耗材扣减由后续自动匹配按实际入库明细完成。
+
+    这里不能把“暂时没有耗材映射”写成“本次不使用”，否则后续补齐正品↔耗材
+    映射时容易让业务误以为已经处理完成。历史上明确人工登记的结果仍由
+    ``auto_apply_inbound_usage`` 负责兼容保留。
     """
     changed = False
-    was_decided = bool(link.consumable_usage_decided)
     if not link.confirmed:
         link.confirmed = True
         changed = True
-    if not link.consumable_usage_decided:
-        link.consumable_usage_decided = True
-        changed = True
-    if link.consumable_usage_enabled is None:
-        link.consumable_usage_enabled = False
+    # 旧自动链路可能曾被标成“本次不使用”。清掉这个自动假决策，交给真正的
+    # 入库明细与耗材映射重新计算；明确人工链路不在这里覆盖。
+    if link.match_method != "manual" and link.consumable_usage_decided and link.consumable_usage_enabled is False:
+        link.consumable_usage_decided = False
+        link.consumable_usage_enabled = None
         changed = True
     suffix = "自动确认"
-    if not was_decided and not link.consumable_usage_enabled:
-        suffix += "；本次不使用耗材"
     if suffix not in (link.note or ""):
         link.note = f"{link.note}；{suffix}" if link.note else suffix
         changed = True
@@ -234,10 +255,27 @@ class ProcurementChainMatcher:
         invoices = filter_visible_invoices(
             self.db.query(TaxInvoice).filter_by(direction="input")
         ).all()
+        supplier_profiles: dict[str, list[Supplier]] = {}
+        for supplier in self.db.query(Supplier).filter(Supplier.tax_no != "").all():
+            tax_no = normalize_tax_no(supplier.tax_no)
+            if tax_no:
+                supplier_profiles.setdefault(tax_no, []).append(supplier)
         order_by_no = {order.external_order_id: order for order in orders}
+        # 淘宝/拼多多/手工采购单没有 Alibaba1688Order 原始副本，需要单独参与发票匹配。
+        # 有 1688 原始副本的工作流副本已由上面的订单处理，避免同一订单被重复候选。
+        external_orders = [
+            po for po in self.db.query(ExternalPurchaseOrder).all()
+            if not is_reference_only_external_po(po)
+            and (
+                (po.platform or "1688") != "1688"
+                or po.external_order_id not in order_by_no
+            )
+        ]
         created, skipped = 0, 0
         protected_inbound = 0
         pending_inbound = 0
+        supplier_profile_missing = 0
+        supplier_profile_ambiguous = 0
 
         # 每张单据最多推荐一个“时间最近”的订单，避免同供应商批量笛卡尔关联。
         for doc in documents:
@@ -291,7 +329,8 @@ class ProcurementChainMatcher:
         covered: dict[int, Decimal] = {order.id: Decimal("0") for order in orders}
         invoice_by_id = {inv.id: inv for inv in invoices}
         for link in self.db.query(TaxInvoiceLink).filter(
-            TaxInvoiceLink.target_type == "alibaba1688_order"
+            TaxInvoiceLink.target_type == "alibaba1688_order",
+            TaxInvoiceLink.match_method != "rejected",
         ).all():
             linked = invoice_by_id.get(link.invoice_id)
             if linked is None:
@@ -299,6 +338,17 @@ class ProcurementChainMatcher:
             linked_amount = parse_decimal(linked.total_amount) or Decimal("0")
             if linked_amount > 0:
                 covered[link.target_id] = covered.get(link.target_id, Decimal("0")) + linked_amount
+        covered_external: dict[int, Decimal] = {po.id: Decimal("0") for po in external_orders}
+        for link in self.db.query(TaxInvoiceLink).filter(
+            TaxInvoiceLink.target_type == "external_purchase_order",
+            TaxInvoiceLink.match_method != "rejected",
+        ).all():
+            linked = invoice_by_id.get(link.invoice_id)
+            if linked is None:
+                continue
+            linked_amount = parse_decimal(linked.total_amount) or Decimal("0")
+            if linked_amount > 0:
+                covered_external[link.target_id] = covered_external.get(link.target_id, Decimal("0")) + linked_amount
 
         for invoice in invoices:
             amount = parse_decimal(invoice.total_amount)
@@ -311,32 +361,79 @@ class ProcurementChainMatcher:
                 else:
                     red_invoices += 1
                 continue
-            match = self._best_order(orders, invoice.seller_name, amount, invoice.issue_date)
+            tax_no = normalize_tax_no(invoice.seller_tax_id)
+            profiles = supplier_profiles.get(tax_no, []) if tax_no else []
+            if not profiles:
+                # 供应商档案是采购、入库、发票的统一维度；没有税号档案时不按名称猜测，
+                # 避免同名/改名主体被串单。人工关联仍可在发票详情中执行。
+                supplier_profile_missing += 1
+                skipped += 1
+                continue
+            if len(profiles) != 1:
+                supplier_profile_ambiguous += 1
+                skipped += 1
+                continue
+            supplier_profile = profiles[0]
+            supplier_name = supplier_profile.name
+            supplier_note = f"供应商档案税号一致（{tax_no}）"
+            target_type = "alibaba1688_order"
+            match = self._best_order(orders, supplier_name, amount, invoice.issue_date)
             if match is None:
                 match = self._best_order(
-                    orders, invoice.seller_name, amount, invoice.issue_date,
+                    orders, supplier_name, amount, invoice.issue_date,
                     window_days=INVOICE_EXTENDED_WINDOW_DAYS, exact=True,
                 )
                 if match is not None:
                     order, _, note = match
-                    match = (order, INVOICE_EXTENDED_CONFIDENCE, f"补开票（>{MATCH_WINDOW_DAYS} 天）：{note}，金额精确一致")
+                    match = (order, INVOICE_EXTENDED_CONFIDENCE, f"{supplier_note}；补开票（>{MATCH_WINDOW_DAYS} 天）：{note}，金额精确一致")
                     extended_invoices += 1
+            elif match is not None:
+                order, confidence, note = match
+                match = (order, confidence, f"{supplier_note}；{note}")
+            if match is None:
+                target_type = "external_purchase_order"
+                match = self._best_external_order(
+                    external_orders, supplier_name, amount, invoice.issue_date,
+                )
+                if match is None:
+                    match = self._best_external_order(
+                        external_orders, supplier_name, amount, invoice.issue_date,
+                        window_days=INVOICE_EXTENDED_WINDOW_DAYS, exact=True,
+                    )
+                    if match is not None:
+                        order, _, note = match
+                        match = (order, INVOICE_EXTENDED_CONFIDENCE, f"{supplier_note}；补开票（>{MATCH_WINDOW_DAYS} 天）：{note}，金额精确一致")
+                        extended_invoices += 1
+                elif match is not None:
+                    order, confidence, note = match
+                    match = (order, confidence, f"{supplier_note}；{note}")
             if match is None:
                 skipped += 1
                 continue
             order, confidence, note = match
-            if not self._existing_invoice_link(order.id, invoice.id):
-                payment = parse_decimal(order.actual_payment) or Decimal("0")
-                already = covered.get(order.id, Decimal("0"))
+            order_id = order.id
+            if not self._existing_invoice_link(target_type, order_id, invoice.id):
+                if target_type == "alibaba1688_order":
+                    payment = parse_decimal(order.actual_payment) or Decimal("0")
+                    already = covered.get(order_id, Decimal("0"))
+                else:
+                    payment = parse_decimal(order.paid_amount)
+                    if payment is None:
+                        payment = parse_decimal(order.order_amount)
+                    payment = payment or Decimal("0")
+                    already = covered_external.get(order_id, Decimal("0"))
                 if payment > 0 and already + amount > payment * (1 + AMOUNT_TOLERANCE) + ABS_EPS:
                     # 该订单的实付已被既有发票覆盖，再挂一张会重复计票（换开/重开）。
                     over_covered += 1
                     continue
                 self._upsert_invoice_link(
-                    order.id, invoice.id, confidence, auto_confirm=auto_confirm,
+                    target_type, order_id, invoice.id, confidence, auto_confirm=auto_confirm,
                     note=note if auto_confirm else f"{note}；待人工确认",
                 )
-                covered[order.id] = already + amount
+                if target_type == "alibaba1688_order":
+                    covered[order_id] = already + amount
+                else:
+                    covered_external[order_id] = already + amount
                 created += 1
         self.db.commit()
         sweep = auto_confirm_pending_links(self.db, actor="system") if auto_confirm else {}
@@ -349,6 +446,8 @@ class ProcurementChainMatcher:
             "voidedInvoices": voided_invoices,
             "extendedInvoices": extended_invoices,
             "overCovered": over_covered,
+            "supplierProfileMissing": supplier_profile_missing,
+            "supplierProfileAmbiguous": supplier_profile_ambiguous,
             "requiresConfirmation": not auto_confirm or pending_inbound > 0,
             "autoConfirmed": (
                 int(sweep.get("confirmedChain", 0)) + int(sweep.get("confirmedInvoices", 0))
@@ -382,6 +481,38 @@ class ProcurementChainMatcher:
                 or days is None
                 or days > window
                 or days < -PREPAY_GRACE_DAYS
+            ):
+                continue
+            candidates.append((days, abs(payment - target_amount), order))
+        if not candidates:
+            return None
+        candidates.sort(key=lambda item: (item[0], item[1], item[2].id))
+        days, _, order = candidates[0]
+        return order, HIGH_CONFIDENCE, f"供应商+金额一致，时间相距 {days:.0f} 天"
+
+    @staticmethod
+    def _best_external_order(
+        orders: list[ExternalPurchaseOrder], supplier_name: str | None, amount, target_date: datetime | None,
+        window_days: int | None = None, exact: bool = False,
+    ) -> tuple[ExternalPurchaseOrder, Decimal, str] | None:
+        """为非 1688 工作流订单匹配进项发票，规则与 1688 原始订单保持一致。"""
+        supplier = normalize_name(supplier_name)
+        target_amount = parse_decimal(amount)
+        if not supplier or target_amount is None or target_date is None:
+            return None
+        window = MATCH_WINDOW_DAYS if window_days is None else window_days
+        candidates: list[tuple[float, Decimal, ExternalPurchaseOrder]] = []
+        for order in orders:
+            payment = parse_decimal(order.paid_amount)
+            if payment is None:
+                payment = parse_decimal(order.order_amount)
+            days = _days_apart(order.ordered_at, target_date)
+            if (
+                normalize_name(order.supplier_name) != supplier
+                or payment is None
+                or not (amount_exact(payment, target_amount) if exact else amount_close(payment, target_amount))
+                or days is None
+                or days > window
             ):
                 continue
             candidates.append((days, abs(payment - target_amount), order))
@@ -457,9 +588,9 @@ class ProcurementChainMatcher:
         self.db.commit()
         return {"linked": True, "settlementNo": best.settlement_no}
 
-    def _existing_invoice_link(self, order_id: int, invoice_id: int) -> bool:
+    def _existing_invoice_link(self, target_type: str, order_id: int, invoice_id: int) -> bool:
         return self.db.query(TaxInvoiceLink).filter_by(
-            target_type="alibaba1688_order", target_id=order_id, invoice_id=invoice_id
+            target_type=target_type, target_id=order_id, invoice_id=invoice_id
         ).first() is not None
 
     def _upsert_link(self, order_id: int, target_type: str, target_id: int,
@@ -480,14 +611,14 @@ class ProcurementChainMatcher:
             auto_confirm_inbound_link(link)
         return link
 
-    def _upsert_invoice_link(self, order_id: int, invoice_id: int,
+    def _upsert_invoice_link(self, target_type: str, order_id: int, invoice_id: int,
                              confidence: Decimal, auto_confirm: bool, note: str) -> TaxInvoiceLink:
         link = self.db.query(TaxInvoiceLink).filter_by(
-            target_type="alibaba1688_order", target_id=order_id, invoice_id=invoice_id
+            target_type=target_type, target_id=order_id, invoice_id=invoice_id
         ).first()
         if link is None:
             link = TaxInvoiceLink(
-                invoice_id=invoice_id, target_type="alibaba1688_order", target_id=order_id,
+                invoice_id=invoice_id, target_type=target_type, target_id=order_id,
                 match_method="auto", confidence=confidence, confirmed=auto_confirm, note=note,
             )
             self.db.add(link)
@@ -616,8 +747,6 @@ class ProcurementChainMatcher:
         link = self.db.get(ProcurementChainLink, link_id)
         if link is None:
             raise ValueError("关联不存在")
-        if link.target_type == "inbound" and not link.consumable_usage_decided:
-            raise ValueError("确认入库关联前必须先确认是否添加耗材使用及数量")
         link.confirmed = True
         self.db.commit()
         # 确认预关联建议后：自动反填该入库单明细为 SKU 分配（此前确认入口不触发反填）
@@ -687,8 +816,9 @@ def auto_confirm_pending_links(db: Session, actor: str = "system") -> dict:
     """把当前可验证的采购链关联一次性确认。
 
     入库链必须有当前采购单的真实 SKU/入库明细分配支撑；仅有供应商、金额、时间
-    候选的关系保持待确认。没有耗材来源信息时只确认“本次不使用耗材”，绝不自动
-    扣库存。缺少来源或目标单据的孤儿关系跳过并返回数量，方便验收。
+    候选的关系保持待确认。入库关联确认后，耗材使用由后续流程按实际入库明细
+    和 SKU 映射自动计算；缺少映射会保留为待处理，不伪造“本次不使用”。
+    缺少来源或目标单据的孤儿关系跳过并返回数量，方便验收。
     """
     chain_links = db.query(ProcurementChainLink).filter(
         ProcurementChainLink.match_method != "rejected"
@@ -809,7 +939,7 @@ def auto_confirm_pending_links(db: Session, actor: str = "system") -> dict:
                     status = usage_result.get("status")
                     if status == "applied":
                         auto_usage["applied"] += 1
-                    elif status == "no_mapping":
+                    elif status in {"no_mapping", "pending_mapping"}:
                         auto_usage["noMapping"] += 1
                     elif status == "pending":
                         auto_usage["pending"] += 1
@@ -1145,7 +1275,10 @@ def list_link_candidates(
     return {"total": len(rows), "items": rows[:limit]}
 
 
-def _source_pairs(db: Session) -> list[tuple[Alibaba1688Order | None, ExternalPurchaseOrder | None]]:
+def _source_pairs(
+    db: Session,
+    externals: list[ExternalPurchaseOrder] | None = None,
+) -> list[tuple[Alibaba1688Order | None, ExternalPurchaseOrder | None]]:
     """按 1688 订单号合并文件副本与采购工作流副本，保证界面一行一单。
 
     ``alibaba1688_orders`` 保存官方导出原件的标准副本，
@@ -1156,6 +1289,9 @@ def _source_pairs(db: Session) -> list[tuple[Alibaba1688Order | None, ExternalPu
     文件副本不出现，同单号的工作流副本也不作为残留行出现（该订单被明确判定为不要）。
     同理，若订单仍有文件副本但该批次已删除或尚未确认，不能让工作流副本绕过
     导入生命周期单独露出；没有任何文件副本的手工/OAuth 订单仍会保留。
+
+    ``externals`` 传入调用方已加载的工作流副本时不再重复查表（同一请求内
+    chain_snapshot 会同时喂给 ChainPrefetch，避免同一张表按行加载两遍）。
     """
     file_orders = (
         filter_active_rows(
@@ -1181,7 +1317,9 @@ def _source_pairs(db: Session) -> list[tuple[Alibaba1688Order | None, ExternalPu
     active_source_nos = {order.external_order_id for order in file_orders}
     workflow_by_no: dict[str, ExternalPurchaseOrder] = {}
     workflow_other: list[ExternalPurchaseOrder] = []
-    for po in db.query(ExternalPurchaseOrder).order_by(ExternalPurchaseOrder.id.desc()).all():
+    if externals is None:
+        externals = db.query(ExternalPurchaseOrder).order_by(ExternalPurchaseOrder.id.desc()).all()
+    for po in sorted(externals, key=lambda item: item.id, reverse=True):
         if is_reference_only_external_po(po):
             continue
         # 1688 文件副本只能与 1688 工作流副本合并；淘宝/拼多多/其他渠道
@@ -1254,20 +1392,28 @@ class ChainPrefetch:
     列表页与漏斗统计要遍历全部订单，逐行查库会产生上千次单行查询（实测 100 单 ≈ 550ms）。
     这里一次性把关联表全量载入内存并按外键分组，把复杂度压到「表数量」而非「订单数 × 每张表」。
     单条订单详情仍走点查，不预加载。
+
+    预加载成本本身也不小（各表 JSONB 列解码占大头），因此：
+    - ``externals`` 可复用调用方已加载的工作流副本，避免同一张表加载两遍；
+    - 发票只按已被链路引用的 ID 取，不做全表 328 张（含 raw）的无谓解码。
     """
 
-    def __init__(self, db: Session):
+    def __init__(self, db: Session, externals: list[ExternalPurchaseOrder] | None = None):
+        # 工作台会同时遍历订单、入库、发票和耗材关系。集中批量加载，
+        # 避免 _order_row 在每张订单上重复点查同一组关联表。
+        self.warehouses_by_id = {
+            warehouse.id: warehouse for warehouse in db.query(Warehouse).all()
+        }
+        if externals is None:
+            externals = db.query(ExternalPurchaseOrder).all()
         self.external_by_no = {
-            po.external_order_id: po for po in db.query(ExternalPurchaseOrder).all()
+            po.external_order_id: po for po in externals
         }
         self.docs = {
             d.id: d for d in db.query(JackyunGoodsDocument).filter_by(document_type="inbound").all()
         }
         self.docs_by_no = {d.goodsdoc_no: d for d in self.docs.values()}
         self.settlements = {s.id: s for s in db.query(JackyunPurchaseSettlement).all()}
-        self.invoices = {
-            i.id: i for i in filter_visible_invoices(db.query(TaxInvoice)).all()
-        }
         self.jackyun_pos = {p.id: p for p in db.query(JackyunPurchaseOrder).all()}
 
         self.chain_links: dict[int, list[ProcurementChainLink]] = {}
@@ -1280,9 +1426,71 @@ class ChainPrefetch:
         ).all():
             self.invoice_links.setdefault((link.target_type, link.target_id), []).append(link)
 
+        # 发票只服务于「已被链路引用的那几张」（_order_row 按 link.invoice_id 查），
+        # 全表加载会把 300+ 张票的 raw JSONB 一起解码，纯属浪费。
+        referenced_invoice_ids = {link.invoice_id for links in self.invoice_links.values() for link in links}
+        self.invoices = {}
+        if referenced_invoice_ids:
+            self.invoices = {
+                i.id: i for i in filter_visible_invoices(
+                    db.query(TaxInvoice).filter(TaxInvoice.id.in_(referenced_invoice_ids))
+                ).all()
+            }
+
         self.inbound_links: dict[int, list[InboundLink]] = {}
         for link in db.query(InboundLink).all():
             self.inbound_links.setdefault(link.po_id, []).append(link)
+
+        self.purchase_invoice_links: dict[int, list[tuple[PurchaseInvoiceLink, PurchaseInvoice]]] = {}
+        purchase_invoices = {
+            invoice.id: invoice for invoice in db.query(PurchaseInvoice).all()
+        }
+        for link in db.query(PurchaseInvoiceLink).all():
+            invoice = purchase_invoices.get(link.invoice_id)
+            if invoice is not None:
+                self.purchase_invoice_links.setdefault(link.po_id, []).append((link, invoice))
+
+        self.inbound_item_totals: dict[int, tuple[Decimal | None, int]] = {}
+        item_totals: dict[int, tuple[Decimal, int]] = {}
+        for document_id, amount_tax in db.query(
+            JackyunGoodsDocumentItem.document_id,
+            JackyunGoodsDocumentItem.amount_tax,
+        ).all():
+            total, count = item_totals.get(document_id, (Decimal("0"), 0))
+            if amount_tax is not None:
+                total += amount_tax
+            item_totals[document_id] = (total, count + 1)
+        for document_id, (total, count) in item_totals.items():
+            self.inbound_item_totals[document_id] = (total, count)
+
+        self.inbound_usages: dict[int, list[dict]] = {}
+        for usage, material in db.query(InboundConsumableUsage, Consumable).join(
+            Consumable, Consumable.id == InboundConsumableUsage.consumable_id
+        ).order_by(Consumable.code).all():
+            self.inbound_usages.setdefault(usage.link_id, []).append({
+                "id": usage.id,
+                "consumableId": material.id,
+                "consumableCode": material.code,
+                "consumableName": material.name,
+                "unit": material.unit,
+                "quantity": f"{Decimal(str(usage.quantity or 0)):.4f}",
+                "note": usage.note,
+            })
+
+        self.consumable_purchases_by_source: dict[int, list[ConsumablePurchase]] = {}
+        self.consumable_purchases_by_reference: dict[str, list[ConsumablePurchase]] = {}
+        for purchase in db.query(ConsumablePurchase).all():
+            if purchase.source_order_id is not None:
+                self.consumable_purchases_by_source.setdefault(purchase.source_order_id, []).append(purchase)
+            reference_no = (purchase.reference_no or "").strip()
+            if reference_no:
+                self.consumable_purchases_by_reference.setdefault(reference_no, []).append(purchase)
+        self.consumable_items_by_purchase: dict[int, list[ConsumablePurchaseItem]] = {}
+        for item in db.query(ConsumablePurchaseItem).all():
+            self.consumable_items_by_purchase.setdefault(item.purchase_id, []).append(item)
+        self.consumable_receipts_by_purchase: dict[int, list[ConsumableReceipt]] = {}
+        for receipt in db.query(ConsumableReceipt).order_by(ConsumableReceipt.id).all():
+            self.consumable_receipts_by_purchase.setdefault(receipt.purchase_id, []).append(receipt)
 
         self.allocations: dict[int, list[PurchaseAllocationItem]] = {}
         for row in db.query(PurchaseAllocationItem).all():
@@ -1295,6 +1503,40 @@ class ChainPrefetch:
         self.expenses: dict[int, list[PurchaseExtraExpense]] = {}
         for row in db.query(PurchaseExtraExpense).all():
             self.expenses.setdefault(row.po_id, []).append(row)
+
+
+# ---------- 请求级链路快照：一次加载，全请求复用 ----------
+
+_SNAPSHOT_KEY = "_procurement_chain_snapshot"
+
+
+@event.listens_for(Session, "after_commit")
+@event.listens_for(Session, "after_rollback")
+def _drop_chain_snapshot(session: Session) -> None:
+    """提交/回滚后立即丢弃快照，保证下一段读取一定看到落库后的最新事实。
+
+    快照只活在「一个数据库会话 = 一个请求」的范围内，不跨请求共享，
+    因此既不会读到旧数据，也不需要任何过期时间。
+    """
+    session.info.pop(_SNAPSHOT_KEY, None)
+
+
+def chain_snapshot(db: Session) -> tuple[
+    list[tuple[Alibaba1688Order | None, ExternalPurchaseOrder | None]], ChainPrefetch
+]:
+    """一次性拿到「订单对 + 批量预取」，供同一请求内的多段聚合共用。
+
+    此前每个入口各自 ``ChainPrefetch(db)`` 再各自 ``_source_pairs(db)``，
+    同一张 external_purchase_orders 表在一个请求里会被完整加载两遍（含 raw JSONB 解码）。
+    这里把两份数据建立在同一次读取上，并挂在事务内的会话上复用。
+    """
+    cached = db.info.get(_SNAPSHOT_KEY)
+    if cached is not None:
+        return cached
+    externals = db.query(ExternalPurchaseOrder).all()
+    snapshot = (_source_pairs(db, externals=externals), ChainPrefetch(db, externals=externals))
+    db.info[_SNAPSHOT_KEY] = snapshot
+    return snapshot
 
 
 # ---------- 取值助手：有预加载走内存，无预加载退回点查 ----------
@@ -1313,6 +1555,39 @@ def _external_of(db: Session, pf: ChainPrefetch | None, order_no: str) -> Extern
     return db.query(ExternalPurchaseOrder).filter_by(
         external_order_id=order_no, platform="1688"
     ).order_by(ExternalPurchaseOrder.id.desc()).first()
+
+
+def _pair_supplier_key(
+    db: Session,
+    pf: ChainPrefetch | None,
+    order: Alibaba1688Order | None,
+    external: ExternalPurchaseOrder | None,
+) -> str:
+    """订单对的「供应商/买家」关键字，与 _order_row 行内取值完全同口径。
+
+    供供应商维度按名字预筛：供应商历史/画像只需命中该供应商的少数订单，
+    没有必要把全部订单都做一遍完整行聚合（实测全量聚合 49 单 ≈ 100ms）。
+    """
+    if external is None and order is not None:
+        external = _external_of(db, pf, order.external_order_id)
+    supplier = (
+        (order.seller_company_name if order is not None else "")
+        or (external.supplier_name if external is not None else "")
+    )
+    buyer = order.buyer_company_name if order is not None else (
+        external.buyer_account if external is not None else ""
+    )
+    return (supplier or buyer or "").strip()
+
+
+def _pair_order_id(
+    order: Alibaba1688Order | None,
+    external: ExternalPurchaseOrder | None,
+) -> int | None:
+    """订单对的工作台 ID，与 _order_row 的 orderId 同口径（文件副本优先）。"""
+    if order is not None:
+        return order.id
+    return external.id if external is not None else None
 
 
 def _chain_links_of(db: Session, pf: ChainPrefetch | None, order_id: int,
@@ -1348,8 +1623,14 @@ def _doc_of(db: Session, pf: ChainPrefetch | None, doc_id: int) -> JackyunGoodsD
     return db.get(JackyunGoodsDocument, doc_id)
 
 
-def _inbound_item_amounts(db: Session, document_id: int) -> tuple[Decimal | None, int]:
+def _inbound_item_amounts(
+    db: Session,
+    document_id: int,
+    pf: ChainPrefetch | None = None,
+) -> tuple[Decimal | None, int]:
     """入库单明细合计金额与行数（用于单据头与明细对账）。"""
+    if pf is not None:
+        return pf.inbound_item_totals.get(document_id, (None, 0))
     from app.models.jackyun import JackyunGoodsDocumentItem
 
     rows = db.query(JackyunGoodsDocumentItem.amount_tax).filter(
@@ -1376,11 +1657,19 @@ def _invoice_of(db: Session, pf: ChainPrefetch | None, invoice_id: int) -> TaxIn
     return db.get(TaxInvoice, invoice_id)
 
 
+def _inbound_usage_of(db: Session, pf: ChainPrefetch | None, link_id: int) -> list[dict]:
+    """返回入库关联的耗材使用明细；列表场景优先走批量缓存。"""
+    if pf is not None:
+        return pf.inbound_usages.get(link_id, [])
+    from app.services.consumable_service import inbound_usage_rows
+
+    return inbound_usage_rows(db, link_id)
+
+
 def list_chain(db: Session, limit: int = 100, offset: int = 0) -> dict:
     """返回采购全链路列表：每个 1688 订单号只占一行。"""
-    pairs = _source_pairs(db)
+    pairs, pf = chain_snapshot(db)
     total = len(pairs)
-    pf = ChainPrefetch(db)
     rows: list[dict] = []
     for order, external in pairs[offset:offset + limit]:
         rows.append(_order_row(db, order, external, pf=pf))
@@ -1464,7 +1753,10 @@ def _extract_1688_items(order: Alibaba1688Order | None) -> list[dict]:
 
 
 def _consumable_of(
-    db: Session, order: Alibaba1688Order | None, order_no: str | None = None
+    db: Session,
+    order: Alibaba1688Order | None,
+    order_no: str | None = None,
+    pf: ChainPrefetch | None = None,
 ) -> dict | None:
     """取该订单关联的耗材采购 + 收货（耗材走本平台，不生成吉客云单据）。
 
@@ -1481,23 +1773,29 @@ def _consumable_of(
     """
     if order is None and not order_no:
         return None
-    from app.models.consumable_purchase import (
-        ConsumablePurchase, ConsumablePurchaseItem, ConsumableReceipt,
-    )
-    from app.models.catalog import Warehouse
     from app.services.warehouse_service import display_code
 
-    conds = []
-    if order is not None:
-        conds.append(ConsumablePurchase.source_order_id == order.id)
-    if order_no:
-        conds.append(ConsumablePurchase.reference_no == order_no)
-    purchases = (
-        db.query(ConsumablePurchase)
-        .filter(or_(*conds))
-        .order_by(ConsumablePurchase.id)
-        .all()
-    )
+    if pf is not None:
+        purchases_by_id: dict[int, ConsumablePurchase] = {}
+        if order is not None:
+            for purchase in pf.consumable_purchases_by_source.get(order.id, []):
+                purchases_by_id[purchase.id] = purchase
+        if order_no:
+            for purchase in pf.consumable_purchases_by_reference.get(order_no, []):
+                purchases_by_id[purchase.id] = purchase
+        purchases = sorted(purchases_by_id.values(), key=lambda item: item.id)
+    else:
+        conds = []
+        if order is not None:
+            conds.append(ConsumablePurchase.source_order_id == order.id)
+        if order_no:
+            conds.append(ConsumablePurchase.reference_no == order_no)
+        purchases = (
+            db.query(ConsumablePurchase)
+            .filter(or_(*conds))
+            .order_by(ConsumablePurchase.id)
+            .all()
+        )
     active = [p for p in purchases if (p.status or "") != "cancelled"]
     if not active:
         return None
@@ -1508,11 +1806,15 @@ def _consumable_of(
     any_received = False
     for purchase in active:
         p_items = (
-            db.query(ConsumablePurchaseItem).filter_by(purchase_id=purchase.id).all()
+            pf.consumable_items_by_purchase.get(purchase.id, [])
+            if pf is not None
+            else db.query(ConsumablePurchaseItem).filter_by(purchase_id=purchase.id).all()
         )
         items.extend(p_items)
         p_receipts = (
-            db.query(ConsumableReceipt)
+            pf.consumable_receipts_by_purchase.get(purchase.id, [])
+            if pf is not None
+            else db.query(ConsumableReceipt)
             .filter_by(purchase_id=purchase.id)
             .order_by(ConsumableReceipt.id)
             .all()
@@ -1528,7 +1830,10 @@ def _consumable_of(
             if got < want:
                 fully_received = False
     last = receipts[-1] if receipts else None
-    last_warehouse = db.get(Warehouse, last.warehouse_id) if last is not None and last.warehouse_id else None
+    last_warehouse = (
+        (pf.warehouses_by_id.get(last.warehouse_id) if pf is not None else db.get(Warehouse, last.warehouse_id))
+        if last is not None and last.warehouse_id else None
+    )
     status = "received" if fully_received else ("partial" if any_received else "ordered")
     return {
         "purchaseNo": "、".join(str(p.number) for p in active),
@@ -1604,10 +1909,10 @@ def _order_row(
         if doc.goodsdoc_no in seen_inbound:
             continue
         seen_inbound.add(doc.goodsdoc_no)
-        from app.services.consumable_service import inbound_usage_rows
-        usage_items = inbound_usage_rows(db, link.id)
-        item_sum, item_count = _inbound_item_amounts(db, doc.id)
+        usage_items = _inbound_usage_of(db, pf, link.id)
+        item_sum, item_count = _inbound_item_amounts(db, doc.id, pf=pf)
         inbound_info.append({
+            **_inbound_source_fields(doc),
             "linkId": link.id,
             "documentId": doc.id,
             "targetId": doc.id,
@@ -1627,14 +1932,24 @@ def _order_row(
         })
     # 采购中心的显式入库关联也合并进同一行（旧链路表仍兼容）。
     if external is not None:
-        for link in db.query(InboundLink).filter_by(po_id=external.id).all():
-            doc = db.query(JackyunGoodsDocument).filter_by(
-                document_type="inbound", goodsdoc_no=link.goodsdoc_no
-            ).first()
+        legacy_links = (
+            pf.inbound_links.get(external.id, [])
+            if pf is not None
+            else db.query(InboundLink).filter_by(po_id=external.id).all()
+        )
+        for link in legacy_links:
+            doc = (
+                pf.docs_by_no.get(link.goodsdoc_no)
+                if pf is not None
+                else db.query(JackyunGoodsDocument).filter_by(
+                    document_type="inbound", goodsdoc_no=link.goodsdoc_no
+                ).first()
+            )
             if doc is None or doc.goodsdoc_no in seen_inbound:
                 continue
             seen_inbound.add(doc.goodsdoc_no)
             inbound_info.append({
+                **_inbound_source_fields(doc),
                 "linkId": None,
                 "targetId": doc.id,
                 "goodsdocNo": doc.goodsdoc_no,
@@ -1696,19 +2011,28 @@ def _order_row(
             "linkId": link.id,
             "invoiceKind": "tax",
             "confirmed": True,
+            "matchMethod": link.match_method or "",
+            "confidence": _num(link.confidence),
+            "note": link.note or "",
         })
 
     if external is not None:
         tax_numbers = {str(inv.get("invoiceNo")) for inv in invoice_info}
-        for link, inv in db.query(PurchaseInvoiceLink, PurchaseInvoice).join(
-            PurchaseInvoice, PurchaseInvoice.id == PurchaseInvoiceLink.invoice_id
-        ).filter(PurchaseInvoiceLink.po_id == external.id).all():
+        manual_invoice_links = (
+            pf.purchase_invoice_links.get(external.id, [])
+            if pf is not None
+            else db.query(PurchaseInvoiceLink, PurchaseInvoice).join(
+                PurchaseInvoice, PurchaseInvoice.id == PurchaseInvoiceLink.invoice_id
+            ).filter(PurchaseInvoiceLink.po_id == external.id).all()
+        )
+        for link, inv in manual_invoice_links:
             if inv.invoice_no and inv.invoice_no in tax_numbers:
                 continue  # 税务原始清单优先，避免登记副本重复计票。
             invoice_info.append({"invoiceId": inv.id, "linkId": link.id, "invoiceKind": "manual",
                                  "invoiceNo": inv.invoice_no, "amount": _num(link.allocated_amount),
                                  "issueDate": inv.invoice_date.isoformat() if inv.invoice_date else None,
-                                 "verified": False, "verifiedMonth": "", "confirmed": True})
+                                 "verified": False, "verifiedMonth": "", "confirmed": True,
+                                 "matchMethod": "manual", "confidence": 1, "note": "采购单手工登记发票"})
             if link.allocated_amount is not None:
                 invoiced_amount += Decimal(str(link.allocated_amount))
     verified = bool(invoice_info) and all(i["verified"] for i in invoice_info)
@@ -1788,30 +2112,44 @@ def _order_row(
     buyer = order.buyer_company_name if order is not None else (
         external.buyer_account if external is not None else ""
     )
+    target_warehouse_id = (
+        external.warehouse_id if external is not None and external.warehouse_id is not None
+        else (order.warehouse_id if order is not None else None)
+    )
+    target_warehouse = (
+        (pf.warehouses_by_id.get(target_warehouse_id) if pf is not None else db.get(Warehouse, target_warehouse_id))
+        if target_warehouse_id is not None else None
+    )
+    platform = "1688" if order is not None else (external.platform or "other")
+    platform_paid_amount = (
+        parse_decimal(order.actual_payment) if order is not None
+        else parse_decimal(external.paid_amount) if platform == "1688" and external is not None
+        else None
+    )
+    paid_on_1688 = platform == "1688" and (platform_paid_amount or Decimal("0")) > 0
     row = {
         # 兼容旧前端：orderId 优先使用文件副本 id；工作流独有订单使用采购单 id。
         "orderId": file_order_id if file_order_id is not None else external.id,
         "fileOrderId": file_order_id,
         "externalPoId": external.id if external is not None else None,
         "source": "file" if order is not None else "workflow",
-        "platform": "1688" if order is not None else (external.platform or "other"),
+        "platform": platform,
         "orderNo": order_no,
         # 订单类型人工覆盖（goods/consumable/空）：自动判定仅作默认，见 _order_kind
         "orderKindOverride": (external.order_kind_override or "") if external is not None else "",
         "supplier": supplier,
         "buyer": buyer,
+        "targetWarehouseId": target_warehouse.id if target_warehouse is not None else None,
+        "targetWarehouseName": target_warehouse.name if target_warehouse is not None else "",
         "amount": float(amount) if amount is not None else None,
         "paidAmount": _num(external.paid_amount) if external is not None else (
             _num(order.actual_payment) if order is not None else None
         ),
-        # 1688 是担保交易：下单即付款，pay_time + actual_payment 本身就是付款事实。
+        # 1688 是担保交易：实际付款金额大于 0 即视为已付款。
+        # pay_time 只是付款时间补充字段，部分导入文件没有该字段，不能用它否定付款事实。
         # 本账号吉客云没有采购/结算体系（jackyun_purchase_settlements 恒为 0 条），
         # 不能因为拿不到结算单就把「付款」环节永久卡住（2026-09-06 口径）。
-        "paidOn1688": bool(
-            order is not None
-            and order.pay_time is not None
-            and (parse_decimal(order.actual_payment) or Decimal("0")) > 0
-        ),
+        "paidOn1688": paid_on_1688,
         "paidOn1688At": order.pay_time.isoformat() if (order is not None and order.pay_time) else None,
         "adjustmentAmount": _num(external.adjustment_amount) if external is not None else None,
         "adjustmentNote": (external.adjustment_note or "") if external is not None else "",
@@ -1840,7 +2178,7 @@ def _order_row(
         "orderItems": _extract_1688_items(order),
         "allocations": allocations,
         # 耗材收货（本平台，不生成吉客云单据）：已收货的耗材单视为内容已确认 + 已入库。
-        "consumable": _consumable_of(db, order, order_no),
+        "consumable": _consumable_of(db, order, order_no, pf=pf),
         "expenses": [_serialize_expense(e) for e in expenses],
         "purchaseOrders": purchase_orders,
         # 采购单步骤按 Excel 口径跳过（2026-09-06 用户口径：金额以导入表格为准、入库闭环即放行）。
@@ -1855,7 +2193,12 @@ def _order_row(
         "pendingCount": pending,
         "stageTotal": STAGE_TOTAL,
     }
-    # 7 环节完成状态：① 1688 订单 → ② SKU → ③ 吉客云采购单 → ④ 入库 → ⑤ 发票 → ⑥ 付款 → ⑦ 认证
+    # 耗材（本平台）不走 1688 SKU 分摊：HC 耗材采购单录入了明细即视为采购内容已确认，
+    # 不能因 pending_refine 卡在「确认采购内容」步骤（2026-09-16 用户口径）。
+    if not purchase_content_complete and (row["consumable"] or {}).get("items"):
+        purchase_content_complete = True
+        row["purchaseContentComplete"] = True
+    # 7 环节完成状态：① 1688 订单 → ② SKU → ③ 本系统采购单 → ④ 入库 → ⑤ 发票 → ⑥ 付款 → ⑦ 认证
     row["stages"] = _stage_states(row)
     row["doneCount"] = sum(1 for s in row["stages"] if s["done"])
     return row
@@ -1909,7 +2252,8 @@ def _stage_states(row: dict) -> list[dict]:
     inbound = row.get("inbound") or []
     invoice = row.get("invoice") or []
     settlement = row.get("settlement") or []
-    inbound_ready = bool(inbound) and all(item.get("consumableUsageDecided") for item in inbound)
+    # 入库阶段以真实入库单为准；耗材扣减是入库后的独立动作，不能阻塞入库状态。
+    inbound_ready = bool(inbound) or bool((row.get("consumable") or {}).get("received"))
 
     paid_rows = [s for s in settlement if s.get("paid")]
     paid_amount = sum(s.get("paidAmount") or s.get("amount") or 0 for s in paid_rows)
@@ -1926,9 +2270,6 @@ def _stage_states(row: dict) -> list[dict]:
         paid_detail = "未付款"
 
     first_po_no = (purchase_orders[0].get("purchNo") if purchase_orders else "") or "—"
-    # 吉客云无采购单体系时（2026-09-06 用户口径：金额以导入表格为准、入库已闭环），
-    # 采购单步骤按口径跳过即视为完成。
-    jackyun_po_bypassed = bool(row.get("jackyunPoBypassed"))
     # 耗材线（本平台 HC 单）：收齐即内容已确认/无需吉客云货品/不生成采购单/收货即入库
     # （与 workbench _step_states 同口径，2026-09-07）。
     consumable_received = bool((row.get("consumable") or {}).get("received"))
@@ -1946,16 +2287,17 @@ def _stage_states(row: dict) -> list[dict]:
             sum(a.get("amount") or 0 for a in allocations) or None,
         ),
         "jackyunPo": (
-            bool(purchase_orders) or jackyun_po_bypassed or consumable_received,
-            (first_po_no if purchase_orders else ("耗材不生成吉客云采购单" if consumable_received else "已按 Excel 口径跳过（入库闭环）"))
-            if (purchase_orders or jackyun_po_bypassed or consumable_received) else "未生成采购单",
-            sum(p.get("amount") or 0 for p in purchase_orders) or None,
+            bool(allocations) and all(a.get("skuId") for a in allocations) or bool(consumable_received),
+            ("耗材采购单已建立" if consumable_received else "本系统采购单已建立")
+            if ((bool(allocations) and all(a.get("skuId") for a in allocations)) or consumable_received)
+            else "待完成本系统采购明细",
+            sum(a.get("amount") or 0 for a in allocations) or None,
         ),
         "inbound": (
             inbound_ready or consumable_received,
             (
                 "耗材已收货入库" if consumable_received
-                else (f"{len(inbound)} 张入库单，耗材使用已确认" if inbound_ready else (f"{len(inbound)} 张入库单，待确认耗材使用" if inbound else "未入库"))
+                else (f"{len(inbound)} 张入库单，耗材已自动扣减" if inbound_ready else (f"{len(inbound)} 张入库单，待完成自动耗材扣减" if inbound else "未入库"))
             ),
             None,
         ),
@@ -1989,23 +2331,42 @@ def stage_done_map(row: dict) -> dict[str, bool]:
 
 
 def list_all_records(db: Session, limit: int = 300, offset: int = 0) -> dict:
-    """平铺全量记录：把 1688 订单、吉客云入库单/结算单、税务发票全部放进一张表，每行标记数据维度与环节。
+    """平铺全量记录：把 1688 订单、本系统入库/外部历史单、结算单和税务发票全部放进一张表，每行标记数据维度与环节。
 
-    - dimension: 1688 / jackyun / tax（即「1688 维度 / 吉客云维度 / 税务维度」）
+    - dimension: 1688 / purchase / jackyun / tax（即「1688 / 本系统采购 / 外部历史 / 税务」维度）
     - stage: order / inbound / settlement / invoice（① 采购 ② 入库 ③ 发票 ④ 付款 ⑤ 认证）
     - linkedOrderNos: 该单据已确认关联的 1688 订单号；pendingCount 为未确认关联数
     """
     rows: list[dict] = []
 
+    # 记录页同时遍历入库、结算和发票。关联关系一次性按目标单据分组，
+    # 避免在每个单据行里重复查询链路和来源订单。
+    order_by_id = {order.id: order for order in db.query(Alibaba1688Order).all()}
+    external_by_id = {
+        po.id: po for po in db.query(ExternalPurchaseOrder).all()
+    }
+    links_by_target: dict[tuple[str, int], list[ProcurementChainLink]] = {}
+    for link in db.query(ProcurementChainLink).filter(
+        ProcurementChainLink.match_method != "rejected"
+    ).all():
+        if link.target_id is not None:
+            links_by_target.setdefault((link.target_type, link.target_id), []).append(link)
+    invoice_links_by_invoice: dict[int, list[TaxInvoiceLink]] = {}
+    for link in db.query(TaxInvoiceLink).filter(
+        TaxInvoiceLink.target_type == "alibaba1688_order",
+        TaxInvoiceLink.match_method != "rejected",
+    ).all():
+        invoice_links_by_invoice.setdefault(link.invoice_id, []).append(link)
+
     def source_label(link: ProcurementChainLink) -> str | None:
         """返回链路来源单号；同时支持 1688 与工作流采购主单。"""
         if link.order_id is not None:
-            order = db.get(Alibaba1688Order, link.order_id)
+            order = order_by_id.get(link.order_id)
             if order is None or order.row_status == "deleted":
                 return None
             return order.external_order_id or f"#{order.id}"
         if link.external_po_id is not None:
-            external = db.get(ExternalPurchaseOrder, link.external_po_id)
+            external = external_by_id.get(link.external_po_id)
             if external is None or is_reference_only_external_po(external):
                 return None
             return external.external_order_id or f"#{external.id}"
@@ -2035,11 +2396,9 @@ def list_all_records(db: Session, limit: int = 300, offset: int = 0) -> dict:
             "verifiedMonth": "",
         })
 
-    # ② 吉客云 入库单
+    # ② 入库单：本系统新建为主，吉客云导入仅保留为历史/外部来源
     for doc in db.query(JackyunGoodsDocument).filter_by(document_type="inbound").all():
-        links = db.query(ProcurementChainLink).filter_by(target_type="inbound", target_id=doc.id).filter(
-            ProcurementChainLink.match_method != "rejected"
-        ).all()
+        links = links_by_target.get(("inbound", doc.id), [])
         linked: list[str] = []
         pending = 0
         for link in links:
@@ -2052,13 +2411,13 @@ def list_all_records(db: Session, limit: int = 300, offset: int = 0) -> dict:
                 pending += 1
         rows.append({
             "recordId": f"inbound-{doc.id}",
-            "dimension": "jackyun",
+            "dimension": "purchase" if (doc.raw or {}).get("source") == "local_purchase_inbound" else "jackyun",
             "stage": "inbound",
             "no": doc.goodsdoc_no,
             "counterparty": doc.supplier_name or doc.company_name or "",
             "amount": _num(doc.total_amount),
             "date": doc.document_at.isoformat() if doc.document_at else None,
-            "status": doc.warehouse_name or "已入库",
+            "status": doc.warehouse_name or ("本系统已入库" if (doc.raw or {}).get("source") == "local_purchase_inbound" else "已入库"),
             "statusTone": "ok",
             "linkedOrderNos": linked,
             "pendingCount": pending,
@@ -2069,9 +2428,7 @@ def list_all_records(db: Session, limit: int = 300, offset: int = 0) -> dict:
 
     # ④ 吉客云 结算 / 付款
     for st in db.query(JackyunPurchaseSettlement).all():
-        links = db.query(ProcurementChainLink).filter_by(target_type="settlement", target_id=st.id).filter(
-            ProcurementChainLink.match_method != "rejected"
-        ).all()
+        links = links_by_target.get(("settlement", st.id), [])
         linked = []
         pending = 0
         for link in links:
@@ -2105,13 +2462,11 @@ def list_all_records(db: Session, limit: int = 300, offset: int = 0) -> dict:
     for inv in filter_visible_invoices(
         db.query(TaxInvoice).filter_by(direction="input")
     ).all():
-        links = db.query(TaxInvoiceLink).filter_by(invoice_id=inv.id, target_type="alibaba1688_order").filter(
-            TaxInvoiceLink.match_method != "rejected"
-        ).all()
+        links = invoice_links_by_invoice.get(inv.id, [])
         linked = []
         pending = 0
         for link in links:
-            order = db.get(Alibaba1688Order, link.target_id)
+            order = order_by_id.get(link.target_id)
             if order is None or order.row_status == "deleted":
                 continue
             if link.confirmed:
@@ -2186,8 +2541,8 @@ def get_order_detail(db: Session, order_id: int) -> dict | None:
 
 def overview(db: Session) -> dict:
     """链路漏斗统计，与详情表共用同一行级聚合，避免两套口径。"""
-    pf = ChainPrefetch(db)
-    rows = [_order_row(db, order, external, pf=pf) for order, external in _source_pairs(db)]
+    pairs, pf = chain_snapshot(db)
+    rows = [_order_row(db, order, external, pf=pf) for order, external in pairs]
     total = len(rows)
     done_by_stage: dict[str, int] = {stage["key"]: 0 for stage in CHAIN_STAGES}
     for row in rows:
@@ -2303,12 +2658,13 @@ def execution_overview(db: Session) -> dict:
 
     口径：以 1688 订单为起点，按"接下来该做什么"分组。
     """
-    pf = ChainPrefetch(db)
-    rows = [_order_row(db, order, external, pf=pf) for order, external in _source_pairs(db)]
+    pairs, pf = chain_snapshot(db)
+    rows = [_order_row(db, order, external, pf=pf) for order, external in pairs]
     pending_process = 0       # 还没进入采购工作流：只有 1688 文件订单
     pending_refine = 0        # 工作流存在但 purchase_status == pending_refine
     pending_sku = 0           # 已确认采购内容但还没分配 SKU
-    pending_po = 0            # 已分配 SKU 但还没生成吉客云采购单
+    # 保留该字段仅为兼容旧版前端；吉客云采购单不再是本地采购流程的待办阶段。
+    pending_po = 0
     pending_invoice = 0       # 已入库/已付款但还没发票
 
     for row in rows:
@@ -2323,14 +2679,10 @@ def execution_overview(db: Session) -> dict:
 
         purchase_status = row.get("purchaseStatus") or ""
         allocations = row.get("allocations") or []
-        purchase_orders = row.get("purchaseOrders") or []
-
         if purchase_status == "pending_refine":
             pending_refine += 1
         elif not allocations:
             pending_sku += 1
-        elif not purchase_orders:
-            pending_po += 1
         elif (stages.get("inbound") or stages.get("paid")) and not stages.get("invoice"):
             pending_invoice += 1
 
@@ -2346,8 +2698,8 @@ def execution_overview(db: Session) -> dict:
 
 def supplier_summaries(db: Session, limit: int = 200, offset: int = 0) -> dict:
     """供应商聚合列表：管理视角。"""
-    pf = ChainPrefetch(db)
-    rows = [_order_row(db, order, external, pf=pf) for order, external in _source_pairs(db)]
+    pairs, pf = chain_snapshot(db)
+    rows = [_order_row(db, order, external, pf=pf) for order, external in pairs]
     by_supplier: dict[str, dict] = {}
     sku_counter: dict[str, dict[str, dict]] = {}
 
@@ -2406,8 +2758,14 @@ def supplier_summaries(db: Session, limit: int = 200, offset: int = 0) -> dict:
 
 def supplier_detail(db: Session, supplier_name: str) -> dict | None:
     """单个供应商详情：历史合作 + 最近订单 + 常购 SKU。"""
-    pf = ChainPrefetch(db)
-    rows = [_order_row(db, order, external, pf=pf) for order, external in _source_pairs(db)]
+    pairs, pf = chain_snapshot(db)
+    # 先按供应商关键字筛订单对，再对命中订单做完整行聚合：结果与全量聚合后再筛完全一致，
+    # 但省掉了为无关订单解析明细的成本。
+    rows = [
+        _order_row(db, order, external, pf=pf)
+        for order, external in pairs
+        if _pair_supplier_key(db, pf, order, external) == supplier_name
+    ]
     matched = [r for r in rows if (r.get("supplier") or r.get("buyer") or "").strip() == supplier_name]
     if not matched:
         return None
@@ -2448,8 +2806,14 @@ def supplier_detail(db: Session, supplier_name: str) -> dict | None:
 
 def order_supplier_history(db: Session, supplier_name: str, exclude_order_id: int | None = None) -> dict:
     """某个订单的供应商历史：合作次数、累计金额、未开发票、最近采购、常购 SKU。"""
-    pf = ChainPrefetch(db)
-    rows = [_order_row(db, order, external, pf=pf) for order, external in _source_pairs(db)]
+    pairs, pf = chain_snapshot(db)
+    # 同上：先按供应商 + 排除单号筛订单对，再只对命中订单做完整行聚合。
+    rows = [
+        _order_row(db, order, external, pf=pf)
+        for order, external in pairs
+        if _pair_supplier_key(db, pf, order, external) == supplier_name
+        and (exclude_order_id is None or _pair_order_id(order, external) != exclude_order_id)
+    ]
     matched = [
         r for r in rows
         if (r.get("supplier") or r.get("buyer") or "").strip() == supplier_name

@@ -160,3 +160,68 @@ def sku_id_for_document_item(db: Session, item: JackyunGoodsDocumentItem) -> int
     """供周转统计复用的安全 SKU 解析。"""
     lookup, sku_by_id = _sku_lookup(db)
     return _resolve_sku_id(item, lookup, sku_by_id)
+
+
+def sku_transactions(db: Session, sku_id: int, limit: int = 500) -> dict[str, Any]:
+    """正品（SKU）逐笔出入库流水：来自本地吉客云入库/出库单明细，真实单据事实。
+
+    SKU 解析口径与 current_positions 完全一致（matched_sku_id 优先，条码/货品号兜底），
+    保证流水合计 = 库存总览的运算库存。结存按时间正序累计后倒序返回。
+    """
+    sku = db.get(ProductSku, sku_id)
+    if sku is None:
+        raise ValueError("SKU 不存在")
+    lookup, sku_by_id = _sku_lookup(db)
+    warehouse_lookup = _warehouse_lookup(db)
+    product = db.get(Product, sku.product_id) if sku.product_id is not None else None
+
+    movements: list[dict[str, Any]] = []
+    rows = (
+        db.query(JackyunGoodsDocumentItem, JackyunGoodsDocument)
+        .join(JackyunGoodsDocument, JackyunGoodsDocument.id == JackyunGoodsDocumentItem.document_id)
+        .filter(JackyunGoodsDocument.document_type.in_(("inbound", "outbound")))
+        .order_by(JackyunGoodsDocument.document_at.nulls_last(), JackyunGoodsDocument.id, JackyunGoodsDocumentItem.line_no)
+        .all()
+    )
+    balance = Decimal("0")
+    for item, document in rows:
+        if _resolve_sku_id(item, lookup, sku_by_id) != sku_id:
+            continue
+        quantity = to_decimal(item.quantity)
+        if quantity is None or quantity <= 0:
+            continue
+        sign = Decimal("1") if document.document_type == "inbound" else Decimal("-1")
+        before = balance
+        balance += sign * quantity
+        warehouse_id = warehouse_lookup.get(_key(document.warehouse_code))
+        if warehouse_id is None:
+            warehouse_id = warehouse_lookup.get(_key(document.warehouse_name))
+        movements.append({
+            "occurredAt": document.document_at.isoformat() if document.document_at else None,
+            "direction": document.document_type,
+            "documentNo": document.goodsdoc_no,
+            "warehouseId": warehouse_id,
+            "warehouseName": document.warehouse_name or "未映射仓库",
+            "quantity": float(sign * quantity),
+            "balanceBefore": float(before),
+            "balanceAfter": float(balance),
+            "supplierName": document.supplier_name or "",
+            "companyName": document.company_name or "",
+            "matchedSkuId": item.matched_sku_id,
+            "matchStatus": item.match_status or "",
+        })
+
+    movements.reverse()
+    return {
+        "sku": {
+            "skuId": sku.id,
+            "skuCode": sku.sku_code,
+            "skuName": sku.sku_name,
+            "barcode": sku.barcode,
+            "unit": sku.unit,
+            "goodsName": product.goods_name if product else "",
+        },
+        "total": len(movements),
+        "rows": movements[: max(1, limit)],
+        "balance": float(balance),
+    }

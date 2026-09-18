@@ -1,24 +1,25 @@
 """利润中心（规格 9）。
 
 - 商品毛利 = 净销售收入 − 商品成本
-- 成本优先级：实际采购结算 > 采购订单成本 > SKU 默认成本 > 暂估成本
-- 一个 SKU/账期允许并存多种成本来源，按优先级选择生效值
-- SKU、销量或成本缺失时不输出伪精确的商品成本和毛利
+- 净销售收入取订单客户实付金额，与月结/经营总览、销售明细共用同一口径
+- 销售货品成本只取本系统采购入库单明细的加权平均成本
+- 成本台账仍允许多种来源并存，供独立成本管理使用
+- SKU、销量或入库成本缺失时不输出伪精确的商品成本和毛利
 """
 from __future__ import annotations
 
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from app.core.audit import audit
 from app.models.catalog import ProductSku
 from app.models.profit import CostSnapshot
 from app.models.sales import SalesOrder, SalesOrderItem
-from app.services.inbound_cost_service import weighted_inbound_costs
+from app.services.inbound_cost_service import resolve_sales_sku_id, sales_sku_lookup, weighted_inbound_costs
 from app.services.monthly_core import month_bounds
+from app.services.sales_scope import deal_orders_condition
 from app.utils.money import quantize, to_decimal
 
 COST_PRIORITY = ("actual_cost", "purch_order_cost", "default_cost", "estimated_cost")
@@ -227,37 +228,38 @@ def compute(db: Session, period_year: int, period_month: int) -> dict[str, Any]:
         raise ValueError("非法账期")
     # 与经营总览/月结共用业务时区自然月边界，禁止 UTC 月份造成月初/月末跨期。
     period_start, next_start = month_bounds(period_year, period_month)
+    orders = (
+        db.query(SalesOrder)
+        .filter(deal_orders_condition())
+        .filter(SalesOrder.ordered_at >= period_start, SalesOrder.ordered_at < next_start)
+        .all()
+    )
+    # 收入基数取客户实付金额：吉客云导出的行金额/优惠与实付对不上（同一单甚至出现负数行），
+    # 只有实付是真实成交金额，且与月结/经营总览、销售明细保持同一口径。
+    net_sales = sum(
+        (to_decimal(row.paid_amount) for row in orders if row.paid_amount is not None),
+        Decimal("0"),
+    )
     items = (
         db.query(SalesOrderItem)
-        .join(SalesOrder, SalesOrder.id == SalesOrderItem.order_id)
-        .filter(or_(
-            SalesOrder.order_status.in_(["paid", "done", "finished", "已支付", "已完成"]),
-            SalesOrder.pay_status.in_(["paid", "success", "已支付"]),
-        ))
-        .filter(SalesOrder.ordered_at >= period_start, SalesOrder.ordered_at < next_start)
+        .filter(SalesOrderItem.order_id.in_([row.id for row in orders]))
         .filter((SalesOrderItem.amount.isnot(None)) | (SalesOrderItem.discount_amount.isnot(None)))
         .all()
     )
 
-    net_sales = Decimal("0")
+    sku_lookup = sales_sku_lookup(db)
     sku_quantities: dict[int, Decimal] = {}
     unmapped_items: list[int] = []
     quantity_missing_items: list[int] = []
     for item in items:
-        net_sales += (item.amount or Decimal("0")) - (item.discount_amount or Decimal("0"))
-        if not item.sku_id:
+        sku_id = resolve_sales_sku_id(item.sku_id, item.sku_code, sku_lookup)
+        if not sku_id:
             unmapped_items.append(item.id)
         elif item.quantity is None:
             quantity_missing_items.append(item.id)
         else:
-            sku_quantities[item.sku_id] = sku_quantities.get(item.sku_id, Decimal("0")) + item.quantity
+            sku_quantities[sku_id] = sku_quantities.get(sku_id, Decimal("0")) + item.quantity
 
-    cost_rows = db.query(CostSnapshot).filter_by(
-        period_year=period_year, period_month=period_month
-    ).all()
-    grouped_costs: dict[int, list[CostSnapshot]] = {}
-    for row in cost_rows:
-        grouped_costs.setdefault(row.sku_id, []).append(row)
     skus = (
         {sku.id: sku for sku in db.query(ProductSku)
          .filter(ProductSku.id.in_(sku_quantities.keys())).all()}
@@ -270,35 +272,70 @@ def compute(db: Session, period_year: int, period_month: int) -> dict[str, Any]:
     )
 
     goods_cost = Decimal("0")
+    covered_skus = 0
     missing_skus: set[int] = set()
+    missing_detail: list[dict[str, Any]] = []
     for sku_id, quantity in sku_quantities.items():
         sku = skus.get(sku_id)
-        if sku is None:
-            missing_skus.add(sku_id)
-            continue
-        values, unit_cost, _ = _combined_cost(grouped_costs.get(sku_id, []), sku.default_cost)
-        # 采购入库是实际货品成本事实；只有没有实际结算/采购订单成本快照时，
-        # 才用账期截止前的入库数量加权平均覆盖货品档案默认成本。
-        if values["actual_cost"] is None and values["purch_order_cost"] is None:
-            unit_cost = weighted_costs.get(sku_id, unit_cost)
+        # 销售货品成本只认账期截止前的本系统采购入库事实，不再用销售导入文件、
+        # 采购订单成本或货品档案默认成本补齐，否则会把不同业务口径混在一起。
+        unit_cost = weighted_costs.get(sku_id) if sku is not None else None
         if unit_cost is None:
             missing_skus.add(sku_id)
-        else:
-            goods_cost += unit_cost * quantity
+            missing_detail.append({
+                "skuId": sku_id,
+                "skuCode": sku.sku_code if sku else "",
+                "skuName": sku.sku_name if sku else "",
+                "quantity": str(quantity),
+            })
+            continue
+        covered_skus += 1
+        goods_cost += unit_cost * quantity
 
     net_sales = quantize(net_sales, Decimal("0.01"))
     goods_cost = quantize(goods_cost, Decimal("0.01"))
-    incomplete = bool(missing_skus or unmapped_items or quantity_missing_items)
+    # 有销量就必须出毛利：个别 SKU 缺成本时先按已覆盖部分计算并给出 warning，
+    # 由用户补录入库成本后重算；完全没有任何成本可用时 error 报错，不出伪数。
+    can_estimate = covered_skus > 0
     has_items = bool(items)
+    incomplete = bool(missing_skus or unmapped_items or quantity_missing_items)
+    warning: str | None = None
+    error: str | None = None
+    if has_items and not can_estimate:
+        error = "本月销售涉及的所有 SKU 都缺采购入库成本，毛利无法计算，请补充采购入库成本后重新月结。"
+    elif incomplete:
+        parts: list[str] = []
+        if missing_detail:
+            names = "、".join(
+                f"{row['skuCode']} {row['skuName']}".strip() for row in missing_detail[:5]
+            )
+            parts.append(
+                f"{len(missing_detail)} 个 SKU 缺采购入库成本（{names}"
+                f"{' 等' if len(missing_detail) > 5 else ''}）"
+            )
+        if unmapped_items:
+            parts.append(f"{len(unmapped_items)} 行明细未匹配到货品档案")
+        if quantity_missing_items:
+            parts.append(f"{len(quantity_missing_items)} 行明细缺销售数量")
+        warning = (
+            "；".join(parts)
+            + "。毛利只含已覆盖部分，实际毛利会更低，请补充后在月结重新计算。"
+        )
     return {
         "period": f"{period_year}-{period_month:02d}",
-        "netSales": str(net_sales) if has_items else None,
-        "goodsCost": str(goods_cost) if has_items and not incomplete else None,
+        "netSales": str(net_sales) if orders else None,
+        "goodsCost": str(goods_cost) if has_items and can_estimate else None,
         "grossProfit": str(gross_profit(net_sales, goods_cost))
-        if has_items and not incomplete else None,
+        if has_items and can_estimate else None,
         "costMissingSkus": sorted(missing_skus),
+        "costMissingDetail": missing_detail,
         "unmappedItems": sorted(unmapped_items),
         "quantityMissingItems": sorted(quantity_missing_items),
         "costMissing": incomplete,
-        "note": "单位成本按销售数量计算；SKU、数量或成本任一缺失时，商品成本与毛利均不输出。",
+        "warning": warning,
+        "error": error,
+        "note": "净销售收入取成交单（待发/已发/待确认收货/已完成）的客户实付金额；"
+                "货品成本按本系统采购入库明细的加权平均单价乘销售数量计算；"
+                "个别 SKU 缺入库成本时按已覆盖部分出毛利并给出 warning，"
+                "全部缺成本时 error 报错不出数。",
     }

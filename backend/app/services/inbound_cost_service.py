@@ -13,8 +13,36 @@ from decimal import Decimal
 from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
+from app.models.catalog import ProductSku
 from app.models.jackyun import JackyunGoodsDocument, JackyunGoodsDocumentItem
 from app.utils.money import to_decimal
+
+
+def sales_sku_lookup(db: Session) -> dict[str, int]:
+    """为销售明细建立安全的 SKU 编码索引。
+
+    销售清单可能只保存了货品编号，没有写入内部 ``sku_id``。只有当一个
+    编码/吉客云 SKU ID/条码唯一命中时才建立索引，重复编码不猜测归属。
+    """
+    candidates: dict[str, set[int]] = defaultdict(set)
+    for sku in db.query(ProductSku).filter(ProductSku.status == "active").all():
+        for value in (sku.sku_code, sku.jackyun_sku_id, sku.barcode):
+            key = str(value or "").strip().lower()
+            if key:
+                candidates[key].add(sku.id)
+    return {key: next(iter(ids)) for key, ids in candidates.items() if len(ids) == 1}
+
+
+def resolve_sales_sku_id(
+    sku_id: int | None,
+    sku_code: str | None,
+    lookup: dict[str, int],
+) -> int | None:
+    """优先使用销售明细已有的 SKU ID，否则按唯一编码补齐。"""
+    if sku_id is not None:
+        return int(sku_id)
+    key = str(sku_code or "").strip().lower()
+    return lookup.get(key) if key else None
 
 
 def weighted_inbound_costs(

@@ -343,10 +343,8 @@ export default function OverviewPage() {
       return;
     }
     try {
-      const productionResponse = await authenticatedFetch("/api/v1/supply-chain/production-purchase-view?group=all&limit=500", { cache: "no-store" });
-      if (!productionResponse.ok) throw new Error(`生产执行数据加载失败（${productionResponse.status}）`);
-      const productionPayload = (await productionResponse.json()) as { rows?: ProductionOrder[] };
-      const [trend, procurement, completed, inventory, consumables, orders, overview] = await Promise.all([
+      const [productionResponse, trend, procurement, completed, inventory, consumables, orders, overview] = await Promise.all([
+        authenticatedFetch("/api/v1/supply-chain/production-purchase-view?group=all&limit=500", { cache: "no-store" }),
         dashboardApi.salesTrend(365, trendStart, trendEnd),
         procurementWorkbenchApi.summary(),
         procurementWorkbenchApi.orders({ status: "done", page: 1, pageSize: 100 }),
@@ -355,6 +353,8 @@ export default function OverviewPage() {
         dashboardApi.orders(),
         getOverview(),
       ]);
+      if (!productionResponse.ok) throw new Error(`生产执行数据加载失败（${productionResponse.status}）`);
+      const productionPayload = (await productionResponse.json()) as { rows?: ProductionOrder[] };
       if (requestId !== loadRequest.current) return;
       setState({
         trend,
@@ -404,17 +404,16 @@ export default function OverviewPage() {
 
   const purchaseSegments: StatusSegment[] = [
     { label: "待完善", count: state.procurement?.pendingSku ?? 0, color: "#f59e0b", href: "/purchase/workbench?view=orders&status=refine" },
-    { label: "待采购单", count: state.procurement?.pendingPo ?? 0, color: "#4f8df7", href: "/purchase/workbench?view=orders&status=po" },
     { label: "待入库", count: state.procurement?.pendingInbound ?? 0, color: "#35b9a4", href: "/purchase/workbench?view=orders&status=inbound" },
     { label: "待发票", count: state.procurement?.pendingInvoice ?? 0, color: "#8b6cf6", href: "/purchase/workbench?view=orders&status=invoice" },
-    { label: "已完成", count: state.completedPurchaseOrders, color: "#cbd5e1", href: "/purchase/workbench?view=orders&status=done" },
+    { label: "开票完成", count: state.completedPurchaseOrders, color: "#cbd5e1", href: "/purchase/workbench?view=orders&status=done" },
   ];
 
   const productionSegments: StatusSegment[] = [
     { label: "待确认", count: state.production.filter((order) => order.stage === "pending").length, color: "#f59e0b", href: "/supply-chain/production?group=production&stage=pending" },
     { label: "待生产", count: state.production.filter((order) => order.stage === "waiting").length, color: "#9bbcf7", href: "/supply-chain/production?group=production&stage=waiting" },
     { label: "生产中", count: state.production.filter((order) => order.stage === "producing").length, color: "#4f8df7", href: "/supply-chain/production?group=production&stage=producing" },
-    { label: "在途", count: state.production.filter((order) => order.archiveGroup === "transit").length, color: "#35b9a4", href: "/supply-chain/in-transit" },
+    { label: "在途", count: state.production.filter((order) => order.archiveGroup === "transit").length, color: "#35b9a4", href: "/supply-chain/production?group=transit" },
     { label: "到货/入库", count: state.production.filter((order) => order.archiveGroup === "receiving").length, color: "#8b6cf6", href: "/supply-chain/receiving" },
     { label: "已完成", count: state.production.filter((order) => order.archiveGroup === "archive").length, color: "#cbd5e1", href: "/supply-chain/production?group=archive" },
   ];
@@ -428,7 +427,7 @@ export default function OverviewPage() {
 
   return (
     <div className="w-full min-w-0 space-y-5 pb-8">
-      <header className="flex flex-wrap items-end justify-between gap-4">
+      <header className="app-page-header -mx-1 bg-[#f4f7fb]/95 pb-3 backdrop-blur">
         <div>
           <div className="flex items-center gap-2">
             <h1 className="text-[22px] font-semibold tracking-tight text-[#14213a]">{greeting}，{displayName}</h1>
@@ -443,7 +442,7 @@ export default function OverviewPage() {
       <section className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
         <KpiCard label={`${dayLabel}销售额`} value={loading ? "…" : money(latestPoint?.salesAmount)} hint={`有效销售数据 · ${latestDataDate}`} href="/sales" tone="border-blue-100 bg-blue-50/70" mark="sales" iconTone="text-blue-600" />
         <KpiCard label={`${dayLabel}订单数`} value={loading ? "…" : quantity(latestPoint?.orders)} hint={`有效销售订单 · ${latestDataDate}`} href="/sales" tone="border-emerald-100 bg-emerald-50/70" mark="orders" iconTone="text-emerald-600" />
-        <KpiCard label="在途订单" value={loading ? "…" : quantity(metrics.transit)} hint={`正品采购链路 · 待确认 ${metrics.pendingProduction} · 待生产 ${metrics.waitingProduction} · 生产中 ${metrics.producing}`} href="/supply-chain/in-transit" tone="border-orange-100 bg-orange-50/70" mark="transit" iconTone="text-orange-500" />
+        <KpiCard label="在途订单" value={loading ? "…" : quantity(metrics.transit)} hint={`正品采购链路 · 待确认 ${metrics.pendingProduction} · 待生产 ${metrics.waitingProduction} · 生产中 ${metrics.producing}`} href="/supply-chain/production?group=transit" tone="border-orange-100 bg-orange-50/70" mark="transit" iconTone="text-orange-500" />
         <KpiCard label="库存预警" value={loading ? "…" : quantity(metrics.warnings.length)} hint="耗材可用库存低于安全库存" href="/inventory?tab=consumables" tone="border-violet-100 bg-violet-50/70" mark="warning" iconTone="text-violet-600" />
       </section>
 
@@ -459,7 +458,6 @@ export default function OverviewPage() {
             <QuickAction href="/supply-chain/production/manual" mark="production" label="新建生产订单" tone="border-violet-100 bg-violet-50/60" iconTone="text-violet-600" />
             <QuickAction href="/supply-chain/warehouses" mark="warehouse" label="仓库管理" tone="border-orange-100 bg-orange-50/60" iconTone="text-orange-500" />
             <QuickAction href="/products" mark="product" label="货品档案" tone="border-slate-200 bg-slate-50" iconTone="text-slate-600" />
-            <QuickAction href="/profit" mark="report" label="生成财务报表" tone="border-emerald-100 bg-emerald-50/60" iconTone="text-emerald-600" />
           </div>
         </Panel>
       </div>

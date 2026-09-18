@@ -194,7 +194,7 @@ async def upload_file(
         raise HTTPException(400, str(exc))
     result: dict[str, Any] = {
         "id": row.id, "version": row.version, "sha256": row.sha256,
-        "size": row.size,
+        "size": row.size, "storedPath": row.stored_path,
     }
     # 银行交易明细上传即解析入流水表（指纹幂等，重复上传无害）；
     # 回单详情同为 category=bank，必须用 original_name 区分，避免误解析。
@@ -253,6 +253,19 @@ def payment_invoice_match_link(
         )
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
+
+
+@router.post("/payment-invoice-match/auto")
+def payment_invoice_match_auto(
+    year: int = Query(..., ge=1900, le=2999),
+    month: int = Query(..., ge=1, le=12),
+    request: Request = None,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    """按同名同金额规则自动匹配当月银行付款 ↔ 进项发票，直接落库。"""
+    from app.services.payment_invoice_match_service import auto_match
+    result = auto_match(db, year=year, month=month, actor=current_actor(request))
+    return result
 
 
 @router.delete("/payment-invoice-match/link/{link_id}")

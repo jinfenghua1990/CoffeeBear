@@ -11,7 +11,9 @@ from app.models.purchase import (
     JackyunPurchaseOrderLink,
     PurchaseAllocationItem,
     PurchaseInvoice,
+    Supplier,
 )
+from app.models.tax import TaxInvoice, TaxInvoiceLink
 from app.services import alibaba1688_import_service as import_service
 from app.services import procurement_chain_service as service
 from app.services import procurement_workbench_service as workbench_service
@@ -54,6 +56,101 @@ def test_workbench_list_fields_keeps_all_unique_inbound_documents():
 
     assert fields["jackyunInboundNo"] == "RK-1、RK-2"
     assert fields["warehouseName"] == "常州-示范仓"
+
+
+def test_invoice_auto_match_supports_non_1688_workflow_order(db_session):
+    """淘宝/拼多多等统一采购单按供应商档案税号参与进项发票自动匹配。"""
+    db_session.add(Supplier(
+        name="温州纸社包装有限公司",
+        tax_no="91330383MAEWPXDP5H",
+    ))
+    order = ExternalPurchaseOrder(
+        external_order_id="TAOBAO-INVOICE-001",
+        platform="taobao",
+        supplier_name="温州纸社包装有限公司",
+        paid_amount=Decimal("800"),
+        ordered_at=datetime(2025, 9, 28, tzinfo=timezone.utc),
+    )
+    old_invoice = TaxInvoice(
+        invoice_key="pytest-non-1688-invoice-old",
+        invoice_number="INV-NON-1688-OLD",
+        direction="input",
+        status="issued",
+        seller_name="温州纸社包装有限公司",
+        seller_tax_id="91330383MAEWPXDP5H",
+        total_amount=Decimal("611"),
+        issue_date=datetime(2026, 6, 1, tzinfo=timezone.utc),
+    )
+    invoice = TaxInvoice(
+        invoice_key="pytest-non-1688-invoice-001",
+        invoice_number="INV-NON-1688-001",
+        direction="input",
+        status="issued",
+        seller_name="温州纸社包装（发票抬头）",
+        seller_tax_id="91330383MAEWPXDP5H",
+        total_amount=Decimal("800"),
+        issue_date=datetime(2026, 7, 2, tzinfo=timezone.utc),
+    )
+    db_session.add_all([order, old_invoice, invoice])
+    db_session.flush()
+    db_session.add(TaxInvoiceLink(
+        invoice_id=old_invoice.id,
+        target_type="external_purchase_order",
+        target_id=order.id,
+        allocated_amount=Decimal("611"),
+        match_method="rejected",
+        confirmed=False,
+    ))
+    db_session.flush()
+
+    result = service.ProcurementChainMatcher(db_session).run_match()
+
+    link = db_session.query(TaxInvoiceLink).filter_by(
+        target_type="external_purchase_order",
+        target_id=order.id,
+        invoice_id=invoice.id,
+    ).one()
+    assert link.confirmed is True
+    assert invoice.match_status == "matched"
+    assert result["created"] >= 1
+
+    states = workbench_service._step_states({
+        "purchaseContentComplete": True,
+        "consumable": {"received": True},
+        "paidAmount": 800,
+        "invoiceStatus": "done",
+        "invoiceOutstanding": 0,
+        "invoice": [{"id": invoice.id}],
+    })
+    assert states["closeout"]["detail"].endswith("已付款")
+
+
+def test_invoice_auto_match_requires_unique_supplier_tax_profile(db_session):
+    """没有唯一供应商税号档案时不能按名称猜测关联采购单。"""
+    order = ExternalPurchaseOrder(
+        external_order_id="TAOBAO-INVOICE-NO-TAX-PROFILE",
+        platform="taobao",
+        supplier_name="同名供应商",
+        paid_amount=Decimal("800"),
+        ordered_at=datetime(2025, 9, 28, tzinfo=timezone.utc),
+    )
+    invoice = TaxInvoice(
+        invoice_key="pytest-invoice-no-tax-profile",
+        invoice_number="INV-NO-TAX-PROFILE",
+        direction="input",
+        status="issued",
+        seller_name="同名供应商",
+        seller_tax_id="91330000NO_PROFILE",
+        total_amount=Decimal("800"),
+        issue_date=datetime(2025, 10, 1, tzinfo=timezone.utc),
+    )
+    db_session.add_all([order, invoice])
+    db_session.flush()
+
+    result = service.ProcurementChainMatcher(db_session).run_match()
+
+    assert db_session.query(TaxInvoiceLink).filter_by(invoice_id=invoice.id).count() == 0
+    assert result["supplierProfileMissing"] >= 1
 
 
 def test_chain_row_merges_file_order_and_purchase_workflow(db_session):
@@ -111,6 +208,7 @@ def test_chain_row_merges_file_order_and_purchase_workflow(db_session):
     assert row["fileOrderId"] == file_order.id
     assert row["externalPoId"] == workflow.id
     assert row["purchaseContentComplete"] is True
+    assert row["paidOn1688"] is True
     assert row["allocations"][0]["skuCode"] == "SKU-001"
     assert row["purchaseOrders"][0]["purchNo"] == "CG-CHAIN-001"
 

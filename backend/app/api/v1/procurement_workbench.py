@@ -179,8 +179,9 @@ def order_workbench(order_id: int, db: Session = Depends(get_db)) -> dict:
 
 
 class OrderMainEditBody(BaseModel):
-    """订单主档编辑：字段传了才改；1688 订单改源单事实，工作流独有单改副本。"""
+    """订单主档编辑：字段传了才改；本地新建单可维护系统主单号。"""
 
+    external_order_id: str | None = None
     supplier_name: str | None = None
     title: str | None = None
     ordered_at: date | None = None
@@ -191,6 +192,7 @@ class OrderMainEditBody(BaseModel):
     order_amount: str | None = None
     paid_amount: str | None = None
     platform: str | None = None
+    warehouse_id: int | None = None
 
 
 @router.patch("/orders/{order_id}/main-fields")
@@ -198,7 +200,7 @@ def edit_order_main_fields(order_id: int, body: OrderMainEditBody, request: Requ
     """网页交互编辑订单主档（金额/供应商/标题等）：源单与副本同步更新，留审计。"""
     try:
         return service.edit_order_main_fields(
-            db, order_id=order_id, actor=current_actor(request), **body.model_dump()
+            db, order_id=order_id, actor=current_actor(request), **body.model_dump(exclude_unset=True)
         )
     except ValueError as exc:
         db.rollback()
@@ -260,6 +262,7 @@ def soft_delete_order(order_id: int, request: Request, db: Session = Depends(get
 
     order_no = order.external_order_id if order is not None else external.external_order_id  # type: ignore[union-attr]
     removed_po_ids: list[int] = []
+    removed_inbound_ids: list[int] = []
 
     if order is not None:
         # 软删除 1688 原件：整单退出链路，工作流副本按订单号一并隐藏。
@@ -270,6 +273,26 @@ def soft_delete_order(order_id: int, request: Request, db: Session = Depends(get
     else:
         # 工作流独有订单：删除记录本体及其直接子项。
         removed_po_ids.append(external.id)  # type: ignore[union-attr]
+        # 本系统采购入库不是外部吉客云事实，订单永久删除时必须连同入库
+        # 和自动耗材扣减一起撤销，否则会留下无法追溯的库存脏数据。
+        from app.models.jackyun import JackyunGoodsDocument
+        from app.services.local_inbound_service import delete_local_purchase_inbound
+        local_inbound_ids = [
+            document.id
+            for document in db.query(JackyunGoodsDocument).filter(
+                JackyunGoodsDocument.document_type == "inbound",
+            ).all()
+            if isinstance(document.raw, dict)
+            and document.raw.get("source") == "local_purchase_inbound"
+            and db.query(ProcurementChainLink.id).filter(
+                ProcurementChainLink.external_po_id == external.id,  # type: ignore[union-attr]
+                ProcurementChainLink.target_type == "inbound",
+                ProcurementChainLink.target_id == document.id,
+            ).first() is not None
+        ]
+        for document_id in local_inbound_ids:
+            delete_local_purchase_inbound(db, document_id=document_id, commit=False)
+            removed_inbound_ids.append(document_id)
         db.query(PurchaseAllocationItem).filter(PurchaseAllocationItem.po_id == external.id).delete(synchronize_session=False)  # type: ignore[union-attr]
         db.query(PurchaseExtraExpense).filter(PurchaseExtraExpense.po_id == external.id).delete(synchronize_session=False)  # type: ignore[union-attr]
         db.query(JackyunPurchaseOrderLink).filter(JackyunPurchaseOrderLink.po_id == external.id).delete(synchronize_session=False)  # type: ignore[union-attr]
@@ -285,6 +308,7 @@ def soft_delete_order(order_id: int, request: Request, db: Session = Depends(get
         "orderNo": order_no,
         "removedPoIds": removed_po_ids,
         "recoverable": order is not None,
+        "removedInboundIds": removed_inbound_ids,
     }
 
 

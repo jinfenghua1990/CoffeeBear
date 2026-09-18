@@ -150,10 +150,10 @@ export default function WarehousesPage() {
         <div className="flex flex-wrap items-center justify-between gap-4">
           <div className="min-w-0">
             <div className="flex items-center gap-2 text-[11px] font-medium text-indigo-600">
-              <span>供应链中心</span><span className="text-slate-300">/</span><span>仓库管理</span>
+              <span>货品中心</span><span className="text-slate-300">/</span><span>库存管理</span><span className="text-slate-300">/</span><span>仓库档案</span>
             </div>
             <div className="mt-1 flex flex-wrap items-center gap-2.5">
-              <h1 className="text-2xl font-semibold tracking-tight text-slate-900">仓库管理</h1>
+              <h1 className="text-2xl font-semibold tracking-tight text-slate-900">仓库档案</h1>
               <span className="rounded-full bg-indigo-50 px-2 py-0.5 text-[11px] font-medium text-indigo-600">统一仓库档案</span>
             </div>
             <p className="mt-1 text-xs text-slate-500">维护仓库类型、用途、吉客云绑定与可售口径，采购入库和库存计算都引用这里的仓库 ID。</p>

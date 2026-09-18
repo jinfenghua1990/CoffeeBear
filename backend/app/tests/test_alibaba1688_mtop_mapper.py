@@ -139,6 +139,17 @@ def test_map_order_extracts_order_remark():
     assert data["order_remark"] == "吉客云入库单 RK202609040001"
 
 
+def test_map_order_extracts_tracking_number_from_order_entries():
+    raw = _order("logistics-1")
+    raw["orderEntries"] = [
+        {"entryExtension": {"trackingNo": "SF123"}},
+        {"entryExtension": {"trackingNo": "SF123"}},
+        {"entryExtension": {"trackingNo": "YT456"}},
+    ]
+    data = map_order(raw)
+    assert data["logistics"] == {"trackingNo": "SF123、YT456"}
+
+
 def test_extract_order_id_quick_path():
     assert extract_order_id(_order("998877")) == "998877"
     assert extract_order_id({"foo": 1}) == ""

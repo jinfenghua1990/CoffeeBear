@@ -26,6 +26,8 @@ from app.services.production_service import (
 )
 from app.utils.money import to_decimal
 from app.services.inventory_position_service import _resolve_sku_id, _sku_lookup, current_positions
+from app.services.inbound_document_view import list_inbound_documents
+from app.services.sales_scope import deal_orders_condition
 
 router = APIRouter(prefix="/supply-chain", tags=["supply-chain"])
 
@@ -61,6 +63,30 @@ class ProductionOrderCreateInput(BaseModel):
     items: list[ProductionItemInput] = Field(min_length=1, max_length=200)
 
 
+@router.get("/inbound-documents")
+def inbound_documents(
+    q: str = Query("", max_length=120),
+    status: str = Query("", max_length=20),
+    warehouse: str = Query("", max_length=256),
+    start_date: date | None = Query(None),
+    end_date: date | None = Query(None),
+    limit: int = Query(200, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    """按入库主单展示真实入库单、明细和采购关联。"""
+    return list_inbound_documents(
+        db,
+        q=q,
+        status=status,
+        warehouse=warehouse,
+        start_date=start_date,
+        end_date=end_date,
+        limit=limit,
+        offset=offset,
+    )
+
+
 def _qty(value: Decimal | None) -> str | None:
     if value is None:
         return None
@@ -74,11 +100,7 @@ def _days(value: Decimal | None) -> str | None:
 
 
 def _valid_sales_condition():
-    return ~or_(
-        SalesOrder.order_status.like("已取消%"),
-        SalesOrder.order_status.like("作废%"),
-        SalesOrder.order_status == "待审核",
-    )
+    return deal_orders_condition()
 
 
 @router.get("/replenishment")
@@ -94,7 +116,7 @@ def replenishment(
 
     数据来源：
     - 当前库存：吉客云最新库存快照；
-    - 近销：本地销售订单明细 quantity，剔除取消/作废/待审核订单；
+    - 近销：本地销售订单明细 quantity，按 sales_scope 成交口径剔除关闭/取消/作废/待审核/退货/退款单；
     - 待供应：已确认尚未入库的采购数量 + 非取消生产单中尚未关联真实入库的生产数量。
 
     生产完成、工厂待发、成品在途和已到货待入库仍然属于“待供应”；只有关联真实吉客云

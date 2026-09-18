@@ -36,6 +36,24 @@ def test_warehouse_can_be_renamed_without_changing_identity(db_session):
     assert updated.code == code
 
 
+def test_warehouse_reference_resolves_code_or_name(db_session):
+    warehouse = warehouse_service.create_warehouse(
+        db_session,
+        code=f"MATCH-{uuid4().hex[:8].upper()}",
+        name="匹配测试仓",
+    )
+
+    assert warehouse_service.resolve_warehouse_reference(
+        db_session, code=warehouse.code,
+    ) == (warehouse.code, warehouse.name)
+    assert warehouse_service.resolve_warehouse_reference(
+        db_session, name=warehouse.name,
+    ) == (warehouse.code, warehouse.name)
+    assert warehouse_service.resolve_warehouse_reference(
+        db_session, code="UNKNOWN-WAREHOUSE", name="外部仓",
+    ) == ("UNKNOWN-WAREHOUSE", "外部仓")
+
+
 def test_unused_warehouse_can_be_physically_deleted(db_session):
     warehouse = warehouse_service.create_warehouse(
         db_session,

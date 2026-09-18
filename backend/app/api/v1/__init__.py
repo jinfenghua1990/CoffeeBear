@@ -13,6 +13,7 @@ from app.api.v1 import (
     finance,
     integrations,
     jackyun_files,
+    logistics,
     jky_orders,
     jky_web,
     opening,
@@ -29,7 +30,6 @@ from app.api.v1 import (
     search,
     suppliers,
     supply_chain,
-    supply_chain_finished_flow,
     supply_chain_material_flow,
     system,
     tax_accounting,
@@ -48,6 +48,7 @@ api_router.include_router(auth.router)
 api_router.include_router(system.router)
 api_router.include_router(integrations.router)
 api_router.include_router(jackyun_files.router)
+api_router.include_router(logistics.router)
 api_router.include_router(jky_orders.router)
 api_router.include_router(sales_file.router)
 api_router.include_router(alibaba1688_imports.router)
@@ -69,7 +70,6 @@ api_router.include_router(dashboard.router)
 api_router.include_router(supply_chain.router)
 api_router.include_router(production_purchase_view.router)
 api_router.include_router(supply_chain_material_flow.router)
-api_router.include_router(supply_chain_finished_flow.router)
 api_router.include_router(opening.router)
 api_router.include_router(closing.router)
 api_router.include_router(consumables.router)

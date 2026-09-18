@@ -1,3 +1,7 @@
+from decimal import Decimal
+
+import pytest
+
 from app.adapters.tax_invoice_file import parse_tax_invoice_export
 from app.services import tax_invoice_service as service
 from uuid import uuid4
@@ -98,3 +102,144 @@ def test_tax_import_keeps_unrecognized_row_for_review(db_session, monkeypatch, t
     db_session.query(TaxInvoiceImportRecord).filter_by(import_id=batch.id).delete()
     db_session.delete(batch)
     db_session.commit()
+
+
+def test_invoice_category_is_single_source_of_truth_for_processing_status(db_session):
+    """category 是唯一事实：写 v2 分类后 processing_status 同步派生
+    （运营成本三分类→required；报销两分类与 excluded→not_required；空→pending）。"""
+    from app.models.tax import TaxInvoice, TaxInvoiceImport
+
+    batch = TaxInvoiceImport(
+        original_name=f"derive-{uuid4().hex}.xlsx",
+        stored_path=f"/tmp/derive-{uuid4().hex}.xlsx",
+        sha256=uuid4().hex + uuid4().hex,
+        lifecycle="active",
+    )
+    db_session.add(batch)
+    db_session.flush()
+
+    def _invoice(prefix: str) -> TaxInvoice:
+        row = TaxInvoice(
+            invoice_key=f"pytest|{prefix}-{uuid4().hex[:8]}",
+            invoice_number=f"{prefix}-{uuid4().hex[:8]}",
+            direction="input",
+            seller_name="供应商丙",
+            total_amount=Decimal("113"),
+            source_import_id=batch.id,
+            source_row_index=1,
+        )
+        db_session.add(row)
+        return row
+
+    goods = _invoice("DERIVE-GOODS")
+    reimb = _invoice("DERIVE-REIMB")
+    platform = _invoice("DERIVE-PLAT")
+    excluded = _invoice("DERIVE-EXCLUDED")
+    empty = _invoice("DERIVE-EMPTY")
+    db_session.flush()
+
+    service.set_invoice_categories(db_session, [goods.id], "goods", actor="pytest")
+    service.set_invoice_categories(db_session, [reimb.id], "reimburse_operating", actor="pytest")
+    service.set_invoice_categories(db_session, [platform.id], "platform_fee", actor="pytest")
+    service.set_invoice_categories(db_session, [excluded.id], "excluded", actor="pytest")
+    # 旧四值 key 已废弃，必须拒绝。
+    with pytest.raises(ValueError):
+        service.set_invoice_categories(db_session, [goods.id], "goods_payment", actor="pytest")
+
+    rows = {row.id: row for row in db_session.query(TaxInvoice).filter(TaxInvoice.id.in_(
+        [goods.id, reimb.id, platform.id, excluded.id, empty.id]
+    )).all()}
+    assert rows[goods.id].processing_status == "required"
+    assert rows[reimb.id].processing_status == "not_required"
+    assert rows[platform.id].processing_status == "required"
+    assert rows[excluded.id].processing_status == "not_required"
+    assert rows[empty.id].category == ""
+    assert rows[empty.id].processing_status == "pending"
+
+    listed = {item["id"]: item for item in service.list_invoices(db_session, direction="input", limit=500)}
+    assert listed[goods.id]["processingStatus"] == "required"
+    assert listed[goods.id]["category"] == "goods"
+    assert listed[goods.id]["categoryLabel"] == "运营成本：货款发票"
+    assert listed[reimb.id]["processingStatus"] == "not_required"
+    assert listed[platform.id]["processingStatus"] == "required"
+    assert listed[excluded.id]["processingStatus"] == "not_required"
+    assert listed[empty.id]["processingStatus"] == "pending"
+    assert listed[empty.id]["categoryLabel"] == "待判断（未分类）"
+
+    # 旧状态按钮接口行为等价：设状态时按映射写 v2 分类，处理结论保持一致。
+    service.set_processing_status(db_session, reimb.id, "required", actor="pytest")
+    assert db_session.get(TaxInvoice, reimb.id).category == "goods"
+    assert service.serialize_invoice(db_session.get(TaxInvoice, reimb.id))["processingStatus"] == "required"
+    service.set_processing_status(db_session, goods.id, "not_required", actor="pytest")
+    assert db_session.get(TaxInvoice, goods.id).category == "reimburse_operating"
+    assert service.serialize_invoice(db_session.get(TaxInvoice, goods.id))["processingStatus"] == "not_required"
+    service.set_processing_status(db_session, excluded.id, "pending", actor="pytest")
+    assert db_session.get(TaxInvoice, excluded.id).category == ""
+    assert service.serialize_invoice(db_session.get(TaxInvoice, excluded.id))["processingStatus"] == "pending"
+
+
+def test_output_invoice_category_enum_and_direction_guard(db_session):
+    """销项分类独立枚举：buyer_sales/platform_service/空=待判断；进项传销项 key、
+    销项传进项 key 都必须拒绝；销项不按明细兜底推断，空即待判断。"""
+    from app.models.tax import TaxInvoice, TaxInvoiceImport
+
+    batch = TaxInvoiceImport(
+        original_name=f"output-{uuid4().hex}.xlsx",
+        stored_path=f"/tmp/output-{uuid4().hex}.xlsx",
+        sha256=uuid4().hex + uuid4().hex,
+        lifecycle="active",
+    )
+    db_session.add(batch)
+    db_session.flush()
+
+    def _invoice(prefix: str, direction: str) -> TaxInvoice:
+        row = TaxInvoice(
+            invoice_key=f"pytest|{prefix}-{uuid4().hex[:8]}",
+            invoice_number=f"{prefix}-{uuid4().hex[:8]}",
+            direction=direction,
+            seller_name="供应商丁",
+            total_amount=Decimal("226"),
+            source_import_id=batch.id,
+            source_row_index=1,
+        )
+        db_session.add(row)
+        return row
+
+    output = _invoice("OUT-BUYER", "output")
+    output2 = _invoice("OUT-PLAT", "output")
+    output3 = _invoice("OUT-EMPTY", "output")
+    input_row = _invoice("IN-GUARD", "input")
+    db_session.flush()
+
+    service.set_invoice_categories(db_session, [output.id], "buyer_sales", actor="pytest")
+    service.set_invoice_categories(db_session, [output2.id], "platform_service", actor="pytest")
+    service.set_invoice_categories(db_session, [output3.id], "", actor="pytest")
+    # 销项传进项 key → 拒绝；进项传销项 key → 拒绝。
+    with pytest.raises(ValueError):
+        service.set_invoice_categories(db_session, [output.id], "goods", actor="pytest")
+    with pytest.raises(ValueError):
+        service.set_invoice_categories(db_session, [input_row.id], "buyer_sales", actor="pytest")
+
+    rows = {row.id: row for row in db_session.query(TaxInvoice).filter(TaxInvoice.id.in_(
+        [output.id, output2.id, output3.id, input_row.id]
+    )).all()}
+    assert rows[output.id].category == "buyer_sales"
+    assert rows[output.id].processing_status == "pending"
+    assert rows[output2.id].category == "platform_service"
+    assert rows[output2.id].processing_status == "pending"
+    assert rows[output3.id].category == ""
+    assert rows[output3.id].processing_status == "pending"
+    # 拒绝后进项行保持未分类，不被误写。
+    assert rows[input_row.id].category == ""
+
+    listed = {item["id"]: item for item in service.list_invoices(db_session, direction="output", limit=500)}
+    assert listed[output.id]["category"] == "buyer_sales"
+    assert listed[output.id]["categoryLabel"] == "给买家开发票"
+    assert listed[output2.id]["categoryLabel"] == "给平台开服务费"
+    assert listed[output3.id]["category"] == ""
+    assert listed[output3.id]["categoryLabel"] == "待判断"
+
+    # 置回空 = 待判断，幂等可逆。
+    service.set_invoice_categories(db_session, [output.id], "", actor="pytest")
+    assert db_session.get(TaxInvoice, output.id).category == ""
+    assert service.serialize_invoice(db_session.get(TaxInvoice, output.id))["categoryLabel"] == "待判断"

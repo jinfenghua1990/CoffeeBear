@@ -195,7 +195,7 @@ def import_bank_xlsx(db: Session, *, account_no: str, content: bytes,
     """
     from datetime import date
 
-    from app.adapters.bank_file import parse_xlsx
+    from app.adapters.bank_file import analyze_xlsx, parse_xlsx
     from app.models.bank import BankImportBatch
 
     if not (1 <= period_month <= 12):
@@ -212,9 +212,21 @@ def import_bank_xlsx(db: Session, *, account_no: str, content: bytes,
     if not rows:
         batch.status = "failed"
         db.commit()
+        # 结构诊断：把“文件存到哪、检测到什么列、缺什么列”明确反馈给用户
+        diag = analyze_xlsx(content)
         audit(db, actor, "bank.import.xlsx.failed", "bank_import_batches", batch.id,
-              {"archiveFileId": archive_file_id, "reason": "未识别到交易明细"})
-        raise ValueError("原始文件已归档，但未识别到交易明细；请确认是 XLSX 流水文件及表头")
+              {"archiveFileId": archive_file_id, "reason": "未识别到交易明细", "diagnosis": diag})
+        col_text = "、".join(diag.get("columns") or []) or "（空表头）"
+        missing_labels = {
+            "txn_date": "交易日期", "amount_in": "收入金额", "amount_out": "支出金额",
+            "counterparty": "对方户名", "summary": "摘要", "voucher_no": "流水号",
+        }
+        missing_text = "、".join(missing_labels.get(k, k) for k in (diag.get("missing") or []))
+        raise ValueError(
+            f"文件已归档但解析失败：工作表「{diag.get('sheet') or '?'}」，共 {diag.get('rows') or 0} 行数据，"
+            f"识别到列：{col_text}。缺少关键列：{missing_text}。"
+            "请从银行系统导出包含交易日期、收入/支出金额、对方户名、摘要的完整流水。"
+        )
     created = duplicates = skipped = 0
     for r in rows:
         if not r.get("txn_date"):

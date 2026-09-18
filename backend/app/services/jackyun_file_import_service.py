@@ -16,6 +16,7 @@ from app.config import settings
 from app.core.audit import audit
 from app.models.jackyun_import import JackyunFileImport, JackyunFileImportRecord
 from app.services.import_lifecycle import filter_lifecycle, transition_lifecycle, transition_row_status
+from app.services.warehouse_service import resolve_warehouse_reference
 
 
 def _root() -> Path:
@@ -228,6 +229,7 @@ _INBOUND_APPLY_KEYS = ("申请单号", "入库申请单号", "申请单编号", 
 _INBOUND_ITEM_NO_KEYS = ("货品编号", "货品编码", "商品编号", "商品编码", "SKU编号", "SKU编码")
 _INBOUND_BARCODE_KEYS = ("条码", "货品条码", "商品条码", "SKU条码", "条形码", "商品条形码")
 _INBOUND_ORDER_REF_KEYS = ("1688采购订单", "1688采购订单号", "1688订单号", "采购订货号", "外部采购订单号")
+_INBOUND_UNIT_PRICE_KEYS = ("含税单价", "单价", "采购单价")
 _INBOUND_AMOUNT_KEYS = ("采购总金额", "价税合计", "含税金额", "入库金额", "金额")
 
 # 销售出库单导入：只接受明确的出库单号，避免把采购/销售订单号错当成库存单据。
@@ -371,6 +373,8 @@ def map_purchase_import(db: Session, import_id: int, actor: str = "system") -> d
                 status=status,
                 raw=raw_meta,
             ))
+        from app.services.supplier_sync_service import ensure_supplier
+        ensure_supplier(db, supplier, platform="其他")
     db.commit()
     audit(db, actor, "jackyun.file_import.map_purchase", "jackyun_file_imports", import_id,
           {"groups": len(groups), "mapped": mapped, "updated": updated,
@@ -434,12 +438,19 @@ def _fill_inbound_item(item, payload: dict) -> list[str]:
     put("apply_quantity", ("申请数量",), decimal_field=True)
     put("remain_quantity", ("剩余数量",), decimal_field=True)
     put("return_quantity", ("退回数量",), decimal_field=True)
-    put("unit_price_tax", ("含税单价",), decimal_field=True)
+    unit_price_text = _pick_cell(payload, _INBOUND_UNIT_PRICE_KEYS)
+    put("unit_price_tax", _INBOUND_UNIT_PRICE_KEYS, decimal_field=True)
     put("unit_price_notax", ("无税单价",), decimal_field=True)
-    amount_tax = _to_decimal(_pick_cell(payload, ("含税金额", "入库金额")))
+    amount_tax = _to_decimal(_pick_cell(payload, _INBOUND_AMOUNT_KEYS))
     if amount_tax is not None:
         item.amount_tax = amount_tax
         wrote.append("amount_tax")
+    # 入库导入通常只提供“数量 + 采购总金额”。金额是事实，单价按金额/数量生成，
+    # 保留 4 位小数与 MONEY 字段一致；若文件明确提供单价，则以文件单价为准。
+    quantity = item.quantity
+    if not unit_price_text and amount_tax is not None and quantity is not None and quantity > 0:
+        item.unit_price_tax = (amount_tax / quantity).quantize(Decimal("0.0001"))
+        wrote.append("unit_price_tax")
     amount_notax = _to_decimal(_pick_cell(payload, ("无税金额",)))
     if amount_notax is not None:
         item.amount_notax = amount_notax
@@ -454,8 +465,34 @@ def _fill_inbound_item(item, payload: dict) -> list[str]:
     put_date("production_date", ("生产日期",))
     put_date("expiry_date", ("到期日期", "有效期至"))
     if wrote:
-        item.raw = {**(item.raw or {}), "fileImportSource": True}
+        order_ref = _pick_cell(payload, _INBOUND_ORDER_REF_KEYS)
+        raw_updates = {"fileImportSource": True}
+        if order_ref:
+            # 分配器兼容历史约定的内部标记；同时保留原始中文列名。
+            raw_updates["_1688采购订单"] = order_ref
+        item.raw = {**(item.raw or {}), **payload, **raw_updates}
     return wrote
+
+
+def _refresh_inbound_document_amount(db, document: JackyunGoodsDocument) -> None:
+    """从导入明细的采购总金额重算入库单头金额；金额不完整时保持不可用。"""
+    from app.models.jackyun import JackyunGoodsDocumentItem
+
+    items = (
+        db.query(JackyunGoodsDocumentItem)
+        .filter(JackyunGoodsDocumentItem.document_id == document.id)
+        .all()
+    )
+    source_amounts = [
+        _to_decimal(_pick_cell(item.raw or {}, _INBOUND_AMOUNT_KEYS))
+        for item in items
+    ]
+    if not any(value is not None for value in source_amounts):
+        return
+    if any(value is None for value in source_amounts):
+        document.total_amount = None
+        return
+    document.total_amount = sum(source_amounts, Decimal("0")).quantize(Decimal("0.0001"))
 
 
 def _infer_purchase_platform(rows: list[dict]) -> str:
@@ -541,6 +578,8 @@ def map_inbound_items(db: Session, import_id: int, actor: str = "system") -> dic
     filled_fields = 0
     docs_hit: set[int] = set()
     matched_items: set[int] = set()
+    created_documents = 0
+    created_document_items = 0
     for no, indexed_rows in groups.items():
         doc = (
             db.query(JackyunGoodsDocument)
@@ -548,16 +587,114 @@ def map_inbound_items(db: Session, import_id: int, actor: str = "system") -> dic
             .order_by(JackyunGoodsDocument.id)
             .first()
         )
+        source_warehouse_code = next(
+            (_pick_cell(payload, ("仓库编码", "仓库编号")) for _, payload in indexed_rows
+             if _pick_cell(payload, ("仓库编码", "仓库编号"))),
+            "",
+        )
+        source_warehouse_name = next(
+            (_pick_cell(payload, ("仓库名称", "仓库")) for _, payload in indexed_rows
+             if _pick_cell(payload, ("仓库名称", "仓库"))),
+            "",
+        )
+        if not source_warehouse_code and not source_warehouse_name and doc:
+            source_warehouse_code = doc.warehouse_code or ""
+            source_warehouse_name = doc.warehouse_name or ""
+        warehouse_code, warehouse_name = resolve_warehouse_reference(
+            db, code=source_warehouse_code, name=source_warehouse_name,
+        )
         if not doc:
-            skipped.append({"row": indexed_rows[0][0], "reason": f"库内无入库单 {no}", "rows": len(indexed_rows)})
-            continue
+            payloads = [payload for _, payload in indexed_rows]
+            dates = [
+                parsed
+                for parsed in (
+                    _parse_date(_pick_cell(row, ("创建时间", "入库时间", "入库日期", "单据日期")))
+                    for row in payloads
+                )
+                if parsed is not None
+            ]
+            order_refs = sorted({
+                _pick_cell(row, _INBOUND_ORDER_REF_KEYS)
+                for row in payloads
+                if _pick_cell(row, _INBOUND_ORDER_REF_KEYS)
+            })
+            quantity_values = [
+                parsed
+                for parsed in (_to_decimal(_pick_cell(row, ("入库数量", "数量", "申请数量"))) for row in payloads)
+                if parsed is not None
+            ]
+            doc = JackyunGoodsDocument(
+                document_type="inbound",
+                goodsdoc_no=no,
+                document_at=min(dates) if dates else None,
+                warehouse_code=warehouse_code,
+                warehouse_name=warehouse_name,
+                company_name=next(
+                    (_pick_cell(row, ("公司名称", "公司", "主体公司")) for row in payloads
+                     if _pick_cell(row, ("公司名称", "公司", "主体公司"))),
+                    "",
+                ),
+                supplier_name=next(
+                    (_pick_cell(row, ("往来单位", "供应商", "供应商名称", "供货单位")) for row in payloads
+                     if _pick_cell(row, ("往来单位", "供应商", "供应商名称", "供货单位"))),
+                    "",
+                ),
+                total_quantity=sum(quantity_values, Decimal("0")) if quantity_values else None,
+                raw={
+                    "source": "jackyun_inbound_apply",
+                    "isLocal": False,
+                    "sourceImportId": import_id,
+                    "sourceRowIndexes": [row_index for row_index, _ in indexed_rows],
+                    "externalReferenceNo": no,
+                    "platformPurchaseOrderNo": order_refs[0] if len(order_refs) == 1 else "",
+                    "platformPurchaseOrderNos": order_refs,
+                },
+            )
+            db.add(doc)
+            db.flush()
+            created_documents += 1
+        else:
+            doc.warehouse_code = warehouse_code or doc.warehouse_code or ""
+            doc.warehouse_name = warehouse_name or doc.warehouse_name or ""
         docs_hit.add(doc.id)
+        from app.services.supplier_sync_service import ensure_supplier
+        ensure_supplier(db, doc.supplier_name, platform=(doc.raw or {}).get("platform", "其他"))
         items = (
             db.query(JackyunGoodsDocumentItem)
             .filter(JackyunGoodsDocumentItem.document_id == doc.id)
             .order_by(JackyunGoodsDocumentItem.line_no)
             .all()
         )
+        if not items:
+            new_items: list[JackyunGoodsDocumentItem] = []
+            for line_no, (row_index, payload) in enumerate(indexed_rows, start=1):
+                goods_no = _pick_cell(payload, _INBOUND_ITEM_NO_KEYS)
+                barcode = _pick_cell(payload, _INBOUND_BARCODE_KEYS)
+                goods_name = _pick_cell(payload, ("货品名称", "商品名称", "货品", "商品"))
+                if not (goods_no or barcode or goods_name):
+                    skipped.append({"row": row_index, "reason": f"单 {no} 缺少货品/SKU信息"})
+                    continue
+                item = JackyunGoodsDocumentItem(
+                    document_id=doc.id,
+                    line_no=line_no,
+                    goods_no=goods_no,
+                    sku_barcode=barcode,
+                    goods_name=goods_name,
+                    quantity=_to_decimal(_pick_cell(payload, ("入库数量", "数量", "申请数量"))),
+                    unit_name=_pick_cell(payload, ("单位", "基本单位")),
+                    raw={**payload, "fileImportSource": True, "sourceImportId": import_id},
+                )
+                filled = _fill_inbound_item(item, payload)
+                filled_fields += len(filled)
+                db.add(item)
+                new_items.append(item)
+            db.flush()
+            for item in new_items:
+                matched_items.add(item.id)
+            matched += len(new_items)
+            created_document_items += len(new_items)
+            _refresh_inbound_document_amount(db, doc)
+            continue
         pool: dict[str, list] = {}
         for item in items:
             for key in (item.goods_no, item.sku_barcode):
@@ -583,6 +720,7 @@ def map_inbound_items(db: Session, import_id: int, actor: str = "system") -> dic
                 filled_fields += len(filled)
                 matched += 1
                 matched_items.add(target.id)
+        _refresh_inbound_document_amount(db, doc)
 
     from app.models.alibaba1688_import import Alibaba1688Order
     from app.models.procurement_chain import ProcurementChainLink
@@ -873,15 +1011,36 @@ def map_inbound_items(db: Session, import_id: int, actor: str = "system") -> dic
             reconciled_link_ids.append(link.id)
 
     db.commit()
+    from app.services.sku_matching_service import match_inbound_items
+    matcher = match_inbound_items(db, include_outbound=True)
     alloc_seeded = 0
+    automatic_usage = {"applied": 0, "pendingMapping": 0, "skipped": 0}
     seed_links = created_links[:]
     seed_links.extend(auto_confirmed_link_objects)
     if seed_links:
         from app.services.inbound_allocation_seed import seed_for_link_batch
+        seed_succeeded = True
         try:
             alloc_seeded = int(seed_for_link_batch(db, seed_links).get("seeded", 0))
         except Exception:
+            seed_succeeded = False
             alloc_seeded = 0
+        if seed_succeeded:
+            from app.services.consumable_service import auto_apply_inbound_usage
+            for link in seed_links:
+                try:
+                    result = auto_apply_inbound_usage(
+                        db, link.id, note="采购入库自动按实际入库数量扣减耗材",
+                    )
+                    if result.get("status") == "applied":
+                        automatic_usage["applied"] += 1
+                    elif result.get("status") in {"pending_mapping", "no_mapping", "pending"}:
+                        automatic_usage["pendingMapping"] += 1
+                    else:
+                        automatic_usage["skipped"] += 1
+                except Exception:
+                    db.rollback()
+                    automatic_usage["skipped"] += 1
     audit(db, actor, "jackyun.file_import.map_inbound", "jackyun_file_imports", import_id,
           {"documents": len(docs_hit), "matched": matched,
            "matchedItems": len(matched_items), "filledFields": filled_fields,
@@ -891,6 +1050,8 @@ def map_inbound_items(db: Session, import_id: int, actor: str = "system") -> dic
            "reconciledLinks": reconciled_links, "reconciledLinkIds": reconciled_link_ids,
            "autoConfirmedLinks": auto_confirmed_links,
            "createdExternalOrders": len(created_external),
+           "createdDocuments": created_documents, "createdDocumentItems": created_document_items,
+           "matcher": matcher, "automaticUsage": automatic_usage,
            "allocSeeded": alloc_seeded, "skipped": len(skipped)})
     return {
         "ok": True,
@@ -912,6 +1073,10 @@ def map_inbound_items(db: Session, import_id: int, actor: str = "system") -> dic
         "rejectedLinks": rejected_links,
         "createdExternalOrders": len(created_external),
         "externalOrderNos": [po.external_order_id for po in created_external],
+        "createdDocuments": created_documents,
+        "createdDocumentItems": created_document_items,
+        "matcher": matcher,
+        "automaticUsage": automatic_usage,
         "allocSeeded": alloc_seeded,
         "missingRk": sorted(set(missing_rk)),
         "skipped": skipped,
@@ -981,15 +1146,21 @@ def map_outbound_documents(db: Session, import_id: int, actor: str = "system") -
         date_values = [value for value in date_values if value is not None]
         if date_values:
             document.document_at = min(date_values)
-        document.warehouse_code = next(
+        source_warehouse_code = next(
             (_pick_cell(payload, _OUTBOUND_WAREHOUSE_CODE_KEYS) for payload in payloads
              if _pick_cell(payload, _OUTBOUND_WAREHOUSE_CODE_KEYS)),
-            document.warehouse_code or "",
+            "",
         )
-        document.warehouse_name = next(
+        source_warehouse_name = next(
             (_pick_cell(payload, _OUTBOUND_WAREHOUSE_NAME_KEYS) for payload in payloads
              if _pick_cell(payload, _OUTBOUND_WAREHOUSE_NAME_KEYS)),
-            document.warehouse_name or "",
+            "",
+        )
+        if not source_warehouse_code and not source_warehouse_name:
+            source_warehouse_code = document.warehouse_code or ""
+            source_warehouse_name = document.warehouse_name or ""
+        document.warehouse_code, document.warehouse_name = resolve_warehouse_reference(
+            db, code=source_warehouse_code, name=source_warehouse_name,
         )
         document.company_name = next(
             (_pick_cell(payload, _OUTBOUND_COMPANY_KEYS) for payload in payloads
@@ -1084,10 +1255,14 @@ def map_import(db: Session, import_id: int, actor: str = "system") -> dict:
 
     if imp.report_type == "outbound":
         return {**map_outbound_documents(db, import_id, actor=actor), "mapper": "outbound"}
-    if _pick_cell({header: header for header in headers}, _PO_NO_COLS):
-        return {**map_purchase_import(db, import_id, actor=actor), "mapper": "purchase"}
     has_apply = any(_pick_cell({header: header for header in headers}, (key,)) for key in _INBOUND_APPLY_KEYS)
     has_item = any(_pick_cell({header: header for header in headers}, (key,)) for key in _INBOUND_ITEM_NO_KEYS)
     if has_apply and has_item:
+        if imp.report_type != "inbound":
+            imp.report_type = "inbound"
         return {**map_inbound_items(db, import_id, actor=actor), "mapper": "inbound_items"}
+    # 采购入库报表可能同时包含“采购单号”。只要同时具备入库单号和货品编码，
+    # 必须优先按入库明细处理，不能被采购单映射器抢先匹配。
+    if _pick_cell({header: header for header in headers}, _PO_NO_COLS):
+        return {**map_purchase_import(db, import_id, actor=actor), "mapper": "purchase"}
     return {"ok": True, "skipped": True, "reason": "无匹配映射器（原始行已存档）"}

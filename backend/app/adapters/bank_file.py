@@ -24,8 +24,8 @@ _COLUMN_PATTERNS: list[tuple[str, tuple[str, ...]]] = [
     ("summary", ("摘要", "交易备注", "用途", "备注")),
     ("counterparty", ("对方户名", "对方账户名称", "对方名称", "对方户名/账号", "交易对方")),
     ("counterparty_account", ("对方账号", "对方账户", "对方卡号")),
-    ("amount_in", ("收入金额", "贷方发生额", "存入金额", "收入")),
-    ("amount_out", ("支出金额", "借方发生额", "支取金额", "支出")),
+    ("amount_in", ("收入金额", "贷方发生额", "存入金额", "收入", "汇入金额")),
+    ("amount_out", ("支出金额", "借方发生额", "支取金额", "支出", "汇出金额")),
     ("balance", ("账户余额", "余额", "可用余额")),
     ("voucher_no", ("流水号", "交易流水号", "凭证号", "序号")),
 ]
@@ -42,6 +42,42 @@ def _match_field(header: str) -> str | None:
     return None
 
 
+def analyze_xlsx(content: bytes) -> dict:
+    """解析失败时输出文件结构诊断：工作表名、列名、行数、已识别/缺失字段。
+
+    返回 {"sheet": str, "columns": [str], "rows": int,
+          "detected": [str], "missing": [str], "valid": bool}
+    供导入失败时把具体原因反馈给用户，避免“请检查文件格式”式模糊提示。
+    """
+    from openpyxl import load_workbook
+
+    info: dict = {"sheet": "", "columns": [], "rows": 0, "detected": [], "missing": [], "valid": False}
+    try:
+        wb = load_workbook(io.BytesIO(content), data_only=True)
+    except Exception:
+        return info
+    ws = wb.active
+    info["sheet"] = ws.title
+    if ws.max_row:
+        info["rows"] = ws.max_row - 1
+    header = [c.value for c in ws[1]] if ws.max_row else None
+    if header is not None:
+        info["columns"] = [str(c) if c is not None else "" for c in header]
+    wb.close()
+
+    mapping: dict[str, int] = {}
+    for idx, cell in enumerate(header or []):
+        field = _match_field(str(cell) if cell is not None else "")
+        if field and field not in mapping:
+            mapping[field] = idx
+    info["detected"] = list(mapping.keys())
+    # 关键列：日期 + 至少一侧金额。缺这些无法落地成流水。
+    required = ("txn_date", "amount_in", "amount_out")
+    info["missing"] = [f for f in required if f not in mapping]
+    info["valid"] = "txn_date" in mapping and ("amount_in" in mapping or "amount_out" in mapping)
+    return info
+
+
 def parse_xlsx(content: bytes) -> list[dict]:
     """解析浙江农信交易明细 XLSX。
 
@@ -54,13 +90,16 @@ def parse_xlsx(content: bytes) -> list[dict]:
     from openpyxl import load_workbook
 
     try:
-        wb = load_workbook(io.BytesIO(content), read_only=True, data_only=True)
+        wb = load_workbook(io.BytesIO(content), data_only=True)
     except Exception:
         return []
     ws = wb.active
 
-    rows_iter = ws.iter_rows(values_only=True)
-    header = next(rows_iter, None)
+    if not ws.max_row:
+        wb.close()
+        return []
+    rows_iter = ws.iter_rows(min_row=2, values_only=True)
+    header = [c.value for c in ws[1]]
     if header is None:
         wb.close()
         return []

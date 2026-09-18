@@ -1,25 +1,34 @@
 from datetime import date
 from decimal import Decimal
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
-from sqlalchemy import func
+from sqlalchemy import and_, func, or_
 from sqlalchemy.orm import Session
 
 from app.db import get_db
 from app.services import dashboard
 from app.api.deps import current_actor, require_roles
 from app.core.audit import audit
+from app.models.alibaba1688_import import Alibaba1688Order
 from app.models.catalog import Product, ProductSku
 from app.models.catalog import InventorySnapshot
-from app.models.consumable import Consumable, ConsumableSkuMapping
-from app.models.jackyun import JackyunGoodsDocumentItem
+from app.models.consumable import Consumable, ConsumableSkuMapping, ConsumableTransaction, InboundConsumableUsage
+from app.models.consumable_purchase import ConsumablePurchaseItem
+from app.models.jackyun import JackyunGoodsDocument, JackyunGoodsDocumentItem
 from app.models.org import User
-from app.models.production import ProductionFinishedMovement, ProductionInboundAllocation, ProductionOrderItem
+from app.models.production import (
+    ProductionFinishedMovement,
+    ProductionInboundAllocation,
+    ProductionMaterialMovement,
+    ProductionMaterialReservation,
+    ProductionOrderItem,
+)
 from app.models.profit import CostSnapshot
-from app.models.purchase import PurchaseAllocationItem
-from app.models.sales import SalesOrderItem
+from app.models.procurement_chain import ProcurementChainLink
+from app.models.purchase import ExternalPurchaseOrder, PurchaseAllocationItem
+from app.models.sales import SalesOrder, SalesOrderItem
 from app.models.tax import TaxAccountingCategoryRule
 from app.services import tax_category_rule_service
 from app.utils.money import to_decimal
@@ -67,6 +76,17 @@ def inventory_skus(search: str = "", limit: int = 1000,
     return dashboard.inventory_skus(db, search=search, limit=min(max(limit, 1), 2000))
 
 
+@router.get("/inventory/sku-transactions")
+def inventory_sku_transactions(sku_id: int, limit: int = 500,
+                               db: Session = Depends(get_db)) -> dict[str, Any]:
+    """正品 SKU 逐笔出入库流水（本地吉客云单据事实，口径与库存运算一致）。"""
+    from app.services.inventory_position_service import sku_transactions
+    try:
+        return sku_transactions(db, sku_id, limit=min(max(limit, 1), 2000))
+    except ValueError as exc:
+        raise HTTPException(404, str(exc)) from exc
+
+
 @router.get("/products")
 def products(search: str = "", limit: int = 200,
              db: Session = Depends(get_db)) -> list[dict[str, Any]]:
@@ -105,7 +125,8 @@ def save_product(body: ProductSkuBody, request: Request,
                  _editor: User = Depends(require_roles("admin", "operator")),
                  db: Session = Depends(get_db)) -> dict[str, Any]:
     code = body.sku_code.strip()
-    external_id = (body.jackyun_sku_id or code).strip()
+    sku = db.get(ProductSku, body.sku_id) if body.sku_id else None
+    external_id = (body.jackyun_sku_id or (sku.jackyun_sku_id if sku else code)).strip()
     if not code or not external_id:
         raise HTTPException(400, "SKU 编码不能为空")
     if body.cost_mode not in {"fixed", "dynamic"}:
@@ -135,12 +156,14 @@ def save_product(body: ProductSkuBody, request: Request,
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
         tax_rule = tax_category_rule_service.unique_enabled_rule_for_tax_code(db, tax_code)
-    sku = db.get(ProductSku, body.sku_id) if body.sku_id else None
+    code_conflict = db.query(ProductSku).filter(func.lower(ProductSku.sku_code) == code.lower())
+    if sku:
+        code_conflict = code_conflict.filter(ProductSku.id != sku.id)
+    if code_conflict.first():
+        raise HTTPException(409, "SKU 编码已存在")
     conflict = db.query(ProductSku).filter(ProductSku.jackyun_sku_id == external_id)
     if sku:
         conflict = conflict.filter(ProductSku.id != sku.id)
-    elif db.query(ProductSku).filter(ProductSku.sku_code == code).first():
-        raise HTTPException(409, "SKU 编码已存在")
     if conflict.first():
         raise HTTPException(409, "吉客云 SKU ID 已存在")
     if sku is None:
@@ -197,6 +220,24 @@ def update_cost_policy(sku_id: int, body: CostPolicyBody, request: Request,
     db.commit()
     audit(db, current_actor(request), "catalog.cost_policy.update", "product_skus", sku.id, {"mode": sku.cost_mode})
     return {"id": sku.id, "costMode": sku.cost_mode, "costTolerancePct": str(sku.cost_tolerance_pct)}
+
+
+class ConsumablePolicyBody(BaseModel):
+    policy: Literal["auto", "none"]
+
+
+@router.post("/products/{sku_id}/consumable-policy")
+def update_consumable_policy(sku_id: int, body: ConsumablePolicyBody, request: Request,
+                             _editor: User = Depends(require_roles("admin", "operator")),
+                             db: Session = Depends(get_db)) -> dict[str, str | int]:
+    """保存货品是否需要绑定耗材的主档规则，不改变已有库存流水。"""
+    sku = db.get(ProductSku, sku_id)
+    if sku is None:
+        raise HTTPException(404, "SKU 不存在")
+    sku.raw = {**(sku.raw or {}), "consumablePolicy": body.policy}
+    db.commit()
+    audit(db, current_actor(request), "catalog.consumable_policy.update", "product_skus", sku.id, {"policy": body.policy})
+    return {"id": sku.id, "consumablePolicy": body.policy}
 
 
 class CategoryBody(BaseModel):
@@ -284,11 +325,17 @@ def bulk_set_tax_code(body: TaxCodeBulkBody, request: Request,
     return {"updated": updated, "skipped": skipped, "missing": missing}
 
 
-class BundleBulkDeleteBody(BaseModel):
-    ids: list[int]
+class CatalogBulkDeleteItem(BaseModel):
+    kind: Literal["goods", "consumable"]
+    id: int
 
 
-_BUNDLE_REFERENCE_SOURCES = (
+class CatalogBulkDeleteBody(BaseModel):
+    items: list[CatalogBulkDeleteItem]
+    dry_run: bool = False
+
+
+_PRODUCT_SKU_REFERENCE_SOURCES = (
     (InventorySnapshot.sku_id, "库存快照"),
     (ConsumableSkuMapping.sku_id, "耗材映射"),
     (PurchaseAllocationItem.sku_id, "采购分摊"),
@@ -299,6 +346,398 @@ _BUNDLE_REFERENCE_SOURCES = (
     (JackyunGoodsDocumentItem.matched_sku_id, "吉客云单据匹配"),
     (CostSnapshot.sku_id, "成本快照"),
 )
+
+
+_CONSUMABLE_REFERENCE_SOURCES = (
+    (ConsumableSkuMapping.consumable_id, "耗材映射"),
+    (ConsumableTransaction.consumable_id, "耗材库存流水"),
+    (InboundConsumableUsage.consumable_id, "入库耗材使用"),
+    (ConsumablePurchaseItem.consumable_id, "耗材采购明细"),
+    (ProductionMaterialReservation.consumable_id, "生产耗材预留"),
+    (ProductionMaterialMovement.consumable_id, "生产耗材流转"),
+)
+
+
+def _catalog_reference_counts(db: Session, sources: tuple[tuple[Any, str], ...], ids: list[int]) -> dict[int, list[dict[str, Any]]]:
+    references: dict[int, list[dict[str, Any]]] = {row_id: [] for row_id in ids}
+    for column, label in sources:
+        if label == "销售订单":
+            # 销售明细多只带 sku_code 文本（sku_id 列常为空）：sku_id OR sku_code 双通道匹配（大小写不敏感），
+            # 按货品分组计数避免同一明细同时命中两通道时重复计数。
+            counts = (
+                db.query(ProductSku.id, func.count(SalesOrderItem.id))
+                .join(
+                    SalesOrderItem,
+                    or_(
+                        SalesOrderItem.sku_id == ProductSku.id,
+                        and_(
+                            SalesOrderItem.sku_code != "",
+                            ProductSku.sku_code != "",
+                            func.lower(SalesOrderItem.sku_code) == func.lower(ProductSku.sku_code),
+                        ),
+                    ),
+                )
+                .filter(ProductSku.id.in_(ids))
+                .group_by(ProductSku.id)
+                .all()
+            ) if ids else []
+            for row_id, count in counts:
+                if int(count) > 0:
+                    references[int(row_id)].append({"label": label, "count": int(count)})
+            continue
+        counts = (
+            db.query(column, func.count())
+            .filter(column.in_(ids))
+            .group_by(column)
+            .all()
+        ) if ids else []
+        for row_id, count in counts:
+            if row_id is not None and int(count) > 0:
+                references[int(row_id)].append({"label": label, "count": int(count)})
+    return references
+
+
+def _inbound_reference_numbers(db: Session, item_ids: list[int]) -> dict[int, str]:
+    """按入库单明细行解析占用单号：优先关联的采购单号（1688/外部），否则入库单号。"""
+    numbers: dict[int, str] = {}
+    if not item_ids:
+        return numbers
+    item_rows = (
+        db.query(JackyunGoodsDocumentItem.id, JackyunGoodsDocumentItem.document_id, JackyunGoodsDocument.goodsdoc_no)
+        .join(JackyunGoodsDocument, JackyunGoodsDocument.id == JackyunGoodsDocumentItem.document_id)
+        .filter(JackyunGoodsDocumentItem.id.in_(item_ids))
+        .all()
+    )
+    document_ids = {document_id for _, document_id, _ in item_rows}
+    po_numbers: dict[int, str] = {}
+    if document_ids:
+        links = (
+            db.query(ProcurementChainLink)
+            .filter(
+                ProcurementChainLink.target_type == "inbound",
+                ProcurementChainLink.target_id.in_(document_ids),
+                ProcurementChainLink.match_method != "rejected",
+            )
+            .order_by(ProcurementChainLink.id)
+            .all()
+        )
+        alibaba_ids = {link.order_id for link in links if link.order_id is not None}
+        external_ids = {link.external_po_id for link in links if link.external_po_id is not None}
+        alibaba_orders = (
+            dict(
+                db.query(Alibaba1688Order.id, Alibaba1688Order.external_order_id)
+                .filter(Alibaba1688Order.id.in_(alibaba_ids))
+                .all()
+            )
+            if alibaba_ids
+            else {}
+        )
+        external_orders = (
+            dict(
+                db.query(ExternalPurchaseOrder.id, ExternalPurchaseOrder.external_order_id)
+                .filter(ExternalPurchaseOrder.id.in_(external_ids))
+                .all()
+            )
+            if external_ids
+            else {}
+        )
+        for link in links:
+            if link.target_id in po_numbers:
+                continue
+            number = ""
+            if link.order_id is not None:
+                number = alibaba_orders.get(link.order_id, "")
+            elif link.external_po_id is not None:
+                number = external_orders.get(link.external_po_id, "")
+            if number:
+                po_numbers[link.target_id] = number
+    for item_id, document_id, goodsdoc_no in item_rows:
+        numbers[item_id] = po_numbers.get(document_id) or goodsdoc_no
+    return numbers
+
+
+def _reference_numbers(db: Session, source: tuple[Any, str], row_ids: list[int]) -> dict[int, list[str]]:
+    """解析引用来源占用的真实单号；仅采购分摊 / 吉客云单据匹配 / 销售订单三类可解析，其余返回空。"""
+    column, label = source
+    if not row_ids or label not in {"采购分摊", "吉客云单据匹配", "销售订单"}:
+        return {}
+    numbers: dict[int, list[str]] = {}
+    if label == "采购分摊":
+        rows = (
+            db.query(PurchaseAllocationItem.sku_id, PurchaseAllocationItem.source_item_id)
+            .filter(PurchaseAllocationItem.sku_id.in_(row_ids))
+            .all()
+        )
+        resolved = _inbound_reference_numbers(
+            db,
+            [source_item_id for _, source_item_id in rows if source_item_id is not None],
+        )
+        for sku_id, source_item_id in rows:
+            if source_item_id is None:
+                continue
+            number = resolved.get(source_item_id)
+            if number:
+                bucket = numbers.setdefault(int(sku_id), [])
+                if number not in bucket:
+                    bucket.append(number)
+    elif label == "销售订单":
+        # sku_id 与 sku_code 双通道归属：销售明细多只带 sku_code 文本（sku_id 列常为空），编码按大小写不敏感匹配
+        code_map = dict(
+            db.query(ProductSku.id, ProductSku.sku_code)
+            .filter(ProductSku.id.in_(row_ids))
+            .all()
+        )
+        code_values = {code.lower() for code in code_map.values() if code}
+        conditions = [SalesOrderItem.sku_id.in_(row_ids)]
+        if code_values:
+            conditions.append(func.lower(SalesOrderItem.sku_code).in_(code_values))
+        rows = (
+            db.query(SalesOrderItem.sku_id, SalesOrderItem.sku_code, SalesOrderItem.order_id)
+            .filter(or_(*conditions))
+            .all()
+        )
+        order_ids = {order_id for _, _, order_id in rows}
+        order_nos = (
+            dict(
+                db.query(SalesOrder.id, SalesOrder.order_no)
+                .filter(SalesOrder.id.in_(order_ids))
+                .all()
+            )
+            if order_ids
+            else {}
+        )
+        for sku_id, sku_code, order_id in rows:
+            number = order_nos.get(order_id)
+            if not number:
+                continue
+            owners: set[int] = set()
+            if sku_id is not None and int(sku_id) in code_map:
+                owners.add(int(sku_id))
+            item_code = (sku_code or "").lower()
+            if item_code:
+                owners.update(
+                    row_id for row_id, code in code_map.items() if code and code.lower() == item_code
+                )
+            for owner in owners:
+                bucket = numbers.setdefault(owner, [])
+                if number not in bucket:
+                    bucket.append(number)
+    else:
+        rows = (
+            db.query(JackyunGoodsDocumentItem.matched_sku_id, JackyunGoodsDocumentItem.id)
+            .filter(JackyunGoodsDocumentItem.matched_sku_id.in_(row_ids))
+            .all()
+        )
+        resolved = _inbound_reference_numbers(db, [item_id for _, item_id in rows])
+        for sku_id, item_id in rows:
+            number = resolved.get(item_id)
+            if number:
+                bucket = numbers.setdefault(int(sku_id), [])
+                if number not in bucket:
+                    bucket.append(number)
+    return numbers
+
+
+def _attach_reference_numbers(
+    db: Session,
+    sources: tuple[tuple[Any, str], ...],
+    references: dict[int, list[dict[str, Any]]],
+) -> None:
+    """为引用计数补充占用单号；每项最多 5 个，超出的截断并以「等」收尾。"""
+    source_by_label = {label: column for column, label in sources}
+    for refs in references.values():
+        for ref in refs:
+            ref["numbers"] = []
+    for label, column in source_by_label.items():
+        row_ids = [
+            row_id for row_id, refs in references.items()
+            if any(ref["label"] == label for ref in refs)
+        ]
+        if not row_ids:
+            continue
+        numbers_by_id = _reference_numbers(db, (column, label), row_ids)
+        if not numbers_by_id:
+            continue
+        for row_id, refs in references.items():
+            for ref in refs:
+                if ref["label"] != label:
+                    continue
+                numbers = numbers_by_id.get(row_id, [])
+                ref["numbers"] = numbers[:5] + (["等"] if len(numbers) > 5 else [])
+
+
+@router.post("/catalog/bulk-delete")
+def bulk_delete_catalog(
+    body: CatalogBulkDeleteBody,
+    request: Request,
+    _admin: User = Depends(require_roles("admin")),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    """批量删除单品和耗材档案；存在历史引用时只返回阻塞原因。"""
+    requested: list[tuple[str, int]] = []
+    seen: set[tuple[str, int]] = set()
+    for item in body.items:
+        if item.id <= 0:
+            raise HTTPException(400, "请提供有效的货品档案 ID")
+        key = (item.kind, item.id)
+        if key not in seen:
+            seen.add(key)
+            requested.append(key)
+    if not requested or len(requested) > 500:
+        raise HTTPException(400, "请提供 1 到 500 个货品档案")
+
+    goods_ids = [row_id for kind, row_id in requested if kind == "goods"]
+    consumable_ids = [row_id for kind, row_id in requested if kind == "consumable"]
+    goods_by_id = {row.id: row for row in db.query(ProductSku).filter(ProductSku.id.in_(goods_ids)).all()} if goods_ids else {}
+    consumable_by_id = {row.id: row for row in db.query(Consumable).filter(Consumable.id.in_(consumable_ids)).all()} if consumable_ids else {}
+    goods_references = _catalog_reference_counts(db, _PRODUCT_SKU_REFERENCE_SOURCES, goods_ids)
+    consumable_references = _catalog_reference_counts(db, _CONSUMABLE_REFERENCE_SOURCES, consumable_ids)
+    # 补充占用单号（采购单号/入库单号），dry_run 与正式删除共用同一份组装结果。
+    _attach_reference_numbers(db, _PRODUCT_SKU_REFERENCE_SOURCES, goods_references)
+    _attach_reference_numbers(db, _CONSUMABLE_REFERENCE_SOURCES, consumable_references)
+
+    blocked: list[dict[str, Any]] = []
+    invalid: list[dict[str, Any]] = []
+    not_found: list[dict[str, int | str]] = []
+    deleted_items: list[dict[str, int | str]] = []
+    for kind, row_id in requested:
+        row = goods_by_id.get(row_id) if kind == "goods" else consumable_by_id.get(row_id)
+        if row is None:
+            not_found.append({"kind": kind, "id": row_id})
+            continue
+        if kind == "goods" and row.product_type != "single":
+            invalid.append({"kind": kind, "id": row.id, "code": row.sku_code, "reason": "套装请在套装档案中操作"})
+            continue
+        references = (goods_references if kind == "goods" else consumable_references).get(row.id, [])
+        code = row.sku_code if kind == "goods" else row.code
+        if references:
+            # 采购单号为纯数字；仅回退到入库单号（RK/CK 等前缀）时不视作被采购单占用
+            occupied_by_purchase = any(
+                ref["label"] in {"采购分摊", "吉客云单据匹配"}
+                and any(str(number).isdigit() for number in ref.get("numbers", []))
+                for ref in references
+            )
+            # 销售订单号来自 SalesOrder.order_no；「等」为截断占位符，不视作单号
+            occupied_by_sales = any(
+                ref["label"] == "销售订单"
+                and any(str(number) not in {"", "等"} for number in ref.get("numbers", []))
+                for ref in references
+            )
+            if occupied_by_purchase:
+                reason = "该货品被采购单占用，不能删除"
+            elif occupied_by_sales:
+                reason = "该货品被销售订单占用，不能删除"
+            else:
+                reason = "已有历史业务引用，不能删除"
+            blocked.append({
+                "kind": kind,
+                "id": row.id,
+                "code": code,
+                "reason": reason,
+                "references": references,
+            })
+            continue
+        deleted_items.append({"kind": kind, "id": row.id, "code": code})
+        if not body.dry_run:
+            db.delete(row)
+
+    if not body.dry_run:
+        db.commit()
+        audit(
+            db,
+            current_actor(request),
+            "catalog.bulk_delete",
+            "catalog",
+            None,
+            {
+                "requested": [{"kind": kind, "id": row_id} for kind, row_id in requested],
+                "deletedItems": deleted_items,
+                "blocked": blocked,
+                "invalid": invalid,
+                "notFound": not_found,
+            },
+        )
+    return {
+        "ok": True,
+        "dryRun": body.dry_run,
+        "requested": len(requested),
+        "deleted": len(deleted_items),
+        "deletedItems": deleted_items,
+        "blocked": blocked,
+        "invalid": invalid,
+        "notFound": not_found,
+    }
+
+
+class CatalogBulkStatusBody(BaseModel):
+    items: list[CatalogBulkDeleteItem]
+    status: str
+
+
+@router.post("/catalog/bulk-status")
+def bulk_set_catalog_status(
+    body: CatalogBulkStatusBody,
+    request: Request,
+    _admin: User = Depends(require_roles("admin")),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    """批量启用/停用单品与耗材档案；停用后不再参与新增业务，历史记录全部保留。"""
+    if body.status not in {"active", "inactive"}:
+        raise HTTPException(400, "状态仅支持 active（启用）或 inactive（停用）")
+    requested: list[tuple[str, int]] = []
+    seen: set[tuple[str, int]] = set()
+    for item in body.items:
+        if item.id <= 0:
+            raise HTTPException(400, "请提供有效的货品档案 ID")
+        key = (item.kind, item.id)
+        if key not in seen:
+            seen.add(key)
+            requested.append(key)
+    if not requested or len(requested) > 500:
+        raise HTTPException(400, "请提供 1 到 500 个货品档案")
+
+    goods_ids = [row_id for kind, row_id in requested if kind == "goods"]
+    consumable_ids = [row_id for kind, row_id in requested if kind == "consumable"]
+    goods_by_id = {row.id: row for row in db.query(ProductSku).filter(ProductSku.id.in_(goods_ids)).all()} if goods_ids else {}
+    consumable_by_id = {row.id: row for row in db.query(Consumable).filter(Consumable.id.in_(consumable_ids)).all()} if consumable_ids else {}
+
+    updated_items: list[dict[str, Any]] = []
+    not_found: list[dict[str, int | str]] = []
+    for kind, row_id in requested:
+        row = goods_by_id.get(row_id) if kind == "goods" else consumable_by_id.get(row_id)
+        if row is None:
+            not_found.append({"kind": kind, "id": row_id})
+            continue
+        row.status = body.status
+        updated_items.append({
+            "kind": kind,
+            "id": row.id,
+            "code": row.sku_code if kind == "goods" else row.code,
+            "status": body.status,
+        })
+    db.commit()
+    audit(
+        db,
+        current_actor(request),
+        "catalog.bulk_status",
+        "catalog",
+        None,
+        {
+            "items": [{"kind": kind, "id": row_id} for kind, row_id in requested],
+            "status": body.status,
+            "updatedItems": updated_items,
+            "notFound": not_found,
+        },
+    )
+    return {"updated": len(updated_items), "items": updated_items, "notFound": not_found}
+
+
+class BundleBulkDeleteBody(BaseModel):
+    ids: list[int]
+    dry_run: bool = False
+
+
+_BUNDLE_REFERENCE_SOURCES = _PRODUCT_SKU_REFERENCE_SOURCES
 
 
 @router.post("/catalog/bundles/bulk-delete")
@@ -326,17 +765,7 @@ def bulk_delete_bundles(
         if row_id in by_id and by_id[row_id].product_type in {"bundle", "virtual_bundle"}
     ]
 
-    references_by_id: dict[int, list[dict[str, int | str]]] = {row_id: [] for row_id in bundle_ids}
-    for column, label in _BUNDLE_REFERENCE_SOURCES:
-        counts = (
-            db.query(column, func.count())
-            .filter(column.in_(bundle_ids))
-            .group_by(column)
-            .all()
-        ) if bundle_ids else []
-        for sku_id, count in counts:
-            if sku_id is not None and int(count) > 0:
-                references_by_id[int(sku_id)].append({"label": label, "count": int(count)})
+    references_by_id = _catalog_reference_counts(db, _BUNDLE_REFERENCE_SOURCES, bundle_ids)
 
     blocked: list[dict[str, Any]] = []
     deleted_ids: list[int] = []
@@ -352,25 +781,28 @@ def bulk_delete_bundles(
             })
             continue
         deleted_ids.append(row.id)
-        db.delete(row)
+        if not body.dry_run:
+            db.delete(row)
 
-    db.commit()
-    audit(
-        db,
-        current_actor(request),
-        "catalog.bundle.bulk_delete",
-        "product_skus",
-        None,
-        {
-            "requested": ids,
-            "deletedIds": deleted_ids,
-            "blocked": blocked,
-            "invalid": invalid,
-            "notFound": not_found,
-        },
-    )
+    if not body.dry_run:
+        db.commit()
+        audit(
+            db,
+            current_actor(request),
+            "catalog.bundle.bulk_delete",
+            "product_skus",
+            None,
+            {
+                "requested": ids,
+                "deletedIds": deleted_ids,
+                "blocked": blocked,
+                "invalid": invalid,
+                "notFound": not_found,
+            },
+        )
     return {
         "ok": True,
+        "dryRun": body.dry_run,
         "requested": len(ids),
         "deleted": len(deleted_ids),
         "deletedIds": deleted_ids,

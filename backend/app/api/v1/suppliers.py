@@ -10,6 +10,7 @@ from app.api.deps import current_actor
 from app.core.audit import audit
 from app.db import get_db
 from app.models.purchase import ExternalPurchaseOrder, Supplier
+from app.services.supplier_sync_service import sync_suppliers_from_business_data
 
 router = APIRouter(prefix="/suppliers", tags=["suppliers"])
 
@@ -66,6 +67,17 @@ def list_suppliers(
     status: str = Query("all", pattern="^(all|normal|temp)$"),
     db: Session = Depends(get_db),
 ) -> list[dict[str, Any]]:
+    sync = sync_suppliers_from_business_data(db)
+    if sync["created"] or sync["updated"]:
+        db.commit()
+        audit(
+            db,
+            "system",
+            "supplier.auto_sync",
+            "suppliers",
+            "",
+            sync,
+        )
     q = db.query(Supplier)
     keyword = keyword.strip()
     if keyword:

@@ -14,7 +14,7 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from app.core.audit import audit
-from app.models.catalog import ProductSku
+from app.models.catalog import ProductSku, Warehouse
 from app.models.ops import ExceptionRecord
 from app.models.purchase import (
     ExternalPurchaseOrder,
@@ -34,6 +34,17 @@ EXPENSE_TYPES = {"pack", "processing", "plate", "mold", "freight", "testing", "o
 # 采购订单号统一落在 external_purchase_orders；平台只描述订单来源，
 # 不要求该订单一定能回到 1688 原始文件。
 PURCHASE_PLATFORMS = {"1688", "pdd", "taobao", "other"}
+_UNSET = object()
+
+
+def _validate_target_warehouse(db: Session, warehouse_id: int | None) -> Warehouse | None:
+    """校验采购订单的计划仓库；空值表示暂不指定。"""
+    if warehouse_id is None:
+        return None
+    warehouse = db.get(Warehouse, int(warehouse_id))
+    if warehouse is None or warehouse.status != "active":
+        raise ValueError("入库仓库不存在或已停用")
+    return warehouse
 
 
 def normalize_platform(value: str | None) -> str:
@@ -91,16 +102,91 @@ def _ensure_exception(db: Session, code: str, title: str, detail: str) -> None:
                                detail={"latest": detail[:2000]}, severity="high", source="system"))
 
 
+def promote_reference_only_po(
+    po: ExternalPurchaseOrder,
+    *,
+    supplier_name: str = "",
+    title: str = "",
+    ordered_at=None,
+    order_amount=None,
+    paid_amount=None,
+    buyer_account: str = "",
+    warehouse: Warehouse | None = None,
+    raw: dict | None = None,
+) -> None:
+    """把入库导入产生的“仅参考采购号”升级为正式采购主单。
+
+    入库文件里的本地参考编号不能直接进入采购工作台；但用户随后用同一采购号
+    正式新建/同步采购单时，这条记录应原地升级，而不是再造第二个订单。
+    """
+    previous_raw = po.raw if isinstance(po.raw, dict) else {}
+    incoming_raw = raw if isinstance(raw, dict) else {}
+    po.raw = {
+        **previous_raw,
+        **incoming_raw,
+        "referenceOnly": False,
+        "referencePromotion": {
+            "from": previous_raw.get("source") or "reference_only",
+            "to": incoming_raw.get("source") or "manual",
+        },
+    }
+    if supplier_name.strip():
+        po.supplier_name = supplier_name.strip()
+    if title.strip():
+        po.title = title.strip()
+    if ordered_at is not None:
+        po.ordered_at = ordered_at
+    if order_amount is not None:
+        value = to_decimal(order_amount)
+        if not value.is_finite() or value < 0:
+            raise ValueError("订单金额必须是非负数字")
+        po.order_amount = value
+    if paid_amount is not None:
+        value = to_decimal(paid_amount)
+        if not value.is_finite() or value < 0:
+            raise ValueError("实付金额必须是非负数字")
+        po.paid_amount = value
+    if buyer_account.strip():
+        po.buyer_account = buyer_account.strip()
+    if warehouse is not None:
+        po.warehouse_id = warehouse.id
+    po.synced_at = datetime.now(timezone.utc)
+
+
 def create_external_po(db: Session, *, external_order_id: str, supplier_name: str = "",
                        title: str = "", ordered_at=None, order_amount=None, paid_amount=None,
                        buyer_account: str = "", platform: str = "1688", raw: dict | None = None,
+                       warehouse_id: int | None = None,
                        actor: str = "system") -> ExternalPurchaseOrder:
     """登记/同步一笔外部采购订单。幂等：已存在则更新状态字段，绝不重复生成。"""
     platform = normalize_platform(platform)
+    warehouse = _validate_target_warehouse(db, warehouse_id)
     po = db.query(ExternalPurchaseOrder).filter_by(
         platform=platform, external_order_id=external_order_id
     ).first()
     if po:
+        if isinstance(po.raw, dict) and po.raw.get("referenceOnly") is True:
+            promote_reference_only_po(
+                po,
+                supplier_name=supplier_name,
+                title=title,
+                ordered_at=ordered_at,
+                order_amount=order_amount,
+                paid_amount=paid_amount,
+                buyer_account=buyer_account,
+                warehouse=warehouse,
+                raw=raw,
+            )
+            from app.services.supplier_sync_service import ensure_supplier
+            ensure_supplier(db, po.supplier_name, platform=po.platform)
+            db.commit()
+            audit(db, actor, "purchase.po.promote_reference_only", "external_purchase_orders", po.id,
+                  {"orderNo": po.external_order_id, "platform": po.platform})
+            from app.services.inbound_allocation_seed import seed_allocations_for_po
+            seed_allocations_for_po(db, po)
+            return po
+        from app.services.supplier_sync_service import ensure_supplier
+        ensure_supplier(db, po.supplier_name, platform=po.platform)
         po.order_status = po.order_status or ""
         po.synced_at = datetime.now(timezone.utc)
         if raw:
@@ -118,11 +204,14 @@ def create_external_po(db: Session, *, external_order_id: str, supplier_name: st
         ordered_at=ordered_at,
         order_amount=to_decimal(order_amount) if order_amount is not None else None,
         paid_amount=to_decimal(paid_amount) if paid_amount is not None else None,
+        warehouse_id=warehouse.id if warehouse is not None else None,
         buyer_account=buyer_account,
         synced_at=datetime.now(timezone.utc),
         raw=raw or {},
     )
     db.add(po)
+    from app.services.supplier_sync_service import ensure_supplier
+    ensure_supplier(db, po.supplier_name, platform=po.platform)
     db.commit()
     audit(db, actor, "purchase.po.create", "external_purchase_orders", po.id,
           {"externalOrderId": external_order_id})
@@ -136,6 +225,7 @@ def update_external_po(
     db: Session,
     po: ExternalPurchaseOrder,
     *,
+    external_order_id: str | None = None,
     platform: str | None = None,
     supplier_name: str | None = None,
     title: str | None = None,
@@ -143,11 +233,31 @@ def update_external_po(
     order_amount=None,
     paid_amount=None,
     buyer_account: str | None = None,
+    warehouse_id: int | None | object = _UNSET,
     actor: str = "system",
 ) -> ExternalPurchaseOrder:
-    """维护订单主档字段；订单号本身保持不变，避免破坏已建立的链路。"""
+    """维护订单主档字段。
+
+    本地新建采购单允许在详情页修正采购单号；带有 1688 原始文件的订单由
+    工作台服务拦截，不允许改写原始平台订单号。
+    """
+    before_order_no = po.external_order_id
     if platform is not None:
         po.platform = normalize_platform(platform)
+    if external_order_id is not None:
+        order_no = str(external_order_id).strip()
+        if not order_no:
+            raise ValueError("采购订单号不能为空")
+        if len(order_no) > 128:
+            raise ValueError("采购订单号不能超过 128 个字符")
+        duplicate = db.query(ExternalPurchaseOrder).filter(
+            ExternalPurchaseOrder.platform == po.platform,
+            ExternalPurchaseOrder.external_order_id == order_no,
+            ExternalPurchaseOrder.id != po.id,
+        ).first()
+        if duplicate is not None:
+            raise ValueError(f"采购订单号 {order_no} 在当前渠道已存在")
+        po.external_order_id = order_no
     if supplier_name is not None:
         po.supplier_name = supplier_name.strip()
     if title is not None:
@@ -166,9 +276,18 @@ def update_external_po(
         po.paid_amount = value
     if buyer_account is not None:
         po.buyer_account = buyer_account.strip()
+    if warehouse_id is not _UNSET:
+        warehouse = _validate_target_warehouse(db, warehouse_id)  # type: ignore[arg-type]
+        po.warehouse_id = warehouse.id if warehouse is not None else None
+    from app.services.supplier_sync_service import ensure_supplier
+    ensure_supplier(db, po.supplier_name, platform=po.platform)
     db.commit()
     audit(db, actor, "purchase.po.update", "external_purchase_orders", po.id,
-          {"orderNo": po.external_order_id, "platform": po.platform})
+          {
+              "orderNo": po.external_order_id,
+              "platform": po.platform,
+              **({"previousOrderNo": before_order_no} if before_order_no != po.external_order_id else {}),
+          })
     return po
 
 
@@ -187,7 +306,7 @@ def balance_of(db: Session, po: ExternalPurchaseOrder) -> dict[str, Any]:
 
 
 def add_allocation(db: Session, po: ExternalPurchaseOrder, *, sku_id: int | None,
-                   sku_code: str, goods_name: str, quantity, unit_price,
+                   sku_code: str, goods_name: str, quantity, unit_price=None, amount=None,
                    note: str = "", actor: str = "system", allocation_id: int | None = None) -> PurchaseAllocationItem:
     if po.purchase_status != "pending_refine":
         raise ValueError("仅“待完善”状态可修改分配")
@@ -197,9 +316,21 @@ def add_allocation(db: Session, po: ExternalPurchaseOrder, *, sku_id: int | None
     if sku is None:
         raise ValueError("SKU 不存在，请先同步吉客云商品主档")
     qty = to_decimal(quantity)
-    price = to_decimal(unit_price)
-    if not qty.is_finite() or not price.is_finite() or qty <= 0 or price < 0:
-        raise ValueError("数量/单价非法")
+    if not qty.is_finite() or qty <= 0:
+        raise ValueError("数量必须大于 0")
+    if amount not in (None, ""):
+        total = to_decimal(amount)
+        if not total.is_finite() or total < 0:
+            raise ValueError("总价不能为负数")
+        total = total.quantize(Decimal("0.0001"))
+        price = (total / qty).quantize(Decimal("0.0001"))
+    else:
+        if unit_price in (None, ""):
+            raise ValueError("请填写总价")
+        price = to_decimal(unit_price)
+        if not price.is_finite() or price < 0:
+            raise ValueError("单价不能为负数")
+        total = (qty * price).quantize(Decimal("0.0001"))
     row = db.get(PurchaseAllocationItem, allocation_id) if allocation_id is not None else PurchaseAllocationItem(po_id=po.id)
     if row is None or row.po_id != po.id:
         raise ValueError("该 SKU 分配不属于当前订单")
@@ -207,7 +338,7 @@ def add_allocation(db: Session, po: ExternalPurchaseOrder, *, sku_id: int | None
     was_inbound_auto = allocation_id is not None and row.source == "inbound_auto"
     row.sku_id, row.sku_code, row.goods_name = sku.id, sku.sku_code, sku.sku_name
     row.quantity, row.unit_price = qty, price
-    row.amount = (qty * price).quantize(Decimal("0.0001"))
+    row.amount = total
     row.source = "manual"
     row.match_confidence = None
     # 仅新建时写入归属备注（如「由入库单 #N 明细自动反填」），编辑时保留原备注不覆盖，
@@ -345,8 +476,29 @@ def advance_status(db: Session, po: ExternalPurchaseOrder, nxt: str,
         row = _order_row(db, source, po)
         if not row["inbound"]:
             raise ValueError("请先关联真实采购入库单")
-        if any(not inbound.get("consumableUsageDecided") for inbound in row["inbound"]):
-            raise ValueError("请先逐张入库单确认是否添加耗材使用及数量")
+        # 正品入库后的耗材耗用是系统动作，不再要求用户逐单确认。状态推进前
+        # 再补跑一次，兼容历史上已经建链但尚未执行自动耗用的入库关联。
+        from app.services.consumable_service import auto_apply_inbound_usage
+        for inbound in row["inbound"]:
+            link_id = inbound.get("linkId")
+            # 已明确选择“本次不使用耗材”也是完成的耗材判定，不应再次要求自动扣减。
+            if (
+                not link_id
+                or inbound.get("consumableUsageEnabled") is True
+                or (
+                    inbound.get("consumableUsageDecided") is True
+                    and inbound.get("consumableUsageEnabled") is False
+                )
+            ):
+                continue
+            result = auto_apply_inbound_usage(
+                db, int(link_id), note="采购入库按实际入库数量自动扣减耗材",
+            )
+            # pending_mapping 只表示货品档案尚未维护耗材映射，不代表入库失败；
+            # 后续补齐映射时会由回溯任务自动补扣。真正未完成入库分摊的 pending 仍需拦截。
+            if result.get("status") not in {"applied", "manual_preserved", "pending_mapping"}:
+                raise ValueError("存在入库单尚未完成自动耗材扣减，请先维护正品与耗材映射")
+        row = _order_row(db, source, po)
         if nxt == "done" and not (row["invoice"] and row["verified"] and any(s["paid"] for s in row["settlement"])):
             raise ValueError("完成前须核实发票、付款关联及税务认证记录")
     po.purchase_status = nxt

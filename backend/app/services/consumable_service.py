@@ -9,9 +9,10 @@ from io import BytesIO
 
 from app.models.catalog import ProductSku, Warehouse
 from app.models.consumable import Consumable, ConsumableSkuMapping, ConsumableTransaction, InboundConsumableUsage
-from app.models.jackyun import JackyunGoodsDocumentItem
+from app.models.jackyun import JackyunGoodsDocument, JackyunGoodsDocumentItem
+from app.models.production import ProductionOrder, ProductionOrderItem
 from app.models.procurement_chain import ProcurementChainLink
-from app.models.purchase import ExternalPurchaseOrder, PurchaseAllocationItem
+from app.models.purchase import PurchaseAllocationItem
 from app.models.tax import TaxAccountingCategoryRule
 from app.services.tax_category_rule_service import normalize_tax_code, unique_enabled_rule_for_tax_code
 from app.utils.money import to_decimal
@@ -32,8 +33,102 @@ def _linked_skus(db: Session, consumable_id: int) -> list[dict]:
     return [{"skuId": sku.id, "skuCode": sku.sku_code, "skuName": sku.sku_name} for _, sku in rows]
 
 
-def serialize_consumable(row: Consumable, db: Session) -> dict:
-    mapping_count = db.query(ConsumableSkuMapping).filter_by(consumable_id=row.id).count()
+_OPEN_PRODUCTION_STATUSES = {
+    "planned", "confirmed", "producing", "produced", "shipped", "arrived", "inbound",
+}
+
+
+def _inventory_context(db: Session, rows: list[Consumable]) -> dict[int, dict]:
+    """批量准备耗材经营视图所需的映射、流水和待生产数据。"""
+    row_ids = [row.id for row in rows]
+    if not row_ids:
+        return {}
+
+    mapping_rows = db.query(ConsumableSkuMapping, ProductSku).join(
+        ProductSku, ProductSku.id == ConsumableSkuMapping.sku_id
+    ).filter(ConsumableSkuMapping.consumable_id.in_(row_ids)).order_by(
+        ConsumableSkuMapping.consumable_id, ProductSku.sku_code,
+    ).all()
+    mappings_by_consumable: dict[int, list[dict]] = {row_id: [] for row_id in row_ids}
+    usage_by_consumable: dict[int, list[Decimal]] = {row_id: [] for row_id in row_ids}
+    for mapping, sku in mapping_rows:
+        usage = to_decimal(mapping.usage_per_unit)
+        mappings_by_consumable[mapping.consumable_id].append({
+            "skuId": sku.id,
+            "skuCode": sku.sku_code,
+            "skuName": sku.sku_name,
+            "usagePerUnit": _qty(usage),
+        })
+        if usage > 0:
+            usage_by_consumable[mapping.consumable_id].append(usage)
+
+    loss_by_consumable: dict[int, Decimal] = {row_id: Decimal("0") for row_id in row_ids}
+    adjustment_by_consumable: dict[int, Decimal] = {row_id: Decimal("0") for row_id in row_ids}
+    transactions = db.query(ConsumableTransaction).filter(
+        ConsumableTransaction.consumable_id.in_(row_ids),
+    ).all()
+    for tx in transactions:
+        qty = to_decimal(tx.quantity)
+        if tx.transaction_type == "loss":
+            loss_by_consumable[tx.consumable_id] += qty
+        elif tx.transaction_type in {"stocktake", "adjustment", "manual"}:
+            adjustment_by_consumable[tx.consumable_id] += qty
+
+    pending_by_sku: dict[int, Decimal] = {}
+    production_rows = db.query(ProductionOrderItem).join(
+        ProductionOrder, ProductionOrder.id == ProductionOrderItem.production_order_id
+    ).filter(
+        ProductionOrder.status.in_(_OPEN_PRODUCTION_STATUSES),
+        ProductionOrderItem.quantity > ProductionOrderItem.inbound_qty,
+    ).all()
+    for item in production_rows:
+        remaining = max(to_decimal(item.quantity) - to_decimal(item.inbound_qty), Decimal("0"))
+        if remaining > 0:
+            pending_by_sku[item.sku_id] = pending_by_sku.get(item.sku_id, Decimal("0")) + remaining
+
+    pending_by_consumable: dict[int, Decimal] = {row_id: Decimal("0") for row_id in row_ids}
+    for mapping, _ in mapping_rows:
+        pending_by_consumable[mapping.consumable_id] += (
+            pending_by_sku.get(mapping.sku_id, Decimal("0")) * to_decimal(mapping.usage_per_unit)
+        )
+
+    context: dict[int, dict] = {}
+    for row in rows:
+        available = to_decimal(row.stock_qty) + to_decimal(row.factory_qty)
+        usage_values = usage_by_consumable[row.id]
+        usage_per_unit = max(usage_values) if usage_values else Decimal("0")
+        pending = pending_by_consumable[row.id]
+        support = max(available, Decimal("0")) / usage_per_unit if usage_per_unit > 0 else None
+        coverage = support / pending * Decimal("100") if support is not None and pending > 0 else None
+        if coverage is None or coverage >= Decimal("100"):
+            inventory_status = "正常"
+        elif coverage >= Decimal("60"):
+            inventory_status = "偏低"
+        else:
+            inventory_status = "缺货"
+        context[row.id] = {
+            "mappingDetails": mappings_by_consumable[row.id],
+            "lossQty": loss_by_consumable[row.id],
+            "adjustmentQty": adjustment_by_consumable[row.id],
+            "pendingProductionQty": pending,
+            "usagePerUnit": usage_per_unit if usage_per_unit > 0 else None,
+            "supportQty": support,
+            "coveragePct": coverage,
+            "gapQty": max(pending - support, Decimal("0")) if support is not None else None,
+            "inventoryStatus": inventory_status,
+        }
+    return context
+
+
+def serialize_consumable(row: Consumable, db: Session, context: dict | None = None) -> dict:
+    inventory = (context or {}).get(row.id, {})
+    mapping_details = inventory.get("mappingDetails")
+    if mapping_details is None:
+        mapping_details = [
+            {**item, "usagePerUnit": None}
+            for item in _linked_skus(db, row.id)
+        ]
+    mapping_count = len(mapping_details)
     available = to_decimal(row.stock_qty) + to_decimal(row.factory_qty)
     min_qty = to_decimal(row.min_stock_qty)
     return {
@@ -57,7 +152,22 @@ def serialize_consumable(row: Consumable, db: Session) -> dict:
         "usageRate": _qty((to_decimal(row.used_qty) / to_decimal(row.purchased_qty)) if to_decimal(row.purchased_qty) > 0 else Decimal("0")),
         "status": row.status,
         "mappingCount": mapping_count,
-        "linkedSkus": _linked_skus(db, row.id),
+        "linkedSkus": [
+            {key: item[key] for key in ("skuId", "skuCode", "skuName")}
+            for item in mapping_details
+        ],
+        "mappingDetails": mapping_details,
+        "totalStockQty": _qty(to_decimal(row.purchased_qty)),
+        "totalUsedQty": _qty(to_decimal(row.used_qty)),
+        "currentStockQty": _qty(available),
+        "lossQty": _qty(inventory.get("lossQty", Decimal("0"))),
+        "adjustmentQty": _qty(inventory.get("adjustmentQty", Decimal("0"))),
+        "pendingProductionQty": _qty(inventory.get("pendingProductionQty", Decimal("0"))),
+        "usagePerUnit": _qty(inventory["usagePerUnit"]) if inventory.get("usagePerUnit") is not None else None,
+        "supportQty": _qty(inventory["supportQty"]) if inventory.get("supportQty") is not None else None,
+        "coveragePct": _qty(inventory["coveragePct"]) if inventory.get("coveragePct") is not None else None,
+        "gapQty": _qty(inventory["gapQty"]) if inventory.get("gapQty") is not None else None,
+        "inventoryStatus": inventory.get("inventoryStatus", "正常"),
         # 预警口径：可用（各耗材仓汇总）≤ 安全库存，或任一库存口径为负
         "lowStock": (min_qty > 0 and available <= min_qty)
         or to_decimal(row.stock_qty) < 0
@@ -80,7 +190,9 @@ def list_consumables(db: Session, search: str = "", status: str | None = None) -
     if term:
         pattern = f"%{term}%"
         query = query.filter((Consumable.code.ilike(pattern)) | (Consumable.name.ilike(pattern)))
-    return [serialize_consumable(row, db) for row in query.limit(500).all()]
+    rows = query.limit(500).all()
+    context = _inventory_context(db, rows)
+    return [serialize_consumable(row, db, context) for row in rows]
 
 
 def upsert_consumable(
@@ -318,28 +430,6 @@ def record_transaction(
     return tx
 
 
-def consume_for_purchase_order(db: Session, po: ExternalPurchaseOrder) -> dict[str, str]:
-    """采购内容确认后按 SKU 映射自动领用耗材；同一 PO 幂等。"""
-    allocations = db.query(PurchaseAllocationItem).filter(
-        PurchaseAllocationItem.po_id == po.id,
-        PurchaseAllocationItem.sku_id.isnot(None),
-        PurchaseAllocationItem.quantity.isnot(None),
-    ).all()
-    totals: dict[int, Decimal] = {}
-    for allocation in allocations:
-        for mapping in db.query(ConsumableSkuMapping).filter_by(sku_id=allocation.sku_id).all():
-            totals[mapping.consumable_id] = totals.get(mapping.consumable_id, Decimal("0")) + to_decimal(allocation.quantity) * to_decimal(mapping.usage_per_unit)
-    consumed = Decimal("0")
-    for consumable_id, qty in totals.items():
-        record_transaction(
-            db, consumable_id=consumable_id, transaction_type="consume", quantity=str(qty),
-            source_type="purchase_order", source_id=po.id,
-            note=f"采购单 {po.external_order_id} 确认后按 SKU 映射自动领用",
-        )
-        consumed += qty
-    return {"consumableCount": str(len(totals)), "consumedQty": _qty(consumed)}
-
-
 def suggest_inbound_usage(db: Session, link_id: int) -> dict:
     """按实际入库明细和 SKU 映射生成一条入库关联的耗材使用建议。
 
@@ -430,8 +520,9 @@ def suggest_inbound_usage(db: Session, link_id: int) -> dict:
 def auto_apply_inbound_usage(db: Session, link_id: int, note: str = "") -> dict:
     """把可确定的 SKU→耗材建议自动写入入库关联并扣减库存。
 
-    用户明确在工作台选择“本次不使用”的人工结果不覆盖；历史自动确认产生的
-    “本次不使用耗材”允许按新的明细分摊规则重新计算。
+    正常采购入库不需要人工选择是否使用耗材：数量来自真实入库明细，耗材来自
+    SKU 映射。只有历史上已经写入实际耗材流水的人工修正才保留；没有映射时
+    保留为待处理，不能伪造“本次不使用”。
     """
     link = db.get(ProcurementChainLink, link_id)
     if link is None or link.target_type != "inbound":
@@ -443,11 +534,8 @@ def auto_apply_inbound_usage(db: Session, link_id: int, note: str = "") -> dict:
         or "自动按 SKU 耗材映射关联" in (link.note or "")
         or "按 SKU 耗材映射自动关联" in (link.note or "")
     )
-    manual_decided = (
-        link.consumable_usage_decided
-        and link.match_method == "manual"
-        and not automatic_link
-    )
+    has_existing_usage = db.query(InboundConsumableUsage.id).filter_by(link_id=link_id).first() is not None
+    manual_decided = link.match_method == "manual" and not automatic_link and has_existing_usage
     if manual_decided:
         return {"status": "manual_preserved", "reason": "保留人工明确的耗材登记结果", "items": []}
 
@@ -466,18 +554,14 @@ def auto_apply_inbound_usage(db: Session, link_id: int, note: str = "") -> dict:
         return {"status": "applied", "basis": suggestion.get("basis"), "items": usage}
 
     if automatic_link or not link.consumable_usage_decided:
-        set_inbound_usage(
-            db,
-            link_id=link_id,
-            enabled=False,
-            items=[],
-            note=note.strip() or "入库 SKU 尚未配置耗材映射",
-        )
-        link = db.get(ProcurementChainLink, link_id)
-        if link is not None and "按 SKU 耗材映射自动关联" not in (link.note or ""):
-            link.note = f"{link.note}；按 SKU 耗材映射自动关联" if link.note else "按 SKU 耗材映射自动关联"
-            db.commit()
-    return {"status": "no_mapping", "basis": suggestion.get("basis"), "items": []}
+        # 未找到映射不是“不使用耗材”。保持未决状态，补齐货品档案映射后由
+        # upsert_mapping -> auto_apply_confirmed_inbound_usage 自动补扣。
+        link.consumable_usage_decided = False
+        link.consumable_usage_enabled = None
+        if "待维护耗材映射" not in (link.note or ""):
+            link.note = f"{link.note}；待维护耗材映射" if link.note else "待维护耗材映射"
+        db.commit()
+    return {"status": "pending_mapping", "basis": suggestion.get("basis"), "items": []}
 
 
 def auto_apply_confirmed_inbound_usage(
@@ -509,7 +593,7 @@ def auto_apply_confirmed_inbound_usage(
                 stats["applied"] += 1
             elif status == "pending":
                 stats["pending"] += 1
-            elif status == "no_mapping":
+            elif status in {"no_mapping", "pending_mapping"}:
                 stats["noMapping"] += 1
             elif status == "manual_preserved":
                 stats["preserved"] += 1
@@ -574,10 +658,12 @@ def set_inbound_usage(
     items: list[dict] | None = None,
     note: str = "",
 ) -> list[dict]:
-    """确认一条入库关联是否产生耗材出库，并按明细扣减库存。
+    """写入一条入库关联的耗材流水，并按明细扣减库存。
 
-    ``enabled=False`` 是明确的“本次不使用耗材”，不是未填写；enabled=True
-    必须至少有一条数量大于 0 的耗材明细。重复提交会先冲销旧明细再重算，保持幂等。
+    正常流程由 ``auto_apply_inbound_usage`` 调用；该接口仍保留给历史数据修正。
+    ``enabled=False`` 仅兼容历史人工结果，不应作为正常正品入库的业务选择。
+    enabled=True 必须至少有一条数量大于 0 的耗材明细。重复提交会先冲销旧明细
+    再重算，保持幂等。
     """
     from app.models.procurement_chain import ProcurementChainLink
     from app.models.jackyun import JackyunGoodsDocument
@@ -688,6 +774,11 @@ def list_transactions(db: Session, consumable_id: int, limit: int = 100) -> list
     receipts = {r.id: r for r in db.query(ConsumableReceipt).filter(ConsumableReceipt.id.in_(receipt_ids)).all()} if receipt_ids else {}
     link_ids = [row.source_id for row in rows if row.source_type == "inbound_link"]
     links = {link.id: link for link in db.query(ProcurementChainLink).filter(ProcurementChainLink.id.in_(link_ids)).all()} if link_ids else {}
+    inbound_document_ids = {link.target_id for link in links.values() if link.target_id is not None}
+    inbound_documents = {
+        document.id: document
+        for document in db.query(JackyunGoodsDocument).filter(JackyunGoodsDocument.id.in_(inbound_document_ids)).all()
+    } if inbound_document_ids else {}
     warehouse_ids = {row.warehouse_id for row in rows if row.warehouse_id is not None}
     warehouses = {
         warehouse.id: warehouse
@@ -713,6 +804,35 @@ def list_transactions(db: Session, consumable_id: int, limit: int = 100) -> list
             "occurredAt": row.occurred_at.isoformat() if row.occurred_at else None,
             "purchaseId": receipts[row.source_id].purchase_id if row.source_type == "consumable_receipt" and row.source_id in receipts else None,
             "orderId": links[row.source_id].workbench_order_id if row.source_type == "inbound_link" and row.source_id in links else None,
+            "inboundDocumentId": (
+                inbound_documents[links[row.source_id].target_id].id
+                if row.source_type == "inbound_link"
+                and row.source_id in links
+                and links[row.source_id].target_id in inbound_documents
+                else None
+            ),
+            "inboundDocumentNo": (
+                inbound_documents[links[row.source_id].target_id].goodsdoc_no
+                if row.source_type == "inbound_link"
+                and row.source_id in links
+                and links[row.source_id].target_id in inbound_documents
+                else ""
+            ),
+            "inboundDocumentAt": (
+                inbound_documents[links[row.source_id].target_id].document_at.isoformat()
+                if row.source_type == "inbound_link"
+                and row.source_id in links
+                and links[row.source_id].target_id in inbound_documents
+                and inbound_documents[links[row.source_id].target_id].document_at is not None
+                else None
+            ),
+            "inboundWarehouseName": (
+                inbound_documents[links[row.source_id].target_id].warehouse_name
+                if row.source_type == "inbound_link"
+                and row.source_id in links
+                and links[row.source_id].target_id in inbound_documents
+                else ""
+            ),
         }
         for row in rows
     ]

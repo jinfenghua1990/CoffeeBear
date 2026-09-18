@@ -292,6 +292,8 @@ def create_production_order(
         )
     db.flush()
     _recalculate_materials(db, order)
+    from app.services.supplier_sync_service import ensure_supplier
+    ensure_supplier(db, order.factory_name, platform="线下")
     db.commit()
     db.refresh(order)
     return order

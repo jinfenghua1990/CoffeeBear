@@ -108,8 +108,8 @@ function purchaseStatus(order: WorkbenchPayload["order"], inbound: Inbound[]) {
 
 function usageStatus(inbound: Inbound | undefined) {
   if (!inbound) return "待入库";
-  if (!inbound.consumableUsageDecided) return "待确认";
-  return inbound.consumableUsageEnabled ? "已使用" : "本次不使用";
+  if (!inbound.consumableUsageDecided || inbound.consumableUsageEnabled !== true) return "待维护映射";
+  return "已自动扣减";
 }
 
 function DetailPage({ orderId }: { orderId: number }) {
@@ -220,7 +220,7 @@ function DetailPage({ orderId }: { orderId: number }) {
 
   return (
     <div className="space-y-3">
-      <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-slate-200 bg-white px-4 py-3">
+      <div className="app-page-header flex flex-wrap items-center justify-between gap-3 rounded-xl border border-slate-200 bg-white px-4 py-3 shadow-sm">
         <div>
           <div className="text-[10px] font-medium text-indigo-600">耗材流转 · 采购入库事实</div>
           <h1 className="mt-1 text-lg font-semibold text-slate-900">{payload.order.orderNo}</h1>
@@ -238,7 +238,7 @@ function DetailPage({ orderId }: { orderId: number }) {
         <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-100 px-4 py-3">
           <div>
             <h2 className="text-sm font-semibold text-slate-900">入库单 · SKU · 耗材一一对应</h2>
-            <p className="mt-1 text-[11px] text-slate-500">以吉客云入库单为主；确认入库后由 SKU 映射自动关联耗材使用，不再复制一套独立采购数据。</p>
+            <p className="mt-1 text-[11px] text-slate-500">以本系统采购入库主单为主；确认入库后由 SKU 映射自动关联耗材使用，历史吉客云单据只作参考。</p>
           </div>
           <span className="text-xs text-slate-400">订单日期 {dateText(payload.order.orderDate)}</span>
         </div>
@@ -291,11 +291,11 @@ export default function MaterialFlowPage() {
 
   return (
     <div className="mx-auto max-w-[1650px] space-y-3">
-      <div className="flex flex-wrap items-end justify-between gap-3 rounded-xl border border-slate-200 bg-white px-4 py-3">
+      <div className="app-page-header flex flex-wrap items-end justify-between gap-3 rounded-xl border border-slate-200 bg-white px-4 py-3 shadow-sm">
         <div>
           <div className="text-[10px] font-medium text-indigo-600">SUPPLY CHAIN / MATERIAL FLOW</div>
           <h1 className="mt-1 text-xl font-semibold tracking-tight text-slate-900">耗材流转</h1>
-          <p className="mt-1 text-xs text-slate-500">统一读取采购主单和吉客云入库单；正品入库后按 SKU 映射自动关联耗材使用。</p>
+          <p className="mt-1 text-xs text-slate-500">统一读取采购主单和本系统入库单；正品入库后按 SKU 映射自动关联耗材使用。</p>
         </div>
       </div>
       <ProductionPurchaseBoard

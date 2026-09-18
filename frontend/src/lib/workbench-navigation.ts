@@ -1,8 +1,8 @@
 export const WORKBENCH_VIEWS = {
-  orders: "采购订单", merge: "采购合并", suppliers: "供应商管理", chain: "采购链路", matching: "SKU 匹配",
+  orders: "采购订单", suppliers: "供应商管理", chain: "采购链路", matching: "SKU 匹配",
   imports: "数据接入", tax: "发票对账", dashboard: "经营总览", sales: "销售管理",
   products: "货品档案", inventory_goods: "正品库存", inventory_consumables: "耗材管理",
-  payments: "回款与对账", profit: "数据报表", finance: "财务资料",
+  finance: "财务资料",
   exceptions: "异常中心", automation: "自动化", settings: "系统设置",
 } as const;
 
@@ -18,9 +18,8 @@ const LEGACY_VIEWS: Record<string, WorkbenchView> = {
   // 正式模块保持自己的页面和全局导航；这里只兼容历史采购地址。
   "/purchase": "orders", "/procurement-workbench": "orders",
   "/procurement-board": "orders", "/procurement-ledger": "chain", "/procurement-chain": "chain",
-  "/procurement-chain/detail": "orders", "/purchase/workbench-v2": "orders", "/purchase/merge": "merge",
+  "/procurement-chain/detail": "orders", "/purchase/workbench-v2": "orders", "/purchase/merge": "orders",
   "/alibaba1688-import": "imports", "/jackyun-import": "imports",
-  "/tax-invoices": "imports",
 };
 
 /** 旧地址保留筛选和订单上下文，统一进入工作台。 */
@@ -36,6 +35,5 @@ export function workbenchHref(href: string): string {
   if (!params.has("view")) params.set("view", view);
   if (pathname === "/jackyun-import") params.set("tab", "jackyun");
   if (pathname === "/alibaba1688-import") params.set("tab", "alibaba1688");
-  if (pathname === "/tax-invoices") params.set("tab", "tax");
   return `/purchase/workbench?${params}`;
 }

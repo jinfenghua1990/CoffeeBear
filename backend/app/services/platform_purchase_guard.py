@@ -25,7 +25,10 @@ from app.services.import_lifecycle import filter_active_import, filter_active_ro
 from app.services.procurement_chain_service import is_reference_only_external_po
 
 
-def platform_source_pairs(db: Session) -> list[tuple[Alibaba1688Order | None, ExternalPurchaseOrder | None]]:
+def platform_source_pairs(
+    db: Session,
+    externals: list[ExternalPurchaseOrder] | None = None,
+) -> list[tuple[Alibaba1688Order | None, ExternalPurchaseOrder | None]]:
     """1688 文件副本只与 platform=1688 工作流副本配对；其他渠道同号单独展示。"""
     file_orders = (
         filter_active_rows(
@@ -49,12 +52,20 @@ def platform_source_pairs(db: Session) -> list[tuple[Alibaba1688Order | None, Ex
     source_nos = {no for (no,) in db.query(Alibaba1688Order.external_order_id).all()}
     active_source_nos = {row.external_order_id for row in file_orders}
 
+    if externals is None:
+        externals = (
+            db.query(ExternalPurchaseOrder)
+            .order_by(ExternalPurchaseOrder.id.desc())
+            .all()
+        )
+    # 口径与原两条 SQL 完全一致：按 id 倒序（同号多副本时保留最后一个），
+    # platform 为 NULL 的行既不属于 1688 也不属于其他渠道。
+    by_id_desc = sorted(externals, key=lambda po: po.id, reverse=True)
     workflow_1688_by_no = {
         po.external_order_id: po
-        for po in db.query(ExternalPurchaseOrder).filter(
-            ExternalPurchaseOrder.platform == "1688"
-        ).order_by(ExternalPurchaseOrder.id.desc()).all()
-        if po.external_order_id not in removed_nos
+        for po in by_id_desc
+        if po.platform == "1688"
+        and po.external_order_id not in removed_nos
         and not is_reference_only_external_po(po)
         and (po.external_order_id in active_source_nos or po.external_order_id not in source_nos)
     }
@@ -65,9 +76,9 @@ def platform_source_pairs(db: Session) -> list[tuple[Alibaba1688Order | None, Ex
 
     # 非 1688 采购订单没有 Alibaba 文件副本，始终作为独立工作流行展示；
     # 即使订单号与 1688 恰好相同，也不能被 removed_nos/source_nos 吞掉。
-    for po in db.query(ExternalPurchaseOrder).filter(
-        ExternalPurchaseOrder.platform != "1688"
-    ).order_by(ExternalPurchaseOrder.id.desc()).all():
+    for po in by_id_desc:
+        if po.platform is None or po.platform == "1688":
+            continue
         if is_reference_only_external_po(po):
             continue
         pairs.append((None, po))
@@ -116,6 +127,9 @@ def sync_1688_purchase_workflow_order(
         )
     now = datetime.now(timezone.utc)
     raw = {"source": source, **source_svc._json_safe_dict(data)}
+
+    from app.services.supplier_sync_service import ensure_supplier
+    ensure_supplier(db, supplier, platform="1688")
 
     row = db.query(ExternalPurchaseOrder).filter_by(
         platform="1688", external_order_id=external_order_id

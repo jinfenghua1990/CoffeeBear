@@ -1,3 +1,5 @@
+"use client";
+
 import Link from "next/link";
 import ReplenishmentPanel from "./replenishment-panel";
 
@@ -39,14 +41,8 @@ const MODULES: ModuleCard[] = [
     badge: "备料",
   },
   {
-    title: "生产 / 在途",
-    description: "同一行登记生产完成、工厂发货、物流在途和到货数量，减少来回切页面和重复录入。",
-    href: "/supply-chain/in-transit",
-    badge: "执行",
-  },
-  {
-    title: "到货入库",
-    description: "将生产到货与吉客云真实入库明细做数量关联；系统记录过程，库存事实仍以吉客云为准。",
+    title: "到仓入库单",
+    description: "采购入库由本系统创建并沉淀为库存事实；历史吉客云入库仅作为外部参考。",
     href: "/supply-chain/receiving",
     badge: "闭环",
   },
@@ -69,9 +65,8 @@ const FLOW: FlowStep[] = [
   { label: "补货计划", href: "#replenishment" },
   { label: "生产 / 采购", href: "/supply-chain/production" },
   { label: "耗材备料", href: "/supply-chain/material-flow" },
-  { label: "生产 / 在途", href: "/supply-chain/in-transit" },
-  { label: "到货验收", href: "/supply-chain/receiving" },
-  { label: "吉客云入库", href: "/supply-chain/receiving" },
+  { label: "到仓验收", href: "/supply-chain/receiving" },
+  { label: "到仓入库单", href: "/supply-chain/receiving" },
 ];
 
 export default function SupplyChainPage() {
@@ -82,7 +77,7 @@ export default function SupplyChainPage() {
           <div>
             <div className="text-xs font-medium text-indigo-600">SUPPLY CHAIN CENTER</div>
             <h1 className="mt-1 text-2xl font-semibold tracking-tight text-slate-900">供应链中心</h1>
-            <p className="mt-1 text-sm text-slate-500">从库存判断到生产、采购、耗材、在途、到货和入库，一个入口完成。</p>
+            <p className="mt-1 text-sm text-slate-500">从库存判断到生产、采购、耗材、到货和入库，一个入口完成。</p>
           </div>
           <div className="flex items-center gap-2">
             <span className="rounded-full bg-emerald-50 px-3 py-1.5 text-xs font-medium text-emerald-700">V1.6.3 · 业务版</span>
@@ -102,7 +97,7 @@ export default function SupplyChainPage() {
           </div>
           <span className="text-xs text-slate-400">按日常操作顺序从左到右</span>
         </div>
-        <div className="grid gap-2 lg:grid-cols-7">
+        <div className="grid gap-2 lg:grid-cols-6">
           {FLOW.map((item, index) => (
             <Link
               key={`${item.label}-${index}`}
@@ -159,7 +154,7 @@ export default function SupplyChainPage() {
           <div>
             <div className="text-sm font-semibold text-white">V1.6.3 供应链中心</div>
             <div className="mt-1 text-xs leading-5 text-slate-400">
-              采购、生产、耗材、仓库、在途、到货已统一到同一业务入口；历史兼容路由保留，但后续新增功能只围绕这一套主流程继续扩展。
+              采购、生产、耗材、仓库、到货已统一到同一业务入口；历史兼容路由保留，但后续新增功能只围绕这一套主流程继续扩展。
             </div>
           </div>
           <div className="text-xs text-slate-400">库存 → 决策 → 执行 → 到货 → 入库</div>

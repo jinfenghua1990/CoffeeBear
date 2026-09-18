@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { getOverview, getSystemHealth, IntegrationStatus } from "@/lib/api";
 
 type BarState = "loading" | "ok" | "attention" | "error";
@@ -51,7 +51,7 @@ function DetailRow({ tone, label, detail, href }: { tone: StatusTone; label: str
   );
 
   return href ? (
-    <Link href={href} className="flex items-start gap-2.5 rounded-lg px-2.5 py-2 transition-colors hover:bg-slate-50">{content}</Link>
+    <Link href={href} prefetch={false} className="flex items-start gap-2.5 rounded-lg px-2.5 py-2 transition-colors hover:bg-slate-50">{content}</Link>
   ) : (
     <div className="flex items-start gap-2.5 rounded-lg px-2.5 py-2">{content}</div>
   );
@@ -65,8 +65,11 @@ export default function SystemStatusBar() {
   const [infraIssues, setInfraIssues] = useState<string[]>([]);
   const [detailsOpen, setDetailsOpen] = useState(false);
   const [checking, setChecking] = useState(false);
+  const requestInFlight = useRef(false);
 
   const load = useCallback(() => {
+    if (requestInFlight.current) return;
+    requestInFlight.current = true;
     setChecking(true);
     Promise.all([getOverview(), getSystemHealth()])
       .then(([overview, health]) => {
@@ -88,13 +91,23 @@ export default function SystemStatusBar() {
         setInfraIssues([]);
         setBarState("error");
       })
-      .finally(() => setChecking(false));
+      .finally(() => {
+        requestInFlight.current = false;
+        setChecking(false);
+      });
   }, []);
 
   useEffect(() => {
-    load();
-    const timer = window.setInterval(load, 30_000);
-    return () => window.clearInterval(timer);
+    const runWhenVisible = () => {
+      if (document.visibilityState === "visible") load();
+    };
+    runWhenVisible();
+    const timer = window.setInterval(runWhenVisible, 30_000);
+    document.addEventListener("visibilitychange", runWhenVisible);
+    return () => {
+      window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", runWhenVisible);
+    };
   }, [load]);
 
   useEffect(() => {

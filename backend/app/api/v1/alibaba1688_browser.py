@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
-from typing import Any
+from datetime import date
+from typing import Any, Literal
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.orm import Session
 
 from app.api.deps import current_actor
@@ -13,6 +15,19 @@ from app.db import get_db
 from app.services.alibaba1688_browser_sync_service import browser_sync_status
 
 router = APIRouter(prefix="/alibaba1688-browser", tags=["1688浏览器直采"])
+
+
+class BrowserSyncRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    mode: Literal["incremental", "range", "single"] = "incremental"
+    start_date: date | None = Field(default=None, alias="startDate")
+    end_date: date | None = Field(default=None, alias="endDate")
+    order_no: str | None = Field(default=None, alias="orderNo")
+    supplier: str | None = Field(default=None, max_length=256)
+    keyword: str | None = Field(default=None, max_length=256)
+    only_unfinished: bool = Field(default=False, alias="onlyUnfinished")
+    time_field: Literal["order_time", "pay_time"] = Field(default="order_time", alias="timeField")
 
 
 @router.get("/status")
@@ -37,12 +52,47 @@ def start_login(request: Request, db: Session = Depends(get_db)) -> dict[str, An
 
 
 @router.post("/sync")
-def start_sync(request: Request, db: Session = Depends(get_db)) -> dict[str, Any]:
+def start_sync(
+    request: Request,
+    body: BrowserSyncRequest | None = None,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
     """立即同步：与自动化页「立即同步 1688」共用 tasks.sync_1688。"""
     from app.tasks.sync import sync_1688
 
-    task = sync_1688.delay()
-    audit(db, current_actor(request), "alibaba1688.browser.sync_queued", "celery_task", task.id)
+    options = body or BrowserSyncRequest()
+    if options.mode == "range":
+        if options.start_date is None or options.end_date is None:
+            raise HTTPException(status_code=422, detail="按时间范围拉取必须填写开始日期和结束日期")
+        if options.start_date > options.end_date:
+            raise HTTPException(status_code=422, detail="开始日期不能晚于结束日期")
+    if options.mode == "single" and not (options.order_no or "").strip():
+        raise HTTPException(status_code=422, detail="单个补拉必须填写 1688 采购订单号")
+
+    task = sync_1688.delay(
+        mode=options.mode,
+        start_date=options.start_date.isoformat() if options.start_date else None,
+        end_date=options.end_date.isoformat() if options.end_date else None,
+        order_no=(options.order_no or "").strip() or None,
+        supplier=(options.supplier or "").strip() or None,
+        keyword=(options.keyword or "").strip() or None,
+        only_unfinished=options.only_unfinished,
+        time_field=options.time_field,
+    )
+    audit(
+        db,
+        current_actor(request),
+        "alibaba1688.browser.sync_queued",
+        "celery_task",
+        task.id,
+        {"mode": options.mode, "startDate": options.start_date.isoformat() if options.start_date else None,
+         "endDate": options.end_date.isoformat() if options.end_date else None,
+         "orderNo": (options.order_no or "").strip() or None,
+         "supplier": (options.supplier or "").strip() or None,
+         "keyword": (options.keyword or "").strip() or None,
+         "onlyUnfinished": options.only_unfinished,
+         "timeField": options.time_field},
+    )
     return {"ok": True, "taskId": task.id, "status": "queued"}
 
 

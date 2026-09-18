@@ -11,6 +11,7 @@ export DATA_DIR=/Users/gino/ecommerce-dashboard/data
 
 VENV=/Users/gino/ecommerce-dashboard/backend/.venv
 export PATH="/Users/gino/.workbuddy/binaries/node/versions/22.22.2-2/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
+API_BIND_HOST="${API_BIND_HOST:-192.168.3.199}"
 
 # ---------- 后端：api / worker / beat ----------
 source "$VENV/bin/activate"
@@ -38,7 +39,7 @@ python -m app.seed > /tmp/ecom_seed.log 2>&1
 for listener_pid in $(/usr/sbin/lsof -t -nP -iTCP:8000 -sTCP:LISTEN 2>/dev/null); do
   listener_command=$(ps -p "$listener_pid" -o command= 2>/dev/null || true)
   listener_cwd=$(/usr/sbin/lsof -a -p "$listener_pid" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p')
-  if [[ "$listener_cwd" == "/Users/gino/ecommerce-dashboard/backend" && "$listener_command" == *"uvicorn app.main:app --host 0.0.0.0 --port 8000"* ]]; then
+  if [[ "$listener_cwd" == "/Users/gino/ecommerce-dashboard/backend" && ( "$listener_command" == *"uvicorn app.main:app --host $API_BIND_HOST --port 8000"* || "$listener_command" == *"uvicorn app.main:app --host 0.0.0.0 --port 8000"* ) ]]; then
     echo "[native-start] 回收脱离托管的旧 API 进程 $listener_pid"
     kill -TERM "$listener_pid" 2>/dev/null || true
     for wait_count in 1 2 3 4 5 6 7 8 9 10; do
@@ -47,7 +48,41 @@ for listener_pid in $(/usr/sbin/lsof -t -nP -iTCP:8000 -sTCP:LISTEN 2>/dev/null)
     done
   fi
 done
-uvicorn app.main:app --host 0.0.0.0 --port 8000 >> /tmp/ecom_api.log 2>&1 &
+
+# launchctl 强制重启时可能只杀掉本脚本，旧 Celery 会被 reparent 到 launchd，
+# 之后与新 worker/beat 共用 Redis，造成定时任务和队列消费重复。启动新实例前，
+# 只回收本项目工作目录下、命令行完全属于本项目的遗留进程。
+cleanup_stale_celery() {
+  local command_pattern="$1"
+  local candidate_pid=""
+  local candidate_command=""
+  local candidate_cwd=""
+  while read -r candidate_pid candidate_command; do
+    [ -n "$candidate_pid" ] || continue
+    [ "$candidate_pid" != "$$" ] || continue
+    case "$candidate_command" in
+      *"$command_pattern"*) ;;
+      *) continue ;;
+    esac
+    candidate_cwd=$(/usr/sbin/lsof -a -p "$candidate_pid" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p')
+    if [ "$candidate_cwd" = "/Users/gino/ecommerce-dashboard/backend" ]; then
+      echo "[native-start] 回收本项目遗留 Celery 进程 $candidate_pid"
+      kill -TERM "$candidate_pid" 2>/dev/null || true
+      for wait_count in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
+        kill -0 "$candidate_pid" 2>/dev/null || break
+        sleep 0.2
+      done
+      if kill -0 "$candidate_pid" 2>/dev/null; then
+        echo "[native-start] 遗留 Celery 进程 $candidate_pid 未响应，强制结束"
+        kill -KILL "$candidate_pid" 2>/dev/null || true
+      fi
+    fi
+  done < <(ps -axo pid=,command=)
+}
+
+cleanup_stale_celery "celery -A app.celery_app worker -l info --concurrency 2"
+cleanup_stale_celery "celery -A app.celery_app beat -l info"
+uvicorn app.main:app --host "$API_BIND_HOST" --port 8000 >> /tmp/ecom_api.log 2>&1 &
 api_pid=$!
 celery -A app.celery_app worker -l info --concurrency 2 >> /tmp/ecom_worker.log 2>&1 &
 worker_pid=$!

@@ -23,6 +23,7 @@ from app.services.procurement_chain_service import normalize_name
 
 AMOUNT_TOLERANCE = Decimal("0.02")
 ABS_EPS = Decimal("0.5")
+INBOUND_AMOUNT_KEYS = ("采购总金额", "价税合计", "含税金额", "入库金额", "金额")
 
 
 # ---------- 入库明细：自动匹配 ----------
@@ -88,13 +89,18 @@ def match_inbound_items(db: Session, include_outbound: bool = False) -> dict[str
         # 入库单金额/数量是本次采购成本事实；default_cost 只是没有入库数据时的兜底。
         amount = item.amount_tax
         qty = item.quantity
-        if amount is not None and qty is not None and amount >= 0 and qty > 0:
+        raw = item.raw or {}
+        has_source_amount = any(
+            raw.get(key) is not None and str(raw.get(key)).strip()
+            for key in INBOUND_AMOUNT_KEYS
+        )
+        if amount is not None and qty is not None and amount >= 0 and qty > 0 and (has_source_amount or amount > 0):
             item.match_status = "price_ok"
             item.match_note = "采购入库金额是实际成本事实；货品档案成本仅作无入库数据时的兜底"
             stats["price_ok"] += 1
         else:
             item.match_status = "auto"
-            item.match_note = "" if amount is not None else "金额信息不全，未做金额校验"
+            item.match_note = "" if amount is not None and has_source_amount else "金额信息不全，未做金额校验"
             stats["auto"] += 1
     db.commit()
     return stats

@@ -21,11 +21,17 @@ def _response(orders: list[dict]) -> dict:
     }
 
 
-def _order(order_id: str, status: str = "已发货") -> dict:
+def _order(
+    order_id: str,
+    status: str = "已发货",
+    order_time: int | str = 1759977600000,
+    seller_company: str = "供应商A",
+    pay_time: str = "2026-09-04 10:00:00",
+) -> dict:
     return {
         "orderId": order_id,
         "statusText": status,
-        "sellerCompanyInfo": {"companyName": "供应商A"},
+        "sellerCompanyInfo": {"companyName": seller_company},
         "sellerNick": "sellerA",
         "buyerCompany": "买家公司",
         "buyerMember": "buyerA",
@@ -33,8 +39,8 @@ def _order(order_id: str, status: str = "已发货") -> dict:
         "freight": "6.00",
         "discount": "1.50",
         "actualPayment": "105.00",
-        "orderTime": 1759977600000,
-        "payTime": "2026-09-04 10:00:00",
+        "orderTime": order_time,
+        "payTime": pay_time,
     }
 
 
@@ -140,6 +146,105 @@ def test_sync_login_required_when_expired(db_session, fake_adapter):
     )
 
 
+def test_sync_skips_deleted_order_in_incremental_mode(db_session, fake_adapter):
+    old_import = Alibaba1688FileImport(
+        original_name="deleted-source.xlsx", stored_path="deleted-source",
+        sha256="d" * 64, lifecycle="active",
+    )
+    db_session.add(old_import)
+    db_session.flush()
+    deleted = Alibaba1688Order(
+        external_order_id="DELETED-DEFAULT",
+        import_id=old_import.id,
+        row_status="deleted",
+    )
+    db_session.add(deleted)
+    db_session.commit()
+    fake_adapter.pages = [[_response([_order("DELETED-DEFAULT")])]]
+
+    result = svc.sync_orders(db_session, actor="pytest")
+
+    assert result["status"] == "success"
+    assert result["stats"]["skippedDeleted"] == 1
+    assert result["stats"]["created"] == 0
+    assert result["stats"]["restored"] == 0
+    db_session.refresh(deleted)
+    assert deleted.row_status == "deleted"
+
+
+def test_sync_skips_closed_order_in_incremental_mode(db_session, fake_adapter):
+    fake_adapter.pages = [[_response([
+        _order("CLOSED-DEFAULT", status="交易关闭"),
+        _order("OPEN-DEFAULT", status="待付款"),
+    ])]]
+
+    result = svc.sync_orders(db_session, actor="pytest")
+
+    assert result["status"] == "success"
+    assert result["stats"]["skippedClosed"] == 1
+    assert result["stats"]["created"] == 1
+    assert db_session.query(Alibaba1688Order).filter_by(
+        external_order_id="CLOSED-DEFAULT"
+    ).count() == 0
+    assert db_session.query(Alibaba1688Order).filter_by(
+        external_order_id="OPEN-DEFAULT"
+    ).count() == 1
+
+
+def test_sync_single_skips_explicitly_requested_closed_order(db_session, fake_adapter):
+    fake_adapter.pages = [[_response([_order("CLOSED-SINGLE", status="交易关闭")])]]
+
+    result = svc.sync_orders(
+        db_session,
+        actor="pytest",
+        mode="single",
+        order_no="CLOSED-SINGLE",
+    )
+
+    assert result["status"] == "closed_skipped"
+    assert result["stats"]["stopReason"] == "target_closed"
+    assert result["stats"]["skippedClosed"] == 1
+    assert result["stats"]["closedStatus"] == "交易关闭"
+    assert db_session.query(Alibaba1688Order).filter_by(
+        external_order_id="CLOSED-SINGLE"
+    ).count() == 0
+    assert db_session.query(Alibaba1688FileImport).filter(
+        Alibaba1688FileImport.stored_path == svc.VIRTUAL_BATCH_PATH_MARKER
+    ).count() == 0
+
+
+def test_sync_single_restores_explicitly_requested_deleted_order(db_session, fake_adapter):
+    old_import = Alibaba1688FileImport(
+        original_name="deleted-single-source.xlsx", stored_path="deleted-single-source",
+        sha256="e" * 64, lifecycle="active",
+    )
+    db_session.add(old_import)
+    db_session.flush()
+    deleted = Alibaba1688Order(
+        external_order_id="DELETED-SINGLE",
+        import_id=old_import.id,
+        row_status="deleted",
+    )
+    db_session.add(deleted)
+    db_session.commit()
+    fake_adapter.pages = [[_response([_order("DELETED-SINGLE")])]]
+
+    result = svc.sync_orders(
+        db_session,
+        actor="pytest",
+        mode="single",
+        order_no="DELETED-SINGLE",
+    )
+
+    assert result["status"] == "success"
+    assert result["stats"]["restored"] == 1
+    assert result["stats"]["created"] == 0
+    assert result["stats"]["stopReason"] == "target_found"
+    db_session.refresh(deleted)
+    assert deleted.row_status == "active"
+    assert deleted.import_id == result["stats"]["batchId"]
+
+
 def test_sync_incremental_stop_by_known_threshold(db_session, fake_adapter, monkeypatch):
     monkeypatch.setattr(settings, "ALIBABA_1688_BROWSER_STOP_AFTER_KNOWN", 2)
     monkeypatch.setattr(settings, "ALIBABA_1688_BROWSER_MAX_PAGES", 10)
@@ -199,8 +304,112 @@ def test_sync_updates_existing_order_status(db_session, fake_adapter):
     result = svc.sync_orders(db_session, actor="pytest")
     assert result["status"] == "success"
     assert result["stats"]["merged"] == 1
+    assert result["stats"]["duplicates"] == 1
     db_session.refresh(order)
     assert order.order_status == "交易成功"
+
+
+def test_sync_range_filters_orders_by_order_date(db_session, fake_adapter):
+    fake_adapter.pages = [[_response([
+        _order("R-IN", order_time="2026-09-10 10:00:00"),
+        _order("R-OUT", order_time="2026-09-12 10:00:00"),
+    ])]]
+    result = svc.sync_orders(
+        db_session,
+        actor="pytest",
+        mode="range",
+        start_date="2026-09-09",
+        end_date="2026-09-11",
+    )
+
+    assert result["status"] == "success"
+    assert result["stats"]["mode"] == "range"
+    assert result["stats"]["skippedOutOfWindow"] == 1
+    assert db_session.query(Alibaba1688Order).filter_by(external_order_id="R-IN").count() == 1
+    assert db_session.query(Alibaba1688Order).filter_by(external_order_id="R-OUT").count() == 0
+
+
+def test_sync_single_only_writes_requested_order(db_session, fake_adapter):
+    fake_adapter.pages = [
+        [_response([_order("S-OTHER"), _order("S-TARGET")])],
+        [_response([_order("S-LATER")])],
+    ]
+    result = svc.sync_orders(
+        db_session,
+        actor="pytest",
+        mode="single",
+        order_no="S-TARGET",
+    )
+
+    assert result["status"] == "success"
+    assert result["stats"]["mode"] == "single"
+    assert result["stats"]["stopReason"] == "target_found"
+    assert result["stats"]["skippedNonTarget"] == 1
+    assert db_session.query(Alibaba1688Order).filter_by(external_order_id="S-TARGET").count() == 1
+    assert db_session.query(Alibaba1688Order).filter_by(external_order_id="S-OTHER").count() == 0
+    assert db_session.query(Alibaba1688Order).filter_by(external_order_id="S-LATER").count() == 0
+
+
+def test_sync_filters_by_supplier_and_payment_time(db_session, fake_adapter):
+    fake_adapter.pages = [[_response([
+        _order(
+            "SUP-PAY-IN",
+            seller_company="目标供应商有限公司",
+            order_time="2026-09-01 10:00:00",
+            pay_time="2026-09-10 10:00:00",
+        ),
+        _order(
+            "SUP-PAY-OUT",
+            seller_company="目标供应商有限公司",
+            order_time="2026-09-10 10:00:00",
+            pay_time="2026-09-12 10:00:00",
+        ),
+        _order(
+            "SUP-WRONG",
+            seller_company="其他供应商",
+            order_time="2026-09-10 10:00:00",
+            pay_time="2026-09-10 10:00:00",
+        ),
+    ])]]
+
+    result = svc.sync_orders(
+        db_session,
+        actor="pytest",
+        mode="range",
+        start_date="2026-09-09",
+        end_date="2026-09-11",
+        supplier="目标供应商",
+        time_field="pay_time",
+    )
+
+    assert result["status"] == "success"
+    assert result["stats"]["timeField"] == "pay_time"
+    assert result["stats"]["supplier"] == "目标供应商"
+    assert result["stats"]["skippedOutOfWindow"] == 1
+    assert result["stats"]["skippedSupplier"] == 1
+    assert db_session.query(Alibaba1688Order).filter_by(
+        external_order_id="SUP-PAY-IN"
+    ).count() == 1
+    assert db_session.query(Alibaba1688Order).filter(
+        Alibaba1688Order.external_order_id.in_(["SUP-PAY-OUT", "SUP-WRONG"])
+    ).count() == 0
+
+
+def test_sync_single_reports_not_found_without_creating_batch(db_session, fake_adapter):
+    fake_adapter.pages = [[_response([_order("S-OTHER")])]]
+    result = svc.sync_orders(
+        db_session,
+        actor="pytest",
+        mode="single",
+        order_no="S-MISSING",
+    )
+
+    assert result["status"] == "not_found"
+    assert result["stats"]["orderNo"] == "S-MISSING"
+    assert db_session.query(Alibaba1688Order).filter_by(external_order_id="S-MISSING").count() == 0
+    assert db_session.query(Alibaba1688FileImport).filter(
+        Alibaba1688FileImport.stored_path == svc.VIRTUAL_BATCH_PATH_MARKER
+    ).count() == 0
 
 
 def test_sync_amounts_and_decimal_fields(db_session, fake_adapter):

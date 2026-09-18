@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname, useSearchParams } from "next/navigation";
-import { isSecondaryActive, resolveModule, type IconName } from "@/lib/navigation";
+import { isSecondaryActive, resolveModule, type IconName, type SecondaryItem } from "@/lib/navigation";
 
 /**
  * 左侧二级导航：跟随顶部一级模块动态变化（配置见 lib/navigation.ts）。
@@ -12,6 +12,7 @@ export default function Sidebar() {
   const pathname = usePathname();
   const searchParams = useSearchParams();
   const module = resolveModule(pathname);
+  const groups = module.groups ?? [{ label: "", items: module.items ?? [] }];
 
   return (
     <aside className="flex h-full w-[208px] shrink-0 flex-col overflow-hidden bg-[#112a49] text-white shadow-[8px_0_28px_rgba(15,39,70,0.08)]">
@@ -21,30 +22,39 @@ export default function Sidebar() {
       </div>
 
       <nav className="flex-1 overflow-y-auto px-3 py-4 [scrollbar-width:thin] [scrollbar-color:rgba(255,255,255,.18)_transparent]">
-        <div className="space-y-1">
-          {module.items.map((item) => {
-            const active = isSecondaryActive(item, pathname, searchParams);
-            return (
-              <Link
-                key={item.href}
-                href={item.href}
-                aria-current={active ? "page" : undefined}
-                className={`group flex items-center gap-3 rounded-lg px-3 py-2.5 text-[13px] transition-all ${
-                  active
-                    ? "bg-[#2574e8] font-medium text-white shadow-[0_6px_18px_rgba(37,116,232,.28)]"
-                    : "text-slate-200 hover:bg-white/8 hover:text-white"
-                }`}
-              >
-                <span className={active ? "text-white" : "text-slate-400 group-hover:text-slate-200"}>
-                  <NavIcon name={item.icon} />
-                </span>
-                <span className="min-w-0 flex-1 truncate">{item.label}</span>
-              </Link>
-            );
-          })}
+        <div className="space-y-5">
+          {groups.map((group) => (
+            <div key={group.label || "default"}>
+              {group.label && <div className="mb-2 px-3 text-[11px] font-medium tracking-wide text-slate-400">{group.label}</div>}
+              <div className="space-y-1">
+                {group.items.map((item) => <SidebarItem key={item.href} item={item} pathname={pathname} searchParams={searchParams} />)}
+              </div>
+            </div>
+          ))}
         </div>
       </nav>
     </aside>
+  );
+}
+
+function SidebarItem({ item, pathname, searchParams }: { item: SecondaryItem; pathname: string; searchParams: URLSearchParams }) {
+  const active = isSecondaryActive(item, pathname, searchParams);
+  return (
+    <Link
+      href={item.href}
+      prefetch={false}
+      aria-current={active ? "page" : undefined}
+      className={`group flex items-center gap-3 rounded-lg px-3 py-2.5 text-[13px] transition-all ${
+        active
+          ? "bg-[#2574e8] font-medium text-white shadow-[0_6px_18px_rgba(37,116,232,.28)]"
+          : "text-slate-200 hover:bg-white/8 hover:text-white"
+      }`}
+    >
+      <span className={active ? "text-white" : "text-slate-400 group-hover:text-slate-200"}>
+        <NavIcon name={item.icon} />
+      </span>
+      <span className="min-w-0 flex-1 truncate">{item.label}</span>
+    </Link>
   );
 }
 

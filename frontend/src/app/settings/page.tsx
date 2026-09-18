@@ -94,10 +94,12 @@ export default function SettingsPage() {
 
   return (
     <div>
-      <h1 className="text-xl font-semibold">系统设置</h1>
-      <p className="mt-2 max-w-3xl text-sm leading-6 text-gray-500">
-        这里只保留账号安全、数据连接和系统级参数。仓库、生产、货品等业务配置统一回到各自业务页面维护。
-      </p>
+      <header className="app-page-header -mx-1 bg-[#f4f7fb]/95 pb-3 backdrop-blur">
+        <h1 className="text-xl font-semibold">系统设置</h1>
+        <p className="mt-2 max-w-3xl text-sm leading-6 text-gray-500">
+          这里只保留账号安全、数据连接和系统级参数。仓库、生产、货品等业务配置统一回到各自业务页面维护。
+        </p>
+      </header>
 
       <div className="mt-6 max-w-3xl rounded-xl border border-gray-200 bg-white p-4">
         <div className="text-sm font-medium">账号安全 · 修改密码</div>

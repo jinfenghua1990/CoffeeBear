@@ -1,4 +1,6 @@
 from app.services import procurement_board_service as board_service
+from app.services import procurement_workbench_service as workbench_service
+from app.models.ops import ExceptionRecord
 
 
 def _row(**overrides):
@@ -47,3 +49,48 @@ def test_board_pending_queue_catches_partial_invoice():
         paidAmount=100.0,
     )
     assert board_service._pending_queue(row) == "invoice"
+
+
+def test_local_inbound_does_not_wait_for_jackyun_purchase_order():
+    row = _row(
+        purchaseOrders=[],
+        jackyunPoBypassed=False,
+        invoice=[],
+        invoiceStatus="pending",
+        invoiceOutstanding=100.0,
+    )
+    assert board_service._pending_queue(row) == "invoice"
+
+
+def test_order_without_inbound_waits_for_inbound_directly():
+    row = _row(purchaseOrders=[], inbound=[], invoice=[])
+    assert board_service._pending_queue(row) == "inbound"
+
+
+def test_exception_refs_do_not_collide_file_and_external_ids(db_session):
+    """采购单异常不能误标同 ID 的 1688 文件订单。"""
+    exception = ExceptionRecord(
+        code="PURCHASE_PAYMENT_GAP",
+        type="PURCHASE_PAYMENT_GAP",
+        title="采购付款差异",
+        status="pending",
+        ref_table="external_purchase_orders",
+        ref_id="193",
+        detail={"poId": 193, "orderId": 193},
+    )
+    db_session.add(exception)
+    db_session.flush()
+
+    refs = workbench_service._exception_refs(db_session)
+    # 返回 (文件订单异常映射, 采购单异常映射)，键为 ID、值为异常摘要列表
+    assert refs == ({}, {193: [refs[1][193][0]]})
+    assert refs[1][193][0]["title"] == "采购付款差异"
+    assert not workbench_service._row_has_exception(
+        {"orderId": 193, "externalPoId": 194}, refs
+    )
+    assert workbench_service._row_has_exception(
+        {"orderId": 192, "externalPoId": 193}, refs
+    )
+    # 异常摘要跟随行返回，供前端直接展示报错原因
+    assert workbench_service._row_exception_info({"orderId": 192, "externalPoId": 193}, refs) == refs[1][193]
+    assert workbench_service._row_exception_info({"orderId": 193, "externalPoId": 194}, refs) == []

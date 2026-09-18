@@ -1,7 +1,7 @@
 from decimal import Decimal
 from datetime import datetime
 
-from sqlalchemy import BigInteger, Boolean, DateTime, Numeric, String, Text, UniqueConstraint
+from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, Integer, Numeric, String, Text, UniqueConstraint
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -24,6 +24,11 @@ class Supplier(Base, PkMixin, TimestampMixin):
     address: Mapped[str] = mapped_column(String(512), default="")
     notes: Mapped[str] = mapped_column(String(512), default="")
     is_temp: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false", nullable=False)
+    # 银行账户与税务信息（用于发票/流水自动匹配）
+    bank_name: Mapped[str] = mapped_column(String(128), default="", comment="开户行名称")
+    bank_account_no: Mapped[str] = mapped_column(String(64), default="", index=True, comment="银行账号")
+    bank_account_name: Mapped[str] = mapped_column(String(256), default="", comment="银行账户名（对方户名）")
+    tax_invoice_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0", comment="关联进项发票数（缓存）")
 
 
 class ExternalPurchaseOrder(Base, PkMixin, TimestampMixin):
@@ -43,6 +48,10 @@ class ExternalPurchaseOrder(Base, PkMixin, TimestampMixin):
     platform: Mapped[str] = mapped_column(String(32), default="1688")
     buyer_account: Mapped[str] = mapped_column(String(128), default="")
     supplier_name: Mapped[str] = mapped_column(String(256), default="", index=True)
+    # 采购订单的计划入库仓库；实际入库完成后，以入库单上的仓库为准。
+    warehouse_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("warehouses.id"), nullable=True, index=True,
+    )
     title: Mapped[str] = mapped_column(Text, default="")  # 原始标题（可能为“定制专拍/OEM定制”）
     ordered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
     order_amount: Mapped[Decimal | None] = mapped_column(MONEY, nullable=True)

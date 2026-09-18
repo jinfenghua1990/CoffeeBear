@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent } from "react";
 import { AftersaleRow, authenticatedFetch, dashboardApi } from "@/lib/api";
+import { useTabActive, useTabScopedState } from "@/lib/workspace/tab-store";
 
 type DetailRow = {
   itemId: number;
@@ -21,7 +22,12 @@ type DetailRow = {
   buyerNote: string;
   goodsCount: number | null;
   goodsCost: number | null;
+  costIncomplete?: boolean;
   grossProfit: number | null;
+  lineCost: number | null;
+  linePaid: number | null;
+  lineGross: number | null;
+  allocBasis?: string;
   skuCode: string;
   goodsName: string;
   spec: string;
@@ -45,7 +51,7 @@ type DetailResp = {
 };
 
 /** 可显示的全部字段（订单 × 货品行级），顺序即列顺序 */
-const COLUMNS: { key: keyof DetailRow; label: string; kind?: "money" | "num"; mono?: boolean }[] = [
+const COLUMNS: { key: keyof DetailRow; label: string; kind?: "money" | "num"; mono?: boolean; hint?: string }[] = [
   { key: "orderNo", label: "订单号", mono: true },
   { key: "netOrderNo", label: "网店订单号", mono: true },
   { key: "orderedAt", label: "下单时间" },
@@ -71,8 +77,12 @@ const COLUMNS: { key: keyof DetailRow; label: string; kind?: "money" | "num"; mo
   { key: "goodsCount", label: "订单货品数", kind: "num" },
   { key: "orderAmount", label: "订单金额", kind: "money" },
   { key: "paidAmount", label: "订单实付", kind: "money" },
-  { key: "goodsCost", label: "订单成本", kind: "money" },
-  { key: "grossProfit", label: "订单毛利", kind: "money" },
+  { key: "goodsCost", label: "订单成本", kind: "money", hint: "按本系统采购入库明细加权平均成本 × 销售数量计算（与业绩总览同口径）；带 * 表示个别货品缺采购入库成本，成本只含已覆盖部分" },
+  { key: "grossProfit", label: "订单毛利", kind: "money", hint: "订单实付金额 − 订单成本（与业绩总览同口径）；带 * 表示个别货品缺采购入库成本，实际毛利会更低" },
+  { key: "lineCost", label: "子SKU成本", kind: "money", hint: "本行货品成本 = 销售数量 × 本系统采购入库加权平均单价；缺入库成本的行留空" },
+  { key: "linePaid", label: "子SKU收入", kind: "money", hint: "订单实付按行成本占比分摊到本行；整单有行缺成本时退回按行金额比例分摊，见「分摊依据」列" },
+  { key: "lineGross", label: "子SKU毛利", kind: "money", hint: "子SKU收入 − 子SKU成本" },
+  { key: "allocBasis", label: "分摊依据", hint: "按行成本比例 / 按行金额比例 / 缺少可分摊依据" },
 ];
 
 const DEFAULT_VISIBLE = ["orderNo", "orderedAt", "platform", "orderStatus", "skuCode", "goodsName", "spec", "quantity", "unitPrice", "amount", "discountAmount"];
@@ -86,6 +96,7 @@ const DEFAULT_WIDTHS: Record<string, number> = {
   skuCode: 130, goodsName: 220, spec: 110, unitName: 70, gift: 70,
   quantity: 70, unitPrice: 90, amount: 100, discountAmount: 90, goodsCount: 90,
   orderAmount: 110, paidAmount: 110, goodsCost: 100, grossProfit: 100,
+  lineCost: 100, linePaid: 100, lineGross: 100, allocBasis: 110,
 };
 const MIN_W = 60;
 const MAX_W = 520;
@@ -117,16 +128,18 @@ export default function SalesDetailView({ initial }: { initial?: DetailInitial }
   const [data, setData] = useState<DetailResp | null>(null);
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState("");
-  const [q, setQ] = useState(initial?.q ?? "");
-  const [platform, setPlatform] = useState(initial?.platform ?? "");
-  const [skuFilter, setSkuFilter] = useState(initial?.sku ?? "");
-  const [status, setStatus] = useState("");
-  const [startDate, setStartDate] = useState(initial?.start ?? "");
-  const [endDate, setEndDate] = useState(initial?.end ?? "");
-  const [page, setPage] = useState(1);
-  const [pageSize, setPageSize] = useState(50);
+  const [q, setQ] = useTabScopedState("sales.detail.q", initial?.q ?? "");
+  const [platform, setPlatform] = useTabScopedState("sales.detail.platform", initial?.platform ?? "");
+  const [skuFilter, setSkuFilter] = useTabScopedState("sales.detail.sku", initial?.sku ?? "");
+  const [status, setStatus] = useTabScopedState("sales.detail.status", "");
+  const [startDate, setStartDate] = useTabScopedState("sales.detail.startDate", initial?.start ?? "");
+  const [endDate, setEndDate] = useTabScopedState("sales.detail.endDate", initial?.end ?? "");
+  const [page, setPage] = useTabScopedState("sales.detail.page", 1);
+  const [pageSize, setPageSize] = useTabScopedState("sales.detail.pageSize", 50);
   const [pickerOpen, setPickerOpen] = useState(false);
   const pickerRef = useRef<HTMLDivElement>(null);
+  // 工作区下隐藏 Tab 常驻挂载：不监听别的 Tab 里的点击，否则切走再回来「显示字段」面板会被误关
+  const tabActive = useTabActive();
   const firstLoad = useRef(true);
   // 列宽：手动拖拽调整，本地持久化（{} 表示全部用默认值）
   const [widths, setWidths] = useState<Record<string, number>>(() => {
@@ -136,6 +149,88 @@ export default function SalesDetailView({ initial }: { initial?: DetailInitial }
   const dragRef = useRef<{ key: string; startX: number; startW: number } | null>(null);
   const [aftersales, setAftersales] = useState<AftersaleRow[]>([]);
   const [afOpen, setAfOpen] = useState(false);
+  const [exporting, setExporting] = useState(false);
+  const [exportMsg, setExportMsg] = useState("");
+
+  /** 导出当前筛选条件下的全部明细（不受分页限制，成本口径与页面同一函数）。 */
+  async function exportDetail() {
+    setExporting(true);
+    setErr("");
+    setExportMsg("");
+    try {
+      const p = new URLSearchParams();
+      if (q.trim()) p.set("q", q.trim());
+      if (platform) p.set("platform", platform);
+      if (skuFilter) p.set("sku", skuFilter);
+      if (status) p.set("status", status);
+      if (startDate) p.set("start_date", startDate);
+      if (endDate) p.set("end_date", endDate);
+      const response = await authenticatedFetch(`/api/v1/sales-file/detail/export?${p.toString()}`, { cache: "no-store" });
+      if (!response.ok) {
+        const payload = await response.json().catch(() => ({}));
+        throw new Error(typeof payload?.detail === "string" ? payload.detail : `导出失败（${response.status}）`);
+      }
+      const blob = await response.blob();
+      const disposition = response.headers.get("content-disposition") || "";
+      const encodedName = disposition.match(/filename\*=UTF-8''([^;]+)/i)?.[1];
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = encodedName ? decodeURIComponent(encodedName) : "销售明细.xlsx";
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+      const count = Number(response.headers.get("x-export-row-count") || 0);
+      const orders = Number(response.headers.get("x-export-order-count") || 0);
+      setExportMsg(
+        `已导出 ${orders.toLocaleString("zh-CN")} 单 / ${count.toLocaleString("zh-CN")} 行明细（含「订单汇总」表，成本与毛利带公式）`,
+      );
+    } catch (caught) {
+      setErr(caught instanceof Error ? caught.message : String(caught));
+    } finally {
+      setExporting(false);
+    }
+  }
+
+  // 快速选月：起止日期正好覆盖某个自然月时回显该月份，否则留空（仍可手改日期微调）。
+  const monthPick = useMemo(() => {
+    if (!startDate || !endDate) return "";
+    const [year, month] = startDate.split("-").map(Number);
+    if (!year || !month || startDate !== `${year}-${String(month).padStart(2, "0")}-01`) return "";
+    const lastDay = new Date(year, month, 0).getDate();
+    return endDate === `${year}-${String(month).padStart(2, "0")}-${String(lastDay).padStart(2, "0")}`
+      ? `${year}-${String(month).padStart(2, "0")}`
+      : "";
+  }, [startDate, endDate]);
+
+  /** 选中某月：自动填该月 1 号到月末，空值清空区间。 */
+  function applyMonth(value: string) {
+    setPage(1);
+    if (!value) {
+      setStartDate("");
+      setEndDate("");
+      return;
+    }
+    const [year, month] = value.split("-").map(Number);
+    const lastDay = new Date(year, month, 0).getDate();
+    setStartDate(`${value}-01`);
+    setEndDate(`${value}-${String(lastDay).padStart(2, "0")}`);
+  }
+
+  const todayMonth = useMemo(() => {
+    const now = new Date();
+    return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
+  }, []);
+
+  function stepMonth(direction: 1 | -1) {
+    const base = monthPick || todayMonth;
+    const [year, month] = base.split("-").map(Number);
+    const next = new Date(year, month - 1 + direction, 1);
+    const value = `${next.getFullYear()}-${String(next.getMonth() + 1).padStart(2, "0")}`;
+    if (value > todayMonth) return;
+    applyMonth(value);
+  }
 
   useEffect(() => {
     window.localStorage.setItem(WIDTHS_KEY, JSON.stringify(widths));
@@ -194,13 +289,13 @@ export default function SalesDetailView({ initial }: { initial?: DetailInitial }
   }, [visible]);
 
   useEffect(() => {
-    if (!pickerOpen) return;
+    if (!pickerOpen || !tabActive) return;
     const close = (e: MouseEvent) => {
       if (pickerRef.current && !pickerRef.current.contains(e.target as Node)) setPickerOpen(false);
     };
     document.addEventListener("mousedown", close);
     return () => document.removeEventListener("mousedown", close);
-  }, [pickerOpen]);
+  }, [pickerOpen, tabActive]);
 
   const query = useMemo(() => {
     const p = new URLSearchParams();
@@ -260,12 +355,23 @@ export default function SalesDetailView({ initial }: { initial?: DetailInitial }
   return (
     <>
     <section className="mt-3 rounded-xl border border-gray-200 bg-white p-4">
+      <div className="mb-3 flex flex-wrap items-end justify-between gap-3">
+        <div>
+          <div className="text-[10px] font-semibold uppercase tracking-[0.16em] text-indigo-500">Sales / Detail</div>
+          <h1 className="mt-0.5 text-sm font-semibold text-slate-800">销售明细</h1>
+          <p className="mt-1 text-[11px] text-slate-400">
+            按订单与货品行查看销售记录，筛选结果与业绩总览使用同一数据源；订单成本按本系统采购入库加权平均成本计算、订单毛利 = 订单实付 − 订单成本，个别货品缺入库成本时按已覆盖部分计算并标记「缺成本*」，整单都算不出来时留空显示「—」。
+          </p>
+        </div>
+        <span className="text-[11px] text-slate-400">{loading ? "正在读取…" : data ? `共 ${data.total.toLocaleString("zh-CN")} 行明细` : "等待查询"}</span>
+      </div>
       <div className="flex flex-wrap items-center gap-2">
         <input
           value={q}
           onChange={(e) => setQ(e.target.value)}
           onKeyDown={(e) => { if (e.key === "Enter") { firstLoad.current = false; setPage(1); void load(); } }}
           placeholder="订单号 / 网店单号 / 货品编号 / 货品名称"
+          aria-label="搜索销售明细"
           className={`${inputCls} w-64`}
         />
         <select value={platform} onChange={(e) => setPlatform(e.target.value)} className={inputCls}>
@@ -279,9 +385,45 @@ export default function SalesDetailView({ initial }: { initial?: DetailInitial }
         <input type="date" value={startDate} onChange={(e) => setStartDate(e.target.value)} className={inputCls} />
         <span className="text-xs text-slate-400">~</span>
         <input type="date" value={endDate} onChange={(e) => setEndDate(e.target.value)} className={inputCls} />
+        <div className="inline-flex items-center gap-1" title="快速选月：自动把起止日期设为该月 1 号到月末">
+          <button
+            type="button"
+            onClick={() => stepMonth(-1)}
+            aria-label="上一月"
+            className="rounded-md border border-slate-200 px-2 py-1 text-xs text-slate-500 hover:bg-slate-50"
+          >
+            ‹
+          </button>
+          <input
+            type="month"
+            value={monthPick}
+            max={todayMonth}
+            onChange={(e) => applyMonth(e.target.value)}
+            aria-label="快速选择月份"
+            className={`${inputCls} w-36`}
+          />
+          <button
+            type="button"
+            onClick={() => stepMonth(1)}
+            disabled={monthPick >= todayMonth}
+            aria-label="下一月"
+            className="rounded-md border border-slate-200 px-2 py-1 text-xs text-slate-500 hover:bg-slate-50 disabled:opacity-30"
+          >
+            ›
+          </button>
+        </div>
         <select value={pageSize} onChange={(e) => setPageSize(Number(e.target.value))} className={inputCls}>
           {[20, 50, 100, 200].map((n) => <option key={n} value={n}>{n} 行/页</option>)}
         </select>
+        <button
+          type="button"
+          onClick={() => void exportDetail()}
+          disabled={exporting}
+          title="导出当前筛选条件下的全部明细（不受分页限制）：「订单汇总」表按订单去重、成本与毛利带公式并带合计，「销售明细」表为订单×货品行，两表与页面同一口径"
+          className="rounded-md border border-indigo-200 bg-white px-3 py-1 text-xs font-medium text-indigo-600 hover:bg-indigo-50 disabled:cursor-wait disabled:opacity-50"
+        >
+          {exporting ? "导出中…" : "导出 Excel"}
+        </button>
         <div className="relative" ref={pickerRef}>
           <button
             onClick={() => setPickerOpen((v) => !v)}
@@ -315,9 +457,10 @@ export default function SalesDetailView({ initial }: { initial?: DetailInitial }
         <span className="text-xs text-slate-400">
           {loading ? "加载中…" : data ? `共 ${data.total.toLocaleString("zh-CN")} 行明细` : ""}
         </span>
+        {exportMsg && <span className="text-xs text-emerald-600">{exportMsg}</span>}
       </div>
 
-      {(skuFilter || platform || startDate || endDate) && (
+      {(skuFilter || platform || status || startDate || endDate) && (
         <div className="mt-2 flex flex-wrap items-center gap-2 text-[11px]">
           <span className="text-slate-400">当前筛选：</span>
           {skuFilter && (
@@ -326,9 +469,10 @@ export default function SalesDetailView({ initial }: { initial?: DetailInitial }
           {platform && (
             <span className="rounded-full bg-indigo-50 px-2 py-0.5 text-indigo-600">{platform}</span>
           )}
+          {status && <span className="rounded-full bg-indigo-50 px-2 py-0.5 text-indigo-600">状态：{status}</span>}
           {(startDate || endDate) && <span className="text-slate-500">{startDate} ~ {endDate}</span>}
           <button
-            onClick={() => { setSkuFilter(""); setPlatform(""); setStartDate(""); setEndDate(""); }}
+            onClick={() => { setSkuFilter(""); setPlatform(""); setStatus(""); setStartDate(""); setEndDate(""); }}
             className="rounded border border-slate-200 px-1.5 py-0.5 text-slate-500 hover:bg-slate-50"
           >
             清除
@@ -347,7 +491,7 @@ export default function SalesDetailView({ initial }: { initial?: DetailInitial }
             <tr>
               {cols.map((c) => (
                 <th key={c.key} className={`relative whitespace-nowrap px-3 py-2 font-medium ${c.kind ? "text-right" : ""}`}>
-                  <span className="block overflow-hidden text-ellipsis" title={c.label}>{c.label}</span>
+                  <span className="block overflow-hidden text-ellipsis" title={c.hint ?? c.label}>{c.label}</span>
                   <span
                     onMouseDown={(e) => startResize(e, c.key as string)}
                     onDoubleClick={() => resetWidth(c.key as string)}
@@ -361,17 +505,19 @@ export default function SalesDetailView({ initial }: { initial?: DetailInitial }
           <tbody className="divide-y divide-gray-100">
             {(data?.rows ?? []).map((row) => {
               const cancelled = row.orderStatus.startsWith("已取消") || row.orderStatus.startsWith("作废");
+              const costFlag = Boolean(row.costIncomplete) && (row.goodsCost !== null || row.grossProfit !== null);
               return (
                 <tr key={row.itemId} className={`hover:bg-slate-50 ${cancelled ? "text-slate-400" : ""}`}>
                   {cols.map((c) => (
                     <td
                       key={c.key}
-                      title={cellText(row, c)}
+                      title={costFlag && (c.key === "goodsCost" || c.key === "grossProfit") ? "该订单有个别货品缺采购入库成本，此项只含已覆盖部分，实际成本会更高" : cellText(row, c)}
                       className={`overflow-hidden text-ellipsis whitespace-nowrap px-3 py-2 ${c.kind ? "text-right" : ""} ${c.mono ? "font-mono" : ""} ${
                         c.key === "orderStatus" && !cancelled ? "text-slate-600" : ""
                       }`}
                     >
                       {cellText(row, c)}
+                      {costFlag && (c.key === "goodsCost" || c.key === "grossProfit") && <span className="ml-0.5 align-super text-[10px] text-amber-600">缺成本*</span>}
                     </td>
                   ))}
                 </tr>

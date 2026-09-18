@@ -82,10 +82,12 @@ export default function AutomationPage() {
 
   return (
     <div>
-      <h1 className="text-xl font-semibold">自动化</h1>
-      <p className="mt-1 text-sm text-gray-400">
-        Celery Beat 定时同步。所有外部同步仅在凭证配置后真正执行；未配置如实跳过（见同步日志）。吉客云订单按配置自动故障切换。
-      </p>
+      <header className="app-page-header -mx-1 bg-[#f4f7fb]/95 pb-3 backdrop-blur">
+        <h1 className="text-xl font-semibold">自动化</h1>
+        <p className="mt-1 text-sm text-gray-400">
+          Celery Beat 定时同步。所有外部同步仅在凭证配置后真正执行；未配置如实跳过（见同步日志）。吉客云订单按配置自动故障切换。
+        </p>
+      </header>
 
       {err && <div className="mt-4 rounded-lg bg-red-50 p-3 text-sm text-red-700">{err}</div>}
       {message && <div className="mt-4 rounded-lg bg-indigo-50 p-3 text-sm text-indigo-700">{message}</div>}

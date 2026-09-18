@@ -21,6 +21,7 @@ from app.services.procurement_chain_service import (
     ChainPrefetch,
     _order_row,
     _source_pairs,
+    chain_snapshot,
     supplier_detail,
 )
 from app.services.procurement_workbench_service import _pending_queue, _step_states
@@ -30,8 +31,8 @@ from app.services.procurement_workbench_service import _pending_queue, _step_sta
 
 def overview(db: Session) -> dict:
     """5 数字 + 1 付款率进度环。"""
-    pf = ChainPrefetch(db)
-    rows = [_order_row(db, order, external, pf=pf) for order, external in _source_pairs(db)]
+    pairs, pf = chain_snapshot(db)
+    rows = [_order_row(db, order, external, pf=pf) for order, external in pairs]
     today = _today()
 
     today_count = 0
@@ -115,8 +116,8 @@ def list_board_orders(
     page: int = 1,
     page_size: int = 20,
 ) -> dict:
-    pf = ChainPrefetch(db)
-    rows = [_order_row(db, order, external, pf=pf) for order, external in _source_pairs(db)]
+    pairs, pf = chain_snapshot(db)
+    rows = [_order_row(db, order, external, pf=pf) for order, external in pairs]
     today = _today()
     out: list[dict] = []
     for row in rows:
@@ -173,7 +174,7 @@ def _status_label(first: str | None) -> str:
         "po": "待采购单",
         "inbound": "待入库",
         "invoice": "待发票",
-        None: "已完成",
+        None: "开票完成",
     }.get(first, "待完善")
 
 
@@ -183,11 +184,14 @@ def _step_progress(row: dict) -> list[dict]:
     purchase_orders = row.get("purchaseOrders") or []
     inbound = row.get("inbound") or []
     invoice = row.get("invoice") or []
+    # 耗材单（本平台）：HC 明细即采购内容，且不生成吉客云采购单。
+    consumable_items = bool((row.get("consumable") or {}).get("items"))
+    consumable_received = bool((row.get("consumable") or {}).get("received"))
     return [
         {"label": "1688", "done": True},
-        {"label": "采购", "done": bool(allocations) and bool(row.get("purchaseContentComplete"))},
-        {"label": "采购单", "done": bool(purchase_orders)},
-        {"label": "入库", "done": bool(inbound)},
+        {"label": "采购", "done": bool(row.get("purchaseContentComplete")) and (bool(allocations) or consumable_items)},
+        {"label": "采购单", "done": bool(purchase_orders) or consumable_items},
+        {"label": "入库", "done": bool(inbound) or consumable_received},
         {"label": "发票", "done": bool(invoice)},
     ]
 
@@ -222,8 +226,8 @@ def _time_group(t: datetime | None, today: date) -> str:
 
 def order_detail(db: Session, order_id: int) -> dict | None:
     """单个订单详情：订单基本信息 + 流程状态 + 供应商档案 + 常购 SKU + 金额与付款分层。"""
-    pf = ChainPrefetch(db)
-    matched = [(o, e) for o, e in _source_pairs(db) if o is not None and o.id == order_id]
+    pairs, pf = chain_snapshot(db)
+    matched = [(o, e) for o, e in pairs if o is not None and o.id == order_id]
     if not matched:
         return None
     order, external = matched[0]
@@ -268,9 +272,8 @@ def order_detail(db: Session, order_id: int) -> dict | None:
 def _flow_status(row: dict) -> list[dict]:
     """5 步流程状态横条数据。"""
     states = _step_states(row)
-    inbound_ready = bool(row.get("inbound")) and all(
-        item.get("consumableUsageDecided") for item in row.get("inbound") or []
-    )
+    # 真实入库单存在即完成入库阶段；耗材映射状态单独展示，不再把订单卡在待入库。
+    inbound_ready = bool(row.get("inbound")) or bool((row.get("consumable") or {}).get("received"))
     consumable_received = bool((row.get("consumable") or {}).get("received"))
     content_done = states["content"]["done"] and states["sku"]["done"]
 
@@ -317,8 +320,8 @@ def _supplier_profile(db: Session, row: dict, supplier_name: str) -> dict:
 
 def _supplier_often_skus(db: Session, supplier_name: str) -> list[dict]:
     """该供应商所有订单的 allocations 聚合 SKU 频次。"""
-    pf = ChainPrefetch(db)
-    rows = [_order_row(db, order, external, pf=pf) for order, external in _source_pairs(db)]
+    pairs, pf = chain_snapshot(db)
+    rows = [_order_row(db, order, external, pf=pf) for order, external in pairs]
     matched = [r for r in rows if (r.get("supplier") or "").strip() == supplier_name]
     counter: Counter = Counter()
     sku_meta: dict[str, dict] = {}

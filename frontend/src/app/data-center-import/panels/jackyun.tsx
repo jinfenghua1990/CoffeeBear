@@ -11,13 +11,13 @@ export function JackyunPanel() {
   return (
     <div>
       <div className="mb-4 rounded-lg border border-emerald-100 bg-emerald-50/60 px-4 py-3 text-xs text-emerald-800">
-        已切换为手动上传模式：开放平台在线同步已停用。请从吉客云客户端导出报表后在此上传，导入后自动执行字段映射、订单建档和采购链路关联。
+        采购入库单就在这里导入：请从吉客云客户端导出「采购入库申请单货品」或「采购入库单」的 XLSX / CSV 后上传，系统会自动识别入库单、回填明细并执行采购链路关联。当前不支持直接在线拉取吉客云单据。
       </div>
       <LifecyclePanel<JackyunFileImportRow, JackyunRecordPreview>
       title="吉客云客户端导出导入"
       description="从吉客云客户端导出的采购/库存/结算等报表，默认上传后自动生效，并继续执行字段映射、订单建档和采购链路关联。需要逐行核对时可关闭自动确认。"
       accept=".xlsx,.csv"
-      fileHint="支持吉客云客户端导出的 XLSX / CSV，所有原始列均保留，确认后不影响后续字段映射。"
+      fileHint="支持吉客云客户端导出的 XLSX / CSV；采购入库单建议包含「入库单号/申请单号」和「货品编号」，所有原始列均保留。下方“吉客云入库单（导出核验）”只是下载本地数据，不是上传入口。"
       api={{
         imports: jackyunFileApi.imports,
         upload: (file, autoConfirm) => jackyunFileApi.upload(file, autoConfirm),

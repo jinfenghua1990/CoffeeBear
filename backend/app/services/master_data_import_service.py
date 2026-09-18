@@ -15,6 +15,7 @@ from io import BytesIO
 from pathlib import Path
 from typing import Any
 
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.core.audit import audit
@@ -366,6 +367,11 @@ def import_catalog(
             created += 1
         else:
             updated += 1
+        code_conflict = db.query(ProductSku).filter(func.lower(ProductSku.sku_code) == item["code"].lower())
+        if sku.id is not None:
+            code_conflict = code_conflict.filter(ProductSku.id != sku.id)
+        if code_conflict.first():
+            raise ValueError(f"货品编码已存在：{item['code']}")
         conflict = db.query(ProductSku).filter(ProductSku.jackyun_sku_id == item["external_id"])
         if sku.id is not None:
             conflict = conflict.filter(ProductSku.id != sku.id)

@@ -10,6 +10,9 @@ export const metadata: Metadata = {
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
     <html lang="zh-CN">
+      <head>
+        <script dangerouslySetInnerHTML={{ __html: `(function(){try{var s=localStorage.getItem("app-theme");var d=s?s==="dark":window.matchMedia("(prefers-color-scheme: dark)").matches;if(d)document.documentElement.classList.add("dark");}catch(e){}})();` }} />
+      </head>
       <body>
         <AuthShell>{children}</AuthShell>
       </body>

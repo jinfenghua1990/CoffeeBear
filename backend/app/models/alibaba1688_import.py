@@ -3,7 +3,7 @@
 from datetime import datetime
 from decimal import Decimal
 
-from sqlalchemy import BigInteger, DateTime, Integer, Numeric, String, Text, UniqueConstraint
+from sqlalchemy import BigInteger, DateTime, ForeignKey, Integer, Numeric, String, Text, UniqueConstraint
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -48,6 +48,10 @@ class Alibaba1688Order(Base, PkMixin, TimestampMixin):
     buyer_company_name: Mapped[str] = mapped_column(String(256), default="")
     buyer_member_name: Mapped[str] = mapped_column(String(128), default="")
     seller_company_name: Mapped[str] = mapped_column(String(256), default="")
+    # 采购订单的计划入库仓库；实际入库完成后，以入库单上的仓库为准。
+    warehouse_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("warehouses.id"), nullable=True, index=True,
+    )
     seller_member_name: Mapped[str] = mapped_column(String(128), default="")
     goods_total: Mapped[Decimal] = mapped_column(Numeric(12, 2), default=Decimal("0"))
     freight: Mapped[Decimal] = mapped_column(Numeric(10, 2), default=Decimal("0"))

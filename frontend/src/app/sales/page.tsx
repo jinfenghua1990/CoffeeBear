@@ -6,6 +6,8 @@ import { useSearchParams } from "next/navigation";
 import MetricCard from "@/components/metric-card";
 import { authenticatedFetch, dashboardApi, PlatformRow, SkuRow, TrendPoint } from "@/lib/api";
 import type { DetailInitial } from "./detail-view";
+import SalesAnalyticsView from "./analytics-view";
+import { useTabRuntime, useTabScopedState, useWorkspace } from "@/lib/workspace/tab-store";
 
 const SalesDetailView = dynamic(() => import("./detail-view"), {
   ssr: false,
@@ -50,6 +52,7 @@ function SalesOverview({ onDrill }: { onDrill: (init: DetailInitial) => void }) 
   const [importing, setImporting] = useState(false);
   const [importMsg, setImportMsg] = useState("");
   const [importBad, setImportBad] = useState(false);
+  const [importFileName, setImportFileName] = useState("");
   const fileRef = useRef<HTMLInputElement>(null);
   const [rangeKey, setRangeKey] = useState<RangeKey>("d30");
   const [pickMonth, setPickMonth] = useState(() => {
@@ -99,27 +102,34 @@ function SalesOverview({ onDrill }: { onDrill: (init: DetailInitial) => void }) 
   async function importFile(file: File) {
     setImporting(true);
     setImportMsg("");
+    setImportFileName(file.name);
     try {
       const fd = new FormData();
       fd.append("file", file);
       const res = await authenticatedFetch("/api/v1/sales-file/import", { method: "POST", body: fd });
-      const d = await res.json();
+      const d = await res.json().catch(() => ({}));
       if (!res.ok) {
         setImportBad(true);
-        setImportMsg(`导入失败：${d?.detail || "服务端拒绝"}`);
+        setImportMsg(d?.detail || "文件格式无法解析，请检查文件后重试");
+        return;
+      }
+      if (Number(d?.itemsImported) <= 0) {
+        setImportBad(true);
+        setImportMsg("未读取到销售明细，系统未将本次导入视为成功");
         return;
       }
       setImportBad(false);
       setImportMsg(
         `导入完成：有效订单 ${d.ordersImported} 单（新建 ${d.created} / 更新 ${d.updated}）· ` +
-        `明细 ${d.itemsImported} 行 · 跳过取消/待审核 ${d.cancelledSkipped} 单` +
+        `明细 ${d.itemsImported} 行 · 跳过非成交状态 ${d.cancelledSkipped} 单` +
         (d.removedCancelled ? ` · 清除库内被标记取消 ${d.removedCancelled} 单` : "") +
-        (d.minDate ? ` · 覆盖 ${d.minDate} ~ ${d.maxDate}` : "")
+        (d.minDate ? ` · 覆盖 ${d.minDate} ~ ${d.maxDate}` : "") +
+        (Array.isArray(d.sheets) ? ` · 已识别 ${d.sheets.length} 个 Sheet` : "")
       );
       load();
-    } catch {
+    } catch (caught) {
       setImportBad(true);
-      setImportMsg("导入请求异常");
+      setImportMsg(caught instanceof Error ? caught.message : "导入请求异常，请检查局域网连接后重试");
     } finally {
       setImporting(false);
       if (fileRef.current) fileRef.current.value = "";
@@ -182,13 +192,25 @@ function SalesOverview({ onDrill }: { onDrill: (init: DetailInitial) => void }) 
 
   return (
     <>
-      {/* 单行工具条：时间快速筛选 + 逐期快选 + 生效区间 + 导入 */}
-      <div className="mt-3 flex flex-wrap items-center gap-2">
-        <span className="text-[11px] font-medium text-slate-500">时间范围</span>
-        <button onClick={() => setRangeKey("month")} className={pillCls(rangeKey === "month")}>当月</button>
-        <button onClick={() => setRangeKey("d30")} className={pillCls(rangeKey === "d30")}>近30天</button>
-        <button onClick={() => setRangeKey("pick_month")} className={pillCls(rangeKey === "pick_month")}>月份</button>
-        <button onClick={() => setRangeKey("pick_year")} className={pillCls(rangeKey === "pick_year")}>年份</button>
+      <section className="mt-3 rounded-xl border border-slate-200 bg-white px-4 py-3 shadow-sm">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <div className="text-[10px] font-semibold uppercase tracking-[0.16em] text-indigo-500">Sales / Performance</div>
+            <div className="mt-0.5 text-sm font-semibold text-slate-800">销售业绩</div>
+          </div>
+          <div className="flex items-center gap-2 text-[11px] text-slate-400">
+            <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />
+            <span>数据来源：销售单查询</span>
+          </div>
+        </div>
+
+        {/* 单行工具条：时间快速筛选 + 逐期快选 + 生效区间 + 导入 */}
+        <div className="mt-3 flex flex-wrap items-center gap-2">
+          <span className="text-[11px] font-medium text-slate-500">时间范围</span>
+          <button onClick={() => setRangeKey("month")} className={pillCls(rangeKey === "month")}>当月</button>
+          <button onClick={() => setRangeKey("d30")} className={pillCls(rangeKey === "d30")}>近30天</button>
+          <button onClick={() => setRangeKey("pick_month")} className={pillCls(rangeKey === "pick_month")}>月份</button>
+          <button onClick={() => setRangeKey("pick_year")} className={pillCls(rangeKey === "pick_year")}>年份</button>
         {rangeKey === "pick_month" && (
           <span className="flex items-center gap-1">
             <button onClick={() => stepPeriod(-1)} className="rounded-md border border-slate-200 px-2 py-1 text-xs text-slate-600 hover:bg-slate-50">‹</button>
@@ -221,7 +243,7 @@ function SalesOverview({ onDrill }: { onDrill: (init: DetailInitial) => void }) 
         <button
           onClick={() => fileRef.current?.click()}
           disabled={importing}
-          title="上传吉客云客户端导出的《销售单查询.xlsx》（含 销售单/销售单货品 两个 sheet），自动合并进本地销售业绩"
+          title="上传吉客云导出的销售单文件，支持双 Sheet 或订单主表内含货品明细"
           className="rounded-md border border-indigo-300 bg-indigo-50 px-3 py-1 text-[11px] font-medium text-indigo-600 hover:bg-indigo-100 disabled:opacity-50"
         >
           {importing ? "导入中…" : "导入销售清单"}
@@ -237,14 +259,33 @@ function SalesOverview({ onDrill }: { onDrill: (init: DetailInitial) => void }) 
           }}
         />
       </div>
+      </section>
 
       {importMsg && (
-        <div className={`mt-2 text-[11px] ${importBad ? "text-red-600" : "text-emerald-700"}`}>{importMsg}</div>
+        <div
+          role={importBad ? "alert" : "status"}
+          aria-live="polite"
+          className={`mt-3 flex items-start gap-3 rounded-xl border px-3.5 py-3 shadow-sm ${
+            importBad ? "border-rose-200 bg-rose-50 text-rose-800" : "border-emerald-200 bg-emerald-50 text-emerald-800"
+          }`}
+        >
+          <span className={`mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-xs font-bold ${importBad ? "bg-rose-600 text-white" : "bg-emerald-600 text-white"}`}>
+            {importBad ? "!" : "✓"}
+          </span>
+          <div className="min-w-0 flex-1">
+            <div className="text-xs font-semibold">{importBad ? "销售清单导入失败" : "销售清单导入完成"}</div>
+            <div className="mt-0.5 break-words text-[11px]">{importMsg}</div>
+            {importBad && <div className="mt-1 text-[10px] text-rose-600">请上传吉客云导出的 .xlsx 文件，并确认包含订单信息和销售明细。</div>}
+            {importFileName && <div className="mt-1 truncate text-[10px] opacity-70">文件：{importFileName}</div>}
+          </div>
+          {importBad && <button type="button" onClick={() => fileRef.current?.click()} disabled={importing} className="shrink-0 rounded-md border border-rose-200 bg-white px-2 py-1 text-[11px] font-medium text-rose-700 hover:bg-rose-100 disabled:opacity-50">重新选择</button>}
+          <button type="button" aria-label="关闭导入提示" onClick={() => { setImportMsg(""); setImportFileName(""); }} className="shrink-0 text-lg leading-4 opacity-50 hover:opacity-100">×</button>
+        </div>
       )}
       {err && <div className="mt-2 rounded-lg bg-red-50 p-2.5 text-xs text-red-700">{err}</div>}
 
       {/* 指标卡：销售额 / 订单数 / 客单价 / 平台数（环比基期 = 紧邻等长区间） */}
-      <div className="mt-3 grid grid-cols-4 gap-3">
+      <div className="mt-3 grid grid-cols-2 gap-3 xl:grid-cols-4">
         <MetricCard label={`${range.label}销售额`} value={fmtMoney(totalSales ? String(totalSales) : null)} delta={salesDelta} deltaSuffix={`vs ${base.label}`} />
         <MetricCard label={`${range.label}订单数`} value={String(totalOrders)} delta={ordersDelta} deltaSuffix={`vs ${base.label}`} />
         <MetricCard label="客单价" value={avgOrder ? fmtMoney(String(avgOrder)) : "—"} delta={avgDelta} deltaSuffix={`vs ${base.label}`} />
@@ -252,8 +293,8 @@ function SalesOverview({ onDrill }: { onDrill: (init: DetailInitial) => void }) 
       </div>
 
       {/* 趋势 + 平台排行 */}
-      <div className="mt-3 grid grid-cols-2 gap-3">
-        <section className="rounded-xl border border-gray-200 bg-white p-4">
+      <div className="mt-3 grid items-start gap-3 lg:grid-cols-[minmax(0,1.45fr)_minmax(360px,0.9fr)]">
+        <section className="h-fit rounded-xl border border-gray-200 bg-white p-4">
           <h2 className="text-sm font-medium text-gray-700">{range.label}销售趋势</h2>
           {trendPoints.length === 0 ? (
             <div className="mt-4 py-8 text-center text-sm text-gray-400">该区间暂无销售，导入《销售单查询》后自动出数</div>
@@ -371,17 +412,36 @@ function SalesOverview({ onDrill }: { onDrill: (init: DetailInitial) => void }) 
 export default function SalesPage() {
   const searchParams = useSearchParams();
   const initialQuery = searchParams.get("q")?.trim() ?? "";
-  const [tab, setTab] = useState<"overview" | "detail">("overview");
+  const runtime = useTabRuntime();
+  const ws = useWorkspace();
+  const tabId = runtime?.tabId;
+  const [tab, setTab] = useTabScopedState<"overview" | "detail">("sales.tab", "overview");
   // 穿透参数 + 自增 key：每次穿透强制重挂明细组件，保证初始筛选生效
-  const [drill, setDrill] = useState<DetailInitial | undefined>(undefined);
+  const [drill, setDrill] = useTabScopedState<DetailInitial | undefined>("sales.drill", undefined);
   const [drillSeq, setDrillSeq] = useState(0);
+
+  /**
+   * 概览穿透到明细：除了重挂明细组件，还要把钻取条件写进明细页的 Tab 快照，
+   * 否则恢复现场时旧快照会盖掉这一次的钻取筛选。
+   */
+  const drillInto = useCallback((init: DetailInitial) => {
+    if (tabId) {
+      ws.setScope(tabId, "sales.detail.q", init.q ?? "");
+      ws.setScope(tabId, "sales.detail.platform", init.platform ?? "");
+      ws.setScope(tabId, "sales.detail.sku", init.sku ?? "");
+      ws.setScope(tabId, "sales.detail.startDate", init.start ?? "");
+      ws.setScope(tabId, "sales.detail.endDate", init.end ?? "");
+      ws.setScope(tabId, "sales.detail.page", 1);
+    }
+    setDrill(init);
+    setDrillSeq((n) => n + 1);
+    setTab("detail");
+  }, [setDrill, setTab, tabId, ws]);
 
   useEffect(() => {
     if (!initialQuery) return;
-    setDrill({ q: initialQuery });
-    setDrillSeq((n) => n + 1);
-    setTab("detail");
-  }, [initialQuery]);
+    drillInto({ q: initialQuery });
+  }, [initialQuery, drillInto]);
 
   // 左侧二级菜单深链：/sales?tab=overview | detail 直接切换页签
   const tabParam = searchParams.get("tab");
@@ -390,41 +450,31 @@ export default function SalesPage() {
   }, [tabParam]);
 
   function handleDrill(init: DetailInitial) {
-    setDrill(init);
-    setDrillSeq((n) => n + 1);
-    setTab("detail");
+    drillInto(init);
   }
 
   return (
     <div>
-      {/* 页签：业绩总览 / 全部销售明细（标题由工作台外壳提供，不再重复） */}
-      <div className="flex w-fit overflow-hidden rounded-lg border border-slate-200 bg-slate-50 text-[12px]">
-        {([
-          ["overview", "业绩总览"],
-          ["detail", "全部销售明细"],
-        ] as const).map(([key, label]) => (
-          <button
-            key={key}
-            onClick={() => {
-              // 穿透状态下再点页签 = 回到完整明细（清掉穿透筛选并重挂）
-              if (key === "detail" && drill) {
-                setDrill(undefined);
-                setDrillSeq((n) => n + 1);
-              }
-              setTab(key);
-            }}
-            className={key === tab ? "bg-indigo-600 px-4 py-1.5 font-medium text-white" : "px-4 py-1.5 text-slate-600 hover:bg-slate-100"}
-          >
-            {label}
-          </button>
-        ))}
-      </div>
+      <header className="app-page-header -mx-6 -mt-5 border-b border-slate-200 bg-[#f4f7fb]/95 px-6 pb-3 pt-4 backdrop-blur xl:-mx-8 xl:-mt-6 xl:px-8">
+        <div className="flex flex-wrap items-end justify-between gap-3">
+          <div>
+            <div className="text-[10px] font-semibold uppercase tracking-[0.18em] text-indigo-500">SALES / ANALYTICS</div>
+            <h1 className="mt-1 text-xl font-bold tracking-tight text-slate-900">{tab === "overview" ? "销售渠道分析（含利润成本）" : "销售明细"}</h1>
+            <p className="mt-1 text-[11px] text-slate-500">{tab === "overview" ? "按销售渠道 / 店铺查看销售、成本、利润等核心数据" : "按订单与货品行查看销售记录，筛选结果与业绩总览使用同一数据源"}</p>
+          </div>
+          {tab === "overview" ? (
+            <button onClick={() => handleDrill({})} className="rounded-lg border border-indigo-200 bg-white px-3.5 py-2 text-xs font-medium text-indigo-600 shadow-sm hover:bg-indigo-50">查看销售明细</button>
+          ) : (
+            <button onClick={() => setTab("overview")} className="rounded-lg border border-indigo-200 bg-white px-3.5 py-2 text-xs font-medium text-indigo-600 shadow-sm hover:bg-indigo-50">返回业绩总览</button>
+          )}
+        </div>
+        <div className="mt-3 flex w-fit overflow-hidden rounded-lg border border-slate-200 bg-white text-[12px] shadow-sm">
+          <button onClick={() => setTab("overview")} className={`px-4 py-1.5 ${tab === "overview" ? "bg-[#5664f5] font-medium text-white" : "text-slate-600 hover:bg-slate-50"}`}>业绩概览</button>
+          <button onClick={() => { setDrill(undefined); setDrillSeq((n) => n + 1); setTab("detail"); }} className={`border-l border-slate-200 px-4 py-1.5 ${tab === "detail" ? "bg-[#5664f5] font-medium text-white" : "text-slate-600 hover:bg-slate-50"}`}>全部销售明细</button>
+        </div>
+      </header>
 
-      {tab === "overview" ? (
-        <SalesOverview key="overview" onDrill={handleDrill} />
-      ) : (
-        <SalesDetailView key={`detail-${drillSeq}`} initial={drill} />
-      )}
+      {tab === "overview" ? <SalesAnalyticsView onDrill={handleDrill} /> : <SalesDetailView key={`detail-${drillSeq}`} initial={drill} />}
     </div>
   );
 }

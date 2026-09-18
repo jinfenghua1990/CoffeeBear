@@ -7,8 +7,9 @@ from sqlalchemy.orm import Session
 
 from app.api.deps import current_actor
 from app.db import get_db
-from app.models.bank import BankTransaction
+from app.models.bank import BankAccount, BankTransaction
 from app.models.payment import SettlementRecord
+from app.models.tax import TaxInvoiceLink
 from app.services import reconciliation as rc
 from app.services import finance_service
 from app.utils.uploads import UploadTooLargeError, read_upload_limited
@@ -67,21 +68,69 @@ class TxnBody(BaseModel):
 @router.get("/transactions")
 def list_transactions(
     limit: int = Query(100, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+    direction: Literal["all", "in", "out"] = Query("all"),
+    start_date: date | None = Query(None),
+    end_date: date | None = Query(None),
+    q: str = Query("", max_length=200),
     db: Session = Depends(get_db),
 ) -> list[dict[str, Any]]:
+    if start_date and end_date and start_date > end_date:
+        raise HTTPException(422, "开始日期不能晚于结束日期")
+    query = db.query(BankTransaction)
+    if direction != "all":
+        query = query.filter(BankTransaction.direction == direction)
+    if start_date:
+        query = query.filter(BankTransaction.txn_date >= start_date)
+    if end_date:
+        query = query.filter(BankTransaction.txn_date <= end_date)
+    needle = q.strip()
+    if needle:
+        like = f"%{needle}%"
+        query = query.filter(
+            BankTransaction.counterparty_name.ilike(like)
+            | BankTransaction.summary.ilike(like)
+            | BankTransaction.voucher_no.ilike(like)
+        )
     rows = (
-        db.query(BankTransaction)
-        .order_by(BankTransaction.txn_date.desc(), BankTransaction.id.desc())
+        query.order_by(BankTransaction.txn_date.desc(), BankTransaction.id.desc())
+        .offset(offset)
         .limit(limit)
         .all()
     )
     matched_ids = rc.confirmed_txn_ids(db, [r.id for r in rows])
+    row_ids = [r.id for r in rows]
+    invoice_matched_ids = {
+        int(target_id)
+        for (target_id,) in db.query(TaxInvoiceLink.target_id)
+        .filter(
+            TaxInvoiceLink.target_type == "bank_transaction",
+            TaxInvoiceLink.target_id.in_(row_ids),
+            TaxInvoiceLink.match_method != "rejected",
+        )
+        .distinct()
+        .all()
+    } if row_ids else set()
+    account_ids = {r.account_id for r in rows if r.account_id is not None}
+    accounts = {
+        account.id: account
+        for account in db.query(BankAccount).filter(BankAccount.id.in_(account_ids)).all()
+    } if account_ids else {}
     return [
         {
             "id": r.id, "txnDate": r.txn_date.isoformat(), "direction": r.direction,
             "amount": str(r.amount), "counterpartyName": r.counterparty_name,
             "summary": r.summary, "voucherNo": r.voucher_no,
             "matched": r.id in matched_ids,
+            "invoiceMatched": r.id in invoice_matched_ids,
+            "matchStatus": (
+                "matched" if (r.id in matched_ids if r.direction == "in" else r.id in invoice_matched_ids)
+                else "unmatched"
+            ),
+            "matchedAt": r.matched_at.isoformat() if r.matched_at else None,
+            "accountNo": accounts[r.account_id].account_no if r.account_id in accounts else "",
+            "accountName": accounts[r.account_id].account_name if r.account_id in accounts else "",
+            "bankName": accounts[r.account_id].bank_name if r.account_id in accounts else "",
         }
         for r in rows
     ]

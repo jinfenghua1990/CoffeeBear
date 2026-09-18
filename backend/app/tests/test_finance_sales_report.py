@@ -40,6 +40,7 @@ def test_monthly_sales_report_summarizes_by_warehouse(db_session):
     )
     other_wh = SalesOrder(
         order_no=_order_no("FIN2"), platform="拼多多", order_status="paid",
+        paid_amount=Decimal("150"),
         ordered_at=datetime(2026, 8, 16, 12, 0, tzinfo=tz),
         raw={"warehouseName": "杭州仓"},
     )
@@ -66,6 +67,26 @@ def test_monthly_sales_report_summarizes_by_warehouse(db_session):
         ProductSku(jackyun_sku_id=f"sku-{uuid4().hex}", sku_code="SKU-X"),
     ])
     db_session.flush()
+    # 成本只取采购入库加权成本（不再用 default_cost 兜底），补入库单让成本口径生效
+    sku_a = db_session.query(ProductSku).filter_by(sku_code="SKU-A").one()
+    sku_b = db_session.query(ProductSku).filter_by(sku_code="SKU-B").one()
+    inbound = JackyunGoodsDocument(
+        document_type="inbound", goodsdoc_no=f"RK-{uuid4().hex}",
+        document_at=datetime(2026, 7, 1, 10, 0, tzinfo=tz),
+    )
+    db_session.add(inbound)
+    db_session.flush()
+    db_session.add_all([
+        JackyunGoodsDocumentItem(
+            document_id=inbound.id, line_no=1, goods_no="SKU-A", quantity=Decimal("100"),
+            unit_price_tax=Decimal("12"), matched_sku_id=sku_a.id,
+        ),
+        JackyunGoodsDocumentItem(
+            document_id=inbound.id, line_no=2, goods_no="SKU-B", quantity=Decimal("100"),
+            unit_price_tax=Decimal("8"), matched_sku_id=sku_b.id,
+        ),
+    ])
+    db_session.flush()
 
     company = f"pytest-{uuid4().hex}"
     template = svc.get_or_create_template(db_session, company)
@@ -75,7 +96,9 @@ def test_monthly_sales_report_summarizes_by_warehouse(db_session):
     assert report["summary"]["warehouseCount"] == 2
     assert report["summary"]["totalQuantity"] == "6.0000"
     assert report["summary"]["salesAmount"] == "250.00"
-    assert report["summary"]["costAmount"] == "56.00"  # 2*12 + 1*8 + 3*8
+    assert report["summary"]["costAmount"] == "56.00"  # 2*12 + 1*8 + 3*8（全部来自入库加权成本）
+    assert report["summary"]["costIncomplete"] is False
+    assert report["summary"]["costMissingDetail"] == []
 
     by_wh = {row["warehouse"]: row for row in report["rows"]}
     assert set(by_wh) == {"常州-示范仓", "杭州仓"}
@@ -165,6 +188,7 @@ def test_multiple_tax_codes_joined_and_missing_cost_is_zero(db_session):
     tz = ZoneInfo(settings.TZ)
     order = SalesOrder(
         order_no=_order_no("FIN"), platform="淘宝", order_status="已完成", pay_status="已支付",
+        paid_amount=Decimal("70"),
         ordered_at=datetime(2026, 8, 15, 12, 0, tzinfo=tz),
         raw={"warehouseName": "常州-示范仓"},
     )
@@ -194,7 +218,10 @@ def test_multiple_tax_codes_joined_and_missing_cost_is_zero(db_session):
     assert row["tax_code"] == "1090101020000000000 / 3040205000000000000"
     assert row["total_quantity"] == "2.0000"
     assert row["total_sales"] == "70.00"
-    assert row["total_cost"] == "5.00"
+    # 两个 SKU 都没有采购入库成本：不用 default_cost 兜底，成本为 0 并标记待补充
+    assert row["total_cost"] == "0.00"
+    assert report["summary"]["costIncomplete"] is True
+    assert [item["skuCode"] for item in report["summary"]["costMissingDetail"]] == ["SKU-A", "SKU-B"]
 
 
 def test_legacy_template_auto_upgrades_to_warehouse_fields(db_session):
@@ -216,6 +243,7 @@ def test_unbilled_adjustment_persists_selected_details_and_version(db_session):
     tz = ZoneInfo(settings.TZ)
     order = SalesOrder(
         order_no=_order_no("UNBILLED"), platform="淘宝", order_status="已完成", pay_status="已支付",
+        paid_amount=Decimal("50"),
         ordered_at=datetime(2098, 8, 15, 12, 0, tzinfo=tz),
         raw={"warehouseName": "常州-示范仓"},
     )

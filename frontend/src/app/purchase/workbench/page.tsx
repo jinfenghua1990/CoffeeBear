@@ -1,7 +1,7 @@
 "use client";
 
 import NextLink from "next/link";
-import { useRouter, useSearchParams } from "next/navigation";
+import { useSearchParams } from "next/navigation";
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type ComponentProps, type ReactNode } from "react";
 import { WORKBENCH_VIEWS, parseWorkbenchView, workbenchHref, type WorkbenchView } from "@/lib/workbench-navigation";
 import { WorkspaceModule } from "./workspace-modules";
@@ -11,6 +11,8 @@ import { SearchableSelect } from "./searchable-select";
 import { QuickTriage, canonicalChainOrderId } from "./quick-triage";
 import { SupplyChainReplica, type SupplyChainChannelFilter, type SupplyChainKindFilter, type SupplyChainStatusFilter } from "./supply-chain-replica";
 import { newRequestKey } from "@/lib/request-key";
+import { useTabActive, useTabDirty, useTabRuntime, useWorkspace } from "@/lib/workspace/tab-store";
+import { syncWorkspaceUrl } from "@/lib/workspace/url-sync";
 import {
   authenticatedFetch,
   consumablesApi,
@@ -61,8 +63,6 @@ const STANDALONE_VIEW_ROUTES: Partial<Record<ViewMode, string>> = {
   products: "/products",
   inventory_goods: "/products/inventory-goods",
   inventory_consumables: "/products/inventory-consumables",
-  payments: "/payments",
-  profit: "/profit",
   finance: "/finance/monthly-send",
   exceptions: "/exceptions",
   automation: "/automation",
@@ -97,7 +97,7 @@ const DIM_DOT: Record<string, string> = {
 const STAGE_ACTION: Record<string, { href?: string; view?: ViewMode; act: string }> = {
   order: { href: "/alibaba1688-import", act: "导入 1688 订单" },
   sku: { view: "matching", act: "配置 SKU 匹配" },
-  jackyunPo: { href: "/jackyun-import", act: "导入吉客云入库单" },
+  jackyunPo: { href: "/purchase/workbench?view=orders", act: "查看本系统采购单" },
   inbound: { href: "/jackyun-import", act: "导入入库单" },
   invoice: { href: "/tax-invoices", act: "导入发票清单" },
   paid: { href: "/jackyun-import", act: "导入结算单" },
@@ -126,7 +126,11 @@ type IconName =
   | "filter"
   | "search"
   | "copy"
-  | "chevron";
+  | "chevron"
+  | "history"
+  | "alert-circle"
+  | "edit"
+  | "x";
 
 type AllocationRow = {
   id?: number;
@@ -140,6 +144,7 @@ type AllocationRow = {
   /** 来源入库单 ID：入库单明细自动反填的行有值；人工新增行为 null（归入手工补录区） */
   inboundDocumentId?: number | null;
 };
+type ModalConsumableItem = ConsumablePurchaseItem & { purchaseId?: number };
 type EditorConsumableDraft = { consumableId: number; quantity: string };
 type PendingConsumableUpdate = { documentId: number; allocationId: number; draft: EditorConsumableDraft | null };
 type ExpenseRow = { id?: number; expenseType?: string; amount?: number | null };
@@ -185,7 +190,7 @@ function channelOf(value: string | null | undefined): ChannelKey {
 function PlatformBadge({ value, className }: { value: string | null | undefined; className?: string }) {
   const meta = CHANNELS[channelOf(value)];
   return (
-    <span className={cx("inline-flex shrink-0 items-center rounded border px-1.5 py-0.5 text-[8.5px] font-medium leading-none", meta.badge, className)}>
+    <span className={cx("inline-flex shrink-0 items-center rounded-md border px-2.5 py-1 text-[11px] font-semibold leading-none tracking-wide shadow-sm", meta.badge, className)}>
       {meta.label}
     </span>
   );
@@ -193,7 +198,7 @@ function PlatformBadge({ value, className }: { value: string | null | undefined;
 
 /** 订单类型标签：正品 / 耗材（包材）。缺省按 goods（正品）处理，避免旧后端未下发时空白。 */
 const ORDER_KIND_META: Record<string, { label: string; badge: string }> = {
-  goods: { label: "正品", badge: "border-slate-200 bg-white text-slate-500" },
+  goods: { label: "正品", badge: "border-blue-200 bg-blue-50 text-blue-600" },
   consumable: { label: "耗材", badge: "border-amber-200 bg-amber-50 text-amber-600" },
 };
 function OrderKindTag({ value, className }: { value?: string | null; className?: string }) {
@@ -240,6 +245,11 @@ function fmtMoney(value: number | null | undefined) {
   return "¥" + value.toLocaleString("zh-CN", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 
+function fmtQty(value: number | null | undefined) {
+  if (value === null || value === undefined || !Number.isFinite(value)) return "—";
+  return value.toLocaleString("zh-CN", { maximumFractionDigits: 3 });
+}
+
 function fmtDate(value: string | null | undefined) {
   const date = parseDate(value);
   if (!date) return "—";
@@ -282,7 +292,7 @@ const PURCHASE_STEP_ORDER = ["content", "sku", "jackyun_po", "inbound", "invoice
 const PURCHASE_STEP_LABELS: Record<string, string> = {
   content: "待确认采购内容",
   sku: "待匹配SKU",
-  jackyun_po: "待生成采购单",
+  jackyun_po: "待完成本系统采购单",
   inbound: "待入库",
   invoice: "待发票",
   closeout: "待收尾(入库/发票/付款)",
@@ -305,7 +315,7 @@ function statusLabel(input: StatusInput) {
       stepKey = "closeout";
     }
   }
-  if (!stepKey) return "已完成";
+  if (!stepKey) return "开票完成";
   // 收尾环节拆到具体卡点：光写「待收尾」看不出是缺入库、缺票还是缺付款
   if (stepKey === "closeout" && input.closeoutStage) {
     const sub = CLOSEOUT_LABELS[input.closeoutStage];
@@ -316,11 +326,11 @@ function statusLabel(input: StatusInput) {
 
 function statusClass(label: string) {
   if (label === "已关闭") return "bg-slate-100 text-slate-500";
-  if (label === "已完成") return "bg-emerald-50 text-emerald-600";
+  if (label === "开票完成") return "bg-emerald-50 text-emerald-600";
   if (label === "异常") return "bg-red-50 text-red-600";
   if (label === "待确认采购内容") return "bg-orange-50 text-orange-600";
   if (label === "待匹配SKU") return "bg-amber-50 text-amber-600";
-  if (label === "待生成采购单") return "bg-blue-50 text-blue-600";
+  if (label === "待完成本系统采购单") return "bg-blue-50 text-blue-600";
   if (label === "待入库") return "bg-emerald-50 text-emerald-600";
   if (label === "待收票" || label === "待开发票") return "bg-violet-50 text-violet-600";
   if (label === "待认证") return "bg-sky-50 text-sky-600";
@@ -350,7 +360,12 @@ function exportOrders(items: WorkbenchOrderItem[]) {
 
 export default function PurchaseWorkbenchPage() {
   const searchParams = useSearchParams();
-  const router = useRouter();
+  const ws = useWorkspace();
+  const tabId = useTabRuntime()?.tabId;
+  // 隐藏 Tab 不响应全局 Esc：弹层状态要留在原地，等切回来继续用
+  const tabActive = useTabActive();
+  const [documentVisible, setDocumentVisible] = useState(true);
+  const pageActive = tabActive && documentVisible;
   const initialView: ViewMode = (() => {
     const v = searchParams.get("view");
     return parseWorkbenchView(v);
@@ -367,8 +382,11 @@ export default function PurchaseWorkbenchPage() {
   })();
   const [view, setView] = useState<ViewMode>(initialView);
   const [newOrderOpen, setNewOrderOpen] = useState(false);
+  const [newOrderId, setNewOrderId] = useState<number | null>(null);
   const [page, setPage] = useState(1);
-  const pageSize = 50;
+  // Keep the active order table light enough for the detail panel and slower LAN clients.
+  // Pagination remains unchanged; this only reduces the number of rows mounted at once.
+  const pageSize = 20;
   const [summary, setSummary] = useState<WorkbenchSummary | null>(null);
   const [orders, setOrders] = useState<WorkbenchOrderItem[]>([]);
   const [outstandingTotal, setOutstandingTotal] = useState(0);
@@ -407,11 +425,20 @@ export default function PurchaseWorkbenchPage() {
   const [funnel, setFunnel] = useState<WorkbenchFunnel | null>(null);
   const [todos, setTodos] = useState<WorkbenchTodo | null>(null);
 
+  // 新建采购单弹窗开着时视为「有未保存内容」，关闭 Tab 需要二次确认
+  useTabDirty(newOrderOpen);
+
   useEffect(() => {
     setView(parseWorkbenchView(searchParams.get("view")));
     const orderId = Number(searchParams.get("order"));
     if (Number.isInteger(orderId) && orderId !== 0) { requestedOrder.current = orderId; setSelectedOrderId(orderId); }
-    if (searchParams.get("action") === "new") setNewOrderOpen(true);
+    if (searchParams.get("action") === "new") {
+      requestedOrder.current = null;
+      setOperationsOpen(false);
+      setSelectedOrderId(null);
+      setOrderDetail(null);
+      setNewOrderOpen(true);
+    }
     const status = searchParams.get("status");
     if (["all", "refine", "po", "inbound", "invoice", "exception", "done"].includes(status ?? "")) {
       setStatusFilter(status as FilterKey);
@@ -422,57 +449,66 @@ export default function PurchaseWorkbenchPage() {
 
   useEffect(() => {
     const destination = STANDALONE_VIEW_ROUTES[view];
-    if (destination) router.replace(destination);
-  }, [router, view]);
+    if (destination) syncWorkspaceUrl(destination);
+  }, [view]);
 
-  // 顶部固定栏高度写入 CSS 变量，sticky 详情栏据此定位，避免遮挡或漏缝
+  // 顶部固定栏高度写入 CSS 变量，sticky 详情栏据此定位，避免遮挡或漏缝。
+  // 工作区下多个 Tab 同时挂载：限定在本 Tab 面板内查找并写在本面板上，避免量到/影响别的 Tab。
   useEffect(() => {
-    const el = document.querySelector<HTMLElement>("main header");
+    const updateVisibility = () => setDocumentVisible(document.visibilityState === "visible");
+    updateVisibility();
+    document.addEventListener("visibilitychange", updateVisibility);
+    return () => document.removeEventListener("visibilitychange", updateVisibility);
+  }, []);
+
+  // 只让当前可见采购页测量顶部高度，避免隐藏页重复监听 resize。
+  useEffect(() => {
+    if (!pageActive) return;
+    const panel = tabId ? document.querySelector<HTMLElement>(`[data-workspace-panel="${tabId}"]`) : null;
+    const host = panel ?? document.documentElement;
+    const el = panel?.querySelector<HTMLElement>("header.sticky") ?? panel?.querySelector<HTMLElement>("header") ?? document.querySelector<HTMLElement>("main header");
     if (!el) return;
-    const update = () => document.documentElement.style.setProperty("--wb-header-h", `${el.offsetHeight}px`);
+    const update = () => host.style.setProperty("--wb-header-h", `${el.offsetHeight}px`);
     update();
     window.addEventListener("resize", update);
     return () => window.removeEventListener("resize", update);
-  }, [view]);
+  }, [pageActive, view, tabId]);
 
   function changeView(next: ViewMode) {
     const standaloneRoute = STANDALONE_VIEW_ROUTES[next];
     if (standaloneRoute) {
-      router.push(standaloneRoute);
+      syncWorkspaceUrl(standaloneRoute, "push");
       return;
     }
     setView(next);
-    const params = new URLSearchParams(window.location.search);
+    const params = new URLSearchParams(searchParams.toString());
     params.set("view", next);
     params.delete("action");
-    if (selectedOrderId !== null) params.set("order", String(selectedOrderId));
+    // 不要把「自动选中的订单」写进地址：它只是展示默认值，写进去会让切换视图凭空多出一个采购单页签。
+    // 用户真正点过的订单在 selectOrder 里已经写进本 Tab 的地址，会原样保留。
     if (next !== "orders") params.delete("status");
     if (next === "suppliers") params.delete("order");
-    router.push(`/purchase/workbench?${params.toString()}`);
+    syncWorkspaceUrl(`/purchase/workbench?${params.toString()}`, "push");
   }
 
   function selectOrder(orderId: number) {
-    requestedOrder.current = orderId;
-    setSelectedOrderId(orderId);
-    const params = new URLSearchParams(window.location.search);
+    const params = new URLSearchParams(searchParams.toString());
     params.set("view", "orders");
     params.set("order", String(orderId));
     params.delete("action");
-    router.replace(`/purchase/workbench?${params.toString()}`);
+    syncWorkspaceUrl(`/purchase/workbench?${params.toString()}`);
     setView("orders");
   }
 
   function changeKind(nextKind: SupplyChainKindFilter) {
     setKindFilter(nextKind);
-    const params = new URLSearchParams(window.location.search);
+    const params = new URLSearchParams(searchParams.toString());
     if (nextKind === "all") params.delete("kind");
     else params.set("kind", nextKind);
-    router.replace(`/purchase/workbench?${params.toString()}`);
+    syncWorkspaceUrl(`/purchase/workbench?${params.toString()}`);
   }
 
   useEffect(() => { setPage(1); }, [statusFilter, channelFilter, kindFilter, warehouseFilter, startDate, endDate, query]);
-
-  useEffect(() => { setOperationsOpen(false); }, [selectedOrderId]);
 
   const loadSummary = useCallback(async () => {
     try { setSummary(await procurementWorkbenchApi.summary()); } catch { setSummary(null); }
@@ -650,19 +686,25 @@ export default function PurchaseWorkbenchPage() {
   }
 
   useEffect(() => {
+    if (!pageActive) return;
     void loadSummary();
-    void loadBoard();
-    void loadFunnelTodos();
-  }, [loadBoard, loadFunnelTodos, loadSummary]);
+    // 订单视图只渲染摘要和订单列表；看板付款率、漏斗和待办卡只在其他视图显示。
+    if (view !== "orders") {
+      void loadBoard();
+      void loadFunnelTodos();
+    }
+  }, [loadBoard, loadFunnelTodos, loadSummary, pageActive, view]);
 
   useEffect(() => {
+    if (!pageActive) return;
     if (view === "orders") void loadOrders();
     else if (view === "chain") void loadChain();
     else if (view === "matching") void loadMatching();
     else if (view === "suppliers") void loadSuppliers();
-  }, [loadChain, loadMatching, loadOrders, loadSuppliers, view]);
+  }, [loadChain, loadMatching, loadOrders, loadSuppliers, pageActive, view]);
 
   useEffect(() => {
+    if (!pageActive) return;
     if (view !== "orders" || selectedOrderId === null) {
       setOrderDetail(null);
       return;
@@ -675,9 +717,10 @@ export default function PurchaseWorkbenchPage() {
       .catch(() => { if (!cancelled) setOrderDetail(null); })
       .finally(() => { if (!cancelled) setDetailLoading(false); });
     return () => { cancelled = true; };
-  }, [selectedOrderId, view]);
+  }, [pageActive, selectedOrderId, view]);
 
   useEffect(() => {
+    if (!pageActive) return;
     if (view !== "suppliers" || !selectedSupplierName) {
       setSupplierDetail(null);
       return;
@@ -690,7 +733,7 @@ export default function PurchaseWorkbenchPage() {
       .catch(() => { if (!cancelled) setSupplierDetail(null); })
       .finally(() => { if (!cancelled) setDetailLoading(false); });
     return () => { cancelled = true; };
-  }, [selectedSupplierName, view]);
+  }, [pageActive, selectedSupplierName, view]);
 
   async function runMatch() {
     setBusyAction("match");
@@ -701,10 +744,11 @@ export default function PurchaseWorkbenchPage() {
       const confirmed = Number(autoConfirm?.confirmedChain ?? 0) + Number(autoConfirm?.confirmedInvoices ?? 0);
       const parts = [`自动化完成：新建 ${created} 条关联`];
       if (confirmed > 0) parts.push(`确认 ${confirmed} 条订单/发票关联`);
-      if (Number(autoConfirm?.resolvedInboundUsage ?? 0) > 0) parts.push(`补齐 ${autoConfirm?.resolvedInboundUsage} 条入库耗材决策`);
+      if (Number(autoConfirm?.resolvedInboundUsage ?? 0) > 0) parts.push(`自动处理 ${autoConfirm?.resolvedInboundUsage} 条入库耗材流水`);
       setNotice(parts.join("，"));
       await Promise.all([
         loadSummary(),
+        ...(view === "orders" ? [] : [loadBoard(), loadFunnelTodos()]),
         view === "orders" ? loadOrders() : view === "chain" ? loadChain() : view === "matching" ? loadMatching() : loadSuppliers(),
       ]);
     } catch (caught) {
@@ -749,7 +793,7 @@ export default function PurchaseWorkbenchPage() {
     setBusyAction("refresh");
     await Promise.all([
       loadSummary(),
-      loadBoard(),
+      ...(view === "orders" ? [] : [loadBoard(), loadFunnelTodos()]),
       view === "orders" ? loadOrders() : view === "chain" ? loadChain() : view === "matching" ? loadMatching() : loadSuppliers(),
     ]);
     setNotice("采购工作台已刷新");
@@ -757,29 +801,33 @@ export default function PurchaseWorkbenchPage() {
   }
 
   const refreshSelectedOrder = useCallback(async () => {
-    if (selectedOrderId === null) return;
+    const targetOrderId = selectedOrderId ?? newOrderId;
+    if (targetOrderId === null) return;
     setDetailLoading(true);
     try {
-      const nextDetail = await procurementWorkbenchApi.workbench(selectedOrderId);
+      const nextDetail = await procurementWorkbenchApi.workbench(targetOrderId);
       setOrderDetail(nextDetail);
       await Promise.all([loadSummary(), loadOrders()]);
     } finally {
       setDetailLoading(false);
     }
-  }, [loadOrders, loadSummary, selectedOrderId]);
+  }, [loadOrders, loadSummary, newOrderId, selectedOrderId]);
 
-  const openOperations = useCallback(() => {
+  const openOperations = useCallback((orderId?: number) => {
+    if (orderId != null && orderId !== selectedOrderId) {
+      selectOrder(orderId);
+    }
     setOperationsOpen(true);
-  }, []);
+  }, [selectedOrderId]);
 
   useEffect(() => {
-    if (!operationsOpen) return;
+    if (!operationsOpen || !tabActive) return;
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") setOperationsOpen(false);
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [operationsOpen]);
+  }, [operationsOpen, tabActive]);
 
   const resetSupplyChainFilters = useCallback(() => {
     setStatusFilter("all");
@@ -837,18 +885,82 @@ export default function PurchaseWorkbenchPage() {
     requestedOrder.current = null;
     setSelectedOrderId(null);
     setOrderDetail(null);
-    const params = new URLSearchParams(window.location.search);
+    const params = new URLSearchParams(searchParams.toString());
     params.set("view", "orders");
     params.delete("order");
     params.delete("action");
-    window.history.replaceState(null, "", `/purchase/workbench?${params}`);
+    // 交给工作区改写当前 Tab 的地址：若工作台列表 Tab 已存在则回到它，否则就地变成列表
+    syncWorkspaceUrl(ws.retarget(`/purchase/workbench?${params}`));
     await Promise.all([loadSummary(), loadOrders()]);
-  }, [loadOrders, loadSummary]);
+  }, [loadOrders, loadSummary, searchParams, ws]);
+
+  const closeNewOrder = useCallback(() => {
+    setNewOrderOpen(false);
+    setNewOrderId(null);
+    setOperationsOpen(false);
+    requestedOrder.current = null;
+    setSelectedOrderId(null);
+    setOrderDetail(null);
+    const params = new URLSearchParams(searchParams.toString());
+    params.delete("action");
+    params.delete("order");
+    syncWorkspaceUrl(ws.retarget(`/purchase/workbench${params.toString() ? `?${params}` : ""}`));
+  }, [searchParams, ws]);
+
+  const openNewOrder = useCallback(() => {
+    setOperationsOpen(false);
+    requestedOrder.current = null;
+    setSelectedOrderId(null);
+    setOrderDetail(null);
+    setNewOrderId(null);
+    setNewOrderOpen(true);
+  }, []);
+
+  const handleNewOrderCreated = useCallback((orderId: number) => {
+    // 新建后的完整录入只留在 NewPurchaseModal 内，不能再把同一订单选到列表下方详情区。
+    requestedOrder.current = null;
+    setNewOrderId(orderId);
+    setSelectedOrderId(null);
+    setOrderDetail(null);
+    setDetailLoading(true);
+    resetSupplyChainFilters();
+    setNotice("基础信息已保存，当前窗口已进入完整采购订单录入");
+    void Promise.all([loadOrders(), loadSummary()]);
+    void procurementWorkbenchApi.workbench(orderId)
+      .then((detail) => setOrderDetail(detail))
+      .catch(() => {
+        setOrderDetail(null);
+        setError("新建订单详情加载失败，请刷新后重试");
+      })
+      .finally(() => setDetailLoading(false));
+  }, [loadOrders, loadSummary, resetSupplyChainFilters]);
+
+  function renderNewOrderEditor(orderId: number) {
+    const createdDetail = orderDetail?.order.orderId === orderId ? orderDetail : null;
+    return (
+      <OrderDetailPanel
+        key={orderId}
+        detail={createdDetail}
+        loading={detailLoading || createdDetail == null}
+        onOrderChanged={refreshSelectedOrder}
+        onOrderDeleted={(message) => { setNotice(message); closeNewOrder(); void removeDeletedOrder(); }}
+        onOpenSupplier={(name) => { closeNewOrder(); setSelectedSupplierName(name); changeView("suppliers"); }}
+        onCloseDialog={closeNewOrder}
+      />
+    );
+  }
 
   const filteredSuppliers = useMemo(() => {
     const normalized = supplierQuery.trim().toLowerCase();
     return normalized ? suppliers.filter((supplier) => supplier.supplierName.toLowerCase().includes(normalized)) : suppliers;
   }, [supplierQuery, suppliers]);
+
+  const newPurchaseDialog = newOrderOpen ? <NewPurchaseModal
+    onClose={closeNewOrder}
+    createdOrderId={newOrderId}
+    renderCreated={renderNewOrderEditor}
+    onCreated={handleNewOrderCreated}
+  /> : null;
 
   if (view === "orders") {
     return (
@@ -859,8 +971,8 @@ export default function PurchaseWorkbenchPage() {
           total={total}
           page={page}
           pageSize={pageSize}
-          selectedOrderId={selectedOrderId}
-          detail={orderDetail}
+          selectedOrderId={newOrderOpen ? null : selectedOrderId}
+          detail={newOrderOpen ? null : orderDetail}
           loading={loading}
           detailLoading={detailLoading}
           refreshBusy={busyAction === "refresh"}
@@ -881,7 +993,7 @@ export default function PurchaseWorkbenchPage() {
           onSearchDraftChange={setSearchDraft}
           onApplySearch={() => setQuery(searchDraft.trim())}
           onReset={resetSupplyChainFilters}
-          onNewOrder={() => setNewOrderOpen(true)}
+          onNewOrder={openNewOrder}
           onExport={exportCurrentPurchaseOrders}
           onRefresh={refresh}
           onSelectOrder={selectOrder}
@@ -890,15 +1002,22 @@ export default function PurchaseWorkbenchPage() {
           onCloseOperations={() => setOperationsOpen(false)}
           operationsOpen={operationsOpen}
           onOpenWorkbenchView={(nextView) => changeView(nextView)}
+          selectedOrderIds={[]}
+          alibaba1688Job={null}
+          onOpenExceptions={() => changeView("exceptions")}
+          onToggleOrder={() => {}}
+          onToggleAllVisible={() => {}}
+          onClearOrderSelection={() => {}}
+          onDeleteSelected={() => {}}
+          deleteBusy={false}
         />
         {(notice || error) && <div className="fixed bottom-5 right-5 z-toast max-w-md rounded-lg border border-blue-100 bg-white px-4 py-3 text-[12px] text-slate-700 shadow-xl"><div className="flex items-start gap-3"><span className={error ? "text-rose-600" : "text-blue-600"}>{error || notice}</span><button onClick={() => { setNotice(""); setError(""); }} className="shrink-0 text-slate-400 hover:text-slate-700">×</button></div></div>}
         {operationsOpen && <div className="fixed inset-0 z-modal flex items-start justify-center overflow-y-auto bg-slate-950/35 p-3 sm:p-6" onMouseDown={(event) => { if (event.target === event.currentTarget) setOperationsOpen(false); }} role="dialog" aria-modal="true" aria-label="编辑采购订单">
-          <div className="my-auto w-full max-w-[1440px] overflow-hidden rounded-xl border border-slate-200 bg-[#f7f9fd] shadow-2xl">
-            <div className="flex items-center justify-between gap-3 border-b border-slate-200 bg-white px-4 py-3 sm:px-6"><div className="min-w-0"><h2 className="truncate text-[16px] font-semibold text-slate-800">编辑采购订单{orderDetail?.order.orderNo ? ` · ${orderDetail.order.orderNo}` : ""}</h2><p className="mt-0.5 text-[11px] text-slate-500">在弹窗内处理订单、SKU、入库关联、耗材、发票和费用分摊。</p></div><button type="button" aria-label="关闭编辑采购订单" onClick={() => setOperationsOpen(false)} className="shrink-0 rounded-md border border-slate-200 bg-white px-3 py-1.5 text-[12px] text-slate-600 hover:border-blue-300 hover:text-blue-600">关闭</button></div>
-            <div className="max-h-[calc(100vh-112px)] overflow-y-auto p-3 sm:p-5"><OrderDetailPanel key={selectedOrderId} detail={orderDetail} loading={detailLoading} onOrderChanged={refreshSelectedOrder} onOrderDeleted={(message) => { setNotice(message); setOperationsOpen(false); void removeDeletedOrder(); }} onOpenSupplier={(name) => { setOperationsOpen(false); setSelectedSupplierName(name); changeView("suppliers"); }} /></div>
+          <div className="my-auto flex h-[90vh] w-full max-w-[1440px] max-h-[calc(100vh-32px)] flex-col overflow-hidden rounded-xl border border-slate-200 bg-[#f7f9fd] shadow-2xl">
+            <div className="flex min-h-0 flex-1 flex-col"><OrderDetailPanel key={selectedOrderId} detail={orderDetail} loading={detailLoading} onOrderChanged={refreshSelectedOrder} onOrderDeleted={(message) => { setNotice(message); setOperationsOpen(false); void removeDeletedOrder(); }} onOpenSupplier={(name) => { setOperationsOpen(false); setSelectedSupplierName(name); changeView("suppliers"); }} onCloseDialog={() => setOperationsOpen(false)} /></div>
           </div>
         </div>}
-        {newOrderOpen && <NewPurchaseModal onClose={() => { setNewOrderOpen(false); const url = new URL(window.location.href); url.searchParams.delete("action"); window.history.replaceState(null, "", url.pathname + url.search); }} onCreated={(orderId) => { setNewOrderOpen(false); resetSupplyChainFilters(); selectOrder(orderId); setNotice("采购记录已保存，可点击订单上的“编辑”打开业务操作弹窗"); void loadOrders(); void loadSummary(); }} />}
+        {newPurchaseDialog}
       </>
     );
   }
@@ -917,7 +1036,7 @@ export default function PurchaseWorkbenchPage() {
             view={view}
             busyAction={busyAction}
             onViewChange={changeView}
-            onNewOrder={() => setNewOrderOpen(true)}
+            onNewOrder={openNewOrder}
             onMatch={runMatch}
             onRefresh={refresh}
             onExport={() => exportOrders(orders)}
@@ -991,13 +1110,7 @@ export default function PurchaseWorkbenchPage() {
             </div>
           ) : <WorkspaceModule key={view} view={view} />}
       </div>
-      {newOrderOpen && <NewPurchaseModal onClose={() => { setNewOrderOpen(false); const url = new URL(window.location.href); url.searchParams.delete("action"); window.history.replaceState(null, "", url.pathname + url.search); }} onCreated={(orderId) => {
-        setNewOrderOpen(false);
-        setStatusFilter("all"); setQuery(""); setSearchDraft(""); setStartDate(""); setEndDate(""); setPage(1);
-        selectOrder(orderId);
-        setNotice("采购记录已保存，可在右侧继续分配 SKU 和费用");
-        void loadOrders(); void loadSummary();
-      }} />}
+      {newPurchaseDialog}
     </div>
   );
 }
@@ -1086,7 +1199,6 @@ function KpiGrid({ summary, board, funnel, todos, onOpenChain }: {
       label: "新订单", value: summary?.newOrders ?? "—", hint: "按采购时间统计", icon: "orders", tone: "blue",
     },
     { label: "待匹配SKU", value: summary?.pendingSku ?? "—", hint: "待完善采购内容", icon: "magic", tone: "violet" },
-    { label: "待生成采购单", value: summary?.pendingPo ?? "—", hint: "SKU齐全待生成", icon: "receipt", tone: "orange" },
     { label: "已到货待入库", value: summary?.pendingInbound ?? "—", hint: "等待入库确认", icon: "box", tone: "green" },
     { label: "待开票", value: summary?.pendingInvoice ?? "—", hint: "等待发票清单", icon: "receipt", tone: "amber" },
     { label: "异常数", value: summary?.exceptionCount ?? "—", hint: "需人工处理", icon: "reconcile", tone: "red" },
@@ -1158,25 +1270,29 @@ function KpiCard({ label, value, hint, icon, tone }: {
   );
 }
 
-function OrderDetailPanel({ detail, loading, onOrderChanged, onOrderDeleted, onOpenSupplier }: {
+function OrderDetailPanel({ detail, loading, onOrderChanged, onOrderDeleted, onOpenSupplier, onCloseDialog }: {
   detail: WorkbenchDetail | null;
   loading: boolean;
   onOrderChanged: () => Promise<void>;
   onOrderDeleted: (message: string) => void;
   onOpenSupplier: (name: string) => void;
+  onCloseDialog?: () => void;
 }) {
   const [skuEditorOpen, setSkuEditorOpen] = useState(false);
+  const panelSearchParams = useSearchParams();
+  const panelWorkspace = useWorkspace();
   const [skuEditorTargetDoc, setSkuEditorTargetDoc] = useState<number | null>(null);
   const [skuCatalog, setSkuCatalog] = useState<CatalogSkuRow[]>([]);
   const [skuCatalogLoading, setSkuCatalogLoading] = useState(false);
   const [selectedSkuId, setSelectedSkuId] = useState<number | null>(null);
   const [skuEntry, setSkuEntry] = useState("");
   const [skuQty, setSkuQty] = useState("1");
-  const [skuPrice, setSkuPrice] = useState("");
+  const [skuTotal, setSkuTotal] = useState("");
   const [skuConsumableId, setSkuConsumableId] = useState<number | null>(null);
   const [skuConsumableEntry, setSkuConsumableEntry] = useState("");
   const [skuConsumableQty, setSkuConsumableQty] = useState("");
   const [skuConsumableAutoQty, setSkuConsumableAutoQty] = useState(false);
+  const [skuConsumableExempt, setSkuConsumableExempt] = useState(false);
   const [skuConsumableTouched, setSkuConsumableTouched] = useState(false);
   const [pendingConsumableUpdate, setPendingConsumableUpdate] = useState<PendingConsumableUpdate | null>(null);
   const [skuAction, setSkuAction] = useState("");
@@ -1195,12 +1311,10 @@ function OrderDetailPanel({ detail, loading, onOrderChanged, onOrderDeleted, onO
   const [selectedInboundId, setSelectedInboundId] = useState<number | null>(null);
   const [replaceInboundLinkId, setReplaceInboundLinkId] = useState<number | null>(null);
   const [inboundMessage, setInboundMessage] = useState("");
+  const autoLinkedInboundQuery = useRef("");
   const [editorBusy, setEditorBusy] = useState(false);
-  const [usageDecision, setUsageDecision] = useState<"" | "yes" | "no">("");
   const [usageMaterials, setUsageMaterials] = useState<ConsumableRow[]>([]);
   const [usageMappings, setUsageMappings] = useState<ConsumableMappingRow[]>([]);
-  const [usageMaterialIds, setUsageMaterialIds] = useState<number[]>([]);
-  const [usageQtys, setUsageQtys] = useState<Record<number, string>>({});
   const [usageLoading, setUsageLoading] = useState(false);
   const [docAmountBusy, setDocAmountBusy] = useState(false);
   const [deleteBusy, setDeleteBusy] = useState(false);
@@ -1211,23 +1325,31 @@ function OrderDetailPanel({ detail, loading, onOrderChanged, onOrderDeleted, onO
   const [poLinkNo, setPoLinkNo] = useState("");
   const [poRelationKind, setPoRelationKind] = useState("");
   const [poAllocAmount, setPoAllocAmount] = useState("");
-  const [mainEditOpen, setMainEditOpen] = useState(false);
   const [mainSaving, setMainSaving] = useState(false);
   const [mainError, setMainError] = useState("");
-  const [mainForm, setMainForm] = useState({ supplier: "", title: "", date: "", goods: "", freight: "", discount: "", paid: "", orderAmount: "", platform: "other" });
-  // 单据 tab：吉客云单据 / 耗材入库单（两类单据都始终可见，替代原先按订单类型的互斥隐藏）
-  const [docTab, setDocTab] = useState<"jackyun" | "consumable">("jackyun");
+  const [mainForm, setMainForm] = useState({ orderNo: "", supplier: "", title: "", date: "", goods: "", freight: "", discount: "", paid: "", orderAmount: "", platform: "other", warehouseId: "", buyer: "", purchaseStatus: "" });
+  const [inboundNoEntry, setInboundNoEntry] = useState("");
+  const [expandedConsumables, setExpandedConsumables] = useState<number[]>([]);
+  const [warehouses, setWarehouses] = useState<WarehouseRow[]>([]);
+  const [consumablePurchaseRows, setConsumablePurchaseRows] = useState<ConsumablePurchaseRow[]>([]);
+  const [editingConsumable, setEditingConsumable] = useState<ModalConsumableItem | null>(null);
+  const [consumableEditQty, setConsumableEditQty] = useState("");
+  const [consumableEditTotal, setConsumableEditTotal] = useState("");
+  const [consumableEditBusy, setConsumableEditBusy] = useState(false);
+
+
 
   useEffect(() => {
     setSkuEditorOpen(false);
     setSelectedSkuId(null);
     setSkuEntry("");
     setSkuQty("1");
-    setSkuPrice("");
+    setSkuTotal("");
     setSkuConsumableId(null);
     setSkuConsumableEntry("");
     setSkuConsumableQty("");
     setSkuConsumableAutoQty(false);
+    setSkuConsumableExempt(false);
     setSkuConsumableTouched(false);
     setPendingConsumableUpdate(null);
     setSkuMessage("");
@@ -1240,26 +1362,59 @@ function OrderDetailPanel({ detail, loading, onOrderChanged, onOrderDeleted, onO
     setSelectedInboundId(null);
     setReplaceInboundLinkId(null);
     setInboundMessage("");
-    setUsageDecision("");
     setUsageMaterials([]);
     setUsageMappings([]);
-    setUsageMaterialIds([]);
-    setUsageQtys({});
     // 注意：order 在组件后段才解构（detail 非空分支），此处用 detail?.order 避免早退分支下 TDZ 崩溃
-    setDocTab(detail?.order.orderKind === "consumable" ? "consumable" : "jackyun");
     setPoEditorOpen(false);
     setPoListOpen(false);
     setPoMessage("");
     setPoLinkNo("");
     setPoRelationKind("");
     setPoAllocAmount("");
-    setMainEditOpen(false);
     setMainSaving(false);
     setMainError("");
-  }, [detail?.order.orderId]);
+    setConsumablePurchaseRows([]);
+    setEditingConsumable(null);
+    setConsumableEditQty("");
+    setConsumableEditTotal("");
+    const initialOrder = detail?.order;
+    const initialWarehouseId = detail?.warehouse?.warehouseId ?? detail?.warehouse?.targetWarehouseId ?? initialOrder?.warehouseId;
+    setMainForm({
+      orderNo: initialOrder?.orderNo ?? "",
+      supplier: initialOrder?.supplier ?? "",
+      title: initialOrder?.title ?? "",
+      date: initialOrder?.orderDate ? fmtDate(initialOrder.orderDate) : "",
+      goods: initialOrder?.goodsTotal != null ? String(initialOrder.goodsTotal) : "",
+      freight: initialOrder?.freight != null ? String(initialOrder.freight) : "",
+      discount: initialOrder?.discount != null ? String(initialOrder.discount) : "",
+      paid: initialOrder?.paidAmount != null ? String(initialOrder.paidAmount) : "",
+      orderAmount: initialOrder?.amount != null ? String(initialOrder.amount) : "",
+      platform: initialOrder?.platform ?? "other",
+      warehouseId: initialWarehouseId != null ? String(initialWarehouseId) : "",
+      buyer: initialOrder?.buyer ?? "",
+      purchaseStatus: initialOrder?.purchaseStatus ?? "",
+    });
+    setInboundNoEntry(((detail?.detail?.inbound ?? []) as InboundRow[]).find((row) => row.goodsdocNo)?.goodsdocNo ?? "");
+    setExpandedConsumables([]);
+
+  }, [detail?.order.orderId, detail?.order.orderNo]);
 
   useEffect(() => {
-    if (!skuEditorOpen) return;
+    let cancelled = false;
+    const orderNo = detail?.order.orderNo;
+    if (!orderNo || detail?.order.orderKind === "goods") {
+      setConsumablePurchaseRows([]);
+      return () => { cancelled = true; };
+    }
+    consumablesApi.purchases("", undefined, orderNo)
+      .then((rows) => {
+        if (!cancelled) setConsumablePurchaseRows(rows);
+      })
+      .catch(() => { if (!cancelled) setConsumablePurchaseRows([]); });
+    return () => { cancelled = true; };
+  }, [detail?.order.orderId, detail?.order.orderKind, detail?.order.orderNo]);
+
+  useEffect(() => {
     let cancelled = false;
     setSkuCatalogLoading(true);
     dashboardApi.products("", 500)
@@ -1267,7 +1422,7 @@ function OrderDetailPanel({ detail, loading, onOrderChanged, onOrderDeleted, onO
       .catch(() => { if (!cancelled) setSkuMessage("吉客云 SKU 主档加载失败，请重新打开分配重试"); })
       .finally(() => { if (!cancelled) setSkuCatalogLoading(false); });
     return () => { cancelled = true; };
-  }, [skuEditorOpen]);
+  }, [detail?.order.orderId]);
 
   useEffect(() => {
     const orderId = detail?.order.orderId;
@@ -1293,13 +1448,98 @@ function OrderDetailPanel({ detail, loading, onOrderChanged, onOrderDeleted, onO
     return () => { cancelled = true; };
   }, [detail?.order.orderId]);
 
+  useEffect(() => {
+    let active = true;
+    warehousesApi.list(false)
+      .then((rows) => { if (active) setWarehouses(rows.filter((row) => row.status === "active")); })
+      .catch(() => { if (active) setMainError("仓库配置加载失败，请刷新后重试"); });
+    return () => { active = false; };
+  }, [detail?.order.orderId]);
+
+  // 详情数据先为空、后加载完成时也必须保持 Hook 顺序不变，否则 React 会报 Hook 顺序错误。
+  const inboundCount = detail?.detail.inbound.length ?? 0;
+  useEffect(() => {
+    const query = inboundQuery.trim().toLowerCase();
+    if (!inboundEditorOpen || !query || inboundCandidateLoading || editorBusy || inboundCount > 0) return;
+    const exactMatches = inboundCandidates.filter((candidate) => candidate.targetNo.trim().toLowerCase() === query);
+    if (exactMatches.length !== 1 || autoLinkedInboundQuery.current === query) return;
+    const exact = exactMatches[0];
+    autoLinkedInboundQuery.current = query;
+    setSelectedInboundId(exact.targetId);
+    setInboundNoEntry(exact.targetNo);
+    setInboundEditorOpen(false);
+    void saveInboundLink(exact.targetId);
+  }, [editorBusy, inboundCandidateLoading, inboundCandidates, inboundCount, inboundEditorOpen, inboundQuery]);
+
+  // 保存明细后，如果订单已经满足完整条件，自动落库为“已确认采购内容”。
+  // 之前只刷新了详情，没有调用 refine，导致金额已平衡的订单仍长期显示“待完善”。
+  const autoRefineAttempted = useRef("");
+  useEffect(() => {
+    const current = detail;
+    if (loading || !current?.order.externalPoId || current.order.purchaseStatus !== "pending_refine") return;
+    const allocations = current.detail.allocations ?? [];
+    const inbound = current.detail.inbound as InboundRow[];
+    const unallocated = current.detail.unallocatedAmount;
+    if (
+      allocations.length === 0
+      || unallocated == null
+      || Math.abs(Number(unallocated)) >= 0.005
+    ) return;
+    const attemptKey = `${current.order.externalPoId}:${allocations.length}:${unallocated}:${inbound.map((row) => `${row.linkId}-${row.consumableUsageDecided}-${row.consumableUsageEnabled}`).join(",")}`;
+    if (autoRefineAttempted.current === attemptKey) return;
+    autoRefineAttempted.current = attemptKey;
+    void authenticatedFetch(`/api/v1/purchase/orders/${current.order.externalPoId}/refine`, { method: "POST" })
+      .then(async (res) => {
+        if (res.ok) await onOrderChanged();
+      })
+      .catch(() => {
+        // 自动确认失败时保留“待完善”，由页面现有校验提示用户具体处理项。
+      });
+  }, [detail, loading, onOrderChanged]);
+
   if (loading && !detail) return <aside className="rounded-xl border border-slate-200 bg-white"><Loading text="正在加载订单详情…" /></aside>;
   if (!detail) return <aside className="flex min-h-[520px] items-center justify-center rounded-xl border border-slate-200 bg-white px-8 text-center text-[12px] text-slate-400">选择左侧订单查看执行详情</aside>;
   const { order, detail: records, stepStates } = detail;
+  const isFile = order.fileOrderId != null;
+  // 统计实际修改的字段数（与原始 order 对比）
   const allocations = records.allocations as AllocationRow[];
+  // 耗材订单的明细由耗材采购单返回，不会落在 SKU allocations 中；展示层仍统一收口到同一张商品明细表。
+  const detailConsumableItems = (((records.consumable as { items?: ConsumablePurchaseItem[] } | null)?.items ?? []) as ModalConsumableItem[]);
+  const sourceOrderItems = (records.orderItems as Array<{
+    productNumber?: string;
+    productName?: string;
+    skuId?: string;
+    quantity?: number;
+    unitPrice?: number;
+    amount?: number;
+    receivedQuantity?: number;
+  }> | undefined) ?? [];
+  // 某些历史耗材订单的详情接口只返回 orderItems，兜底映射成统一商品明细，避免页面误显示 0 条。
+  const fetchedConsumableItems = consumablePurchaseRows.flatMap((purchase) => purchase.items.map((item) => ({ ...item, purchaseId: purchase.id })));
+  const consumableItems: ModalConsumableItem[] = fetchedConsumableItems.length > 0
+    ? fetchedConsumableItems
+    : detailConsumableItems.length > 0
+      ? detailConsumableItems
+      : order.orderKind === "consumable"
+        ? sourceOrderItems.map((item, index) => ({
+            id: index,
+            consumableId: 0,
+            code: item.productNumber || item.skuId || "",
+            name: item.productName || "未命名耗材",
+            unit: "",
+            quantity: String(item.quantity ?? 0),
+            receivedQty: String(item.receivedQuantity ?? 0),
+            unitCost: String(item.unitPrice ?? (item.amount && item.quantity ? item.amount / item.quantity : 0)),
+          }))
+        : [];
+  const displayRowCount = allocations.length > 0 ? allocations.length : consumableItems.length;
+  const displayTotal = allocations.length > 0
+    ? allocations.reduce((sum, row) => sum + (row.amount ?? 0), 0)
+    : consumableItems.reduce((sum, item) => sum + Number(item.quantity || 0) * Number(item.unitCost || 0), 0);
+  const purchaseAmount = order.amount ?? 0;
+  const detailAmountGap = purchaseAmount - displayTotal;
+  const hasDetailAmountGap = displayRowCount > 0 && Math.abs(detailAmountGap) >= 0.005;
   const expenses = records.expenses as ExpenseRow[];
-  const purchaseOrders = (records.purchaseOrders ?? []) as ChainPurchaseOrder[];
-  const poClosure = records.poAmountClosure ?? null;
   const inbound = records.inbound as InboundRow[];
   // SKU 分配归属：后端返回结构化 inboundDocumentId 时直接采用；旧版后端没有该字段时
   // 退化为解析 note（"由入库单 #N 明细自动反填"），保证后端未同步时分组依然正确。
@@ -1323,9 +1563,6 @@ function OrderDetailPanel({ detail, loading, onOrderChanged, onOrderDeleted, onO
     }
   }
   const manualTotal = manualAllocations.reduce((sum, row) => sum + (row.amount ?? 0), 0);
-  const inboundLinked = inbound.filter((row) => row.linkId);
-  const allInboundConsumableDecided = inboundLinked.length === 0
-    || inboundLinked.every((row) => Boolean(row.consumableUsageDecided));
   const settlements = records.settlement as SettlementRow[];
   const extraAmount = expenses.reduce((sum, row) => sum + (typeof row.amount === "number" ? row.amount : 0), 0);
   const settlementPaid = settlements.reduce((sum, row) => {
@@ -1334,9 +1571,14 @@ function OrderDetailPanel({ detail, loading, onOrderChanged, onOrderDeleted, onO
   }, 0);
   // 原单总额已含运费优惠，分摊费用不再次加到应付；未知付款不算已付。
   const payable = order.paidAmount ?? order.amount ?? 0;
-  const platformPaid = order.paidOn1688 ? (order.paidAmount ?? order.amount ?? 0) : 0;
+  const platformPaid = order.paidOn1688
+    ? (order.paidAmount ?? order.amount ?? 0)
+    : order.platform !== "1688" && (order.paidAmount ?? 0) > 0
+      ? order.paidAmount ?? 0
+      : 0;
   const paidAmount = Math.min(payable, Math.max(settlementPaid, platformPaid));
   const unpaidAmount = Math.max(0, payable - paidAmount);
+  const isPaid = order.paidOn1688 || paidAmount > 0;
   const remainingAmount = records.unallocatedAmount ?? order.paidAmount ?? order.amount;
   // 1688 源单已关闭：整单只读，不允许再确认采购内容或修改分配。
   const closed = isOrderClosed(order.orderStatus);
@@ -1352,8 +1594,7 @@ function OrderDetailPanel({ detail, loading, onOrderChanged, onOrderDeleted, onO
   // 详情页默认全可修改；确认按钮仅作为手动推进快捷入口（SKU 分配保存后也会自动静默尝试确认）
   const canConfirm = Boolean(
     order.externalPoId && editable && allocations.length > 0 &&
-    remainingAmount !== null && remainingAmount !== undefined && Math.abs(remainingAmount) < 0.005 &&
-    allInboundConsumableDecided
+    remainingAmount !== null && remainingAmount !== undefined && Math.abs(remainingAmount) < 0.005
   );
   const confirmBlockReason = !canConfirm
     ? (
@@ -1361,7 +1602,6 @@ function OrderDetailPanel({ detail, loading, onOrderChanged, onOrderDeleted, onO
       : closed ? `订单已关闭（1688 源单：${order.orderStatus || "已关闭"}），不可再确认`
       : !editable ? "当前状态不可确认"
       : allocations.length === 0 ? "尚未完成 SKU 分配"
-      : !allInboundConsumableDecided ? "有入库单尚未登记耗材（请在对应卡片底部「耗材登记」选「有耗材/不使用」并保存）"
       : order.paidAmount == null && remainingAmount !== null && remainingAmount < -0.005
         ? `实付金额未登记：分配合计 ${fmtMoney(Math.abs(remainingAmount))}，请在「金额与付款分层」的「1688微调」补录实付后再确认`
       : (remainingAmount !== null && Math.abs(remainingAmount) > 0.005)
@@ -1392,6 +1632,16 @@ function OrderDetailPanel({ detail, loading, onOrderChanged, onOrderDeleted, onO
   }
 
   function seedSkuConsumable(skuId: number | null, quantity: string, existing?: EditorConsumableDraft | null) {
+    const exempt = skuCatalog.find((item) => item.id === skuId)?.consumablePolicy === "none";
+    setSkuConsumableExempt(exempt);
+    if (exempt) {
+      setSkuConsumableId(null);
+      setSkuConsumableEntry("");
+      setSkuConsumableQty("");
+      setSkuConsumableAutoQty(false);
+      setSkuConsumableTouched(false);
+      return;
+    }
     if (existing) {
       setSkuConsumableId(existing.consumableId);
       const material = usageMaterials.find((item) => item.id === existing.consumableId);
@@ -1414,6 +1664,7 @@ function OrderDetailPanel({ detail, loading, onOrderChanged, onOrderDeleted, onO
     setSkuConsumableEntry("");
     setSkuConsumableQty("");
     setSkuConsumableAutoQty(false);
+    setSkuConsumableExempt(false);
     setSkuConsumableTouched(false);
   }
 
@@ -1425,15 +1676,22 @@ function OrderDetailPanel({ detail, loading, onOrderChanged, onOrderDeleted, onO
   function applySkuSelection(sku: CatalogSkuRow) {
     setSelectedSkuId(sku.id);
     setSkuEntry(skuLabel(sku));
+    const exempt = sku.consumablePolicy === "none";
+    setSkuConsumableExempt(exempt);
+    if (exempt) {
+      resetSkuConsumable();
+      setSkuConsumableExempt(true);
+    }
     const mapping = usageMappings.find((item) => item.skuId === sku.id);
-    setSkuConsumableId(mapping?.consumableId ?? null);
+    setSkuConsumableId(exempt ? null : mapping?.consumableId ?? null);
     const material = mapping ? usageMaterials.find((item) => item.id === mapping.consumableId) : null;
-    setSkuConsumableEntry(material ? consumableLabel(material) : "");
-    setSkuConsumableQty(mappedConsumableQty(skuQty, mapping));
-    setSkuConsumableAutoQty(Boolean(mapping));
+    setSkuConsumableEntry(exempt ? "" : material ? consumableLabel(material) : "");
+    setSkuConsumableQty(exempt ? "" : mappedConsumableQty(skuQty, mapping));
+    setSkuConsumableAutoQty(!exempt && Boolean(mapping));
     setSkuConsumableTouched(true);
     // 入库前仅用货品档案成本作预估；实际入库反填后以入库明细含税单价为准。
-    setSkuPrice(sku.defaultCost != null && String(sku.defaultCost).trim() !== "" ? String(sku.defaultCost) : "");
+    const defaultCost = Number(sku.defaultCost);
+    setSkuTotal(Number.isFinite(defaultCost) && defaultCost >= 0 ? String(Number((defaultCost * Number(skuQty || 0)).toFixed(4))) : "");
   }
 
   function handleSkuEntry(value: string) {
@@ -1441,7 +1699,7 @@ function OrderDetailPanel({ detail, loading, onOrderChanged, onOrderDeleted, onO
     setSkuEntry(value);
     if (!normalized) {
       setSelectedSkuId(null);
-      setSkuPrice("");
+      setSkuTotal("");
       resetSkuConsumable();
       return;
     }
@@ -1450,7 +1708,7 @@ function OrderDetailPanel({ detail, loading, onOrderChanged, onOrderDeleted, onO
     if (sku) applySkuSelection(sku);
     else {
       setSelectedSkuId(null);
-      setSkuPrice("");
+      setSkuTotal("");
       resetSkuConsumable();
     }
   }
@@ -1459,6 +1717,10 @@ function OrderDetailPanel({ detail, loading, onOrderChanged, onOrderDeleted, onO
     const normalized = value.trim().toLowerCase();
     setSkuConsumableEntry(value);
     setSkuConsumableTouched(true);
+    if (normalized === "不使用" || normalized === "无需耗材") {
+      void updateSelectedSkuConsumablePolicy("none");
+      return;
+    }
     if (!normalized) {
       setSkuConsumableId(null);
       setSkuConsumableQty("");
@@ -1480,9 +1742,99 @@ function OrderDetailPanel({ detail, loading, onOrderChanged, onOrderDeleted, onO
     setSkuConsumableAutoQty(Boolean(mapping));
   }
 
-  // 入库单卡片内的「添加/修改 SKU」：直接做成 SKU 明细表的一行，与表头列（SKU 明细/数量/单价/总价/耗材/操作）一一对齐
+  async function updateSelectedSkuConsumablePolicy(policy: "auto" | "none") {
+    if (!selectedSku || editorBusy || skuAction) return;
+    setEditorBusy(true);
+    setSkuMessage("");
+    try {
+      await dashboardApi.updateConsumablePolicy(selectedSku.id, policy);
+      setSkuCatalog((current) => current.map((row) => row.id === selectedSku.id ? { ...row, consumablePolicy: policy } : row));
+      if (policy === "none") {
+        setSkuConsumableExempt(true);
+        setSkuConsumableId(null);
+        setSkuConsumableEntry("");
+        setSkuConsumableQty("");
+        setSkuConsumableAutoQty(false);
+        setSkuConsumableTouched(true);
+        setSkuMessage("已设置为不使用耗材；保存明细后将显示“无需耗材”，不会扣减耗材库存");
+      } else {
+        setSkuConsumableExempt(false);
+        seedSkuConsumable(selectedSku.id, skuQty);
+        setSkuMessage("已恢复该货品的耗材自动匹配");
+      }
+    } catch (caught) {
+      setSkuMessage(caught instanceof Error ? caught.message : "耗材规则保存失败");
+    } finally {
+      setEditorBusy(false);
+    }
+  }
+
+  function startConsumableEdit(item: ModalConsumableItem) {
+    if (item.purchaseId == null) {
+      setSkuMessage("该耗材明细缺少本地采购单 ID，暂不能在当前弹窗修改");
+      return;
+    }
+    setEditingConsumable(item);
+    setConsumableEditQty(item.quantity);
+    setConsumableEditTotal((Number(item.quantity) * Number(item.unitCost)).toFixed(4));
+    setSkuMessage("");
+  }
+
+  function cancelConsumableEdit() {
+    setEditingConsumable(null);
+    setConsumableEditQty("");
+    setConsumableEditTotal("");
+  }
+
+  async function saveConsumableEdit() {
+    const editing = editingConsumable;
+    if (consumableEditBusy || !editing || editing.purchaseId == null) return;
+    const quantity = Number(consumableEditQty);
+    const total = Number(consumableEditTotal);
+    if (!Number.isFinite(quantity) || quantity <= 0) {
+      setSkuMessage("耗材数量必须大于 0");
+      return;
+    }
+    const receivedQty = Number(editing.receivedQty || 0);
+    if (receivedQty > 0 && quantity < receivedQty) {
+      setSkuMessage(`耗材数量不能小于已入库数量 ${fmtQty(receivedQty)}`);
+      return;
+    }
+    if (!Number.isFinite(total) || total < 0) {
+      setSkuMessage("耗材总价不能为负");
+      return;
+    }
+    const purchase = consumablePurchaseRows.find((row) => row.id === editing.purchaseId);
+    if (!purchase) {
+      setSkuMessage("耗材采购单明细尚未加载完成，请稍后重试");
+      return;
+    }
+    const unitCost = total / quantity;
+    const items = purchase.items.map((item) => item.id === editing.id
+      ? { consumable_id: item.consumableId, quantity: String(quantity), unit_cost: String(unitCost) }
+      : { consumable_id: item.consumableId, quantity: item.quantity, unit_cost: item.unitCost });
+    setConsumableEditBusy(true);
+    setSkuMessage("");
+    try {
+      await consumablesApi.updatePurchase(purchase.id, { items });
+      setConsumablePurchaseRows((current) => current.map((row) => row.id === purchase.id
+        ? { ...row, items: row.items.map((item) => item.id === editing.id ? { ...item, quantity: String(quantity), unitCost: String(unitCost) } : item) }
+        : row));
+      cancelConsumableEdit();
+      setSkuMessage(`已更新 ${editing.name}，单价已按总价 ÷ 数量自动计算`);
+      await onOrderChanged();
+    } catch (caught) {
+      setSkuMessage(caught instanceof Error ? caught.message : "耗材明细保存失败");
+    } finally {
+      setConsumableEditBusy(false);
+    }
+  }
+
+  // 商品明细表内的添加/修改行：用户填写数量和总价，单价由系统自动计算。
   const skuEditorRow = (
     <tr className="whitespace-nowrap border-t border-indigo-200 bg-indigo-50/60">
+      <td className="py-1.5 pl-3 pr-2"><OrderKindTag value={order.orderKind} /></td>
+      <td className="py-1.5 pr-2 font-mono text-[11px] text-slate-500">{selectedSku?.barcode || "—"}</td>
       <td className="py-1.5 pr-2">
         {skuCatalogLoading ? (
           <div className="flex h-8 items-center gap-1.5 rounded border border-indigo-200 bg-white px-2 text-[11px] text-slate-400">正在读取 SKU 主档…</div>
@@ -1519,17 +1871,22 @@ function OrderDetailPanel({ detail, loading, onOrderChanged, onOrderDeleted, onO
           className="h-8 w-full max-w-[96px] rounded border border-slate-200 bg-white px-1.5 text-right text-[11px] tabular-nums outline-none focus:border-indigo-300"
         />
       </td>
+      <td className="py-1.5 px-1 text-right tabular-nums font-medium text-slate-700">{fmtMoney(Number(skuQty) > 0 && skuTotal !== "" ? Number(skuTotal) / Number(skuQty) : null)}</td>
       <td className="py-1.5 px-1 text-right">
         <input
-          type="number" min="0" step="0.01" aria-label="单价" value={skuPrice}
-          onChange={(event) => setSkuPrice(event.target.value)}
-          className="h-8 w-full max-w-[96px] rounded border border-slate-200 bg-white px-1.5 text-right text-[11px] tabular-nums outline-none focus:border-indigo-300"
+          type="number" min="0" step="0.0001" aria-label="总价" value={skuTotal}
+          onChange={(event) => setSkuTotal(event.target.value)}
+          className="h-8 w-full max-w-[104px] rounded border border-slate-200 bg-white px-1.5 text-right text-[11px] tabular-nums outline-none focus:border-indigo-300"
         />
       </td>
-      <td className="py-1.5 px-1 text-right tabular-nums font-medium text-slate-700">{fmtMoney(Number(skuQty) * Number(skuPrice))}</td>
       <td className="py-1.5 px-1">
-        {skuEditorTargetDoc == null || editorConsumableDisabled ? (
-          <span className="text-[11px] text-slate-400">{editorConsumableDisabled ? "本单不使用" : "—"}</span>
+        {order.orderKind === "consumable" || editorConsumableDisabled ? (
+          <span className="text-[11px] text-slate-400">{editorConsumableDisabled ? "本次不使用" : "—"}</span>
+        ) : skuConsumableExempt ? (
+          <div className="flex items-center gap-1.5 whitespace-nowrap">
+            <span className="rounded bg-slate-100 px-1.5 py-1 text-[11px] font-medium text-slate-500">无需耗材</span>
+            <button type="button" disabled={editorBusy} onClick={() => void updateSelectedSkuConsumablePolicy("auto")} className="text-[10px] text-indigo-600 hover:text-indigo-800 disabled:opacity-40">恢复自动匹配</button>
+          </div>
         ) : (
           <div className="flex items-center gap-1">
             <input
@@ -1542,6 +1899,7 @@ function OrderDetailPanel({ detail, loading, onOrderChanged, onOrderDeleted, onO
               className="h-6 min-w-0 flex-1 rounded border border-indigo-200 bg-white px-1 text-[11px] outline-none focus:border-indigo-400 disabled:bg-slate-50 disabled:text-slate-400"
             />
             <datalist id={consumableListId}>
+              <option value="不使用" />
               {usageMaterials.map((material) => <option key={material.id} value={consumableLabel(material)} />)}
             </datalist>
             <input
@@ -1556,9 +1914,12 @@ function OrderDetailPanel({ detail, loading, onOrderChanged, onOrderDeleted, onO
               className="h-6 w-12 shrink-0 rounded border border-slate-200 px-1 text-center text-[11px] tabular-nums outline-none focus:border-amber-400 disabled:bg-slate-50"
             />
             <span className="w-6 shrink-0 text-[11px] text-slate-400">{editorConsumable?.unit ?? "—"}</span>
+            <button type="button" disabled={!selectedSku || editorBusy} onClick={() => void updateSelectedSkuConsumablePolicy("none")} className="shrink-0 rounded border border-slate-200 bg-white px-1.5 py-1 text-[10px] text-slate-500 hover:border-indigo-300 hover:text-indigo-600 disabled:cursor-not-allowed disabled:opacity-40">不使用</button>
           </div>
         )}
       </td>
+      <td className="py-1.5 px-1 text-center tabular-nums text-[11px] text-slate-500">{skuConsumableId ? skuConsumableQty || "—" : "—"}</td>
+      <td className={cx("py-1.5 px-1 text-center text-[11px]", skuConsumableExempt ? "text-slate-400" : "text-amber-600")}>{order.orderKind === "consumable" || skuConsumableExempt ? "—" : skuConsumableId ? "待计算" : "未匹配"}</td>
       <td className="py-1.5 pl-2">
         <div className="flex justify-end gap-1.5">
           <button
@@ -1566,7 +1927,7 @@ function OrderDetailPanel({ detail, loading, onOrderChanged, onOrderDeleted, onO
             className="text-[11px] text-slate-400 hover:text-slate-600"
           >取消</button>
           <button
-            disabled={skuAction !== "" || !selectedSku || !skuQty || skuPrice === "" || (skuConsumableId != null && (!skuConsumableQty || Number(skuConsumableQty) <= 0))}
+            disabled={skuAction !== "" || editorBusy || !selectedSku || !skuQty || skuTotal === "" || (!skuConsumableExempt && skuConsumableId != null && (!skuConsumableQty || Number(skuConsumableQty) <= 0))}
             onClick={addSkuAllocation}
             className="rounded bg-indigo-600 px-2 py-1 text-[11px] font-medium text-white disabled:cursor-not-allowed disabled:opacity-40"
           >
@@ -1604,11 +1965,11 @@ function OrderDetailPanel({ detail, loading, onOrderChanged, onOrderDeleted, onO
   }
 
   async function addSkuAllocation() {
-    if (!selectedSku || !skuQty || skuPrice === "") return;
+    if (!selectedSku || !skuQty || skuTotal === "") return;
     const quantity = Number(skuQty);
-    const unitPrice = Number(skuPrice);
-    if (!Number.isFinite(quantity) || quantity <= 0 || !Number.isFinite(unitPrice) || unitPrice < 0) {
-      setSkuMessage("请填写有效的数量和单价");
+    const total = Number(skuTotal);
+    if (!Number.isFinite(quantity) || quantity <= 0 || !Number.isFinite(total) || total < 0) {
+      setSkuMessage("请填写有效的数量和总价");
       return;
     }
     const consumableQuantity = Number(skuConsumableQty);
@@ -1631,7 +1992,7 @@ function OrderDetailPanel({ detail, loading, onOrderChanged, onOrderDeleted, onO
           sku_code: selectedSku.skuCode,
           goods_name: selectedSku.goodsName || selectedSku.skuName,
           quantity: skuQty,
-          unit_price: skuPrice,
+          amount: skuTotal,
           note: targetDocId != null ? `由入库单 #${targetDocId} 明细自动反填` : "",
         }),
       });
@@ -1647,10 +2008,10 @@ function OrderDetailPanel({ detail, loading, onOrderChanged, onOrderDeleted, onO
       }
       setSelectedSkuId(null);
       setSkuEntry("");
-      setSkuPrice("");
+      setSkuTotal("");
       resetSkuConsumable();
       setSkuMessage(wasEditing
-        ? "SKU 数量/单价已更新；若该行原为入库单反填，单据明细与金额已同步更正（超分配/待分配会自动重算）"
+        ? "SKU 数量/总价已更新，单价已自动计算；若该行原为入库单反填，单据明细与金额已同步更正"
         : (targetDocId != null ? `SKU 已添加到入库单 #${targetDocId}` : "SKU 已加入当前订单"));
       setEditingAllocation(null);
       if (wasEditing) {
@@ -1681,7 +2042,7 @@ function OrderDetailPanel({ detail, loading, onOrderChanged, onOrderDeleted, onO
       });
       const body = await readMutation(res) as { purchaseStatus?: string; resync?: { ok: boolean | null; attempted: boolean; error?: string; stats?: { stockinOrders?: number; stockinItems?: number } } };
       const r = body.resync;
-      const parts = ["采购内容已确认，订单已进入待生成采购单阶段"];
+      const parts = ["采购内容已确认，订单已进入待入库阶段"];
       if (r?.attempted) {
         if (r.ok) parts.push(`已尝试回写本地：入库单 ${r.stats?.stockinOrders ?? 0} 张 / 明细 ${r.stats?.stockinItems ?? 0} 行`);
         else parts.push(`本地回写未生效：${r.error ?? "未知原因"}`);
@@ -1715,45 +2076,68 @@ function OrderDetailPanel({ detail, loading, onOrderChanged, onOrderDeleted, onO
     }
   }
 
-  function openMainEdit() {
-    setMainForm({
-      supplier: order.supplier ?? "",
-      title: order.title ?? "",
-      date: order.orderDate ? fmtDate(order.orderDate) : "",
-      goods: order.goodsTotal != null ? String(order.goodsTotal) : "",
-      freight: order.freight != null ? String(order.freight) : "",
-      discount: order.discount != null ? String(order.discount) : "",
-      paid: order.paidAmount != null ? String(order.paidAmount) : "",
-      orderAmount: order.amount != null ? String(order.amount) : "",
-      platform: order.platform ?? "other",
-    });
-    setMainError("");
-    setMainEditOpen(true);
-  }
-
-  async function saveMainEdit(event: React.FormEvent) {
-    event.preventDefault();
+  async function saveMainEdit(event?: React.FormEvent) {
+    if (event) event.preventDefault();
     if (mainSaving) return;
-    const isFile = order.fileOrderId != null;
+    const warehouseId = mainForm.warehouseId.trim() ? Number(mainForm.warehouseId) : null;
     setMainSaving(true);
     setMainError("");
     try {
+      if (!mainForm.supplier.trim()) throw new Error("供应商不能为空");
+      if (warehouseId == null || !Number.isInteger(warehouseId)) throw new Error("请选择采购入库仓库");
+      const purchaseAmount = Number(mainForm.orderAmount);
+      if (!mainForm.orderAmount.trim() || !Number.isFinite(purchaseAmount) || purchaseAmount < 0) {
+        throw new Error("请输入有效的采购金额");
+      }
       await procurementWorkbenchApi.editOrderMain(order.orderId, isFile ? {
         supplier_name: mainForm.supplier,
         title: mainForm.title,
-        goods_total: mainForm.goods,
-        freight: mainForm.freight,
-        discount: mainForm.discount,
-        actual_payment: mainForm.paid,
+        goods_total: mainForm.goods.trim() || undefined,
+        freight: mainForm.freight.trim() || undefined,
+        discount: mainForm.discount.trim() || undefined,
+        actual_payment: mainForm.orderAmount,
+        warehouse_id: warehouseId,
       } : {
+        external_order_id: mainForm.orderNo.trim(),
         supplier_name: mainForm.supplier,
         title: mainForm.title,
         ordered_at: mainForm.date || undefined,
         order_amount: mainForm.orderAmount,
         paid_amount: mainForm.paid,
         platform: mainForm.platform,
+        warehouse_id: warehouseId,
       });
-      setMainEditOpen(false);
+
+      const requestedInboundNo = inboundNoEntry.trim();
+      const createInboundFromAllocations = (inboundNo?: string) => {
+        if (allocations.length === 0) throw new Error("请先添加商品明细，系统才能生成入库单");
+        const items = allocations.filter((row) => row.id != null && row.skuId != null && Number(row.quantity) > 0);
+        if (items.length !== allocations.length) throw new Error("存在未绑定 SKU 的明细，请先完成商品匹配");
+        return procurementChainApi.createLocalInbound({
+          order_id: order.orderId,
+          inbound_no: inboundNo,
+          inbound_at: mainForm.date ? `${mainForm.date}T00:00:00` : null,
+          warehouse_id: warehouseId,
+          note: inboundNo ? "按采购订单填写的入库单号创建" : "采购订单保存时自动生成入库单",
+          items: items.map((row) => ({ allocation_id: row.id!, quantity: String(row.quantity), unit_price: row.unitPrice == null ? null : String(row.unitPrice) })),
+        });
+      };
+      if (requestedInboundNo && !inbound.some((row) => row.goodsdocNo === requestedInboundNo)) {
+        const result = await procurementChainApi.candidates(order.orderId, "inbound", requestedInboundNo, 30);
+        const exact = result.items.find((row) => row.targetNo.trim().toLowerCase() === requestedInboundNo.toLowerCase());
+        if (inbound.length > 0) throw new Error(`一张采购订单只能关联一个入库单，当前已有 ${inbound[0].goodsdocNo || "入库单"}`);
+        if (exact) {
+          setSelectedInboundId(exact.targetId);
+          await saveInboundLink(exact.targetId);
+        } else {
+          const created = await createInboundFromAllocations(requestedInboundNo);
+          setInboundNoEntry(created.inboundNo);
+          setInboundMessage(`未找到旧入库单，已按填写的编号创建：${created.inboundNo}`);
+        }
+      } else if (!requestedInboundNo && inbound.length === 0) {
+        const created = await createInboundFromAllocations();
+        setInboundNoEntry(created.inboundNo);
+      }
       await onOrderChanged();
     } catch (caught) {
       setMainError(caught instanceof Error ? caught.message : "订单主档保存失败");
@@ -1897,8 +2281,8 @@ function OrderDetailPanel({ detail, loading, onOrderChanged, onOrderDeleted, onO
 
   async function advanceStatus() {
     if (!order.externalPoId || !nextStatus) return;
-    if ((nextStatus === "inbound" || nextStatus === "done") && (inbound.length === 0 || inbound.some((row) => !row.consumableUsageDecided))) {
-      setSkuMessage("请先在已关联的每张吉客云入库单上确认是否添加耗材使用及数量");
+    if ((nextStatus === "inbound" || nextStatus === "done") && inbound.length === 0) {
+      setSkuMessage("请先关联真实采购入库单");
       return;
     }
     setEditorBusy(true);
@@ -1922,43 +2306,33 @@ function OrderDetailPanel({ detail, loading, onOrderChanged, onOrderDeleted, onO
     setReplaceInboundLinkId(linkId);
     setSelectedInboundId(null);
     setInboundQuery("");
+    autoLinkedInboundQuery.current = "";
     setInboundMessage("");
-    setUsageDecision("");
-    setUsageMaterialIds([]);
-    setUsageQtys({});
     setInboundEditorOpen(true);
   }
 
   function selectInboundCandidate(candidate: ChainLinkCandidate) {
     setSelectedInboundId(candidate.targetId);
-    const totals: Record<number, number> = {};
-    for (const item of candidate.details ?? []) {
-      if (!item.skuId || item.quantity == null) continue;
-      for (const mapping of usageMappings.filter((row) => row.skuId === item.skuId)) {
-        totals[mapping.consumableId] = (totals[mapping.consumableId] ?? 0) + item.quantity * Number(mapping.usagePerUnit || 0);
-      }
-    }
-    setUsageMaterialIds(Object.keys(totals).map(Number));
-    setUsageQtys(Object.fromEntries(Object.entries(totals).map(([id, value]) => [Number(id), String(value)])));
-    setUsageDecision(Object.keys(totals).length > 0 ? "yes" : "");
+    setInboundNoEntry(candidate.targetNo);
+    setInboundQuery(candidate.targetNo);
+    setInboundEditorOpen(false);
+    void saveInboundLink(candidate.targetId);
   }
 
-  async function saveInboundLink() {
-    if (!usageDecision) { setInboundMessage("请先明确选择“有耗材使用”或“本次不使用耗材”"); return; }
-    const usageItems = usageDecision === "yes"
-      ? usageMaterialIds.map((id) => ({ consumable_id: id, quantity: usageQtys[id] || "" })).filter((item) => item.quantity.trim() !== "")
-      : [];
-    if (usageDecision === "yes" && usageItems.length === 0) { setInboundMessage("请选择耗材并填写使用数量"); return; }
+  async function saveInboundLink(targetId: number | null = selectedInboundId) {
     setEditorBusy(true);
     setInboundMessage("");
     try {
-      if (!selectedInboundId) return;
+      if (!targetId) return;
+      if (inbound.length > 0 && !inbound.some((row) => row.targetId === targetId || row.documentId === targetId)) {
+        throw new Error(`一张采购订单只能关联一个入库单，当前已有 ${inbound[0].goodsdocNo || "入库单"}`);
+      }
       if (replaceInboundLinkId) {
-        await procurementChainApi.replaceLink(replaceInboundLinkId, selectedInboundId, "采购工作台人工更换入库单", usageDecision === "yes", usageItems);
-        setInboundMessage("入库单关联已更换");
+        await procurementChainApi.replaceLink(replaceInboundLinkId, targetId, "采购工作台更换入库单，耗材按实际入库数量自动计算");
+        setInboundMessage("入库单关联已更换，耗材将按实际入库数量自动计算");
       } else {
-        await procurementChainApi.manualLink(order.orderId, "inbound", selectedInboundId, "采购工作台人工选择入库单", usageDecision === "yes", usageItems);
-        setInboundMessage("入库单已人工关联");
+        await procurementChainApi.manualLink(order.orderId, "inbound", targetId, "采购工作台关联入库单，耗材按实际入库数量自动计算");
+        setInboundMessage("入库单已关联，耗材将按实际入库数量自动计算");
       }
       setInboundEditorOpen(false);
       setSelectedInboundId(null);
@@ -1966,6 +2340,7 @@ function OrderDetailPanel({ detail, loading, onOrderChanged, onOrderDeleted, onO
       await onOrderChanged();
     } catch (caught) {
       setInboundMessage(caught instanceof Error ? caught.message : "入库单关联失败");
+      setInboundEditorOpen(Boolean(inboundQuery.trim()));
     } finally {
       setEditorBusy(false);
     }
@@ -2035,563 +2410,336 @@ async function saveInboundAmount(documentId: number, value: string, note: string
     }
   }
 
+  const cancelled = isOrderClosed(order.orderStatus);
+
+  // 关闭弹窗：触发父组件卸载右侧详情面板
+  function onClose() {
+    onOrderChanged().catch(() => {});
+    // 关掉详情 = 当前 Tab 交还给工作台列表（列表 Tab 已存在就切回去），地址栏与工作区保持一致
+    if (typeof window !== "undefined") {
+      const params = new URLSearchParams(panelSearchParams.toString());
+      params.delete("order");
+      syncWorkspaceUrl(panelWorkspace.retarget(`/purchase/workbench${params.toString() ? `?${params}` : ""}`));
+    }
+    onCloseDialog?.();
+  }
+
+  // 仓库名：实际入库仓库 > 计划仓库 > 订单上记录的仓库
+  const actualWarehouseName = detail.warehouse?.warehouseName ?? order.warehouseName ?? "";
+  const targetWarehouseName = detail.warehouse?.targetWarehouseName ?? "";
+
+  // 发票匹配状态（由发票池自动处理，详情页只读）
+  const invoiceStatusText = (() => {
+    switch (order.invoiceStatus) {
+      case "done": return "已开票";
+      case "partial": return "部分开票";
+      case "pending": return "待开票";
+      case "none": return "无票";
+      default: return "待匹配";
+    }
+  })();
+  const invoiceStatusClass = order.invoiceStatus === "done"
+    ? "bg-emerald-50 text-emerald-700"
+    : order.invoiceStatus === "partial"
+      ? "bg-amber-50 text-amber-700"
+      : "bg-slate-100 text-slate-500";
+
+  const invoiceOutstanding = order.invoiceOutstanding ?? 0;
+  const invoicedAmount = order.invoicedAmount ?? 0;
+  const orderAmount = order.amount ?? 0;
+  const invoiceHasGap = invoiceOutstanding > 0 || invoicedAmount < orderAmount;
+  const topInvoiceStatusText = order.invoiceStatus === "pending"
+    ? "待供应商开票"
+    : invoiceHasGap || order.invoiceStatus === "partial"
+      ? "待开票"
+      : invoiceStatusText;
+  const topInvoiceStatusClass = invoiceHasGap
+    ? "bg-amber-50 text-amber-700"
+    : invoiceStatusClass;
+  const currentWarehouseName = actualWarehouseName || targetWarehouseName || order.warehouseName || "";
+  const currentWarehouseId = detail.warehouse?.warehouseId ?? detail.warehouse?.targetWarehouseId ?? order.warehouseId ?? null;
+
+  function allocationConsumables(row: AllocationRow) {
+    if (order.orderKind === "consumable" || row.skuId == null) return [];
+    if (skuCatalog.find((item) => item.id === row.skuId)?.consumablePolicy === "none") return [];
+    return usageMappings
+      .filter((mapping) => mapping.skuId === row.skuId)
+      .map((mapping) => {
+        const material = usageMaterials.find((item) => item.id === mapping.consumableId) ?? null;
+        const requiredQty = Math.max(0, Number(row.quantity ?? 0) * Number(mapping.usagePerUnit || 0));
+        const availableRaw = material ? Number(material.availableQty) : NaN;
+        const availableQty = Number.isFinite(availableRaw) ? Math.max(0, availableRaw) : null;
+        const usedQty = availableQty == null ? null : Math.min(requiredQty, availableQty);
+        const shortageQty = availableQty == null ? null : Math.max(0, requiredQty - availableQty);
+        const status = !material
+          ? { label: "未匹配", className: "bg-orange-50 text-orange-600" }
+          : shortageQty == null
+            ? { label: "未匹配", className: "bg-orange-50 text-orange-600" }
+            : shortageQty > 0
+              ? { label: "缺 " + fmtQty(shortageQty), className: "bg-rose-50 text-rose-600" }
+              : { label: "已匹配", className: "bg-emerald-50 text-emerald-600" };
+        return { mapping, material, requiredQty, availableQty, usedQty, shortageQty, status };
+      });
+  }
+
   return (
-    <aside className="min-w-0 scroll-mt-4">
-      <div className="overflow-hidden rounded-xl border border-slate-200/90 bg-white shadow-[0_4px_18px_rgba(40,53,85,0.045)]">
-        <div className="border-b border-slate-100 px-4 py-3.5">
-          <div className="flex items-center justify-between text-[11px]">
-            <span className="font-semibold text-slate-700">已选择订单</span>
-            <span className="flex items-center gap-2">
-              <button
-                onClick={openMainEdit}
-                title="编辑供应商 / 标题 / 金额等主档信息（修改会同步 1688 源单与采购副本，并写入审计日志）"
-                className="rounded-md border border-indigo-200 bg-white px-2 py-1 text-[12px] font-medium text-indigo-600 hover:bg-indigo-50"
-              >
-                ✎ 编辑
-              </button>
-              <button
-                disabled={deleteBusy}
-                onClick={() => void deleteOrder()}
-                title={order.orderId > 0 ? "从工作台移除该订单（1688 导入订单为软删除，数据可恢复）" : "删除该手工登记订单（无 1688 原件，不可恢复）"}
-                className="rounded-md border border-red-200 bg-white px-2 py-1 text-[12px] font-medium text-red-500 hover:bg-red-50 disabled:opacity-40"
-              >
-                {deleteBusy ? "删除中…" : "🗑 删除订单"}
-              </button>
-              <span className="font-medium text-indigo-600">订单详情</span>
-            </span>
+    <aside className="flex min-h-0 min-w-0 flex-1 flex-col scroll-mt-4">
+      <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl bg-white shadow-[0_8px_32px_rgba(40,53,85,0.10)]">
+        <header className="flex shrink-0 items-center justify-between gap-4 border-b border-slate-200 bg-white px-5 py-3">
+          <div className="min-w-0">
+            <div className="flex flex-wrap items-center gap-2">
+              <h2 className="text-[16px] font-semibold tracking-tight text-slate-900">
+                采购订单详情 / 全量录入 <span className="font-mono text-[15px]">{order.orderNo}</span>
+              </h2>
+              <PlatformBadge value={order.platform} />
+              {cancelled && <span className="rounded bg-slate-700 px-2 py-0.5 text-[11px] font-medium text-white">已关闭</span>}
+            </div>
+            <p className="mt-1 text-[11px] text-slate-400">一张采购订单对应一个供应商、一个仓库、一个入库单号和多条商品明细</p>
           </div>
-          <div className="mt-3 flex items-start justify-between gap-3">
-            <div className="min-w-0">
-              <div className="flex items-center gap-1.5">
-                <PlatformBadge value={order.platform} />
-                <button
-                  onClick={() => void toggleOrderKind()}
-                  disabled={editorBusy}
-                  className="disabled:opacity-50"
-                  title={order.orderKindOverride
-                    ? `已人工覆盖为${order.orderKind === "consumable" ? "耗材" : "正品"}；点击切换类型`
-                    : "类型为自动判定（耗材档案采购订货号引用 / 供应商关键词）；点击可人工切换 正品/耗材"}
-                >
-                  <OrderKindTag value={order.orderKind} />
-                  <span aria-hidden className="ml-0.5 text-[9px] text-slate-300">✎</span>
-                </button>
-                <span className="truncate font-mono text-[13px] font-semibold text-slate-800">{order.orderNo}</span>
-                <button onClick={() => navigator.clipboard?.writeText(order.orderNo)} className="shrink-0 text-slate-300 hover:text-indigo-500" title="复制订单号"><Icon name="copy" size={12} /></button>
-                {closed ? (
-                  <span className="shrink-0 rounded bg-slate-700 px-1.5 py-0.5 text-[11px] font-semibold text-white" title={`平台订单状态：${order.orderStatus || "已关闭"}`}>已关闭</span>
-                ) : (
-                  <>
-                    <span
-                      className={cx("shrink-0 rounded px-1.5 py-0.5 text-[11px] font-medium", statusClass(statusLabel({ orderStatus: order.orderStatus, stepStates, closeoutStage: order.closeoutStage })))}
-                      title="最后一步未确认的环节"
-                    >
-                      {statusLabel({ orderStatus: order.orderStatus, stepStates, closeoutStage: order.closeoutStage })}
-                    </span>
-                    {order.externalPoId && editable && allocations.length > 0 && (
-                      <>
-                        <button
-                          disabled={!canConfirm || skuAction !== ""}
-                          onClick={() => void confirmPurchaseContent()}
-                          title={confirmBlockReason || "确认采购内容并推进到下一阶段"}
-                          className="shrink-0 rounded bg-emerald-50 px-2 py-0.5 text-[11px] font-medium text-emerald-600 hover:bg-emerald-100 disabled:cursor-not-allowed disabled:opacity-40"
-                        >{skuAction === "confirm" ? "确认中…" : "确认"}</button>
-                        {!canConfirm && confirmBlockReason && (
-                          <span
-                            className="max-w-[260px] shrink truncate text-[11px] text-amber-600"
-                            title={confirmBlockReason}
-                          >{confirmBlockReason}</span>
-                        )}
-                      </>
-                    )}
-                  </>
-                )}
-              </div>
-              <div className="mt-2 text-[12px] text-slate-400">下单时间：{fmtDateTime(order.orderDate)}　来源：{CHANNELS[channelOf(order.platform)].label}</div>
-              <div className="mt-1 flex flex-wrap items-center gap-1.5 text-[12px] text-slate-500">
-                <span className="shrink-0 text-slate-400">供应商：</span>
-                {order.supplier ? (
-                  <button onClick={() => order.supplier && onOpenSupplier(order.supplier)} className="min-w-0 truncate font-medium text-slate-600 hover:text-indigo-600" title="查看供应商详情">{order.supplier}</button>
-                ) : <span>—</span>}
-                {detail.supplierHistory && (
-                  <>
-                    {detail.supplierHistory.orderCount >= 5 && <span className="shrink-0 rounded bg-emerald-50 px-1.5 py-0.5 text-[11px] text-emerald-600">稳定合作</span>}
-                    {detail.supplierHistory.orderCount === 1 && <span className="shrink-0 rounded bg-violet-50 px-1.5 py-0.5 text-[11px] text-violet-600">首次采购</span>}
-                  </>
-                )}
-              </div>
-              {detail.supplierHistory && (
-                <div className="mt-1 flex flex-wrap items-center gap-x-2.5 gap-y-0.5 text-[11px] text-slate-400" title="常购商品 / 未开票金额 / 最近一次采购">
-                  <span>常购 <span className="font-medium tabular-nums text-slate-600">{detail.supplierHistory.oftenSkus.length}</span></span>
-                  <span>未开票 <span className="font-medium tabular-nums text-slate-600">{fmtMoney(detail.supplierHistory.uninvoiced)}</span></span>
-                  <span>最近采购 <span className="font-medium tabular-nums text-slate-600">{fmtDate(detail.supplierHistory.lastOrderDate)}</span></span>
-                  <button onClick={() => order.supplier && onOpenSupplier(order.supplier)} className="text-indigo-500 hover:text-indigo-600">详情 ›</button>
-                </div>
-              )}
-              <div className="mt-1 flex flex-wrap items-center gap-x-2.5 gap-y-0.5 text-[11px] text-slate-400" title="收货仓库 / 付款方式 / 订单状态 / 备注">
-                <span>仓库 <span className="font-medium text-slate-600">{inbound.find((row) => row.warehouseName)?.warehouseName ?? "—"}</span></span>
-                <span>付款 <span className="font-medium text-slate-600">{order.paidOn1688 ? "1688已实付" : paidAmount > 0 ? "已关联" : "未关联"}</span></span>
-                <span>状态 <span className="font-medium text-slate-600">{order.orderStatus || "—"}</span></span>
-                <span className="min-w-0 truncate" title={order.title || undefined}>备注 <span className="font-medium text-slate-600">{order.title || "—"}</span></span>
-              </div>
-            </div>
-            <div className="shrink-0 text-right">
-              <div className="text-[11px] text-slate-400">订单金额</div>
-              <div className="mt-1 text-[17px] font-semibold tabular-nums text-slate-900">{fmtMoney(order.amount)}</div>
-            </div>
+          <div className="flex shrink-0 items-center gap-1.5">
+            <span className={cx("rounded-md px-2 py-1 text-[11px] font-medium", isPaid ? "bg-emerald-50 text-emerald-600" : "bg-amber-50 text-amber-700")}>{isPaid ? "已付款" : "待付款"}</span>
+            <span className={cx("rounded-md px-2 py-1 text-[11px] font-medium", topInvoiceStatusClass)}>{topInvoiceStatusText}</span>
+            {!closed && !editable && order.externalPoId && <button type="button" onClick={() => void reopenPurchase()} disabled={editorBusy} className="inline-flex items-center gap-1 rounded-md border border-indigo-200 bg-indigo-50 px-2.5 py-1.5 text-[11px] font-medium text-indigo-600 hover:border-indigo-300 hover:bg-indigo-100 disabled:cursor-not-allowed disabled:opacity-50"><Icon name="edit" size={12} />{editorBusy ? "打开中…" : "编辑"}</button>}
+            <button type="button" disabled title="当前后端没有独立草稿接口，保存会直接写入采购单" className="rounded-md border border-slate-200 bg-white px-2.5 py-1.5 text-[11px] text-slate-400">保存草稿</button>
+            <button type="button" onClick={() => void saveMainEdit()} disabled={!editable || mainSaving} className="rounded-md bg-blue-600 px-3 py-1.5 text-[11px] font-medium text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50">{mainSaving ? "保存中…" : "保存"}</button>
+            <button type="button" onClick={onClose} aria-label="关闭" className="flex items-center justify-center rounded-md border border-slate-200 px-2.5 py-1.5 text-slate-600 hover:border-indigo-200 hover:text-indigo-600"><Icon name="x" size={15} /></button>
           </div>
-        </div>
-        <div className="space-y-2 p-3">
-          {closed && (
-            <div className="rounded-md border border-slate-200 bg-slate-50 px-2.5 py-1.5 text-[12px] text-slate-500">
-              已关闭订单为只读 · 点右上角「🗑 删除订单」可从工作台移除（数据可恢复）
-            </div>
-          )}
-          {skuMessage && (
-            <div className={cx(
-              "rounded-md border px-2.5 py-1.5 text-[12px]",
-              skuMessage.includes("失败") || skuMessage.includes("未生效") || skuMessage.includes("未平衡") || skuMessage.includes("请")
-                ? "border-amber-300 bg-amber-50 text-amber-800"
-                : skuMessage.includes("已确认") || skuMessage.includes("已移除") || skuMessage.includes("已删除")
-                  ? "border-emerald-300 bg-emerald-50 text-emerald-800"
-                  : "border-slate-200 bg-white text-slate-600"
-            )}>
-              {skuMessage}
-            </div>
-          )}
-          <div className="flex items-center justify-between gap-2">
-            <div className="flex items-center gap-1">
-              {([["jackyun", "吉客云单据"], ["consumable", "耗材入库单"]] as const).map(([key, label]) => (
-                <button
-                  key={key}
-                  onClick={() => setDocTab(key)}
-                  className={cx(
-                    "rounded-md px-2.5 py-1 text-[12px] font-medium transition-colors",
-                    docTab === key ? "bg-indigo-600 text-white" : "border border-slate-200 bg-white text-slate-500 hover:bg-slate-100"
-                  )}
-                >
-                  {label}{key === "jackyun" && inbound.length > 0 ? ` · ${inbound.length}` : ""}
-                </button>
-              ))}
-            </div>
-            <span className="text-[10px] text-slate-400">单据按类型分页展示，两类单据互相独立</span>
-          </div>
-          {docTab === "jackyun" && (
-          <DetailSection title="吉客云单据" badge={inbound.length > 0 ? `已关联 ${inbound.length} 张` : "待关联"}>
-            {/* 采购单与入库单同源，通常无需单独关联；保留入口供需要时补录 */}
-            <div className="rounded-md border border-indigo-100 bg-indigo-50/20 px-2 py-1.5">
-              <div className="flex items-center justify-between gap-2">
-                <div className="flex min-w-0 items-center gap-1.5">
-                  <span className="text-[12px] font-medium text-indigo-800">吉客云采购单</span>
-                  {purchaseOrders.length > 0 ? (
-                    <span className="shrink-0 rounded-full bg-emerald-50 px-1.5 py-0.5 text-[11px] font-medium text-emerald-600">
-                      已关联 {purchaseOrders.length} 张
-                    </span>
-                  ) : order.jackyunPoBypassed ? (
-                    <span className="shrink-0 rounded-full bg-teal-50 px-1.5 py-0.5 text-[11px] font-medium text-teal-600" title="吉客云侧未建采购单；金额以导入表格为准、入库已闭环，采购单步骤按口径放行">
-                      已按 Excel 口径放行
-                    </span>
-                  ) : (
-                    <span className="truncate text-[11px] text-slate-400">通常无需单独关联</span>
-                  )}
-                </div>
-                <div className="flex shrink-0 items-center gap-1.5">
-                  {purchaseOrders.length > 0 && (
-                    <button onClick={() => setPoListOpen((v) => !v)} className="text-[11px] text-indigo-600 hover:text-indigo-700">
-                      {poListOpen ? "收起" : "查看"}
-                    </button>
-                  )}
-                  {order.externalPoId && !closed ? (
-                    <button disabled={poBusy} onClick={() => setPoEditorOpen((v) => !v)} className="rounded bg-indigo-600 px-2 py-1 text-[11px] font-medium text-white hover:bg-indigo-700 disabled:opacity-40">
-                      {poEditorOpen ? "取消" : "关联采购单"}
-                    </button>
-                  ) : null}
-                </div>
-              </div>
+        </header>
 
-              {poListOpen && purchaseOrders.length > 0 && (
-                <div className="mt-1.5 space-y-1">
-                  {purchaseOrders.map((row, index) => (
-                    <div key={(row.purchNo || "po") + index} className="flex items-center justify-between gap-2 rounded bg-white/70 px-2 py-1.5 text-[12px]">
-                      <span className="min-w-0 truncate">
-                        <span className="font-mono font-medium text-indigo-600">{row.purchNo || "已关联采购单"}</span>
-                        {row.relationKind === "merged" && <span className="ml-1.5 shrink-0 rounded bg-amber-100 px-1 py-px text-[11px] text-amber-700" title="多张采购订单共用这张采购单">合并</span>}
-                        {row.relationKind === "split" && <span className="ml-1.5 shrink-0 rounded bg-violet-100 px-1 py-px text-[11px] text-violet-700" title="一张采购订单拆成多张采购单，此为其中之一">拆分</span>}
-                        {row.allocAmount != null && row.allocAmount > 0 && <span className="ml-1.5 text-[11px] text-slate-500">分摊 {fmtMoney(row.allocAmount)}</span>}
-                      </span>
-                      <div className="flex shrink-0 items-center gap-2">
-                        <span className="text-slate-500">{fmtMoney(row.amount)}　{row.status || ""}</span>
-                        {row.linkId && order.externalPoId && !closed ? (
-                          <button disabled={poBusy} onClick={() => void unlinkJackyunPo(row.linkId!)} className="rounded px-1.5 py-0.5 text-[11px] text-red-500 hover:bg-white disabled:opacity-40">解除</button>
-                        ) : null}
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              )}
-
-              {poClosure?.relevant && (
-                <div className={cx("mt-1.5 flex flex-wrap items-center justify-between gap-2 rounded border px-2 py-1.5 text-[11px]",
-                  poClosure.closed ? "border-emerald-100 bg-emerald-50/60 text-emerald-700" : "border-amber-200 bg-amber-50/70 text-amber-700")}>
-                  <span>
-                    采购单金额闭环：关联合计 <span className="font-semibold tabular-nums">{fmtMoney(poClosure.allocTotal)}</span>
-                    {poClosure.gap != null && <> · 与实付差额 <span className="font-semibold tabular-nums">{fmtMoney(poClosure.gap)}</span></>}
-                  </span>
-                  {!poClosure.closed && <span>差额较大：可能存在合并/拆分未完整关联，请标注类型并填写分摊金额</span>}
-                </div>
-              )}
-
-              {poEditorOpen && (
-                <div className="mt-1.5 rounded border border-indigo-100 bg-indigo-50/30 p-2">
-                  <div className="text-[11px] font-medium text-slate-700">关联吉客云采购单</div>
-                  <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 rounded border border-slate-200 bg-white px-2 py-1">
-                    <span className="text-[11px] text-slate-400">关联类型：</span>
-                    {([["", "普通"], ["merged", "合并（多单共一单）"], ["split", "拆分（一单分多单）"]] as const).map(([value, label]) => (
-                      <label key={value || "normal"} className="flex items-center gap-1 text-[11px] text-slate-600">
-                        <input type="radio" name="po-relation-kind" checked={poRelationKind === value} onChange={() => setPoRelationKind(value)} />
-                        {label}
-                      </label>
-                    ))}
-                  </div>
-                  <div className="mt-1.5 flex items-center gap-1.5">
-                    <input value={poLinkNo} onChange={(event) => setPoLinkNo(event.target.value)} placeholder="吉客云采购单号" className="h-7 flex-1 rounded border border-indigo-300 px-2 text-[12px] outline-none" />
-                    <input value={poAllocAmount} onChange={(event) => setPoAllocAmount(event.target.value)} placeholder="分摊金额" className="h-7 w-28 rounded border border-indigo-300 px-2 text-right text-[12px] tabular-nums outline-none" />
-                    <button disabled={poBusy} onClick={() => void linkJackyunPo()} className="h-7 rounded bg-indigo-600 px-2.5 text-[11px] font-medium text-white hover:bg-indigo-700 disabled:opacity-40">{poBusy ? "关联中…" : "关联"}</button>
-                  </div>
-                </div>
-              )}
-
-              {poMessage && <div className={cx("mt-1.5 text-[11px]", poMessage.includes("失败") || poMessage.includes("尚未") || poMessage.includes("请输入") ? "text-amber-600" : "text-emerald-600")}>{poMessage}</div>}
-            </div>
-
-            <div className="mt-2 rounded-lg border border-teal-100 bg-teal-50/20 p-2">
-            <div className="flex items-center justify-between gap-2">
-              <div className="flex min-w-0 items-center gap-1.5">
-                <span className="text-[12px] font-semibold text-teal-800">吉客云入库单</span>
-                <span className={cx("shrink-0 rounded-full px-2 py-0.5 text-[11px] font-medium",
-                  inbound.length > 0 ? "bg-emerald-50 text-emerald-600" : "bg-amber-50 text-amber-700")}>
-                  {inbound.length > 0 ? `已关联 ${inbound.length} 张` : "待关联"}
-                </span>
-              </div>
-              <button disabled={editorBusy || (!order.fileOrderId && !order.externalPoId) || closed} onClick={() => openInboundPicker()} title={closed ? "订单已关闭，不可再关联入库单" : (!order.fileOrderId && !order.externalPoId) ? "该订单尚未建立采购主档，暂无法关联入库单" : "手工关联吉客云入库单"} className="shrink-0 rounded-md bg-indigo-50 px-2.5 py-1.5 text-[12px] font-medium text-indigo-600 hover:bg-indigo-100 disabled:cursor-not-allowed disabled:opacity-40">手工关联入库单</button>
-            </div>
-        {inbound.length > 0 ? (
-          <div className="mt-2 space-y-2">
-            {inbound.map((row, index) => (
-              <InboundDocCard
-                key={(row.linkId ?? row.goodsdocNo ?? "inbound") + "-" + index}
-                doc={row}
-                allocations={allocationsByDoc.get(row.documentId ?? -1) ?? []}
-                closed={closed}
-                editable={editable}
-                usageMaterials={usageMaterials}
-                usageMappings={usageMappings}
-                busy={editorBusy || docAmountBusy}
-                onChanged={onOrderChanged}
-                onRequestReplace={(linkId) => openInboundPicker(linkId)}
-                onRemove={(linkId) => void removeInboundLink(linkId)}
-                onCorrectAmount={(documentId) => void correctInboundAmount(documentId)}
-                onSaveAmount={(documentId, value) => void saveInboundAmount(documentId, value, "吉客云录入金额错误更正")}
-                onEditAllocation={(alloc, consumable) => {
-                  setEditingAllocation(alloc.id ?? null);
-                  setSelectedSkuId(alloc.skuId ?? null);
-                  setSkuEntry(`${alloc.skuCode ?? ""}${alloc.goodsName ? ` · ${alloc.goodsName}` : ""}`);
-                  setSkuQty(String(alloc.quantity ?? 1));
-                  setSkuPrice(String(alloc.unitPrice ?? 0));
-                  seedSkuConsumable(alloc.skuId ?? null, String(alloc.quantity ?? 1), consumable);
-                  setSkuEditorTargetDoc(row.documentId ?? null);
-                  setSkuEditorOpen(true);
-                }}
-                onAddSku={(documentId) => {
-                  setEditingAllocation(null);
-                  setSelectedSkuId(null);
-                  setSkuEntry("");
-                  setSkuQty("1");
-                  setSkuPrice("");
-                  seedSkuConsumable(null, "1");
-                  setSkuEditorTargetDoc(documentId);
-                  setSkuEditorOpen(true);
-                }}
-                onRemoveAllocation={(id) => void removeAllocation(id)}
-                onNotify={setSkuMessage}
-                pendingConsumableUpdate={pendingConsumableUpdate?.documentId === row.documentId ? pendingConsumableUpdate : null}
-                onPendingConsumableUpdateApplied={() => setPendingConsumableUpdate(null)}
-                editor={skuEditorOpen && editable && skuEditorTargetDoc != null && skuEditorTargetDoc === row.documentId ? skuEditorRow : null}
-              />
-            ))}
-            {inbound.some((row) => row.linkId && !row.consumableUsageDecided) && (
-              <div className="rounded-md border border-amber-200 bg-amber-50/70 px-2.5 py-2 text-[11px] leading-relaxed text-amber-800">
-                有入库单未登记耗材 —— 在对应单据卡片底部「耗材登记」选「有耗材」或「不使用」后点「保存耗材」。确认采购内容前必须全部明确。
-              </div>
-            )}
-          </div>
-        ) : <div className="mt-2 rounded-md border border-amber-100 bg-amber-50/60 px-2.5 py-2 text-[12px] text-amber-700">尚未关联入库单，点击「手工关联入库单」从候选中选择。</div>}
-{inboundEditorOpen && (
-          <div className="mt-2 rounded-lg border border-indigo-100 bg-indigo-50/30 p-2.5">
-            <div className="flex items-center justify-between gap-2">
-              <span className="text-[12px] font-medium text-slate-700">{replaceInboundLinkId ? "更换当前入库单" : "选择要关联的吉客云入库单"}</span>
-              <button onClick={() => setInboundEditorOpen(false)} className="text-[11px] text-slate-400 hover:text-slate-600">取消</button>
-            </div>
-            <div className="mt-2 flex items-center gap-2 rounded-md border border-slate-200 bg-white px-2.5">
-              <Icon name="search" size={13} />
-              <input value={inboundQuery} onChange={(event) => setInboundQuery(event.target.value)} placeholder="搜索入库单号、供应商或仓库" className="h-8 min-w-0 flex-1 bg-transparent text-[12px] outline-none placeholder:text-slate-400" />
-            </div>
-            <div className="mt-2 max-h-52 space-y-1 overflow-y-auto">
-              {inboundCandidateLoading ? <div className="py-4 text-center text-[12px] text-slate-400">正在读取入库单数据库…</div> : matchingInboundCandidates.length > 0 ? matchingInboundCandidates.map((candidate) => {
-                const linkedElsewhere = candidate.linkedOrderNos.filter((no) => no !== order.orderNo);
-                return (
-                    <button key={candidate.targetId} disabled={candidate.currentlyLinked && !replaceInboundLinkId} onClick={() => selectInboundCandidate(candidate)} className={cx(
-                  "flex w-full items-center justify-between gap-2 rounded-md border px-2.5 py-2 text-left disabled:cursor-not-allowed disabled:opacity-50",
-                  selectedInboundId === candidate.targetId ? "border-indigo-300 bg-white ring-1 ring-indigo-100" : "border-transparent bg-white/75 hover:border-slate-200"
-                )}>
-                  <span className="min-w-0">
-                    <span className="flex items-center gap-1.5"><span className="truncate font-mono text-[12px] font-medium text-slate-700">{candidate.targetNo}</span>{candidate.pendingSuggestion && <span className="shrink-0 rounded bg-amber-50 px-1 py-px text-[8px] text-amber-600">待确认建议</span>}{candidate.currentlyLinked && <span className="shrink-0 rounded bg-emerald-50 px-1 py-px text-[8px] text-emerald-600">本单已关联</span>}{candidate.previouslyRejected && <span className="shrink-0 rounded bg-slate-100 px-1 py-px text-[8px] text-slate-500">曾解除，可重选</span>}</span>
-                    <span className="mt-0.5 block truncate text-[11px] text-slate-400">{fmtDateTime(candidate.targetDate)} · {candidate.targetSupplier || "未注供应商"} · {candidate.warehouseName || "未注仓库"}</span>
-                    <span className="mt-0.5 block truncate text-[11px] text-indigo-500">{candidate.reason}{linkedElsewhere.length > 0 ? ` · 已关联其他订单 ${linkedElsewhere.slice(0, 2).join("、")}` : ""}</span>
-                  </span>
-                  <span className="shrink-0 text-right"><span className="block text-[12px] font-medium tabular-nums text-slate-700">{fmtMoney(candidate.targetAmount)}</span><span className="mt-0.5 block text-[8px] text-slate-400">参考 {(candidate.score * 100).toFixed(0)}%</span></span>
-                </button>
-              );
-            }) : <div className="py-4 text-center text-[12px] text-slate-400">没有符合搜索条件的入库单</div>}
-            </div>
-            {selectedInboundId && (
-              <div className="mt-2 rounded-md border border-amber-200 bg-amber-50/60 p-2.5">
-                <div className="text-[12px] font-semibold text-slate-800">关联前必答：本次入库产生了耗材出库吗？</div>
-                <div className="mt-1.5 flex gap-2">
-                  <button type="button" onClick={() => setUsageDecision("yes")} className={cx("flex-1 rounded-md border px-2 py-1.5 text-[12px] transition-colors",
-                    usageDecision === "yes" ? "border-amber-400 bg-amber-100 font-semibold text-amber-800" : "border-slate-200 bg-white text-slate-500 hover:border-slate-300")}>有耗材使用</button>
-                  <button type="button" onClick={() => { setUsageDecision("no"); setUsageMaterialIds([]); setUsageQtys({}); }} className={cx("flex-1 rounded-md border px-2 py-1.5 text-[12px] transition-colors",
-                    usageDecision === "no" ? "border-slate-500 bg-slate-200 font-semibold text-slate-700" : "border-slate-200 bg-white text-slate-500 hover:border-slate-300")}>本次不使用耗材</button>
-                </div>
-                {usageDecision === "yes" && <>
-                  <div className="mt-2 text-[12px] font-medium text-slate-700">用了哪些耗材？<span className="ml-1 font-normal text-[8.5px] text-slate-400">数量必填，保存后计入耗材台账</span></div>
-                  <SearchableSelect
-                    ariaLabel="添加耗材"
-                    placeholder="＋ 添加耗材（已匹配的会自动带出）"
-                    className="mt-1.5 w-full [&>button]:border-amber-300"
-                    value=""
-                    onChange={(next) => {
-                      const id = Number(next);
-                      if (id && !usageMaterialIds.includes(id)) { setUsageMaterialIds([...usageMaterialIds, id]); setUsageQtys({ ...usageQtys, [id]: "" }); }
-                    }}
-                    options={usageMaterials.filter((row) => !usageMaterialIds.includes(row.id)).map((row) => ({
-                      value: String(row.id), label: `${row.code} · ${row.name}`, keywords: `${row.code} ${row.name}`,
-                    }))}
-                  />
-                  <div className="mt-2 space-y-1.5">
-                    {usageMaterialIds.map((id) => {
-                      const material = usageMaterials.find((row) => row.id === id);
-                      if (!material) return null;
-                      return (
-                        <div key={id} className="flex items-center gap-2 rounded-md bg-white px-2.5 py-2 ring-1 ring-slate-100">
-                          <span className="min-w-0 flex-1 truncate text-[12px] text-slate-700"><span className="font-mono text-[9px] text-slate-400">{material.code}</span> {material.name}</span>
-                          <input required value={usageQtys[id] ?? ""} onChange={(event) => setUsageQtys({ ...usageQtys, [id]: event.target.value })} placeholder="数量" className="h-7 w-16 rounded border border-slate-200 px-2 text-center text-[12px] tabular-nums outline-none focus:border-amber-400" />
-                          <span className="w-8 shrink-0 text-[11px] text-slate-400">{material.unit}</span>
-                          <button type="button" onClick={() => { setUsageMaterialIds(usageMaterialIds.filter((value) => value !== id)); const next = { ...usageQtys }; delete next[id]; setUsageQtys(next); }} className="shrink-0 rounded px-1.5 py-0.5 text-[11px] text-red-400 hover:bg-red-50 hover:text-red-600">移除</button>
-                        </div>
-                      );
-                    })}
-                    {usageMaterialIds.length === 0 && <div className="rounded-md border border-dashed border-amber-300 bg-white/60 px-2 py-2.5 text-center text-[12px] text-amber-700">从上方「＋ 添加耗材」下拉选择耗材，并填写使用数量</div>}
-                  </div>
-                </>}
-              </div>
-            )}
-            <div className="mt-2 flex items-center justify-between gap-2 border-t border-indigo-100 pt-2">
-              <span className="truncate text-[11px] text-slate-500">
-                {selectedInbound ? `已选 ${selectedInbound.targetNo} · ${fmtMoney(selectedInbound.targetAmount)}` : "请选择一张入库单"}
-              </span>
-              <button disabled={editorBusy || !selectedInboundId || !usageDecision} onClick={() => void saveInboundLink()} className="shrink-0 rounded-md bg-indigo-600 px-3 py-1.5 text-[12px] font-medium text-white disabled:opacity-40">{editorBusy ? "保存中…" : replaceInboundLinkId ? "确认更换" : "确认关联"}</button>
-            </div>
+        {(mainError || inboundMessage || skuMessage) && (
+          <div className={cx(
+            "mx-4 mt-2 rounded-md border px-3 py-1.5 text-[11px]",
+            mainError || inboundMessage?.includes("失败") || skuMessage?.includes("失败") || skuMessage?.includes("请")
+              ? "border-amber-200 bg-amber-50 text-amber-800"
+              : "border-emerald-200 bg-emerald-50 text-emerald-700"
+          )}>
+            {mainError || inboundMessage || skuMessage}
           </div>
         )}
-        {inboundMessage && <div className={cx("mt-2 text-[11px]", inboundMessage.includes("失败") || inboundMessage.includes("暂不能") ? "text-red-500" : "text-emerald-600")}>{inboundMessage}</div>}
+
+        <div className="min-h-0 flex-1 overflow-y-auto bg-[#f7f9fd] px-4 py-3">
+          {cancelled && <div className="mb-2 rounded-md border border-slate-200 bg-slate-50 px-3 py-1.5 text-[11px] text-slate-500">已关闭订单只读，不能修改采购参数或商品明细。</div>}
+
+          <section className="rounded-lg border border-slate-200 bg-white">
+            <div className="flex items-center justify-between border-b border-slate-100 px-4 py-2">
+              <div>
+                <h3 className="text-[13px] font-semibold text-slate-800">采购参数</h3>
+                <p className="mt-0.5 text-[10px] text-slate-400">订单级信息只维护一次，商品明细不再重复填写仓库和入库单号</p>
+              </div>
+              <span className="rounded-full bg-indigo-50 px-2 py-0.5 text-[10px] text-indigo-600">一单一仓</span>
             </div>
-          {(manualAllocations.length > 0 || (skuEditorOpen && skuEditorTargetDoc == null)) && (
-            <div className="mt-2 rounded-lg border border-dashed border-slate-200 bg-slate-50/40 px-2.5 py-2">
-              <div className="flex items-center justify-between gap-2">
-                <span className="text-[11px] font-semibold text-slate-600">未关联入库单的明细（手工补录）</span>
-                <div className="flex items-center gap-2">
-                  <span className="text-[11px] text-slate-400">{manualAllocations.length} 行 · {fmtMoney(manualTotal)}</span>
-                  {editable && <button
-                    onClick={() => {
-                      setEditingAllocation(null);
-                      setSelectedSkuId(null);
-                      setSkuEntry("");
-                      setSkuQty("1");
-                      setSkuPrice("");
-                      resetSkuConsumable();
-                      setSkuEditorTargetDoc(null);
-                      setSkuEditorOpen(true);
-                    }}
-                    className="rounded bg-indigo-50 px-1.5 py-0.5 text-[11px] font-medium text-indigo-600 hover:bg-indigo-100"
-                  >＋ 新建</button>}
+            <div className="space-y-2 px-4 py-3">
+              <div className="grid grid-cols-1 gap-2.5 md:grid-cols-4">
+                <div className="flex min-w-0 items-center gap-2">
+                  <label className="w-[4.5em] shrink-0 text-[11px] text-slate-500">供应商<span className="ml-1 text-rose-500">*</span></label>
+                  <input list={"purchase-supplier-" + order.orderId} value={mainForm.supplier} disabled={!editable} onChange={(event) => setMainForm({ ...mainForm, supplier: event.target.value })} className="h-8 min-w-0 flex-1 rounded-md border border-slate-200 bg-white px-2 text-[12px] font-medium text-slate-700 outline-none focus:border-indigo-400 disabled:bg-slate-50" />
+                  <datalist id={"purchase-supplier-" + order.orderId}>
+                    {detail.supplierHistory?.recentOrders.map((item) => <option key={item.orderId} value={item.supplier || ""} />)}
+                  </datalist>
+                </div>
+                <div className="flex min-w-0 items-center gap-2">
+                  <label className="w-[4.5em] shrink-0 text-[11px] text-slate-500">仓库<span className="ml-1 text-rose-500">*</span></label>
+                  <select value={mainForm.warehouseId} disabled={!editable} onChange={(event) => setMainForm({ ...mainForm, warehouseId: event.target.value })} className="h-8 min-w-0 flex-1 rounded-md border border-slate-200 bg-white px-2 text-[12px] font-medium text-slate-700 outline-none focus:border-indigo-400 disabled:bg-slate-50">
+                    <option value="">请选择仓库</option>
+                    {mainForm.warehouseId && !warehouses.some((item) => String(item.id) === mainForm.warehouseId) && <option value={mainForm.warehouseId}>{currentWarehouseName || "当前仓库"}</option>}
+                    {warehouses.map((warehouse) => <option key={warehouse.id} value={String(warehouse.id)}>{warehouse.name}{warehouse.code ? " · " + warehouse.code : ""}</option>)}
+                  </select>
+                </div>
+                <div className="flex min-w-0 items-center gap-2">
+                  <label className="w-[4.5em] shrink-0 text-[11px] text-slate-500">采购金额<span className="ml-1 text-rose-500">*</span></label>
+                  <input
+                    type="number"
+                    min="0"
+                    step="0.01"
+                    inputMode="decimal"
+                    value={mainForm.orderAmount}
+                    disabled={!editable}
+                    onChange={(event) => setMainForm({ ...mainForm, orderAmount: event.target.value })}
+                    placeholder="请输入采购金额"
+                    title="修改后将按新采购金额重新计算发票差额"
+                    className="h-8 min-w-0 flex-1 rounded-md border border-slate-200 bg-white px-2 text-right text-[12px] font-semibold tabular-nums text-slate-800 outline-none focus:border-indigo-400 disabled:bg-slate-50"
+                  />
+                </div>
+                <div className="flex min-w-0 items-center gap-2">
+                  <label className="w-[4.5em] shrink-0 text-[11px] text-slate-500">采购时间<span className="ml-1 text-rose-500">*</span></label>
+                  <input type="date" value={mainForm.date} disabled={!editable} onChange={(event) => setMainForm({ ...mainForm, date: event.target.value })} className="h-8 min-w-0 flex-1 rounded-md border border-slate-200 bg-white px-2 text-[12px] text-slate-700 outline-none focus:border-indigo-400 disabled:bg-slate-50" />
                 </div>
               </div>
-              <table className="mt-1.5 w-full table-fixed border-collapse text-[12px]">
-                <colgroup>
-                  <col style={{ width: "38%" }} />
-                  <col style={{ width: "9%" }} />
-                  <col style={{ width: "11%" }} />
-                  <col style={{ width: "12%" }} />
-                  <col style={{ width: "20%" }} />
-                  <col style={{ width: "10%" }} />
-                </colgroup>
-                <thead>
-                  <tr className="text-[11px] text-slate-400">
-                    <th className="border-b border-slate-200 py-1 pr-2 text-left font-medium">SKU 明细</th>
-                    <th className="border-b border-slate-200 py-1 px-1 text-right font-medium">数量</th>
-                    <th className="border-b border-slate-200 py-1 px-1 text-right font-medium">单价</th>
-                    <th className="border-b border-slate-200 py-1 px-1 text-right font-medium">总价</th>
-                    <th className="border-b border-slate-200 py-1 px-1 text-left font-medium">耗材</th>
-                    <th className="border-b border-slate-200 py-1 pl-2 text-right font-medium">操作</th>
-                  </tr>
-                </thead>
+
+              <div className="grid grid-cols-1 gap-2.5 md:grid-cols-3">
+                <div className="flex min-w-0 items-center gap-2"><label className="w-[4.5em] shrink-0 whitespace-nowrap text-[11px] text-slate-500">采购渠道</label><select value={mainForm.platform} disabled={!editable} onChange={(event) => setMainForm({ ...mainForm, platform: event.target.value })} className="h-8 min-w-0 flex-1 rounded-md border border-slate-200 bg-white px-2 text-[12px] text-slate-700 outline-none focus:border-indigo-400 disabled:bg-slate-50"><option value="1688">1688</option><option value="pdd">拼多多</option><option value="taobao">淘宝 / 天猫</option><option value="other">其他</option></select></div>
+                <div className="flex min-w-0 items-center gap-2"><label className="w-[4.5em] shrink-0 whitespace-nowrap text-[11px] text-slate-500">{isFile ? "订单号" : "采购单号"}</label><input value={mainForm.orderNo} readOnly={isFile} disabled={!editable} onChange={(event) => setMainForm({ ...mainForm, orderNo: event.target.value })} placeholder="请输入本系统采购单号" title={isFile ? "1688 原始订单号不可修改" : "本地新建采购单以此单号作为系统主单号"} className="h-8 min-w-0 flex-1 rounded-md border border-slate-200 bg-white px-2 font-mono text-[11px] text-slate-600 outline-none focus:border-indigo-400 read-only:cursor-not-allowed read-only:bg-slate-50 disabled:bg-slate-50" /></div>
+                <div className="flex min-w-0 items-center gap-2"><label className="w-[4.5em] shrink-0 whitespace-nowrap text-[11px] text-slate-500">付款状态</label><div className={cx("flex h-8 min-w-0 flex-1 items-center rounded-md border px-2 text-[12px] font-medium", isPaid ? "border-emerald-100 bg-emerald-50 text-emerald-700" : "border-amber-100 bg-amber-50 text-amber-700")}>{isPaid ? "已付款" : "待核对"}</div></div>
+              </div>
+
+              <div className="grid grid-cols-1 gap-2.5 md:grid-cols-[minmax(180px,1fr)_minmax(0,1.4fr)]">
+                <div className="flex min-w-0 items-center gap-2">
+                  <label className="w-[5.5em] shrink-0 whitespace-nowrap text-[11px] text-slate-500">发票匹配状态</label>
+                  <div title="由发票池自动匹配，只读" className={cx("flex min-h-8 min-w-0 flex-1 items-center rounded-md border px-2 text-[11px] font-medium", invoiceHasGap ? "border-amber-100 bg-amber-50 text-amber-700" : invoiceStatusClass)}>
+                    {invoiceHasGap ? "金额不足 " + fmtMoney(invoicedAmount) + " / " + fmtMoney(orderAmount) : invoiceStatusText}
+                  </div>
+                </div>
+                <div className="flex min-w-0 items-center gap-2">
+                  <label className="w-[3.5em] shrink-0 whitespace-nowrap text-[11px] text-slate-500">备注</label>
+                  <textarea value={mainForm.title} disabled={!editable} onChange={(event) => setMainForm({ ...mainForm, title: event.target.value })} rows={1} placeholder="可填写采购备注" className="h-8 min-w-0 flex-1 resize-none rounded-md border border-slate-200 bg-white px-2 py-1.5 text-[12px] text-slate-700 outline-none focus:border-indigo-400 disabled:bg-slate-50" />
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <section className="mt-3 overflow-hidden rounded-lg border border-slate-200 bg-white shadow-sm">
+            <div className="flex flex-wrap items-center gap-x-5 gap-y-2 border-b border-slate-100 px-4 py-2.5 text-[11px]">
+              <div className="flex shrink-0 items-center gap-2">
+                <span className="text-slate-500">订单状态</span>
+                <span className={cx("rounded-md px-2 py-1 font-medium", statusClass(detailStatusLabel))}>{detailStatusLabel}</span>
+              </div>
+              <div className="relative flex min-w-[280px] flex-[1_1_360px] items-center gap-2">
+                <label className="shrink-0 whitespace-nowrap text-slate-500">入库单号</label>
+                <input value={inboundNoEntry} disabled={!editable} onFocus={() => {
+                  if (editable && inboundQuery.trim()) setInboundEditorOpen(true);
+                }} onChange={(event) => {
+                  const value = event.target.value;
+                  setInboundNoEntry(value);
+                  setInboundQuery(value);
+                  setInboundMessage("");
+                  setInboundEditorOpen(Boolean(value.trim()));
+                  if (!value.trim()) { setInboundCandidates([]); setSelectedInboundId(null); }
+                }} placeholder="已有单号可关联；新单号按填写值创建，留空自动生成" className="h-8 min-w-0 flex-1 rounded-md border border-slate-200 bg-white px-2 font-mono text-[11px] text-slate-700 outline-none focus:border-indigo-400 disabled:bg-slate-50" />
+                {inbound.length > 0 && <span className="shrink-0 rounded-full bg-emerald-50 px-2 py-1 font-medium text-emerald-600">已关联</span>}
+                {inboundEditorOpen && inboundQuery.trim() && (
+                  <div className="absolute left-0 right-0 top-[36px] z-20 rounded-md border border-slate-200 bg-white p-1.5 shadow-xl">
+                    {inboundCandidateLoading ? <div className="px-2 py-2 text-center text-[11px] text-slate-400">正在查询本地入库单…</div> : matchingInboundCandidates.length > 0 ? matchingInboundCandidates.slice(0, 6).map((candidate) => (
+                      <button key={candidate.targetId} type="button" onClick={() => selectInboundCandidate(candidate)} className={cx("flex w-full items-center justify-between gap-2 rounded px-2 py-1.5 text-left hover:bg-indigo-50", selectedInboundId === candidate.targetId ? "bg-indigo-50" : "")}>
+                        <span className="min-w-0"><span className="block truncate font-mono text-[11px] text-slate-700">{candidate.targetNo}</span><span className="block truncate text-[10px] text-slate-400">{candidate.targetSupplier || "未注供应商"} · {candidate.warehouseName || "未注仓库"}</span></span>
+                        <span className="shrink-0 text-[10px] text-slate-500">{fmtMoney(candidate.targetAmount)}</span>
+                      </button>
+                    )) : <div className="px-2 py-2 text-center text-[11px] text-amber-600">未找到旧入库单，保存时将按此编号新建</div>}
+                  </div>
+                )}
+              </div>
+              <div className="ml-auto flex shrink-0 items-center gap-3 text-slate-500"><span>商品明细 <span className="font-semibold text-slate-800">共 {displayRowCount} 条</span></span>
+              <button type="button" disabled={!editable} onClick={() => { setEditingAllocation(null); setSelectedSkuId(null); setSkuEntry(""); setSkuQty("1"); setSkuTotal(""); resetSkuConsumable(); setSkuEditorTargetDoc(null); setSkuEditorOpen(true); }} className="flex shrink-0 items-center gap-1 rounded-md bg-indigo-600 px-3 py-1.5 text-[11px] font-medium text-white hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-40"><Icon name="plus" size={12} />新增商品</button>
+              </div>
+            </div>
+            <div className="overflow-x-auto">
+              <table className="w-full min-w-[1120px] border-collapse text-[11px]">
+                <thead><tr className="bg-slate-50 text-slate-500">
+                  <th className="border-b border-slate-100 px-3 py-2 text-left font-medium">类型</th>
+                  <th className="border-b border-slate-100 px-2 py-2 text-left font-medium">条形码</th>
+                  <th className="border-b border-slate-100 px-2 py-2 text-left font-medium">商品名称</th>
+                  <th className="border-b border-slate-100 px-2 py-2 text-right font-medium">数量</th>
+                  <th className="border-b border-slate-100 px-2 py-2 text-right font-medium">单价</th>
+                  <th className="border-b border-slate-100 px-2 py-2 text-right font-medium">金额</th>
+                  <th className="border-b border-slate-100 px-2 py-2 text-left font-medium">耗材名称</th>
+                  <th className="border-b border-slate-100 px-2 py-2 text-right font-medium">耗材使用量</th>
+                  <th className="border-b border-slate-100 px-2 py-2 text-center font-medium">耗材匹配</th>
+                  <th className="border-b border-slate-100 px-3 py-2 text-right font-medium">操作</th>
+                </tr></thead>
                 <tbody>
-                  {manualAllocations.map((row, index) => (
-                    <tr key={(row.id ?? row.skuCode ?? "manual") + "-" + index} className="whitespace-nowrap border-b border-slate-100 last:border-0">
-                      <td className="py-1.5 pr-2">
-                        <div className="flex min-w-0 items-center gap-1.5">
-                          <span className="shrink-0 font-mono text-[11px] text-indigo-500">{row.skuCode || "未关联SKU"}</span>
-                          <span className="min-w-0 truncate text-[12px] font-medium text-slate-700" title={`${row.skuCode || ""} ${row.goodsName || "未命名商品"}`}>{row.goodsName || "未命名商品"}</span>
-                        </div>
-                      </td>
-                      <td className="py-1.5 px-1 text-right tabular-nums text-slate-500">{row.quantity ?? "—"}</td>
-                      <td className="py-1.5 px-1 text-right tabular-nums text-slate-500">{fmtMoney(row.unitPrice)}</td>
-                      <td className="py-1.5 px-1 text-right tabular-nums font-medium text-slate-700">{fmtMoney(row.amount)}</td>
-                      <td className="py-1.5 px-1 text-[11px] text-slate-400">—</td>
-                      <td className="py-1.5 pl-2">
-                        {editable && row.id ? (
-                          <div className="flex gap-2">
-                            <button disabled={editorBusy} onClick={() => { setEditingAllocation(row.id!); setSelectedSkuId(row.skuId ?? null); setSkuEntry(`${row.skuCode ?? ""}${row.goodsName ? ` · ${row.goodsName}` : ""}`); setSkuQty(String(row.quantity ?? 1)); setSkuPrice(String(row.unitPrice ?? 0)); resetSkuConsumable(); setSkuEditorTargetDoc(null); setSkuEditorOpen(true); }} className="text-[11px] text-indigo-600 disabled:opacity-40">修改</button>
-                            <button disabled={editorBusy} onClick={() => void removeAllocation(row.id as number)} title="删除这条 SKU 明细" className="text-[11px] text-red-400 hover:text-red-600 disabled:opacity-40">删除</button>
-                          </div>
-                        ) : null}
-                      </td>
-                    </tr>
-                  ))}
-                  {skuEditorOpen && skuEditorTargetDoc == null ? skuEditorRow : null}
+                  {allocations.length > 0 ? allocations.map((row, index) => {
+                    const rowKey = row.id ?? index;
+                    const rowType = order.orderKind === "consumable" ? "consumable" : "goods";
+                    const catalogSku = skuCatalog.find((item) => item.id === row.skuId);
+                    const rowMappings = allocationConsumables(row);
+                    const primary = rowMappings[0];
+                    const combinedShortage = rowMappings.reduce((sum, item) => sum + (item.shortageQty ?? 0), 0);
+                    const hasUnmatched = rowMappings.some((item) => item.status.label === "未匹配");
+                    const noConsumable = catalogSku?.consumablePolicy === "none";
+                    const rowStatus = rowType === "consumable"
+                      ? { label: "—", className: "bg-slate-100 text-slate-400" }
+                      : noConsumable
+                        ? { label: "无需耗材", className: "bg-slate-100 text-slate-500" }
+                      : rowMappings.length === 0
+                        ? { label: "未匹配", className: "bg-orange-50 text-orange-600" }
+                        : hasUnmatched
+                          ? { label: "未匹配", className: "bg-orange-50 text-orange-600" }
+                          : combinedShortage > 0
+                            ? { label: "缺 " + fmtQty(combinedShortage), className: "bg-rose-50 text-rose-600" }
+                            : { label: "已匹配", className: "bg-emerald-50 text-emerald-600" };
+                    const rowUnitPrice = row.unitPrice ?? (row.quantity && row.amount != null ? row.amount / row.quantity : null);
+                    return (
+                      <Fragment key={String(rowKey)}>
+                        <tr className="border-b border-slate-50 align-middle hover:bg-slate-50/50">
+                          <td className="px-3 py-2"><OrderKindTag value={rowType} /></td>
+                          <td className="px-2 py-2 font-mono text-[10px] text-slate-500">{catalogSku?.barcode || row.skuCode || "—"}</td>
+                          <td className="max-w-[300px] px-2 py-2"><div className="truncate font-medium text-slate-700" title={row.goodsName}>{row.goodsName || "未命名商品"}</div></td>
+                          <td className="px-2 py-2 text-right tabular-nums text-slate-600">{fmtQty(row.quantity ?? null)}</td>
+                          <td className="px-2 py-2 text-right tabular-nums text-slate-600">{fmtMoney(rowUnitPrice)}</td>
+                          <td className="px-2 py-2 text-right font-semibold tabular-nums text-slate-800">{fmtMoney(row.amount)}</td>
+                          <td className="max-w-[250px] px-2 py-2 text-slate-600">
+                            {rowType === "consumable" || noConsumable ? <span className="text-slate-400">{noConsumable ? "无需耗材" : "—"}</span> : primary ? <span className="inline-flex max-w-full items-center gap-1"><span className="truncate" title={primary.material?.name || primary.mapping.consumableName}>{primary.material?.name || primary.mapping.consumableName}</span>{rowMappings.length > 1 && <button type="button" onClick={() => setExpandedConsumables((current) => current.includes(rowKey) ? current.filter((value) => value !== rowKey) : [...current, rowKey])} className="shrink-0 rounded bg-indigo-50 px-1.5 py-0.5 text-[10px] font-medium text-indigo-600">+{rowMappings.length - 1}</button>}</span> : <span className="text-slate-400">—</span>}
+                          </td>
+                          <td className="px-2 py-2 text-right tabular-nums text-slate-600">{primary?.usedQty == null ? "—" : fmtQty(primary.usedQty)}</td>
+                          <td className="px-2 py-2 text-center"><span className={cx("inline-flex rounded-full px-2 py-0.5 text-[10px] font-medium", rowStatus.className)}>{rowStatus.label}</span></td>
+                          <td className="whitespace-nowrap px-3 py-2 text-right">{editable && row.id ? <span className="inline-flex items-center gap-1.5"><button type="button" disabled={editorBusy} onClick={() => { setEditingAllocation(row.id!); setSelectedSkuId(row.skuId ?? null); setSkuEntry((row.skuCode || "") + (row.goodsName ? " · " + row.goodsName : "")); setSkuQty(String(row.quantity ?? 1)); setSkuTotal(String(row.amount ?? (row.unitPrice != null ? Number(row.quantity ?? 0) * row.unitPrice : ""))); seedSkuConsumable(row.skuId ?? null, String(row.quantity ?? 1)); setSkuEditorTargetDoc(null); setSkuEditorOpen(true); }} className="inline-flex items-center gap-1 rounded-md border border-indigo-200 bg-indigo-50 px-2 py-1 text-[11px] font-medium text-indigo-600 hover:border-indigo-300 hover:bg-indigo-100 disabled:opacity-40"><Icon name="edit" size={11} />编辑</button><button type="button" disabled={editorBusy} onClick={() => void removeAllocation(row.id as number)} className="rounded-md px-1 py-1 text-rose-500 hover:bg-rose-50 hover:text-rose-600 disabled:opacity-40">删除</button></span> : <span className="text-slate-300">—</span>}</td>
+                        </tr>
+                        {expandedConsumables.includes(rowKey) && rowMappings.length > 1 && <tr className="border-b border-slate-100 bg-indigo-50/30"><td colSpan={10} className="px-5 py-2"><div className="flex flex-wrap gap-x-5 gap-y-1.5">{rowMappings.map((item) => <span key={item.mapping.id} className="inline-flex items-center gap-1.5 text-[10px] text-slate-600"><span className="font-medium">{item.material?.name || item.mapping.consumableName}</span><span>使用 {item.usedQty == null ? "—" : fmtQty(item.usedQty)}</span><span className={cx("rounded-full px-1.5 py-0.5 font-medium", item.status.className)}>{item.status.label}</span></span>)}</div></td></tr>}
+                      </Fragment>
+                    );
+                  }) : consumableItems.length > 0 ? consumableItems.map((item, index) => {
+                    const quantity = Number(item.quantity || 0);
+                    const unitCost = Number(item.unitCost || 0);
+                    const amount = quantity * unitCost;
+                    const receivedQty = Number(item.receivedQty || 0);
+                    const isEditing = editingConsumable?.purchaseId === item.purchaseId && editingConsumable?.id === item.id;
+                    if (isEditing) return (
+                      <tr key={`consumable-${item.id ?? index}`} className="border-b border-indigo-100 bg-indigo-50/60 align-middle">
+                        <td className="px-3 py-2"><OrderKindTag value="consumable" /></td>
+                        <td className="px-2 py-2 font-mono text-[10px] text-slate-500">{item.code || "—"}</td>
+                        <td className="max-w-[300px] px-2 py-2"><div className="truncate font-medium text-slate-700" title={item.name}>{item.name || "未命名耗材"}</div><div className="mt-0.5 text-[10px] text-slate-400">已入库 {fmtQty(receivedQty)} {item.unit || ""}</div></td>
+                        <td className="px-2 py-2 text-right"><input type="number" min={receivedQty || 0.0001} step="0.0001" aria-label="耗材数量" value={consumableEditQty} onChange={(event) => setConsumableEditQty(event.target.value)} className="h-8 w-full max-w-[92px] rounded border border-indigo-300 bg-white px-1.5 text-right text-[11px] tabular-nums outline-none focus:border-indigo-500" /></td>
+                        <td className="px-2 py-2 text-right tabular-nums font-medium text-slate-700">{fmtMoney(Number(consumableEditQty) > 0 && consumableEditTotal !== "" ? Number(consumableEditTotal) / Number(consumableEditQty) : null)}</td>
+                        <td className="px-2 py-2 text-right"><input type="number" min="0" step="0.0001" aria-label="耗材总价" value={consumableEditTotal} onChange={(event) => setConsumableEditTotal(event.target.value)} className="h-8 w-full max-w-[104px] rounded border border-indigo-300 bg-white px-1.5 text-right text-[11px] tabular-nums outline-none focus:border-indigo-500" /></td>
+                        <td className="px-2 py-2 text-slate-400">—</td>
+                        <td className="px-2 py-2 text-right tabular-nums text-slate-400">—</td>
+                        <td className="px-2 py-2 text-center"><span className="inline-flex rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-medium text-slate-500">—</span></td>
+                        <td className="whitespace-nowrap px-3 py-2 text-right"><span className="inline-flex items-center gap-1.5"><button type="button" disabled={consumableEditBusy} onClick={() => void saveConsumableEdit()} className="rounded-md bg-indigo-600 px-2 py-1 text-[11px] font-medium text-white hover:bg-indigo-700 disabled:opacity-40">{consumableEditBusy ? "保存中…" : "保存"}</button><button type="button" disabled={consumableEditBusy} onClick={cancelConsumableEdit} className="rounded-md px-1 py-1 text-slate-500 hover:bg-slate-100 disabled:opacity-40">取消</button></span></td>
+                      </tr>
+                    );
+                    return (
+                      <tr key={`consumable-${item.id ?? index}`} className="border-b border-slate-50 align-middle hover:bg-slate-50/50">
+                        <td className="px-3 py-2"><OrderKindTag value="consumable" /></td>
+                        <td className="px-2 py-2 font-mono text-[10px] text-slate-500">{item.code || "—"}</td>
+                        <td className="max-w-[300px] px-2 py-2"><div className="truncate font-medium text-slate-700" title={item.name}>{item.name || "未命名耗材"}</div><div className="mt-0.5 text-[10px] text-slate-400">已入库 {fmtQty(receivedQty)} {item.unit || ""}</div></td>
+                        <td className="px-2 py-2 text-right tabular-nums text-slate-600">{fmtQty(quantity)}</td>
+                        <td className="px-2 py-2 text-right tabular-nums text-slate-600">{fmtMoney(unitCost)}</td>
+                        <td className="px-2 py-2 text-right font-semibold tabular-nums text-slate-800">{fmtMoney(amount)}</td>
+                        <td className="px-2 py-2 text-slate-400">—</td>
+                        <td className="px-2 py-2 text-right tabular-nums text-slate-400">—</td>
+                        <td className="px-2 py-2 text-center"><span className="inline-flex rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-medium text-slate-500">—</span></td>
+                        <td className="whitespace-nowrap px-3 py-2 text-right">{editable && item.purchaseId != null ? <button type="button" disabled={consumableEditBusy} onClick={() => startConsumableEdit(item)} className="inline-flex items-center gap-1 rounded-md border border-indigo-200 bg-indigo-50 px-2 py-1 text-[11px] font-medium text-indigo-600 hover:border-indigo-300 hover:bg-indigo-100 disabled:opacity-40"><Icon name="edit" size={11} />编辑</button> : <span className="text-[10px] text-slate-400">耗材采购明细</span>}</td>
+                      </tr>
+                    );
+                  }) : <tr><td colSpan={10} className="py-8 text-center text-[11px] text-slate-400">暂无商品明细，请点击右上角“新增商品”</td></tr>}
+                  {skuEditorOpen ? skuEditorRow : null}
                 </tbody>
               </table>
             </div>
-          )}
-        {allocations.length === 0 && (
-          <div className="mt-2 flex items-center justify-between gap-2 border-t border-slate-100 pt-2">
-            <span className={cx("text-[12px] tabular-nums", remainingAmount !== null && Math.abs(remainingAmount) < 0.005 ? "text-emerald-600" : remainingAmount !== null && remainingAmount < 0 ? "text-red-600" : "text-amber-600")}>
-              {remainingAmount !== null && remainingAmount < -0.005 ? "超分配" : remainingAmount !== null && remainingAmount > 0.005 ? "待分配" : "金额已平衡"} {fmtMoney(remainingAmount)}
-            </span>
-            {editable ? (
-              <button onClick={() => { setEditingAllocation(null); setSelectedSkuId(null); setSkuEntry(""); setSkuQty("1"); setSkuPrice(""); resetSkuConsumable(); setSkuEditorTargetDoc(null); setSkuEditorOpen((open) => !open); }} className="rounded-md bg-indigo-50 px-2.5 py-1.5 text-[12px] font-medium text-indigo-600 hover:bg-indigo-100">
-                {skuEditorOpen ? "收起分配" : "新建 SKU 明细"}
-              </button>
-            ) : <button disabled={editorBusy || closed} onClick={() => void reopenPurchase()} className="text-[12px] text-indigo-600 disabled:opacity-40 disabled:cursor-not-allowed">重新编辑采购内容</button>}
-          </div>
-        )}
-          </DetailSection>
-          )}
-          {docTab === "consumable" && (
-            <OrderConsumableSection order={order} materials={usageMaterials} />
-          )}
-          <DetailSection title="费用分摊" badge="原单总额 / 实际分配">
-          <div className="grid grid-cols-8 items-end gap-1.5">
-            <DetailField label="商品金额" value={fmtMoney(order.goodsTotal ?? order.amount)} strong />
-            <DetailField label="运费" value={fmtMoney(order.freight ?? 0)} strong />
-            <DetailField label="优惠/抵扣" value={fmtMoney(order.discount ?? 0)} strong />
-            <DetailField label="其它费用" value={fmtMoney(extraAmount)} strong />
-            <DetailField label="应付款" value={fmtMoney(payable)} strong />
-            <DetailField label="已付款" value={fmtMoney(paidAmount)} strong />
-            <DetailField label="未付款" value={fmtMoney(unpaidAmount)} strong />
-            {adjEditing ? (
-              <div className="min-w-0 space-y-1">
-                <input autoFocus onFocus={(e) => e.target.select()} value={adjValue}
-                  onChange={(event) => setAdjValue(event.target.value)} placeholder="如 -3.50"
-                  className="h-7 w-full rounded border border-indigo-300 px-1 text-right text-[12px] tabular-nums outline-none" />
-                <input value={adjNote} onChange={(event) => setAdjNote(event.target.value)} placeholder="原因（红包等）"
-                  className="h-7 w-full rounded border border-slate-200 px-1 text-[11px] outline-none" />
-                <div className="flex justify-end gap-1.5">
-                  <button disabled={editorBusy} onClick={() => void saveAdjustment()} className="text-[11px] font-medium text-indigo-600 disabled:opacity-40">保存</button>
-                  <button onClick={() => { setAdjEditing(false); setAdjValue(""); setAdjNote(""); }} className="text-[11px] text-slate-400 hover:text-slate-600">取消</button>
-                </div>
-              </div>
-            ) : (
-              <button type="button" disabled={!order.externalPoId} title="1688 红包等导致开票金额（准确）与订单实付有零头差时使用；分配平衡按 实付+微调 计算"
-                onClick={() => { setAdjValue(order.adjustmentAmount != null ? String(order.adjustmentAmount) : ""); setAdjNote(order.adjustmentNote ?? ""); setAdjEditing(true); }}
-                className="min-w-0 text-left disabled:cursor-not-allowed">
-                <div className="text-[11px] text-slate-400">1688微调 ✎</div>
-                <div className={cx("mt-0.5 truncate text-[12px] font-semibold tabular-nums",
-                  order.adjustmentAmount != null ? "text-amber-700" : "text-slate-400")}>
-                  {order.adjustmentAmount != null ? `${order.adjustmentAmount > 0 ? "+" : ""}${fmtMoney(order.adjustmentAmount)}` : "未调整"}
-                </div>
-              </button>
-            )}
-          </div>
-        {expenses.length > 0 && (
-          <div className="mt-2 flex flex-wrap gap-1.5">
-            {expenses.map((row, index) => (
-              <span key={(row.id ?? "exp") + "-" + index} className="inline-flex items-center gap-1 rounded-full bg-slate-100 px-2 py-0.5 text-[12px] text-slate-600">
-                {EXPENSE_LABEL[row.expenseType ?? ""] ?? row.expenseType ?? "费用"} {fmtMoney(row.amount)}
-                {editable && row.id ? (
-                  <button disabled={editorBusy} onClick={() => void removeExpense(row.id as number)} title="删除这条费用" className="text-red-400 hover:text-red-600 disabled:opacity-40">×</button>
-                ) : null}
-              </span>
-            ))}
-          </div>
-        )}
-        {editable ? (
-          <div className="mt-2 flex items-end gap-1.5 border-t border-slate-100 pt-2">
-            <select value={expenseType} onChange={(event) => setExpenseType(event.target.value)} className="h-7 rounded-md border border-slate-200 bg-white px-1.5 text-[12px] text-slate-700 outline-none focus:border-indigo-300">
-              {Object.entries(EXPENSE_LABEL).map(([key, label]) => <option key={key} value={key}>{label}</option>)}
-            </select>
-            <input value={expenseAmount} onChange={(event) => setExpenseAmount(event.target.value)} placeholder="金额" className="h-7 w-20 rounded-md border border-slate-200 bg-white px-2 text-[12px] text-slate-700 outline-none focus:border-indigo-300" />
-            <button disabled={editorBusy || !expenseAmount} onClick={() => void addExpense()} className="h-7 rounded-md bg-indigo-50 px-2.5 text-[12px] font-medium text-indigo-600 hover:bg-indigo-100 disabled:opacity-40">登记费用</button>
-            {expenseMessage && <span className={cx("text-[11px]", expenseMessage.includes("失败") ? "text-red-500" : "text-emerald-600")}>{expenseMessage}</span>}
-          </div>
-        ) : null}
-          </DetailSection>
-          <RelatedRecordsPanel detail={detail} ensurePo={ensureExternalPoId} onChanged={onOrderChanged} />
-          {nextStatus && !closed ? (
-        <div className="flex items-center justify-between gap-2 rounded-lg border border-slate-200/80 bg-white px-3 py-2">
-          <span className="text-[12px] text-slate-500">当前状态：<span className="font-medium text-slate-700">{detailStatusLabel}</span></span>
-          <button disabled={editorBusy || closed} onClick={() => void advanceStatus()} className="rounded-md bg-white px-2.5 py-1.5 text-[12px] font-medium text-indigo-600 ring-1 ring-slate-200 hover:bg-slate-50 disabled:opacity-40">
-            流转到「{PO_STATUS[nextStatus] ?? nextStatus}」
-          </button>
-        </div>
-          ) : null}
+            {displayRowCount > 0 && <div className="flex flex-wrap items-center justify-between gap-2 border-t border-slate-100 bg-slate-50/50 px-4 py-2 text-[11px]"><span className="text-slate-500">明细合计</span><span className="font-semibold tabular-nums text-slate-800">{fmtMoney(displayTotal)}</span>{hasDetailAmountGap && <span className="ml-auto rounded-md bg-amber-50 px-2 py-1 text-[10px] font-medium text-amber-700">与采购金额 {fmtMoney(purchaseAmount)} 相差 {fmtMoney(Math.abs(detailAmountGap))}，请编辑商品明细确认</span>}</div>}
+          </section>
+
         </div>
       </div>
-      {mainEditOpen && (
-        <div className="fixed inset-0 z-modal-nested flex items-center justify-center bg-slate-900/35 p-5" onMouseDown={(event) => { if (event.target === event.currentTarget) setMainEditOpen(false); }} role="dialog" aria-modal="true" aria-label="编辑订单主档">
-          <form onSubmit={saveMainEdit} className="max-h-[90vh] w-full max-w-xl overflow-y-auto rounded-2xl bg-white p-5 shadow-2xl">
-            <div className="flex items-start justify-between">
-              <div>
-                <h3 className="text-base font-semibold text-slate-800">编辑订单主档</h3>
-                <p className="mt-1 text-xs text-slate-400">{order.orderNo} · 修改会同步 1688 源单与采购副本，并写入审计日志</p>
-              </div>
-              <button type="button" onClick={() => setMainEditOpen(false)} aria-label="关闭编辑订单" className="text-xl leading-none text-slate-300 hover:text-slate-500">×</button>
-            </div>
-            {mainError && <div className="mt-3 rounded-lg bg-red-50 p-2.5 text-xs text-red-600">{mainError}</div>}
-            <div className="mt-4 grid grid-cols-2 gap-3 text-xs">
-              <label className="col-span-2">供应商<input required value={mainForm.supplier} onChange={(event) => setMainForm({ ...mainForm, supplier: event.target.value })} className="mt-1.5 h-9 w-full rounded-lg border border-slate-200 px-3 text-xs text-slate-700 outline-none focus:border-indigo-400" /></label>
-              <label className="col-span-2">标题 / 备注<input value={mainForm.title} onChange={(event) => setMainForm({ ...mainForm, title: event.target.value })} placeholder="可空" className="mt-1.5 h-9 w-full rounded-lg border border-slate-200 px-3 text-xs text-slate-700 outline-none focus:border-indigo-400" /></label>
-              {order.fileOrderId != null ? (<>
-                <label>商品金额（元）<input required type="number" min="0" step="0.01" value={mainForm.goods} onChange={(event) => setMainForm({ ...mainForm, goods: event.target.value })} className="mt-1.5 h-9 w-full rounded-lg border border-slate-200 px-3 text-xs text-slate-700 outline-none focus:border-indigo-400" /></label>
-                <label>运费（元）<input required type="number" min="0" step="0.01" value={mainForm.freight} onChange={(event) => setMainForm({ ...mainForm, freight: event.target.value })} className="mt-1.5 h-9 w-full rounded-lg border border-slate-200 px-3 text-xs text-slate-700 outline-none focus:border-indigo-400" /></label>
-                <label>优惠 / 调整（元）<input type="number" step="0.01" value={mainForm.discount} onChange={(event) => setMainForm({ ...mainForm, discount: event.target.value })} title="按 1688 导入口径：正数从应付金额中扣减" className="mt-1.5 h-9 w-full rounded-lg border border-slate-200 px-3 text-xs text-slate-700 outline-none focus:border-indigo-400" /></label>
-                <label>实付金额（元）<input required type="number" min="0" step="0.01" value={mainForm.paid} onChange={(event) => setMainForm({ ...mainForm, paid: event.target.value })} className="mt-1.5 h-9 w-full rounded-lg border border-slate-200 px-3 text-xs text-slate-700 outline-none focus:border-indigo-400" /></label>
-              </>) : (<>
-                <label>下单日期<input type="date" value={mainForm.date} onChange={(event) => setMainForm({ ...mainForm, date: event.target.value })} className="mt-1.5 h-9 w-full rounded-lg border border-slate-200 px-3 text-xs text-slate-700 outline-none focus:border-indigo-400" /></label>
-                <label>采购渠道<input value={mainForm.platform} onChange={(event) => setMainForm({ ...mainForm, platform: event.target.value })} placeholder="1688 / pdd / taobao / other" className="mt-1.5 h-9 w-full rounded-lg border border-slate-200 px-3 text-xs text-slate-700 outline-none focus:border-indigo-400" /></label>
-                <label>订单金额（元）<input required type="number" min="0" step="0.01" value={mainForm.orderAmount} onChange={(event) => setMainForm({ ...mainForm, orderAmount: event.target.value })} className="mt-1.5 h-9 w-full rounded-lg border border-slate-200 px-3 text-xs text-slate-700 outline-none focus:border-indigo-400" /></label>
-                <label>实付金额（元）<input required type="number" min="0" step="0.01" value={mainForm.paid} onChange={(event) => setMainForm({ ...mainForm, paid: event.target.value })} className="mt-1.5 h-9 w-full rounded-lg border border-slate-200 px-3 text-xs text-slate-700 outline-none focus:border-indigo-400" /></label>
-              </>)}
-            </div>
-            <p className="mt-3 text-[11px] leading-5 text-slate-400">1688 订单的副本金额按「商品 + 运费 − 优惠」自动同步；SKU 分配平衡目标 = 实付 + 1688微调。金额请按 1688 后台或发票实际数字填写。</p>
-            <div className="mt-4 flex justify-end gap-2">
-              <button type="button" onClick={() => setMainEditOpen(false)} className="rounded-lg border border-slate-200 px-4 py-2 text-xs text-slate-600">取消</button>
-              <button disabled={mainSaving} className="rounded-lg bg-indigo-600 px-4 py-2 text-xs font-medium text-white hover:bg-indigo-700 disabled:opacity-50">{mainSaving ? "保存中…" : "保存修改"}</button>
-            </div>
-          </form>
-        </div>
-      )}
     </aside>
+  );
+}
+
+
+function FormField({ label, required, children, className }: {
+  label: string;
+  required?: boolean;
+  htmlFor?: string;
+  children: ReactNode;
+  className?: string;
+}) {
+  return (
+    <div className={cx("min-w-0", className)}>
+      <div className="flex items-center gap-1 text-[11px] text-slate-500">
+        {label}
+        {required && <span className="text-rose-500">*</span>}
+      </div>
+      <div className="mt-0.5 leading-7 text-[12px] text-slate-700">{children}</div>
+    </div>
   );
 }
 
@@ -3817,6 +3965,10 @@ function Icon({ name, size = 16 }: { name: IconName; size?: number }) {
     search: "m21 21-4.5-4.5M19 11a8 8 0 1 1-16 0 8 8 0 0 1 16 0z",
     copy: "M9 9h11v11H9zM5 15V5h10",
     chevron: "m8 10 4 4 4-4",
+    history: "M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18zm1-13v5l4 2 1-1.5-3.5-1.8V8H13z",
+    "alert-circle": "M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18zm0-12v5m0 3v.01",
+    edit: "M4 20h4l10.5-10.5a2.1 2.1 0 0 0-4-4L4 16v4zm9.5-13.5 4 4",
+    x: "M18 6 6 18M6 6l12 12",
   };
   return <svg width={size} height={size} viewBox="0 0 24 24" fill="none" aria-hidden="true" className="shrink-0"><path d={paths[name]} stroke="currentColor" strokeWidth="1.65" strokeLinecap="round" strokeLinejoin="round" /></svg>;
 }
@@ -4022,7 +4174,7 @@ function ChainPanel({ overview, orders, total, pending, filter, loading, busy, p
           type="button"
           disabled={prelinkBusy}
           onClick={() => void onPrelink(true)}
-          title="多因子打分（SKU 重合+供应商+时间窗）：达到阈值的候选自动关联并确认；没有耗材来源信息时明确记为不使用耗材，不扣库存。一笔订单可拆批关联多张入库单。"
+          title="多因子打分（SKU 重合+供应商+时间窗）：达到阈值的候选自动关联并确认；耗材按正品实际入库数量和映射自动扣减。一笔订单可拆批关联多张入库单。"
           className={cx(
             "rounded-md px-2.5 py-1 text-[12px] font-medium transition-colors disabled:opacity-50",
             "bg-indigo-600 text-white hover:bg-indigo-700"
@@ -4593,6 +4745,7 @@ function PendingAllocationCard({ pending, loading, onRefresh, onNotice, onOpenOr
         sku_id: draft.skuId,
         quantity: draft.quantity,
         unit_price: draft.unitPrice,
+        amount: String((Number(draft.quantity) || 0) * (Number(draft.unitPrice) || 0)),
       });
       onNotice(`订单 ${po.externalOrderId} SKU 分配已保存`);
       setDraft(null);

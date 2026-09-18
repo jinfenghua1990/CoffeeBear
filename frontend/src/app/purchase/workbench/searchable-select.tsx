@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { useTabActive } from "@/lib/workspace/tab-store";
 
 export type SearchSelectOption = { value: string; label: string; keywords?: string };
 
@@ -24,15 +25,17 @@ export function SearchableSelect({
   const [query, setQuery] = useState("");
   const boxRef = useRef<HTMLDivElement>(null);
   const selected = options.find((option) => option.value === value);
+  // 工作区下隐藏 Tab 常驻挂载：不监听别的 Tab 里的点击，否则切走再回来下拉会被误关
+  const tabActive = useTabActive();
 
   useEffect(() => {
-    if (!open) return;
+    if (!open || !tabActive) return;
     const handler = (event: MouseEvent) => {
       if (boxRef.current && !boxRef.current.contains(event.target as Node)) setOpen(false);
     };
     document.addEventListener("mousedown", handler);
     return () => document.removeEventListener("mousedown", handler);
-  }, [open]);
+  }, [open, tabActive]);
 
   const keyword = query.trim().toLowerCase();
   const filtered = keyword

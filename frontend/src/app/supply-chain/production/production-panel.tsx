@@ -1,7 +1,7 @@
 "use client";
 
-import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { useSearchParams } from "next/navigation";
 import { authenticatedFetch } from "@/lib/api";
 
 type SkuOption = {
@@ -107,6 +107,7 @@ async function responseError(response: Response, fallback: string) {
 }
 
 export default function ProductionPanel() {
+  const searchParams = useSearchParams();
   const [orders, setOrders] = useState<ProductionOrder[]>([]);
   const [skuOptions, setSkuOptions] = useState<SkuOption[]>([]);
   const [loading, setLoading] = useState(true);
@@ -178,11 +179,11 @@ export default function ProductionPanel() {
   }, [load]);
 
   useEffect(() => {
-    const params = new URLSearchParams(window.location.search);
-    const skuId = params.get("skuId") ?? "";
-    const quantity = params.get("qty") ?? "";
+    // 工作区下必须读本 Tab 冻结的 searchParams：隐藏 Tab 读 window.location.search 会命中别的 Tab
+    const skuId = searchParams.get("skuId") ?? "";
+    const quantity = searchParams.get("qty") ?? "";
     if (skuId) setItems([{ key: Date.now(), skuId, quantity }]);
-  }, []);
+  }, [searchParams]);
 
   const summary = useMemo(() => ({
     active: orders.filter((order) => !["completed", "cancelled"].includes(order.status)).length,
@@ -392,7 +393,7 @@ export default function ProductionPanel() {
 
       <section className="overflow-hidden rounded-xl border border-slate-200 bg-white">
         <div className="flex items-center justify-between border-b border-slate-100 px-4 py-3">
-          <div><h2 className="text-sm font-semibold text-slate-900">生产单列表</h2><p className="mt-1 text-[11px] text-slate-500">内容全部展开；缺料直接标红，生产推进后从“生产 / 在途”继续操作。</p></div>
+          <div><h2 className="text-sm font-semibold text-slate-900">生产单列表</h2><p className="mt-1 text-[11px] text-slate-500">内容全部展开；缺料直接标红。</p></div>
           <button onClick={load} disabled={loading} className="rounded-md border border-slate-200 px-3 py-1.5 text-xs text-slate-600 hover:bg-slate-50 disabled:opacity-50">{loading ? "刷新中…" : "刷新"}</button>
         </div>
         <div className="overflow-x-auto">
@@ -416,7 +417,6 @@ export default function ProductionPanel() {
                     <td className="px-4 py-3 align-top">
                       <div className="flex flex-wrap gap-1.5">
                         {["planned", "confirmed"].includes(order.status) && <button onClick={() => recalculate(order.id)} className="rounded-md border border-slate-200 px-2 py-1 text-[11px] text-slate-600 hover:bg-slate-50">重算耗材</button>}
-                        {!["completed", "cancelled"].includes(order.status) && <Link href="/supply-chain/in-transit" className="rounded-md border border-indigo-200 px-2 py-1 text-[11px] text-indigo-700 hover:bg-indigo-50">去执行</Link>}
                         {!["completed", "cancelled"].includes(order.status) && <button onClick={() => cancel(order.id)} className="rounded-md border border-red-100 px-2 py-1 text-[11px] text-red-600 hover:bg-red-50">取消</button>}
                       </div>
                     </td>

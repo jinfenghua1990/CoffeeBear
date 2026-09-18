@@ -68,6 +68,12 @@ def detect_report_type(headers: list[str]) -> str:
         return "aftersales"
     if _matches(normalized, ("入库单号", "入库单据号", "入库单编号")):
         return "inbound"
+    if (
+        _matches(normalized, ("申请单号", "入库申请单号", "入库申请编号"))
+        and _matches(normalized, ("入库数量", "申请数量", "入库类型"))
+        and has_product_ref
+    ):
+        return "inbound"
     if _matches(normalized, ("出库单号", "出库单据号", "出库单编号", "发货单号")):
         return "outbound"
     if _matches(normalized, ("采购单号", "采购订单号", "采购单编号")):

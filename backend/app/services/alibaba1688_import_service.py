@@ -103,11 +103,15 @@ def _sync_purchase_workflow_order(
     goods_total = _to_decimal(data.get("goods_total")) if data.get("goods_total") not in (None, "") else None
     freight = _to_decimal(data.get("freight")) if data.get("freight") not in (None, "") else None
     discount = _to_decimal(data.get("discount")) if data.get("discount") not in (None, "") else None
+    logistics = data.get("logistics") if isinstance(data.get("logistics"), dict) else {}
     order_amount = None
     if goods_total is not None or freight is not None or discount is not None:
         order_amount = (goods_total or Decimal("0")) + (freight or Decimal("0")) - (discount or Decimal("0"))
     now = datetime.now(timezone.utc)
     raw = {"source": source, **_json_safe_dict(data)}
+
+    from app.services.supplier_sync_service import ensure_supplier
+    ensure_supplier(db, supplier, platform="1688")
 
     row = db.query(ExternalPurchaseOrder).filter_by(
         external_order_id=external_order_id
@@ -123,6 +127,7 @@ def _sync_purchase_workflow_order(
             order_amount=order_amount,
             paid_amount=paid_amount,
             order_status=order_status,
+            logistics=logistics,
             synced_at=now,
             raw=raw,
         ))
@@ -150,6 +155,11 @@ def _sync_purchase_workflow_order(
     if paid_amount is not None and row.paid_amount != paid_amount:
         row.paid_amount = paid_amount
         changed = True
+    if logistics:
+        merged_logistics = {**(row.logistics or {}), **logistics}
+        if row.logistics != merged_logistics:
+            row.logistics = merged_logistics
+            changed = True
     merged_raw = {**(row.raw or {}), **raw}
     if row.raw != merged_raw:
         row.raw = merged_raw
@@ -219,6 +229,7 @@ def upsert_order_data(
     source: str = "alibaba1688_file",
     adopt_from_deleted: bool = True,
     update_status: bool = False,
+    restore_deleted: bool = False,
 ) -> str:
     """把一条标准字段订单 upsert 到来源表 + 采购工作流表（Excel 导入与浏览器直采共用）。
 
@@ -226,6 +237,7 @@ def upsert_order_data(
     - ``created``         新订单（来源表 + 工作流都新建）
     - ``adopted``         已有订单从回收站批次重新挂到当前批次
     - ``merged``          已有订单刷新状态/时间/金额（浏览器直采会更新 order_status）
+    - ``restored`` 用户明确按订单号补拉，恢复之前软删除的订单
     - ``skipped_deleted`` 用户在明细核对中逐行删除过的订单，不自动复活
     - ``skipped_no_id``   缺订单号，无法处理
     """
@@ -248,6 +260,13 @@ def upsert_order_data(
             _merge_source_order(existing, data, source=source, update_status=update_status)
             _sync_purchase_workflow_order(db, data, source=source)
             return "adopted" if adopted else "merged"
+        if restore_deleted:
+            # 只有显式的单号补拉才允许恢复；挂到当前有效批次，重新进入采购工作台。
+            existing.row_status = "active"
+            existing.import_id = import_id
+            _merge_source_order(existing, data, source=source, update_status=update_status)
+            _sync_purchase_workflow_order(db, data, source=source)
+            return "restored"
         # 用户明确删除过的行不随重复导入自动回到工作流；保留来源字段补全语义。
         return "skipped_deleted"
     db.add(Alibaba1688Order(

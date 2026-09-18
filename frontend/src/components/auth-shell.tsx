@@ -1,41 +1,35 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { usePathname, useRouter } from "next/navigation";
 import Sidebar from "@/components/sidebar";
 import SystemStatusBar from "@/components/system-status-bar";
 import TopBar from "@/components/top-bar";
+import WorkspaceHost from "@/components/workspace/workspace-host";
 import { fetchMe, getToken, redirectToLogin } from "@/lib/api";
-import { workbenchHref } from "@/lib/workbench-navigation";
 
 /**
- * 路由守卫：除 /login 外，先向服务端校验令牌，再渲染业务页面。
+ * 路由守卫 + 全局外壳。
  *
- * V1.6.1 统一使用同一套全局侧栏 + 动态主内容区。
- * 采购工作台只保留采购域业务视图；历史 WorkbenchSidebar 源码已删除，
- * 不再存在“双侧栏 / 套工作台”的第二套视觉外壳。
+ * V1.6.4 起主内容区由「工作区（Workspace Tabs）」接管渲染：
+ * 页面内容不再由 Next 路由直接渲染，而是由工作区按 Tab 挂载并保活，
+ * 地址栏只负责与「激活 Tab 的 URL」保持一致（识别与深链）。
  */
 export default function AuthShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const router = useRouter();
   const [ready, setReady] = useState(false);
   const openAccess = process.env.NEXT_PUBLIC_ACCESS_MODE === "open";
+  // 令牌只校验一次：工作区下切换 Tab 也会改地址栏，不能因此把整个工作区卸载重建
+  const validatedRef = useRef(false);
 
   useEffect(() => {
     if (pathname === "/login") {
       setReady(true);
       return;
     }
-
-    // 仅废弃旧采购地址做兼容跳转；正式业务页保持自己的平铺路由。
-    const destination = workbenchHref(pathname + window.location.search);
-    if (destination !== pathname + window.location.search) {
-      setReady(false);
-      router.replace(destination);
-      return;
-    }
-
     if (openAccess) {
+      validatedRef.current = true;
       setReady(true);
       return;
     }
@@ -43,12 +37,14 @@ export default function AuthShell({ children }: { children: React.ReactNode }) {
       router.replace("/login");
       return;
     }
+    if (validatedRef.current) return;
 
     let cancelled = false;
-    setReady(false);
     fetchMe()
       .then(() => {
-        if (!cancelled) setReady(true);
+        if (cancelled) return;
+        validatedRef.current = true;
+        setReady(true);
       })
       .catch(() => {
         if (!cancelled) redirectToLogin();
@@ -61,8 +57,6 @@ export default function AuthShell({ children }: { children: React.ReactNode }) {
   if (pathname === "/login") return <>{children}</>;
   if (!ready) return null;
 
-  const purchaseWorkbench = pathname === "/purchase/workbench";
-
   return (
     <div className="flex h-screen w-full min-w-0 flex-col overflow-hidden bg-[#f4f7fb]">
       <TopBar />
@@ -71,14 +65,8 @@ export default function AuthShell({ children }: { children: React.ReactNode }) {
           <Sidebar />
           <SystemStatusBar />
         </div>
-        <main
-          data-app-main
-          data-purchase-workbench={purchaseWorkbench ? "true" : undefined}
-          className={`h-full w-0 min-w-0 flex-1 overflow-x-hidden overflow-y-auto ${
-            purchaseWorkbench ? "p-0" : "px-6 py-5 xl:px-8 xl:py-6"
-          }`}
-        >
-          <div className="app-route-content w-full min-w-0">{children}</div>
+        <main data-app-main className="flex h-full min-h-0 w-0 min-w-0 flex-1 flex-col overflow-hidden">
+          <WorkspaceHost />
         </main>
       </div>
     </div>

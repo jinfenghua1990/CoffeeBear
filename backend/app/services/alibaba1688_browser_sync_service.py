@@ -17,10 +17,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import secrets
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from sqlalchemy.orm import Session
 
@@ -45,6 +47,101 @@ CONNECTION_MODE = "浏览器直采"
 PROFILE_LOCK_KEY = "ecommerce:lock:alibaba1688-browser-profile"
 PROFILE_LOCK_TTL_SECONDS = 15 * 60
 VIRTUAL_BATCH_PATH_MARKER = "browser://direct-capture"
+_TIME_FIELD_LABELS = {
+    "order_time": "下单时间",
+    "pay_time": "付款时间",
+}
+_CLOSED_ORDER_STATUS_RE = re.compile(
+    r"交易关闭|订单关闭|已关闭|关闭|已取消|交易取消|取消|closed|cancelled|canceled|cancel",
+    re.IGNORECASE,
+)
+
+
+def _is_closed_order_status(value: Any) -> bool:
+    """判断 1688 订单是否属于关闭/取消状态，不让其进入采购订单表。"""
+    return bool(_CLOSED_ORDER_STATUS_RE.search(str(value or "").strip()))
+
+
+def _normalize_time_field(value: str | None) -> str:
+    field = (value or "order_time").strip()
+    if field not in _TIME_FIELD_LABELS:
+        raise ValueError("不支持的 1688 时间维度")
+    return field
+
+
+def _matches_supplier(data: dict[str, Any], supplier: str) -> bool:
+    """按供应商公司名或供应商账号匹配，允许输入公司名的一部分。"""
+    needle = supplier.strip().casefold()
+    if not needle:
+        return True
+    return any(
+        needle in str(data.get(field) or "").strip().casefold()
+        for field in ("seller_company_name", "seller_member_name")
+    )
+
+
+def _matches_keyword(data: dict[str, Any], keyword: str) -> bool:
+    """在映射字段和原始 1688 响应中查找商品名、SKU 等关键词。"""
+    needle = keyword.strip().casefold()
+    if not needle:
+        return True
+    mapped_text = " ".join(str(value or "") for key, value in data.items() if not key.startswith("_"))
+    raw_text = json.dumps(data.get("_raw") or {}, ensure_ascii=False, default=str)
+    return needle in f"{mapped_text} {raw_text}".casefold()
+
+
+_FINISHED_ORDER_STATUS_RE = re.compile(
+    r"(?:交易成功|已完成|已收货|已签收|success|finished|completed)",
+    re.IGNORECASE,
+)
+
+
+def _is_finished_order_status(value: Any) -> bool:
+    """识别明确已完成的订单；不把待完成等中间状态误判为完成。"""
+    return bool(_FINISHED_ORDER_STATUS_RE.search(str(value or "").strip()))
+
+
+def _parse_sync_date(value: str | date | None, field_name: str) -> date | None:
+    if value is None or value == "":
+        return None
+    if isinstance(value, date):
+        return value
+    try:
+        return date.fromisoformat(str(value))
+    except ValueError as exc:
+        raise ValueError(f"{field_name} 必须是 YYYY-MM-DD") from exc
+
+
+def _date_boundary(value: date) -> datetime:
+    try:
+        local_tz = ZoneInfo(settings.TZ)
+    except Exception:  # noqa: BLE001 - 时区配置异常时回退 UTC
+        local_tz = timezone.utc
+    return datetime.combine(value, time.min, tzinfo=local_tz).astimezone(timezone.utc)
+
+
+def _normalize_sync_scope(
+    mode: str,
+    start_date: str | date | None,
+    end_date: str | date | None,
+    order_no: str | None,
+) -> tuple[date | None, date | None, str | None]:
+    if mode not in {"incremental", "range", "single"}:
+        raise ValueError("不支持的 1688 拉取模式")
+    if mode == "single":
+        target = (order_no or "").strip()
+        if not target:
+            raise ValueError("单个补拉必须填写 1688 采购订单号")
+        return None, None, target
+    if mode == "range":
+        start = _parse_sync_date(start_date, "开始日期")
+        end = _parse_sync_date(end_date, "结束日期")
+        if start is None or end is None:
+            raise ValueError("按时间范围拉取必须填写开始日期和结束日期")
+        if start > end:
+            raise ValueError("开始日期不能晚于结束日期")
+        return start, end, None
+    return None, None, None
 
 
 class SyncAlreadyRunningError(Exception):
@@ -175,15 +272,45 @@ def _create_virtual_batch(db: Session, actor: str, row_count: int) -> Alibaba168
     )
 
 
-def sync_orders(db: Session, *, actor: str = "system") -> dict[str, Any]:
-    """主同步入口：打开浏览器 → 逐页捕获 mtop → 增量 upsert → 虚拟批次落库。"""
+def sync_orders(
+    db: Session,
+    *,
+    actor: str = "system",
+    mode: str = "incremental",
+    start_date: str | date | None = None,
+    end_date: str | date | None = None,
+    order_no: str | None = None,
+    supplier: str | None = None,
+    keyword: str | None = None,
+    only_unfinished: bool = False,
+    time_field: str = "order_time",
+) -> dict[str, Any]:
+    """主同步入口：按增量、时间范围或单号逐页捕获并幂等落库。"""
     if not settings.ALIBABA_1688_BROWSER_ENABLED:
         return {"status": "skipped", "reason": "browser channel disabled"}
+
+    scope_start, scope_end, target_order_no = _normalize_sync_scope(
+        mode, start_date, end_date, order_no
+    )
+    normalized_time_field = _normalize_time_field(time_field)
+    supplier_filter = (supplier or "").strip()
+    keyword_filter = (keyword or "").strip()
 
     job = start_sync_job(db, PROVIDER, "browser_orders")
     try:
         with _ProfileLock():
-            result = _sync_with_browser(db, actor=actor)
+            result = _sync_with_browser(
+                db,
+                actor=actor,
+                mode=mode,
+                scope_start=scope_start,
+                scope_end=scope_end,
+                target_order_no=target_order_no,
+                supplier_filter=supplier_filter,
+                keyword_filter=keyword_filter,
+                only_unfinished=only_unfinished,
+                time_field=normalized_time_field,
+            )
         job_status = "success" if result.get("status") == "success" else result.get("status", "failed")
         finish_sync_job(db, job, job_status, result.get("stats") or {}, result.get("message", ""))
         if result.get("status") == "success":
@@ -243,7 +370,19 @@ def sync_orders(db: Session, *, actor: str = "system") -> dict[str, Any]:
         raise
 
 
-def _sync_with_browser(db: Session, *, actor: str) -> dict[str, Any]:
+def _sync_with_browser(
+    db: Session,
+    *,
+    actor: str,
+    mode: str,
+    scope_start: date | None,
+    scope_end: date | None,
+    target_order_no: str | None,
+    supplier_filter: str,
+    keyword_filter: str,
+    only_unfinished: bool,
+    time_field: str,
+) -> dict[str, Any]:
     """持锁执行浏览器捕获与落库（锁由调用方管理）。"""
     with Alibaba1688BrowserAdapter() as adapter:
         logged_in, account = adapter.check_login()
@@ -280,17 +419,31 @@ def _sync_with_browser(db: Session, *, actor: str) -> dict[str, Any]:
             .filter(Alibaba1688Order.row_status != "deleted")
             .all()
         }
+        deleted_ids = {
+            row[0]
+            for row in db.query(Alibaba1688Order.external_order_id)
+            .filter(Alibaba1688Order.row_status == "deleted")
+            .all()
+        }
         counters: dict[str, int] = {
             "created": 0, "adopted": 0, "merged": 0,
-            "skippedDeleted": 0, "skippedNoId": 0,
+            "restored": 0, "duplicates": 0, "skippedDeleted": 0, "skippedNoId": 0,
+            "skippedOutOfWindow": 0, "skippedNonTarget": 0, "skippedClosed": 0,
+            "skippedSupplier": 0, "skippedKeyword": 0, "skippedFinished": 0,
         }
         new_order_numbers: set[str] = set()
         consecutive_known = 0
         pages_visited = 0
         raw_seen = 0
+        target_found = False
+        target_closed = False
+        target_closed_status = ""
+        target_supplier_mismatch = False
         stop_reason = "end"
         lookback_days = max(int(settings.ALIBABA_1688_BROWSER_LOOKBACK_DAYS), 1)
         lookback_cutoff = datetime.now(timezone.utc) - timedelta(days=lookback_days)
+        range_start = _date_boundary(scope_start) if scope_start else None
+        range_end_exclusive = _date_boundary(scope_end + timedelta(days=1)) if scope_end else None
 
         batch = _create_virtual_batch(db, actor, row_count=0)
         db.add(batch)
@@ -298,9 +451,9 @@ def _sync_with_browser(db: Session, *, actor: str) -> dict[str, Any]:
 
         for page_responses in adapter.iter_order_pages():
             pages_visited += 1
-            page_orders = 0
+            page_order_count = 0
             page_has_new_order = False
-            page_order_times: list[datetime] = []
+            page_time_values: list[datetime] = []
             seen_on_page: set[str] = set()
             for response in page_responses:
                 for raw_order in extract_orders(response):
@@ -308,32 +461,80 @@ def _sync_with_browser(db: Session, *, actor: str) -> dict[str, Any]:
                     order_id = str(data.get("external_order_id") or "").strip()
                     # 同一页的多条 mtop 响应可能包含重复订单，按订单号去重。
                     if order_id and order_id in seen_on_page:
+                        counters["duplicates"] += 1
                         continue
                     if order_id:
                         seen_on_page.add(order_id)
-                    page_orders += 1
-                    raw_seen += 1
+                    page_order_count += 1
                     if not order_id:
                         counters["skippedNoId"] += 1
                         continue
+                    selected_time = data.get(time_field)
+                    if isinstance(selected_time, datetime):
+                        if selected_time.tzinfo is None:
+                            selected_time = selected_time.replace(tzinfo=timezone.utc)
+                        page_time_values.append(selected_time)
+                    if mode == "single" and order_id != target_order_no:
+                        counters["skippedNonTarget"] += 1
+                        continue
+                    if mode == "range" and (
+                        not isinstance(selected_time, datetime)
+                        or range_start is None
+                        or range_end_exclusive is None
+                        or selected_time < range_start
+                        or selected_time >= range_end_exclusive
+                    ):
+                        counters["skippedOutOfWindow"] += 1
+                        continue
+                    if supplier_filter and not _matches_supplier(data, supplier_filter):
+                        counters["skippedSupplier"] += 1
+                        if mode == "single":
+                            target_supplier_mismatch = True
+                        continue
+                    if keyword_filter and not _matches_keyword(data, keyword_filter):
+                        counters["skippedKeyword"] += 1
+                        continue
+                    if mode == "single":
+                        if _is_closed_order_status(data.get("order_status")):
+                            counters["skippedClosed"] += 1
+                            target_closed = True
+                            target_closed_status = str(data.get("order_status") or "关闭")
+                            continue
+                        target_found = True
+                    if _is_closed_order_status(data.get("order_status")):
+                        counters["skippedClosed"] += 1
+                        if mode == "incremental":
+                            # 关闭订单也属于已识别记录，避免每次增量都反复翻过同一页。
+                            consecutive_known += 1
+                        continue
+                    if only_unfinished and _is_finished_order_status(data.get("order_status")):
+                        counters["skippedFinished"] += 1
+                        continue
+                    if mode != "single" and order_id in deleted_ids:
+                        counters["skippedDeleted"] += 1
+                        if mode == "incremental":
+                            consecutive_known += 1
+                        continue
+                    raw_seen += 1
                     if order_id in known_ids:
-                        consecutive_known += 1
+                        counters["duplicates"] += 1
+                        if mode == "incremental":
+                            consecutive_known += 1
+                    elif order_id in deleted_ids:
+                        consecutive_known = 0
+                        new_order_numbers.add(order_id)
                     else:
                         page_has_new_order = True
                         consecutive_known = 0
                         known_ids.add(order_id)
                         new_order_numbers.add(order_id)
-                    order_time = data.get("order_time")
-                    if isinstance(order_time, datetime):
-                        if order_time.tzinfo is None:
-                            order_time = order_time.replace(tzinfo=timezone.utc)
-                        page_order_times.append(order_time)
                     outcome = upsert_order_data(
                         db, data,
                         import_id=batch.id,
                         source="alibaba1688_browser",
                         adopt_from_deleted=True,
                         update_status=True,
+                        restore_deleted=mode == "single",
                     )
                     if outcome == "skipped_deleted":
                         counters["skippedDeleted"] += 1
@@ -341,30 +542,131 @@ def _sync_with_browser(db: Session, *, actor: str) -> dict[str, Any]:
                         counters["skippedNoId"] += 1
                     else:
                         counters[outcome] += 1
-            if page_orders == 0:
+            if page_order_count == 0:
                 # 页面响应里没有订单：可能是末页，也可能是登录态/页面结构异常。
                 stop_reason = "empty_page"
                 break
-            page_is_older_than_window = bool(page_order_times) and all(
-                order_time < lookback_cutoff for order_time in page_order_times
-            )
-            if page_is_older_than_window and not page_has_new_order:
-                # 已知阈值仍作为兼容性兜底，但不再是唯一的停止条件。
-                stop_reason = (
-                    "known_threshold"
-                    if consecutive_known >= settings.ALIBABA_1688_BROWSER_STOP_AFTER_KNOWN
-                    else "lookback_window"
+            if target_closed:
+                stop_reason = "target_closed"
+                break
+            if mode == "single" and target_found:
+                stop_reason = "target_found"
+                break
+            if mode == "range":
+                page_is_older_than_range = bool(page_time_values) and range_start is not None and all(
+                    selected_time < range_start for selected_time in page_time_values
                 )
-                break
-            if consecutive_known >= settings.ALIBABA_1688_BROWSER_STOP_AFTER_KNOWN:
-                # 订单通常按时间倒序：连续 N 条都是已知订单，作为保守兜底停止。
-                stop_reason = "known_threshold"
-                break
+                if page_is_older_than_range:
+                    stop_reason = "date_range"
+                    break
+            if mode == "incremental":
+                page_is_older_than_window = bool(page_time_values) and all(
+                    selected_time < lookback_cutoff for selected_time in page_time_values
+                )
+                if page_is_older_than_window and not page_has_new_order:
+                    # 已知阈值仍作为兼容性兜底，但不再是唯一的停止条件。
+                    stop_reason = (
+                        "known_threshold"
+                        if consecutive_known >= settings.ALIBABA_1688_BROWSER_STOP_AFTER_KNOWN
+                        else "lookback_window"
+                    )
+                    break
+                if consecutive_known >= settings.ALIBABA_1688_BROWSER_STOP_AFTER_KNOWN:
+                    # 订单通常按时间倒序：连续 N 条都是已知订单，作为保守兜底停止。
+                    stop_reason = "known_threshold"
+                    break
         else:
             stop_reason = "last_page" if pages_visited else "empty_page"
 
         capture_path = _dump_capture_samples(adapter)
         capture_complete = stop_reason != "empty_page"
+
+        if mode == "single" and target_closed:
+            db.delete(batch)
+            db.commit()
+            message = (
+                f"1688 订单号 {target_order_no} 当前状态为“{target_closed_status or '关闭'}”，"
+                "已跳过，未写入采购订单"
+            )
+            _set_connection(
+                db,
+                "connected",
+                "",
+                account=account,
+                lastSyncAt=_now_iso(),
+                lastSyncSummary=message,
+                lastCaptureFile=str(capture_path),
+            )
+            db.commit()
+            return {
+                "status": "closed_skipped",
+                "message": message,
+                "stats": {
+                    "mode": mode,
+                    "pagesVisited": pages_visited,
+                    "stopReason": stop_reason,
+                    "captureComplete": capture_complete,
+                    "rawCaptureFile": str(capture_path),
+                    "batchId": None,
+                    "startDate": scope_start.isoformat() if scope_start else None,
+                    "endDate": scope_end.isoformat() if scope_end else None,
+                    "orderNo": target_order_no,
+                    "supplier": supplier_filter or None,
+                    "keyword": keyword_filter or None,
+                    "onlyUnfinished": only_unfinished,
+                    "timeField": time_field,
+                    "closedStatus": target_closed_status or "关闭",
+                    **counters,
+                },
+            }
+
+        if (mode == "single" and not target_found) or (mode == "range" and raw_seen == 0):
+            db.delete(batch)
+            db.commit()
+            message = (
+                (
+                    f"1688 订单号 {target_order_no} 不属于供应商“{supplier_filter}”，未写入订单"
+                    if target_supplier_mismatch
+                    else f"最近 {pages_visited} 页未找到 1688 订单号 {target_order_no}，未写入订单"
+                )
+                if mode == "single"
+                else (
+                    "所选时间范围内未找到可导入的 1688 采购订单，"
+                    f"已跳过供应商不匹配 {counters['skippedSupplier']} 单、关闭订单 {counters['skippedClosed']} 单，未写入订单"
+                    if counters["skippedSupplier"] or counters["skippedClosed"] or counters["skippedKeyword"] or counters["skippedFinished"]
+                    else "所选时间范围内未找到 1688 采购订单，未写入订单"
+                )
+            )
+            _set_connection(
+                db,
+                "connected",
+                "",
+                account=account,
+                lastSyncAt=_now_iso(),
+                lastSyncSummary=message,
+                lastCaptureFile=str(capture_path),
+            )
+            db.commit()
+            return {
+                "status": "not_found",
+                "message": message,
+                "stats": {
+                    "mode": mode,
+                    "pagesVisited": pages_visited,
+                    "stopReason": stop_reason,
+                    "captureComplete": capture_complete,
+                    "rawCaptureFile": str(capture_path),
+                    "batchId": None,
+                    "startDate": scope_start.isoformat() if scope_start else None,
+                    "endDate": scope_end.isoformat() if scope_end else None,
+                    "orderNo": target_order_no,
+                    "supplier": supplier_filter or None,
+                    "keyword": keyword_filter or None,
+                    "onlyUnfinished": only_unfinished,
+                    "timeField": time_field,
+                    **counters,
+                },
+            }
 
         if not capture_complete and raw_seen == 0:
             # 没有任何订单时删除空虚拟批次，明确记录为部分失败，避免页面显示“同步成功”。
@@ -388,6 +690,10 @@ def _sync_with_browser(db: Session, *, actor: str) -> dict[str, Any]:
                 "stats": {
                     "pagesVisited": pages_visited,
                     "stopReason": stop_reason,
+                    "supplier": supplier_filter or None,
+                    "keyword": keyword_filter or None,
+                    "onlyUnfinished": only_unfinished,
+                    "timeField": time_field,
                     "captureComplete": False,
                     "rawCaptureFile": str(capture_path),
                     "batchId": None,
@@ -396,7 +702,7 @@ def _sync_with_browser(db: Session, *, actor: str) -> dict[str, Any]:
             }
 
         batch.row_count = raw_seen
-        batch.imported_order_count = counters["created"] + counters["adopted"]
+        batch.imported_order_count = counters["created"] + counters["adopted"] + counters["restored"]
         db.commit()
 
         # 与 Excel 导入对齐：新订单可能先于入库明细存在，补齐 SKU 分配行。
@@ -408,9 +714,23 @@ def _sync_with_browser(db: Session, *, actor: str) -> dict[str, Any]:
 
         remark_match = run_verified_remark_match(db, actor=actor)
 
+        scope_summary = (
+            f"{_TIME_FIELD_LABELS[time_field]} {scope_start.isoformat()} 至 {scope_end.isoformat()}"
+            if mode == "range" and scope_start and scope_end
+            else f"订单号 {target_order_no}"
+            if mode == "single" and target_order_no
+            else f"默认增量（{_TIME_FIELD_LABELS[time_field]}）"
+        )
+        if supplier_filter:
+            scope_summary += f"；供应商 {supplier_filter}"
+        if keyword_filter:
+            scope_summary += f"；关键词 {keyword_filter}"
         summary = (
-            f"浏览器直采{'完成' if capture_complete else '部分完成'}：新增 {counters['created']}，"
-            f"状态更新 {counters['merged']}，翻页 {pages_visited}（{stop_reason}），批次 #{batch.id}"
+            f"浏览器直采{'完成' if capture_complete else '部分完成'}（{scope_summary}）：新增 {counters['created']}，"
+            f"已识别重复 {counters['duplicates']}，状态更新 {counters['merged']}，"
+            f"跳过供应商不匹配 {counters['skippedSupplier']}、关键词不匹配 {counters['skippedKeyword']}、"
+            f"已完成 {counters['skippedFinished']}、关闭 {counters['skippedClosed']}，"
+            f"翻页 {pages_visited}（{stop_reason}），批次 #{batch.id}"
         )
         _set_connection(
             db,
@@ -430,9 +750,17 @@ def _sync_with_browser(db: Session, *, actor: str) -> dict[str, Any]:
             "alibaba1688_file_imports",
             batch.id,
             {
+                "mode": mode,
                 "pages": pages_visited,
                 "stopReason": stop_reason,
                 "lookbackDays": lookback_days,
+                "startDate": scope_start.isoformat() if scope_start else None,
+                "endDate": scope_end.isoformat() if scope_end else None,
+                "orderNo": target_order_no,
+                "supplier": supplier_filter or None,
+                "keyword": keyword_filter or None,
+                "onlyUnfinished": only_unfinished,
+                "timeField": time_field,
                 "captureComplete": capture_complete,
                 "remarkMatch": remark_match,
                 **counters,
@@ -443,9 +771,17 @@ def _sync_with_browser(db: Session, *, actor: str) -> dict[str, Any]:
             "status": "success" if capture_complete else "partial",
             "message": summary,
             "stats": {
+                "mode": mode,
                 "pagesVisited": pages_visited,
                 "stopReason": stop_reason,
                 "lookbackDays": lookback_days,
+                "startDate": scope_start.isoformat() if scope_start else None,
+                "endDate": scope_end.isoformat() if scope_end else None,
+                "orderNo": target_order_no,
+                "supplier": supplier_filter or None,
+                "keyword": keyword_filter or None,
+                "onlyUnfinished": only_unfinished,
+                "timeField": time_field,
                 "lookbackCutoff": lookback_cutoff.isoformat(),
                 "captureComplete": capture_complete,
                 "rawCaptureFile": str(capture_path),

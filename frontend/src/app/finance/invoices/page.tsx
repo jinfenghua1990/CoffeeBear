@@ -1,0 +1,873 @@
+"use client";
+
+import Link from "next/link";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { taxInvoiceApi, type TaxInvoiceCategoryOutput, type TaxInvoiceCategoryV2, type TaxInvoiceImportRow, type TaxInvoiceLinesResponse, type TaxInvoiceProcessingStatus, type TaxInvoicePurchaseCandidate, type TaxInvoiceRow, type TaxInvoiceSummary } from "@/lib/api";
+import { useTabActive, useTabScopedState } from "@/lib/workspace/tab-store";
+
+type FilterValue = "input" | "output";
+type MatchFilter = "all" | "matched" | "unmatched" | "needs_review" | "pending";
+type InvoiceStatusFilter = "all" | "issued" | "red" | "void" | "unknown";
+/** v2 分类筛选：6 个分类 + ""=待判断 + 派生组伪值（计入运营成本） */
+type TypeFilter = "all" | TaxInvoiceCategoryV2 | TaxInvoiceCategoryOutput | "" | "group:operating";
+
+function money(value: string | number | null | undefined) {
+  if (value === null || value === undefined || value === "") return "—";
+  const amount = Number(value);
+  return Number.isFinite(amount)
+    ? `¥${amount.toLocaleString("zh-CN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+    : String(value);
+}
+
+function dateText(value: string | null) {
+  if (!value) return "—";
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? value.slice(0, 10) : date.toLocaleDateString("zh-CN");
+}
+
+function invoiceNo(row: TaxInvoiceRow) {
+  return `${row.invoiceCode || ""}${row.invoiceNumber || ""}` || "未记录号码";
+}
+
+function directionLabel(value: string) {
+  return value === "input" ? "进项" : value === "output" ? "销项" : "待确认";
+}
+
+function directionClass(value: string) {
+  return value === "input"
+    ? "border-blue-200 bg-blue-50 text-blue-700"
+    : value === "output"
+      ? "border-violet-200 bg-violet-50 text-violet-700"
+      : "border-slate-200 bg-slate-50 text-slate-500";
+}
+
+function matchLabel(value: string) {
+  return value === "matched" ? "已匹配" : value === "needs_review" ? "待核对" : "未匹配";
+}
+
+function matchClass(value: string) {
+  return value === "matched"
+    ? "bg-emerald-50 text-emerald-700"
+    : value === "needs_review"
+      ? "bg-amber-50 text-amber-700"
+      : "bg-slate-100 text-slate-500";
+}
+
+/** 派生态（由 v2 分类派生，仅作展示与统计）：计入运营成本 / 计入报销成本 / 不计入 / 待判断 */
+type DerivedGroup = "operating" | "reimburse" | "excluded" | "pending";
+
+function derivedGroup(value: string): DerivedGroup {
+  if (value === "goods" || value === "platform_fee" || value === "operating_other") return "operating";
+  if (value === "reimburse_advance" || value === "reimburse_operating") return "reimburse";
+  if (value === "excluded") return "excluded";
+  return "pending";
+}
+
+function derivedLabel(value: DerivedGroup): string {
+  return value === "operating"
+    ? "计入运营成本"
+    : value === "reimburse"
+      ? "计入报销成本"
+      : value === "excluded"
+        ? "不计入"
+        : "待判断";
+}
+
+function derivedClass(value: DerivedGroup): string {
+  return value === "operating"
+    ? "border-blue-200 bg-blue-50 text-blue-700"
+    : value === "reimburse"
+      ? "border-amber-200 bg-amber-50 text-amber-700"
+      : value === "excluded"
+        ? "border-slate-200 bg-slate-100 text-slate-500"
+        : "border-orange-200 bg-orange-50 text-orange-700";
+}
+
+function lineSummary(row: TaxInvoiceRow) {
+  if (!row.lineItemCount) return "未解析到开票明细";
+  const items = row.lineItems || [];
+  const names = items.slice(0, 2).map((item) => item.goodsName ? `${item.goodsName}${item.spec ? `（${item.spec}）` : ""}` : "已识别明细");
+  return `${names.join("、") || "已识别明细"}${row.lineItemCount > names.length ? ` 等 ${row.lineItemCount} 项` : ""}`;
+}
+
+/** 进项发票 v2 分类（6+1）：运营成本三分类、报销两分类、不计入；空=待判断（未分类）。
+ *  后端已存分类为权威，缺失时按开票明细兜底识别。 */
+const CATEGORY_META: Record<string, { label: string; cls: string }> = {
+  goods: { label: "运营成本：货款发票", cls: "border-blue-200 bg-blue-50 text-blue-700" },
+  platform_fee: { label: "运营成本：平台服务费", cls: "border-violet-200 bg-violet-50 text-violet-700" },
+  operating_other: { label: "运营成本其他", cls: "border-cyan-200 bg-cyan-50 text-cyan-700" },
+  reimburse_advance: { label: "报销：代付", cls: "border-amber-200 bg-amber-50 text-amber-700" },
+  reimburse_operating: { label: "报销：运营成本", cls: "border-amber-200 bg-amber-50 text-amber-700" },
+  excluded: { label: "不计入任何报销运营", cls: "border-slate-200 bg-slate-100 text-slate-500" },
+  "": { label: "待判断（未分类）", cls: "border-orange-200 bg-orange-50 text-orange-700" },
+};
+const CATEGORY_V2_OPTIONS: TaxInvoiceCategoryV2[] = [
+  "goods", "platform_fee", "operating_other", "reimburse_advance", "reimburse_operating", "excluded",
+];
+function categoryLabel(value: string): string {
+  return CATEGORY_META[value]?.label ?? (value || "待判断（未分类）");
+}
+function categoryClass(value: string): string {
+  return CATEGORY_META[value]?.cls ?? CATEGORY_META[""].cls;
+}
+function invoiceCategory(row: TaxInvoiceRow): TaxInvoiceCategoryV2 | "" {
+  // 后端存值为权威：未分类一律如实显示「待判断」，不做明细推断兜底
+  return (row.category || "") as TaxInvoiceCategoryV2 | "";
+}
+/** 销项发票分类（独立枚举）：给买家开发票 / 给平台开服务费；空=待判断。后端存值为权威，不做明细推断。 */
+const OUTPUT_CATEGORY_META: Record<string, { label: string; cls: string }> = {
+  buyer_sales: { label: "给买家开发票", cls: "border-emerald-200 bg-emerald-50 text-emerald-700" },
+  platform_service: { label: "给平台开服务费", cls: "border-violet-200 bg-violet-50 text-violet-700" },
+  "": { label: "待判断", cls: "border-orange-200 bg-orange-50 text-orange-700" },
+};
+const OUTPUT_CATEGORY_OPTIONS: TaxInvoiceCategoryOutput[] = ["buyer_sales", "platform_service"];
+/** 行内/批量下拉可选项：进项 6+1、销项 3 项（含空=待判断）。 */
+const INPUT_CATEGORY_SELECT_OPTIONS: (TaxInvoiceCategoryV2 | "")[] = [...CATEGORY_V2_OPTIONS, ""];
+const OUTPUT_CATEGORY_SELECT_OPTIONS: (TaxInvoiceCategoryOutput | "")[] = [...OUTPUT_CATEGORY_OPTIONS, ""];
+/** 行分类取值：销项直接用存量（无明细推断），进项保留兜底识别。 */
+function rowCategoryValue(row: TaxInvoiceRow): string {
+  return row.direction === "output" ? row.category || "" : invoiceCategory(row);
+}
+function outputCategoryLabel(value: string): string {
+  return OUTPUT_CATEGORY_META[value]?.label ?? (value || "待判断");
+}
+
+/** 进项发票支付方式：对公账户支出 / 个人垫付；空=未设置。根据银行流水关联自动判断。 */
+const PAYMENT_METHOD_META: Record<string, { label: string; cls: string }> = {
+  corporate: { label: "对公账户支出", cls: "border-blue-200 bg-blue-50 text-blue-700" },
+  personal: { label: "个人垫付", cls: "border-amber-200 bg-amber-50 text-amber-700" },
+  "": { label: "未设置", cls: "border-slate-200 bg-slate-100 text-slate-500" },
+};
+function paymentMethodLabel(value: string): string {
+  return PAYMENT_METHOD_META[value]?.label ?? (value || "未设置");
+}
+function paymentMethodClass(value: string): string {
+  return PAYMENT_METHOD_META[value]?.cls ?? PAYMENT_METHOD_META[""].cls;
+}
+/** 按行方向取分类文案与徽章样式。 */
+function rowCategoryLabel(row: TaxInvoiceRow, value: string): string {
+  return row.direction === "output" ? outputCategoryLabel(value) : categoryLabel(value);
+}
+function rowCategoryClass(row: TaxInvoiceRow, value: string): string {
+  return row.direction === "output"
+    ? (OUTPUT_CATEGORY_META[value]?.cls ?? OUTPUT_CATEGORY_META[""].cls)
+    : categoryClass(value);
+}
+function rowCategoryOptions(row: TaxInvoiceRow): readonly string[] {
+  return row.direction === "output" ? OUTPUT_CATEGORY_SELECT_OPTIONS : INPUT_CATEGORY_SELECT_OPTIONS;
+}
+/** 分类筛选谓词：支持精确 6+1 与派生组伪值。 */
+function matchCategoryFilter(category: string, filter: TypeFilter): boolean {
+  if (filter === "all") return true;
+  if (filter === "group:operating") return derivedGroup(category) === "operating";
+  return category === filter;
+}
+/** processing_status 兼容缓存：由分类派生（运营成本→required；报销/不计入→not_required；空→pending）。 */
+function processingFromCategory(value: string): TaxInvoiceProcessingStatus {
+  const group = derivedGroup(value);
+  return group === "operating" ? "required" : group === "pending" ? "pending" : "not_required";
+}
+function invoiceKindLabel(row: TaxInvoiceRow): string {
+  const type = row.invoiceType || "";
+  if (type.includes("专用")) return "专票";
+  if (type.includes("普通")) return "普票";
+  if (type.includes("客票")) return "客票";
+  return type || "—";
+}
+function invoiceKindClass(row: TaxInvoiceRow): string {
+  const type = row.invoiceType || "";
+  if (type.includes("专用")) return "border-blue-200 bg-blue-50 text-blue-700";
+  if (type.includes("普通")) return "border-slate-200 bg-slate-100 text-slate-600";
+  if (type.includes("客票")) return "border-amber-200 bg-amber-50 text-amber-700";
+  return "border-slate-200 bg-white text-slate-400";
+}
+
+export default function InvoiceManagementPage() {
+  const [rows, setRows] = useState<TaxInvoiceRow[]>([]);
+  const [summary, setSummary] = useState<TaxInvoiceSummary | null>(null);
+  const [imports, setImports] = useState<TaxInvoiceImportRow[]>([]);
+  const [selectedId, setSelectedId] = useState<number | null>(null);
+  const [query, setQuery] = useTabScopedState("invoices.search", "");
+  const [direction, setDirection] = useTabScopedState<FilterValue>("invoices.direction", "input");
+  const [matchStatus, setMatchStatus] = useTabScopedState<MatchFilter>("invoices.match", "all");
+  const [invoiceStatus, setInvoiceStatus] = useTabScopedState<InvoiceStatusFilter>("invoices.status", "all");
+  const [typeFilter, setTypeFilter] = useTabScopedState<TypeFilter>("invoices.type", "all");
+  const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
+  // 批量分类选择：__placeholder__ = 未选择（与「待判断」的空值区分开）
+  const [batchCategory, setBatchCategory] = useState("__placeholder__");
+  const [batchBusy, setBatchBusy] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [uploading, setUploading] = useState(false);
+  const [error, setError] = useState("");
+  const [message, setMessage] = useState("");
+  const [period, setPeriod] = useTabScopedState("invoices.period", "");
+  const fileRef = useRef<HTMLInputElement>(null);
+  const selectAllRef = useRef<HTMLInputElement>(null);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    setError("");
+    try {
+      const [invoiceRows, invoiceSummary, activeImports] = await Promise.all([
+        taxInvoiceApi.invoices({ limit: 500 }),
+        taxInvoiceApi.summary(),
+        taxInvoiceApi.imports("active"),
+      ]);
+      setRows(invoiceRows);
+      setSummary(invoiceSummary);
+      setImports(activeImports);
+      // 首次加载不自动打开详情弹窗；只有用户主动点“查看详情”时才打开。
+      setSelectedId((current) => (current && invoiceRows.some((row) => row.id === current) ? current : null));
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : String(caught));
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  const visibleRows = useMemo(() => {
+    const needle = query.trim().toLowerCase();
+    return rows.filter((row) => {
+      if (row.direction !== direction) return false;
+      if (invoiceStatus !== "all" && row.status !== invoiceStatus) return false;
+      if (matchStatus === "pending") {
+        if (row.matchStatus !== "unmatched" && row.matchStatus !== "needs_review") return false;
+      } else if (matchStatus !== "all" && row.matchStatus !== matchStatus) return false;
+      if (typeFilter !== "all" && !matchCategoryFilter(rowCategoryValue(row), typeFilter)) return false;
+      if (!needle) return true;
+      // 多关键词空格分隔 = 全部命中才显示（AND），如「河北 咖啡」只留两者兼有的行
+      const keywords = needle.split(/\s+/).filter(Boolean);
+      const searchable = [
+        invoiceNo(row), row.sellerName, row.sellerTaxId, row.buyerName, row.buyerTaxId,
+        row.purchaseOrderNos.join(" "), row.inboundNos.join(" "), row.matchNote,
+        row.lineItems.map((line) => [line.goodsName, line.spec, line.remark].filter(Boolean).join(" ")).join(" "),
+      ].join(" ").toLowerCase();
+      return keywords.every((keyword) => searchable.includes(keyword));
+    });
+  }, [direction, invoiceStatus, matchStatus, query, rows, typeFilter]);
+
+  const selected = rows.find((row) => row.id === selectedId) ?? null;
+  const visibleTotalAmount = useMemo(
+    () => visibleRows.reduce((sum, row) => sum + (Number(row.totalAmount) || 0), 0),
+    [visibleRows],
+  );
+  const categoryCounts = useMemo(() => {
+    const inputCounts: Record<TaxInvoiceCategoryV2 | "", number> = {
+      goods: 0, platform_fee: 0, operating_other: 0,
+      reimburse_advance: 0, reimburse_operating: 0, excluded: 0, "": 0,
+    };
+    const outputCounts: Record<TaxInvoiceCategoryOutput | "", number> = {
+      buyer_sales: 0, platform_service: 0, "": 0,
+    };
+    for (const row of rows) {
+      if (row.direction === "input") inputCounts[invoiceCategory(row)] += 1;
+      else if (row.direction === "output") outputCounts[(row.category || "") as TaxInvoiceCategoryOutput | ""] += 1;
+    }
+    return { input: inputCounts, output: outputCounts };
+  }, [rows]);
+  const batchCategoryReady = batchCategory !== "__placeholder__";
+
+  // 筛选条件或方向变化时清空已选行，避免对已不可见的行批量操作
+  useEffect(() => {
+    setSelectedIds(new Set());
+  }, [direction, query, matchStatus, invoiceStatus, typeFilter]);
+
+  const allVisibleSelected = visibleRows.length > 0 && visibleRows.every((row) => selectedIds.has(row.id));
+  // 部分选中时表头复选框显示半选态
+  useEffect(() => {
+    if (selectAllRef.current) {
+      selectAllRef.current.indeterminate = visibleRows.length > 0 && !allVisibleSelected && visibleRows.some((row) => selectedIds.has(row.id));
+    }
+  }, [allVisibleSelected, selectedIds, visibleRows]);
+  function toggleRowSelected(id: number) {
+    setSelectedIds((current) => {
+      const next = new Set(current);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
+  function toggleSelectAll() {
+    setSelectedIds(allVisibleSelected ? new Set() : new Set(visibleRows.map((row) => row.id)));
+  }
+  async function changeCategory(id: number, category: string) {
+    setError("");
+    setMessage("");
+    try {
+      await taxInvoiceApi.bulkSetCategory([id], category);
+      setRows((current) => current.map((row) => (row.id === id ? { ...row, category, processingStatus: processingFromCategory(category) } : row)));
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : String(caught));
+    }
+  }
+  async function changePaymentMethod(id: number, paymentMethod: string) {
+    setError("");
+    setMessage("");
+    try {
+      await taxInvoiceApi.bulkSetPaymentMethod([id], paymentMethod);
+      setRows((current) => current.map((row) => (row.id === id ? { ...row, paymentMethod } : row)));
+      setMessage(paymentMethod ? `已设置为「${paymentMethodLabel(paymentMethod)}」` : "已清除支付方式");
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : String(caught));
+    }
+  }
+  async function moveSelectedToCategory() {
+    if (!batchCategoryReady || !selectedIds.size) return;
+    setBatchBusy(true);
+    setError("");
+    setMessage("");
+    try {
+      const ids = [...selectedIds];
+      await taxInvoiceApi.bulkSetCategory(ids, batchCategory);
+      setRows((current) => current.map((row) => (ids.includes(row.id) ? { ...row, category: batchCategory, processingStatus: processingFromCategory(batchCategory) } : row)));
+      setSelectedIds(new Set());
+      setMessage(`已将 ${ids.length} 张发票移动到「${direction === "output" ? outputCategoryLabel(batchCategory) : categoryLabel(batchCategory)}」。`);
+      setBatchCategory("__placeholder__");
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : String(caught));
+    } finally {
+      setBatchBusy(false);
+    }
+  }
+
+  async function handleUpload(fileList: FileList | undefined) {
+    const files = fileList ? Array.from(fileList) : [];
+    if (!files.length) return;
+    setUploading(true);
+    setError("");
+    setMessage("");
+    try {
+      const completed: string[] = [];
+      const failed: string[] = [];
+      for (const [index, file] of files.entries()) {
+        setMessage(`正在处理第 ${index + 1} / ${files.length} 份：${file.name}`);
+        try {
+          const result = await taxInvoiceApi.upload(file, period || undefined, true);
+          const imported = result.import;
+          completed.push(
+            result.duplicate
+              ? `${imported.originalName}（重复，已跳过）`
+              : `${imported.originalName}（识别 ${imported.recognizedRowCount} 行，匹配 ${imported.matchedRowCount} 行${imported.needsReviewCount ? `，待核对 ${imported.needsReviewCount} 行` : ""}）`,
+          );
+        } catch (caught) {
+          failed.push(`${file.name}：${caught instanceof Error ? caught.message : String(caught)}`);
+        }
+      }
+      setMessage(`批量处理完成：成功 ${completed.length} 份${failed.length ? `，失败 ${failed.length} 份（${failed.join("、")}）` : ""}。${completed.join("；")}`);
+      await load();
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : String(caught));
+    } finally {
+      setUploading(false);
+      if (fileRef.current) fileRef.current.value = "";
+    }
+  }
+
+  return (
+    <div className="mx-auto max-w-[1600px]">
+      <header className="app-page-header -mx-1 bg-[#f4f7fb]/95 pb-2 backdrop-blur">
+        <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
+          <h1 className="text-lg font-semibold tracking-tight text-slate-900">发票管理</h1>
+          <p className="text-xs text-slate-500">统一管理进项、销项发票，上传后自动识别并匹配采购单</p>
+          <Link href="/data-center-import?tab=tax" className="text-xs text-indigo-600 hover:underline">查看原始导入批次与明细</Link>
+        </div>
+      </header>
+
+      {message && <div className="mt-4 rounded-lg border border-emerald-100 bg-emerald-50 px-4 py-2.5 text-xs text-emerald-700">{message}</div>}
+      {error && <div className="mt-4 rounded-lg border border-rose-100 bg-rose-50 px-4 py-2.5 text-xs text-rose-700">{error}</div>}
+
+      {/* 吸顶单行工具条：tab + 筛选 + 操作合并一行，滚动时固定在顶部 */}
+      <div className="sticky top-0 z-30 -mx-1 flex flex-wrap items-center gap-2 border-b border-slate-200 bg-white/95 px-4 py-2 shadow-sm backdrop-blur">
+          <div className="flex items-center rounded-lg border border-slate-200 bg-white p-0.5">
+            {([
+              ["input", "进项发票", summary?.byDirection?.input ?? 0],
+              ["output", "销项发票", summary?.byDirection?.output ?? 0],
+            ] as const).map(([value, label, count]) => (
+              <button
+                key={value}
+                type="button"
+                onClick={() => { setDirection(value); setTypeFilter("all"); setMatchStatus("all"); setInvoiceStatus("all"); setBatchCategory("__placeholder__"); }}
+                className={`rounded-lg px-4 py-1.5 text-xs transition ${direction === value ? "bg-indigo-600 font-medium text-white shadow-sm" : "text-slate-500 hover:bg-slate-50 hover:text-slate-800"}`}
+              >
+                {label} <span className={direction === value ? "text-indigo-100" : "text-slate-400"}>{count}</span>
+              </button>
+            ))}
+          </div>
+          <div className="relative min-w-[220px] flex-1">
+            <span className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate-400">⌕</span>
+            <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="关键词即时筛选：发票号 / 开票方 / 税号 / 货物明细 / 采购单 / 入库单，可空格分隔多词" className="w-full rounded-lg border border-slate-200 bg-white py-1.5 pl-8 pr-8 text-xs outline-none focus:border-indigo-400" />
+            {query && <button type="button" onClick={() => setQuery("")} title="清空关键词" className="absolute right-2 top-1/2 -translate-y-1/2 rounded px-1 text-slate-400 transition hover:text-slate-700">✕</button>}
+          </div>
+          <select value={matchStatus} onChange={(event) => setMatchStatus(event.target.value as MatchFilter)} className="rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs text-slate-600 outline-none"><option value="all">全部匹配状态</option><option value="pending">待匹配（未匹配+待核对）</option><option value="matched">已匹配</option><option value="unmatched">未匹配</option><option value="needs_review">待核对</option></select>
+          <select value={invoiceStatus} onChange={(event) => setInvoiceStatus(event.target.value as InvoiceStatusFilter)} className="rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs text-slate-600 outline-none"><option value="all">全部票据状态</option><option value="issued">有效</option><option value="red">红冲相关</option><option value="void">作废</option><option value="unknown">待确认</option></select>
+          {direction === "input" && !!summary?.byStatus?.red && (
+            <button type="button" onClick={() => setInvoiceStatus(invoiceStatus === "red" ? "all" : "red")} title={`蓝字票和红字票都保留展示并按净额核算；未识别到对应红字票的已红冲蓝字金额 ${money(String(summary.excludedRedAmount ?? 0))} 暂不计入有效进项金额`} className={`rounded-full border px-2.5 py-1 text-[11px] transition ${invoiceStatus === "red" ? "border-rose-300 bg-rose-50 font-medium text-rose-700 ring-1 ring-rose-200" : "border-rose-200 bg-white text-rose-600 hover:bg-rose-50"}`}>红冲相关 <span className="tabular-nums">{summary.byStatus.red}</span></button>
+          )}
+          <span className="text-[11px] font-medium text-slate-400">分类</span>
+          <button type="button" onClick={() => setTypeFilter("all")} className={`rounded-full border px-2.5 py-1 text-[11px] transition ${typeFilter === "all" ? "border-indigo-300 bg-indigo-50 text-indigo-700 ring-1 ring-indigo-200" : "border-slate-200 bg-white text-slate-600 hover:bg-slate-50"}`}>全部 <span className="tabular-nums">{rows.filter((row) => row.direction === direction).length}</span></button>
+          {(direction === "output" ? (["buyer_sales", "platform_service", ""] as const) : (["goods", "platform_fee", "operating_other", "reimburse_advance", "reimburse_operating", "excluded", ""] as const)).map((value) => (
+            <button
+              key={value || "pending"}
+              type="button"
+              onClick={() => setTypeFilter(typeFilter === value ? "all" : value)}
+              className={`rounded-full border px-2.5 py-1 text-[11px] transition ${typeFilter === value ? "border-indigo-300 bg-indigo-50 text-indigo-700 ring-1 ring-indigo-200" : `border-slate-200 bg-white text-slate-600 hover:bg-slate-50 ${value === "" ? "border-dashed" : ""}`}`}
+            >
+              {direction === "output" ? outputCategoryLabel(value) : categoryLabel(value)} <span className="tabular-nums">{(categoryCounts[direction] as Record<string, number>)[value]}</span>
+            </button>
+          ))}
+        <div className="ml-auto flex items-center gap-2">
+          <input ref={fileRef} type="file" accept=".xlsx,.csv" multiple className="hidden" onChange={(event) => void handleUpload(event.target.files ?? undefined)} />
+          <input type="month" value={period} onChange={(event) => setPeriod(event.target.value)} aria-label="发票所属账期" className="rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs text-slate-600 outline-none focus:border-indigo-400" />
+          <button type="button" onClick={() => fileRef.current?.click()} disabled={uploading} className="rounded-lg bg-indigo-600 px-3.5 py-1.5 text-xs font-medium text-white shadow-sm hover:bg-indigo-700 disabled:cursor-wait disabled:opacity-50">{uploading ? "识别匹配中…" : "上传发票清单"}</button>
+          <button type="button" onClick={() => void load()} disabled={loading} className="rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs text-slate-600 hover:bg-slate-50 disabled:opacity-50">刷新</button>
+        </div>
+      </div>
+
+      <section className="mt-3 overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
+        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-100 bg-slate-50/40 px-4 py-1.5 text-[11px] text-slate-400">
+          <span>共 <span className="tabular-nums text-slate-600">{visibleRows.length}</span> 张 · 价税合计 <span className="tabular-nums text-slate-600">{money(String(visibleTotalAmount))}</span></span>
+          <span>{typeFilter !== "all" ? `分类：${direction === "output" ? outputCategoryLabel(typeFilter as string) : typeFilter === "group:operating" ? "计入运营成本（货款/平台服务费/其他）" : categoryLabel(typeFilter)}` : ""}</span>
+        </div>
+
+        {selectedIds.size > 0 && (
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 border-b border-indigo-100 bg-indigo-50/70 px-4 py-2.5">
+            <span className="text-xs font-medium text-indigo-700">已选择 <span className="tabular-nums">{selectedIds.size}</span> 张<span className="font-normal text-indigo-400">（当前筛选可见 {visibleRows.length} 张）</span></span>
+            <span className="flex items-center gap-1.5"><span className="text-[11px] text-indigo-400">移动到：</span>
+              <select value={batchCategory} onChange={(event) => setBatchCategory(event.target.value)} className="rounded-md border border-slate-200 bg-white px-2 py-1 text-xs text-slate-700 outline-none focus:border-indigo-300">
+                <option value="__placeholder__" disabled>请选择分类</option>
+                {(direction === "output" ? OUTPUT_CATEGORY_SELECT_OPTIONS : INPUT_CATEGORY_SELECT_OPTIONS).map((value) => (
+                  <option key={value || "pending"} value={value}>{direction === "output" ? outputCategoryLabel(value) : categoryLabel(value)}</option>
+                ))}
+              </select>
+              <button type="button" onClick={() => void moveSelectedToCategory()} disabled={batchBusy || !batchCategoryReady} className="rounded-md bg-indigo-600 px-3 py-1 text-xs font-medium text-white hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-40">{batchBusy ? "移动中…" : "批量移动"}</button>
+            </span>
+            <span className="hidden text-[10px] text-indigo-300 xl:inline">{direction === "output" ? "销项分类：给买家开发票 / 给平台开服务费 · 空=待判断" : "分类决定统计口径：运营成本三分类=计入运营成本 · 报销两分类=计入报销成本 · 不计入任何报销运营 · 空=待判断"}</span>
+                        <button type="button" onClick={() => { setSelectedIds(new Set()); setBatchCategory("__placeholder__"); }} className="ml-auto rounded-md border border-slate-200 bg-white px-3 py-1 text-xs text-slate-600 hover:bg-slate-50">取消选择</button>
+          </div>
+        )}
+
+        <div className="max-h-[calc(100vh-200px)] overflow-auto">
+          <table className="w-full min-w-[1600px] border-collapse text-xs">
+            <thead className="sticky top-0 z-10 bg-slate-50 text-left text-[11px] text-slate-500 shadow-[0_1px_0_0_#e2e8f0]">
+              <tr>
+                <th className="w-10 px-4 py-2.5"><input ref={selectAllRef} type="checkbox" checked={allVisibleSelected} onChange={toggleSelectAll} title="全选当前筛选结果" className="h-3.5 w-3.5 accent-indigo-600" /></th>
+                <th className="px-3 py-2.5">发票号码</th>
+                <th className="px-3 py-2.5">开票方</th>
+                <th className="px-3 py-2.5">开票日期</th>
+                <th className="px-3 py-2.5">方向</th>
+                <th className="px-3 py-2.5">开票明细</th>
+                <th className="px-3 py-2.5">发票类型</th>
+                <th className="px-3 py-2.5 text-right">价税合计</th>
+                <th className="px-3 py-2.5">票据状态</th>
+                <th className="px-3 py-2.5">类别</th>
+                <th className="px-3 py-2.5">支付方式</th>
+                <th className="px-3 py-2.5">采购关联</th>
+                <th className="px-3 py-2.5">入库关联</th>
+                <th className="px-3 py-2.5">匹配状态</th>
+                <th className="px-4 py-2.5 text-right">操作</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-100">
+              {visibleRows.map((row) => {
+                const category = rowCategoryValue(row);
+                return (
+                <tr key={row.id} className={`transition hover:bg-indigo-50/40 ${selectedId === row.id ? "bg-indigo-50/60" : ""}`}>
+                  <td className="px-4 py-2.5"><input type="checkbox" checked={selectedIds.has(row.id)} onChange={() => toggleRowSelected(row.id)} onClick={(event) => event.stopPropagation()} className="h-3.5 w-3.5 accent-indigo-600" /></td>
+                  <td className="px-3 py-2.5"><div className="font-mono font-medium text-slate-800">{invoiceNo(row)}</div></td>
+                  <td className="max-w-[210px] truncate px-3 py-2.5 text-slate-700" title={row.direction === "output" ? `销项抬头：${row.buyerName || "未记录购买方"} · 本单位：${row.sellerName || "—"}` : row.sellerName}>{row.direction === "output" ? <><span className="mr-1 inline-block rounded border border-violet-200 bg-violet-50 px-1 align-[-1px] text-[10px] leading-4 text-violet-700">购方</span><span className="font-medium">{row.buyerName || "未记录购买方"}</span><div className="mt-0.5 truncate text-[10px] text-slate-400">本单位：{row.sellerName || "—"}</div></> : (row.sellerName || "未记录开票方")}</td>
+                  <td className="whitespace-nowrap px-3 py-2.5 text-slate-500">{dateText(row.issueDate)}</td>
+                  <td className="px-3 py-2.5"><span className={`rounded-full border px-2 py-0.5 text-[10px] font-medium ${directionClass(row.direction)}`}>{directionLabel(row.direction)}</span></td>
+                  <td className="max-w-[320px] truncate px-3 py-2.5 text-slate-700" title={lineSummary(row)}>{lineSummary(row)}</td>
+                  <td className="px-3 py-2.5"><span className={`whitespace-nowrap rounded-full border px-2 py-0.5 text-[10px] font-medium ${invoiceKindClass(row)}`}>{invoiceKindLabel(row)}</span></td>
+                  <td className="px-3 py-2.5 text-right font-medium tabular-nums text-slate-700">{money(row.totalAmount)}</td>
+                  <td className="px-3 py-2.5"><span className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${row.redStatus === "red_offset" ? "bg-rose-50 text-rose-700" : row.redStatus === "voided_blue" ? "bg-orange-50 text-orange-700" : row.status === "issued" ? "bg-emerald-50 text-emerald-700" : "bg-slate-100 text-slate-500"}`}>{row.invoiceStatusLabel}</span>{row.redRelatedInvoiceNo && <div className="mt-1 max-w-[150px] truncate text-[10px] text-rose-600" title={row.redRelatedInvoiceNo}>对应 {row.redRelatedInvoiceNo}</div>}</td>
+                  <td className="px-3 py-2.5">
+                    <div className="relative inline-flex items-center" onClick={(event) => event.stopPropagation()}>
+                      <select
+                        value={category}
+                        onChange={(event) => void changeCategory(row.id, event.target.value)}
+                        title="点击修改分类"
+                        className={`cursor-pointer appearance-none whitespace-nowrap rounded-full border py-0.5 pl-2 pr-5 text-[10px] font-medium outline-none transition hover:opacity-80 ${rowCategoryClass(row, category)} ${category === "" ? "border-dashed" : ""}`}
+                      >
+                        {rowCategoryOptions(row).map((value) => (
+                          <option key={value || "pending"} value={value}>{rowCategoryLabel(row, value)}</option>
+                        ))}
+                      </select>
+                      <span className="pointer-events-none absolute right-1.5 text-[8px] text-current opacity-50">▾</span>
+                    </div>
+                  </td>
+                  <td className="px-3 py-2.5">
+                    {row.direction === "input" ? (
+                      <span className={`whitespace-nowrap rounded-full border px-2 py-0.5 text-[10px] font-medium ${paymentMethodClass(row.paymentMethod || "")}`}>
+                        {paymentMethodLabel(row.paymentMethod || "")}
+                      </span>
+                    ) : (
+                      <span className="text-slate-300">—</span>
+                    )}
+                  </td>
+                  <td className="max-w-[210px] px-3 py-2.5 text-slate-600">{row.purchaseOrderNos.length ? <span title={row.purchaseOrderNos.join("、")}>{row.purchaseOrderNos.slice(0, 2).join("、")}{row.purchaseOrderNos.length > 2 ? ` 等 ${row.purchaseOrderNos.length} 单` : ""}</span> : <span className="text-slate-400">未匹配</span>}</td>
+                  <td className="max-w-[190px] px-3 py-2.5 text-slate-600">{row.inboundNos.length ? <span title={row.inboundNos.join("、")}>{row.inboundNos.slice(0, 2).join("、")}{row.inboundNos.length > 2 ? ` 等 ${row.inboundNos.length} 单` : ""}</span> : <span className="text-slate-400">—</span>}</td>
+                  <td className="px-3 py-2.5"><span className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${matchClass(row.matchStatus)}`}>{matchLabel(row.matchStatus)}</span></td>
+                  <td className="px-4 py-2.5 text-right"><button type="button" onClick={(event) => { event.stopPropagation(); setSelectedId(row.id); }} className="text-indigo-600 hover:text-indigo-800">查看详情</button></td>
+                </tr>
+                );
+              })}
+              {!loading && !visibleRows.length && <tr><td colSpan={15} className="px-4 py-16 text-center text-sm text-slate-400">{rows.length ? "没有符合当前筛选条件的发票" : "暂时没有发票，请从右上角上传税务发票清单"}</td></tr>}
+              {loading && <tr><td colSpan={15} className="px-4 py-16 text-center text-sm text-slate-400">正在加载发票池…</td></tr>}
+            </tbody>
+          </table>
+        </div>
+        <div className="flex flex-wrap items-center justify-between gap-2 border-t border-slate-100 px-4 py-2.5 text-[11px] text-slate-400">
+          <span>当前显示 {visibleRows.length} 张 · 原始发票清单和导入批次永久保留</span>
+          <Link href="/data-center-import?tab=tax" className="text-indigo-600 hover:underline">进入原始清单核对</Link>
+        </div>
+      </section>
+
+      {selected && <InvoiceDetailModal row={selected} onRefresh={load} onClose={() => setSelectedId(null)} />}
+    </div>
+  );
+}
+
+function purchaseTypeLabel(targetType: string) {
+  return targetType === "jackyun_purchase_order" ? "吉客云采购单" : "1688 订单";
+}
+
+function purchaseTypeClass(targetType: string) {
+  return targetType === "jackyun_purchase_order"
+    ? "border-violet-200 bg-violet-50 text-violet-700"
+    : "border-sky-200 bg-sky-50 text-sky-700";
+}
+
+function candidateTypeLabel(targetType: string) {
+  return targetType === "sales_order" ? "销售订单" : purchaseTypeLabel(targetType);
+}
+
+function candidateTypeClass(targetType: string) {
+  return targetType === "sales_order"
+    ? "border-emerald-200 bg-emerald-50 text-emerald-700"
+    : purchaseTypeClass(targetType);
+}
+
+function amountDiffLabel(candidate: TaxInvoicePurchaseCandidate) {
+  if (!candidate.amountDiff) return <span className="text-slate-300">—</span>;
+  const diff = Number(candidate.amountDiff);
+  if (!Number.isFinite(diff)) return <span className="text-slate-300">—</span>;
+  if (Math.abs(diff) < 1) return <span className="font-medium text-emerald-600">金额一致</span>;
+  return <span className={diff > 0 ? "text-amber-600" : "text-rose-600"}>{diff > 0 ? "+" : ""}{diff.toFixed(2)}</span>;
+}
+
+function InvoiceDetailModal({ row, onRefresh, onClose }: { row: TaxInvoiceRow; onRefresh: () => Promise<void>; onClose: () => void }) {
+  const isOutput = row.direction === "output";
+  const purchaseLinks = isOutput
+    ? row.links.filter((link) => link.targetType === "sales_order")
+    : row.links.filter((link) => link.targetType !== "sales_order");
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const [keyword, setKeyword] = useState("");
+  const [candidates, setCandidates] = useState<TaxInvoicePurchaseCandidate[]>([]);
+  const [searched, setSearched] = useState(false);
+  const [searching, setSearching] = useState(false);
+  const [submitting, setSubmitting] = useState<string | null>(null);
+  const [unlinking, setUnlinking] = useState(false);
+  const [actionError, setActionError] = useState("");
+  const [lines, setLines] = useState<TaxInvoiceLinesResponse | null>(null);
+  const [linesLoading, setLinesLoading] = useState(false);
+  const [linesError, setLinesError] = useState("");
+  // 工作区下所有 Tab 都常驻挂载：隐藏 Tab 不能响应全局 Esc，否则在别的 Tab 按 Esc 会关掉这里的弹窗
+  const tabActive = useTabActive();
+
+  useEffect(() => {
+    let cancelled = false;
+    setLines(null);
+    setLinesError("");
+    setLinesLoading(true);
+    taxInvoiceApi.lines(row.id)
+      .then((data) => { if (!cancelled) setLines(data); })
+      .catch((caught) => { if (!cancelled) setLinesError(caught instanceof Error ? caught.message : String(caught)); })
+      .finally(() => { if (!cancelled) setLinesLoading(false); });
+    return () => { cancelled = true; };
+  }, [row.id]);
+
+  useEffect(() => {
+    if (!tabActive) return;
+    function onKey(event: KeyboardEvent) {
+      if (event.key !== "Escape") return;
+      if (pickerOpen) setPickerOpen(false);
+      else onClose();
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [pickerOpen, onClose, tabActive]);
+
+  async function searchCandidates(value: string) {
+    setSearching(true);
+    setActionError("");
+    try {
+      const found = await taxInvoiceApi.purchaseCandidates(row.id, value);
+      setCandidates(found);
+      setSearched(true);
+    } catch (caught) {
+      setActionError(caught instanceof Error ? caught.message : String(caught));
+    } finally {
+      setSearching(false);
+    }
+  }
+
+  async function handleCategoryChange(category: string) {
+    setActionError("");
+    try {
+      await taxInvoiceApi.bulkSetCategory([row.id], category);
+      await onRefresh();
+    } catch (caught) {
+      setActionError(caught instanceof Error ? caught.message : String(caught));
+    }
+  }
+  async function handlePaymentMethodChange(paymentMethod: string) {
+    setActionError("");
+    try {
+      await taxInvoiceApi.bulkSetPaymentMethod([row.id], paymentMethod);
+      await onRefresh();
+    } catch (caught) {
+      setActionError(caught instanceof Error ? caught.message : String(caught));
+    }
+  }
+
+  function openPicker() {
+    const initial = isOutput ? row.buyerName || "" : row.sellerName || "";
+    setKeyword(initial);
+    setCandidates([]);
+    setSearched(false);
+    setActionError("");
+    setPickerOpen(true);
+    void searchCandidates(initial);
+  }
+
+  async function handleLink(candidate: TaxInvoicePurchaseCandidate) {
+    setSubmitting(`${candidate.targetType}-${candidate.targetId}`);
+    setActionError("");
+    try {
+      await taxInvoiceApi.linkPurchase(row.id, { targetType: candidate.targetType, targetId: candidate.targetId });
+      setPickerOpen(false);
+      await onRefresh();
+    } catch (caught) {
+      setActionError(caught instanceof Error ? caught.message : String(caught));
+    } finally {
+      setSubmitting(null);
+    }
+  }
+
+  async function handleUnlink(link: TaxInvoiceRow["links"][number]) {
+    const targetDesc = link.targetType === "sales_order" ? `订单 ${link.targetNo}` : link.targetLabel;
+    if (!window.confirm(`确认解除与「${targetDesc}」的关联？解除会保留审计记录，之后可重新关联。`)) return;
+    setUnlinking(true);
+    setActionError("");
+    try {
+      await taxInvoiceApi.unlinkPurchase(row.id, link.id);
+      await onRefresh();
+    } catch (caught) {
+      setActionError(caught instanceof Error ? caught.message : String(caught));
+    } finally {
+      setUnlinking(false);
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-slate-900/45 p-4 sm:p-8" onClick={onClose}>
+      <div className="w-full max-w-4xl overflow-hidden rounded-xl bg-white shadow-xl" onClick={(event) => event.stopPropagation()}>
+        <div className="flex items-start justify-between gap-4 border-b border-slate-100 px-5 py-4">
+          <div>
+            <div className="flex flex-wrap items-center gap-2"><h2 className="font-mono text-sm font-semibold text-slate-900">{invoiceNo(row)}</h2><span className={`rounded-full border px-2 py-0.5 text-[10px] font-medium ${directionClass(row.direction)}`}>{directionLabel(row.direction)}</span><span className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${matchClass(row.matchStatus)}`}>{matchLabel(row.matchStatus)}</span><span className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${row.redStatus === "red_offset" ? "bg-rose-50 text-rose-700" : row.redStatus === "voided_blue" ? "bg-orange-50 text-orange-700" : "bg-emerald-50 text-emerald-700"}`}>{row.invoiceStatusLabel}</span>
+            {row.direction === "input" && (
+              <>
+                <span className="relative inline-flex items-center" onClick={(event) => event.stopPropagation()}>
+                  <select value={invoiceCategory(row)} onChange={(event) => void handleCategoryChange(event.target.value)} title="点击修改分类（分类决定统计口径）" className={`cursor-pointer appearance-none whitespace-nowrap rounded-full border py-0.5 pl-2 pr-5 text-[10px] font-medium outline-none transition hover:opacity-80 ${categoryClass(invoiceCategory(row))} ${invoiceCategory(row) === "" ? "border-dashed" : ""}`}>
+                    {(["goods", "platform_fee", "operating_other", "reimburse_advance", "reimburse_operating", "excluded", ""] as const).map((value) => (
+                      <option key={value || "pending"} value={value}>{categoryLabel(value)}</option>
+                    ))}
+                  </select>
+                  <span className="pointer-events-none absolute right-1.5 text-[8px] text-current opacity-50">▾</span>
+                </span>
+                <span className={`rounded-full border px-2 py-0.5 text-[10px] font-medium ${derivedClass(derivedGroup(invoiceCategory(row)))}`}>{derivedLabel(derivedGroup(invoiceCategory(row)))}</span>
+              </>
+            )}
+            {row.direction === "output" && (
+              <span className="relative inline-flex items-center" onClick={(event) => event.stopPropagation()}>
+                <select value={row.category || ""} onChange={(event) => void handleCategoryChange(event.target.value)} title="点击修改销项分类" className={`cursor-pointer appearance-none whitespace-nowrap rounded-full border py-0.5 pl-2 pr-5 text-[10px] font-medium outline-none transition hover:opacity-80 ${rowCategoryClass(row, row.category || "")} ${!row.category ? "border-dashed" : ""}`}>
+                  {(["buyer_sales", "platform_service", ""] as const).map((value) => (
+                    <option key={value || "pending"} value={value}>{outputCategoryLabel(value)}</option>
+                  ))}
+                </select>
+                <span className="pointer-events-none absolute right-1.5 text-[8px] text-current opacity-50">▾</span>
+              </span>
+            )}
+            {row.direction === "input" && row.paymentMethod && (
+              <span className={`rounded-full border px-2 py-0.5 text-[10px] font-medium ${paymentMethodClass(row.paymentMethod)}`}>
+                {paymentMethodLabel(row.paymentMethod)}
+              </span>
+            )}</div>
+            <div className="mt-1 text-xs text-slate-500">{row.sellerName || "未记录开票方"} · 开票日期 {dateText(row.issueDate)} · 价税合计 {money(row.totalAmount)}</div>
+          </div>
+          <button type="button" onClick={onClose} aria-label="关闭详情" className="rounded-md px-2 py-1 text-base leading-none text-slate-400 hover:bg-slate-100 hover:text-slate-600">✕</button>
+        </div>
+        <div className="border-b border-slate-100 px-5 py-4">
+          <div className="mb-2 text-xs font-semibold text-slate-700">货物明细{lines ? `（${lines.total} 行）` : ""}</div>
+          {linesError && <div className="mb-2 rounded-lg border border-rose-100 bg-rose-50 px-3 py-2 text-[11px] text-rose-700">明细加载失败：{linesError}</div>}
+          {linesLoading ? (
+            <div className="rounded-lg border border-dashed border-slate-200 px-3 py-6 text-center text-xs text-slate-400">正在加载明细…</div>
+          ) : lines ? (
+            lines.items.length ? (
+              <div className="max-h-[40vh] overflow-auto rounded-lg border border-slate-200">
+                <table className="w-full min-w-[720px] border-collapse text-xs">
+                  <thead className="bg-slate-50 text-left text-[11px] text-slate-500">
+                    <tr>
+                      <th className="px-3 py-2.5">货物名称</th>
+                      <th className="px-3 py-2.5">规格型号</th>
+                      <th className="px-3 py-2.5">单位</th>
+                      <th className="px-3 py-2.5 text-right">数量</th>
+                      <th className="px-3 py-2.5 text-right">单价</th>
+                      <th className="px-3 py-2.5 text-right">金额</th>
+                      <th className="px-3 py-2.5">税率</th>
+                      <th className="px-3 py-2.5 text-right">税额</th>
+                      <th className="px-3 py-2.5 text-right">价税合计</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100">
+                    {lines.items.map((line, index) => (
+                      <tr key={index} className="hover:bg-indigo-50/30">
+                        <td className="px-3 py-2 text-slate-700">{line.goodsName ?? "—"}</td>
+                        <td className="px-3 py-2 text-slate-500">{line.spec ?? "—"}</td>
+                        <td className="px-3 py-2 text-slate-500">{line.unit ?? "—"}</td>
+                        <td className="px-3 py-2 text-right tabular-nums text-slate-600">{line.quantity ?? "—"}</td>
+                        <td className="px-3 py-2 text-right tabular-nums text-slate-600">{line.unitPrice ?? "—"}</td>
+                        <td className="px-3 py-2 text-right tabular-nums text-slate-700">{money(line.amount)}</td>
+                        <td className="px-3 py-2 text-slate-500">{line.taxRate ?? "—"}</td>
+                        <td className="px-3 py-2 text-right tabular-nums text-slate-700">{money(line.taxAmount)}</td>
+                        <td className="px-3 py-2 text-right tabular-nums text-slate-700">{money(line.totalAmount)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                  <tfoot>
+                    <tr className="bg-slate-50/70 font-medium text-slate-700">
+                      <td className="border-t border-slate-200 px-3 py-2" colSpan={5}>合计</td>
+                      <td className="border-t border-slate-200 px-3 py-2 text-right tabular-nums">{money(lines.sumAmount)}</td>
+                      <td className="border-t border-slate-200 px-3 py-2" />
+                      <td className="border-t border-slate-200 px-3 py-2 text-right tabular-nums">{money(lines.sumTax)}</td>
+                      <td className="border-t border-slate-200 px-3 py-2 text-right tabular-nums">{money(lines.sumTotal)}</td>
+                    </tr>
+                  </tfoot>
+                </table>
+              </div>
+            ) : (
+              <div className="rounded-lg border border-dashed border-slate-200 px-3 py-6 text-center text-xs text-slate-400">这张发票的清单里没有货物明细行</div>
+            )
+          ) : null}
+        </div>
+      {row.redStatus !== "none" && <div className="border-b border-rose-100 bg-rose-50/70 px-4 py-3 text-xs text-rose-800"><b>红冲提示：</b>{row.redStatus === "voided_blue" ? "这张蓝字发票已经被红冲，不能作为有效进项重复计入。" : "这是一张红字冲销发票，金额用于冲减对应蓝字发票。"}{row.redRelatedInvoiceNo ? ` 对应发票：${row.redRelatedInvoiceNo}。` : " 当前未识别到对应的另一张发票，请人工核对。"}{row.redNoticeNo ? ` 确认单：${row.redNoticeNo}` : ""}</div>}
+      <div className="grid gap-3 border-b border-slate-100 bg-slate-50/50 px-4 py-3 text-xs sm:grid-cols-2 xl:grid-cols-4">
+        <Info label="销方税号" value={row.sellerTaxId || "—"} />
+        <Info label="购方" value={row.buyerName || "—"} />
+        <Info label="购方税号" value={row.buyerTaxId || "—"} />
+      </div>
+      <div className="grid gap-4 p-4 lg:grid-cols-2">
+        <div>
+          <div className="mb-2 flex items-center justify-between gap-2">
+            <span className="text-xs font-semibold text-slate-700">{isOutput ? "销售订单关联" : "采购关联"}</span>
+            <button type="button" onClick={openPicker} className="rounded-md border border-indigo-200 bg-indigo-50 px-2.5 py-1 text-[11px] font-medium text-indigo-700 hover:bg-indigo-100">{isOutput ? "+ 关联销售订单" : "+ 关联采购单"}</button>
+          </div>
+          {actionError && <div className="mb-2 rounded-lg border border-rose-100 bg-rose-50 px-3 py-2 text-[11px] text-rose-700">{actionError}</div>}
+          {purchaseLinks.length ? (
+            <div className="space-y-2">
+              {purchaseLinks.map((link) => (
+                <div key={`${link.targetType}-${link.targetId}`} className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-slate-200 px-3 py-2">
+                  <span className="text-slate-700">{link.targetLabel}</span>
+                  <span className="flex items-center gap-3 text-[11px] text-indigo-600">
+                    {link.allocatedAmount === null ? "未分配金额" : money(String(link.allocatedAmount))} · {link.confirmed ? "已确认" : "待确认"}
+                    <button type="button" onClick={() => void handleUnlink(link)} disabled={unlinking} className="text-rose-500 hover:text-rose-700 disabled:cursor-wait disabled:opacity-50">解除</button>
+                  </span>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div className="rounded-lg border border-dashed border-slate-200 px-3 py-5 text-center text-xs text-slate-400">{isOutput ? "尚未关联销售订单" : "尚未匹配采购单"}</div>
+          )}
+        </div>
+        <div>
+          <div className="mb-2 text-xs font-semibold text-slate-700">入库追溯</div>
+          {row.inboundNos.length ? <div className="flex flex-wrap gap-2">{row.inboundNos.map((no) => <Link key={no} href="/supply-chain/receiving" className="rounded-lg border border-blue-100 bg-blue-50/60 px-3 py-2 font-mono text-xs text-blue-700 hover:bg-blue-100">{no}</Link>)}</div> : <div className="rounded-lg border border-dashed border-slate-200 px-3 py-5 text-center text-xs text-slate-400">{isOutput ? "销项发票不涉及入库追溯" : "已匹配采购单，但还没有关联入库单"}</div>}
+        </div>
+      </div>
+      {row.matchNote && <div className="border-t border-slate-100 px-4 py-3 text-xs text-slate-500">匹配说明：{row.matchNote}</div>}
+      {pickerOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40 p-4" onClick={(event) => { event.stopPropagation(); setPickerOpen(false); }}>
+          <div className="flex max-h-[82vh] w-full max-w-4xl flex-col overflow-hidden rounded-xl border border-slate-200 bg-white shadow-xl" onClick={(event) => event.stopPropagation()}>
+            <div className="flex items-center justify-between border-b border-slate-100 px-4 py-3">
+              <div>
+                <div className="text-sm font-semibold text-slate-900">{isOutput ? "关联销售订单" : "关联采购单"}</div>
+                <div className="mt-0.5 text-[11px] text-slate-400">发票 {invoiceNo(row)} · 价税合计 {money(row.totalAmount)}</div>
+              </div>
+              <button type="button" onClick={() => setPickerOpen(false)} className="rounded-md px-2 py-1 text-xs text-slate-400 hover:bg-slate-100 hover:text-slate-600">关闭</button>
+            </div>
+            <div className="flex flex-wrap items-center gap-2 border-b border-slate-100 bg-slate-50/60 px-4 py-3">
+              <input
+                value={keyword}
+                onChange={(event) => setKeyword(event.target.value)}
+                onKeyDown={(event) => { if (event.key === "Enter") void searchCandidates(keyword); }}
+                placeholder={isOutput ? "按订单号或买家/客户搜索，留空则推荐开票当月或最近订单" : "按单号或供应商搜索，留空则按发票销方推荐最近单据"}
+                className="min-w-[240px] flex-1 rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs outline-none focus:border-indigo-400"
+              />
+              <button type="button" onClick={() => void searchCandidates(keyword)} disabled={searching} className="rounded-lg bg-indigo-600 px-4 py-2 text-xs font-medium text-white shadow-sm hover:bg-indigo-700 disabled:cursor-wait disabled:opacity-50">{searching ? "搜索中…" : "搜索"}</button>
+            </div>
+            {actionError && <div className="border-b border-rose-100 bg-rose-50 px-4 py-2 text-[11px] text-rose-700">{actionError}</div>}
+            <div className="overflow-auto">
+              <table className="w-full min-w-[760px] border-collapse text-xs">
+                <thead className="bg-slate-50 text-left text-[11px] text-slate-500">
+                  <tr>
+                    <th className="px-3 py-2.5">类型</th>
+                    <th className="px-3 py-2.5">单号</th>
+                    <th className="px-3 py-2.5">{isOutput ? "买家" : "供应商"}</th>
+                    <th className="px-3 py-2.5">日期</th>
+                    <th className="px-3 py-2.5 text-right">金额</th>
+                    <th className="px-3 py-2.5">金额差</th>
+                    <th className="px-3 py-2.5">占用</th>
+                    <th className="px-4 py-2.5 text-right">操作</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100">
+                  {candidates.map((candidate) => {
+                    const key = `${candidate.targetType}-${candidate.targetId}`;
+                    const occupied = candidate.linkedInvoiceId !== null && candidate.linkedInvoiceId !== row.id;
+                    return (
+                      <tr key={key} className="hover:bg-indigo-50/30">
+                        <td className="px-3 py-2.5"><span className={`rounded-full border px-2 py-0.5 text-[10px] font-medium ${candidateTypeClass(candidate.targetType)}`}>{candidateTypeLabel(candidate.targetType)}</span></td>
+                        <td className="px-3 py-2.5 font-mono text-slate-800">{candidate.orderNo || `#${candidate.targetId}`}</td>
+                        <td className="max-w-[180px] truncate px-3 py-2.5 text-slate-600" title={candidate.targetType === "sales_order" ? candidate.buyer || "" : candidate.supplier}>{candidate.targetType === "sales_order" ? (candidate.buyer || "—") : (candidate.supplier || "—")}</td>
+                        <td className="whitespace-nowrap px-3 py-2.5 text-slate-500">{candidate.orderDate ? dateText(candidate.orderDate) : "—"}</td>
+                        <td className="px-3 py-2.5 text-right tabular-nums text-slate-700">{money(candidate.amount)}</td>
+                        <td className="px-3 py-2.5">{amountDiffLabel(candidate)}</td>
+                        <td className="px-3 py-2.5">{occupied ? <span className="rounded-full bg-rose-50 px-2 py-0.5 text-[10px] text-rose-600">已关联 {candidate.linkedInvoiceNo}</span> : <span className="text-slate-300">—</span>}</td>
+                        <td className="px-4 py-2.5 text-right">
+                          <button type="button" onClick={() => void handleLink(candidate)} disabled={submitting !== null} className="rounded-md border border-indigo-200 bg-indigo-50 px-2.5 py-1 text-[11px] font-medium text-indigo-700 hover:bg-indigo-100 disabled:cursor-wait disabled:opacity-50">{submitting === key ? "关联中…" : occupied ? "仍要关联" : "关联"}</button>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                  {!searching && searched && !candidates.length && <tr><td colSpan={8} className="px-4 py-10 text-center text-sm text-slate-400">{isOutput ? "没有找到匹配的销售订单，换个关键词试试" : "没有找到匹配的采购单，换个关键词试试"}</td></tr>}
+                  {searching && <tr><td colSpan={8} className="px-4 py-10 text-center text-sm text-slate-400">{isOutput ? "正在搜索候选销售订单…" : "正在搜索候选采购单…"}</td></tr>}
+                </tbody>
+              </table>
+            </div>
+            <div className="border-t border-slate-100 px-4 py-2 text-[11px] text-slate-400">关联后发票标记为已匹配；被其他发票占用的{isOutput ? "销售订单" : "采购单"}也可强制关联，请先核对金额。</div>
+          </div>
+        </div>
+      )}
+      </div>
+    </div>
+  );
+}
+
+function Info({ label, value }: { label: string; value: string }) {
+  return <div><div className="text-[10px] text-slate-400">{label}</div><div className="mt-1 truncate text-slate-700" title={value}>{value}</div></div>;
+}

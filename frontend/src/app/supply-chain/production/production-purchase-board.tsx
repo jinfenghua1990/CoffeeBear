@@ -1,7 +1,8 @@
 "use client";
 
 import Link from "next/link";
-import { useRouter, useSearchParams } from "next/navigation";
+import { usePathname, useSearchParams } from "next/navigation";
+import { syncWorkspaceUrl } from "@/lib/workspace/url-sync";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { authenticatedFetch } from "@/lib/api";
 
@@ -127,7 +128,7 @@ export default function ProductionPurchaseBoard({
   actionHref?: (row: PurchaseProductionRow) => string;
 }) {
   const searchParams = useSearchParams();
-  const router = useRouter();
+  const pathname = usePathname();
   const [group, setGroup] = useState<Group>(initialGroup);
   const [stage, setStage] = useState<Stage | "">("");
   const [rows, setRows] = useState<PurchaseProductionRow[]>([]);
@@ -180,21 +181,22 @@ export default function ProductionPurchaseBoard({
     void load();
   }, [load]);
 
+  // 工作区下必须用本 Tab 冻结的 searchParams/pathname，window.location 会读到激活 Tab 的地址
   function changeGroup(next: Group) {
     setGroup(next);
     setStage("");
-    const params = new URLSearchParams(window.location.search);
+    const params = new URLSearchParams(searchParams.toString());
     if (next === "all") params.delete("group");
     else params.set("group", next);
     params.delete("stage");
-    router.replace(`${window.location.pathname}${params.toString() ? `?${params.toString()}` : ""}`, { scroll: false });
+    syncWorkspaceUrl(`${pathname}${params.toString() ? `?${params.toString()}` : ""}`);
   }
 
   function clearStage() {
     setStage("");
-    const params = new URLSearchParams(window.location.search);
+    const params = new URLSearchParams(searchParams.toString());
     params.delete("stage");
-    router.replace(`${window.location.pathname}${params.toString() ? `?${params.toString()}` : ""}`, { scroll: false });
+    syncWorkspaceUrl(`${pathname}${params.toString() ? `?${params.toString()}` : ""}`);
   }
 
   const visibleItems = useMemo(() => rows.reduce((total, row) => total + row.itemCount, 0), [rows]);

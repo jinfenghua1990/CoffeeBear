@@ -18,12 +18,22 @@ from app.models.catalog import Product, ProductSku, Store, Warehouse
 from app.models.consumable import Consumable, ConsumableSkuMapping
 from app.models.sales import AftersalesOrder, SalesOrder, SalesOrderItem
 from app.models.tax import TaxAccountingCategoryRule
+from app.services.inbound_cost_service import resolve_sales_sku_id, sales_sku_lookup, weighted_inbound_costs
 from app.services.inventory_position_service import current_positions
+from app.services.sales_scope import deal_orders_condition
 from app.utils.money import quantize, to_decimal
 
 
-def _money(value: Decimal | None) -> str | None:
-    return f"{quantize(to_decimal(value), Decimal('0.01')):f}" if value is not None else None
+def _money(value: Decimal | None, *, fine: bool = False) -> str | None:
+    """金额输出：默认分位；fine=True 输出 4 位小数。
+
+    趋势/排行等会被前端逐日、逐行汇总的接口用 fine=True：若先舍入到分再相加，
+    月合计会与月结（整月一次舍入）差 0.01~0.02，属假性对不上。展示仍由前端格式化为 2 位。
+    """
+    if value is None:
+        return None
+    step = Decimal("0.0001") if fine else Decimal("0.01")
+    return f"{quantize(to_decimal(value), step):f}"
 
 
 def _quantity(value: Decimal | None) -> str | None:
@@ -41,13 +51,8 @@ def _tax_rule_map(db: Session) -> dict[int, TaxAccountingCategoryRule]:
 
 
 def _valid_sales():
-    """业绩口径：剔除取消/作废/待审核订单（2026-09-07 与销售清单导入通道对齐）。"""
-    o = SalesOrder
-    return ~or_(
-        o.order_status.like("已取消%"),
-        o.order_status.like("作废%"),
-        o.order_status == "待审核",
-    )
+    """业绩口径：见 sales_scope 成交口径（待发/已发/待确认收货/已完成计入）。"""
+    return deal_orders_condition()
 
 
 def _range_conds(start: date | None, end: date | None) -> list[Any]:
@@ -60,71 +65,282 @@ def _range_conds(start: date | None, end: date | None) -> list[Any]:
     return conds
 
 
+def _sales_order_cost_parts(
+    db: Session,
+    orders: list[SalesOrder],
+    *,
+    as_of: date | datetime,
+) -> tuple[dict[int, Decimal], set[int], set[int]]:
+    """订单成本明细拆解：返回（已覆盖成本, 缺 SKU/数量/入库成本的订单, 有明细的订单）。
+
+    销售导入文件中的成本字段只作为原始参考，不参与销售分析计算。销售明细
+    先按唯一货品编码补齐 SKU，再使用截止报告期的本系统入库明细单价。
+    """
+    order_ids = [order.id for order in orders]
+    if not order_ids:
+        return {}, set(), set()
+    items = (
+        db.query(SalesOrderItem)
+        .filter(SalesOrderItem.order_id.in_(order_ids))
+        .order_by(SalesOrderItem.order_id, SalesOrderItem.id)
+        .all()
+    )
+    lookup = sales_sku_lookup(db)
+    item_rows: list[tuple[int, int | None, Decimal | None]] = []
+    sku_ids: set[int] = set()
+    for item in items:
+        sku_id = resolve_sales_sku_id(item.sku_id, item.sku_code, lookup)
+        quantity = to_decimal(item.quantity) if item.quantity is not None else None
+        item_rows.append((item.order_id, sku_id, quantity))
+        if sku_id is not None:
+            sku_ids.add(sku_id)
+    inbound_costs = weighted_inbound_costs(db, as_of=as_of, sku_ids=sku_ids)
+    costs: dict[int, Decimal] = {}
+    has_invalid_item: set[int] = set()
+    for order_id, sku_id, quantity in item_rows:
+        if sku_id is None or quantity is None or sku_id not in inbound_costs:
+            has_invalid_item.add(order_id)
+            continue
+        costs[order_id] = costs.get(order_id, Decimal("0")) + inbound_costs[sku_id] * quantity
+    item_order_ids = {order_id for order_id, _sku_id, _quantity in item_rows}
+    return costs, has_invalid_item, item_order_ids
+
+
+def sales_order_item_costs(
+    db: Session,
+    items: list[SalesOrderItem],
+    *,
+    as_of: date | datetime,
+) -> dict[int, Decimal | None]:
+    """逐行货品成本：销售数量 × 该 SKU 的入库加权单价，缺 SKU/数量/入库成本的行返回 None。
+
+    与订单成本（sales_order_costs_partial）共用同一套 SKU 解析与入库单价，
+    保证 Σ 行成本 = 订单成本（已覆盖部分）；销售明细导出按此把订单级的实付、
+    成本拆到每个子 SKU 行上。
+    """
+    if not items:
+        return {}
+    lookup = sales_sku_lookup(db)
+    resolved: list[tuple[int, int | None, Decimal | None]] = []
+    sku_ids: set[int] = set()
+    for item in items:
+        sku_id = resolve_sales_sku_id(item.sku_id, item.sku_code, lookup)
+        quantity = to_decimal(item.quantity) if item.quantity is not None else None
+        resolved.append((item.id, sku_id, quantity))
+        if sku_id is not None:
+            sku_ids.add(sku_id)
+    inbound_costs = weighted_inbound_costs(db, as_of=as_of, sku_ids=sku_ids)
+    return {
+        item_id: inbound_costs[sku_id] * quantity
+        if sku_id is not None and quantity is not None and sku_id in inbound_costs
+        else None
+        for item_id, sku_id, quantity in resolved
+    }
+
+
+def sales_order_costs(
+    db: Session,
+    orders: list[SalesOrder],
+    *,
+    as_of: date | datetime,
+) -> dict[int, Decimal | None]:
+    """按入库单加权成本计算每张销售订单的货品成本（销售明细口径）。
+
+    任何明细无法匹配 SKU、数量或入库成本缺失时，该订单成本保持为空，
+    供销售明细逐单核对使用；业绩总览与销售明细共用本函数保证口径一致。
+    """
+    costs, invalid_orders, item_order_ids = _sales_order_cost_parts(db, orders, as_of=as_of)
+    return {
+        order.id: costs[order.id].quantize(Decimal("0.0001"))
+        if order.id in item_order_ids and order.id in costs and order.id not in invalid_orders
+        else None
+        for order in orders
+    }
+
+
+def sales_order_costs_partial(
+    db: Session,
+    orders: list[SalesOrder],
+    *,
+    as_of: date | datetime,
+) -> dict[int, tuple[Decimal | None, bool]]:
+    """聚合口径的订单成本：按已覆盖明细累计，缺成本的订单标记不完整。
+
+    与月结/利润中心（profit.compute）的「已覆盖部分出数」保持一致，
+    避免个别 SKU 缺成本时聚合毛利整段留空或与月结对不上；
+    整单没有任何可计算明细时成本返回 None，不伪造 0 成本。
+    """
+    costs, invalid_orders, item_order_ids = _sales_order_cost_parts(db, orders, as_of=as_of)
+    return {
+        order.id: (
+            costs[order.id].quantize(Decimal("0.0001")) if order.id in costs else None,
+            order.id in invalid_orders or order.id not in item_order_ids,
+        )
+        for order in orders
+    }
+
+
 def sales_trend(db: Session, days: int = 30, start: date | None = None, end: date | None = None) -> list[dict[str, Any]]:
-    """区间内每日销售额/订单数/退款率。按 ordered_at 分组（本地库）。
-    start 传入时按 [start, end] 闭区间，否则取近 N 天。"""
+    """区间内每日销售额/订单数/入库成本/毛利润。按 ordered_at 分组（本地库）。
+    start 传入时按 [start, end] 闭区间，否则取近 N 天。
+    个别订单缺入库成本时按已覆盖部分出数并置 costIncomplete，避免整段毛利留空。"""
     if start is not None:
         conds = _range_conds(start, end)
+        as_of: date | datetime = (end + timedelta(days=1)) if end else datetime.now(timezone.utc)
     else:
         since = datetime.now(timezone.utc) - timedelta(days=days)
         conds = [SalesOrder.ordered_at >= since, _valid_sales()]
-    rows = (
-        db.query(
-            func.date(SalesOrder.ordered_at),
-            func.count(SalesOrder.id),
-            func.coalesce(func.sum(SalesOrder.paid_amount), 0),
-        )
-        .filter(*conds)
-        .group_by(func.date(SalesOrder.ordered_at))
-        .order_by(func.date(SalesOrder.ordered_at))
-        .all()
-    )
-    out = []
-    for day, cnt, amt in rows:
-        out.append({"date": day.isoformat(), "orders": int(cnt), "salesAmount": _money(amt)})
-    return out
+        as_of = datetime.now(timezone.utc)
+    orders = db.query(SalesOrder).filter(*conds).all()
+    order_costs = sales_order_costs_partial(db, orders, as_of=as_of)
+    grouped: dict[str, dict[str, Any]] = {}
+    for order in orders:
+        if order.ordered_at is None:
+            continue
+        day = order.ordered_at.date().isoformat()
+        bucket = grouped.setdefault(day, {
+            "orders": 0,
+            "sales": Decimal("0"),
+            "cost": Decimal("0"),
+            "gross": Decimal("0"),
+            "costIncomplete": False,
+        })
+        bucket["orders"] += 1
+        sales = to_decimal(order.paid_amount) if order.paid_amount is not None else Decimal("0")
+        bucket["sales"] += sales
+        # 按已覆盖明细出成本（与月结同口径）；缺成本明细的订单标记不完整并由前端提示补充。
+        # 毛利 = 销售额 − 已覆盖成本：整单没有可计算成本时仍计入销售额（成本按 0 累计），
+        # 与月结 profit.compute 的「已覆盖部分出数」保持一致。
+        cost, incomplete = order_costs.get(order.id, (None, True))
+        if incomplete:
+            bucket["costIncomplete"] = True
+        bucket["gross"] += sales
+        if cost is not None:
+            bucket["cost"] += cost
+            bucket["gross"] -= cost
+    return [
+        {
+            "date": day,
+            "orders": bucket["orders"],
+            "salesAmount": _money(bucket["sales"], fine=True),
+            "costAmount": _money(bucket["cost"], fine=True),
+            "grossProfit": _money(bucket["gross"], fine=True),
+            "costIncomplete": bucket["costIncomplete"],
+        }
+        for day, bucket in sorted(grouped.items())
+    ]
 
 
 def platform_ranking(db: Session, start: date | None = None, end: date | None = None) -> list[dict[str, Any]]:
-    """平台/店铺销售排行。无平台字段的订单归入 unknown。"""
-    rows = (
-        db.query(SalesOrder.platform, func.count(SalesOrder.id), func.coalesce(func.sum(SalesOrder.paid_amount), 0))
-        .filter(*_range_conds(start, end))
-        .group_by(SalesOrder.platform)
-        .order_by(func.sum(SalesOrder.paid_amount).desc())
-        .all()
-    )
-    out = []
-    for platform, cnt, amt in rows:
-        out.append({"platform": platform or "unknown", "orders": int(cnt), "salesAmount": _money(amt)})
-    return out
+    """平台/店铺销售排行；货品成本来自本系统入库单。无平台字段的订单归入 unknown。
+    个别订单缺入库成本时按已覆盖部分出数并置 costIncomplete。"""
+    orders = db.query(SalesOrder).filter(*_range_conds(start, end)).all()
+    as_of: date | datetime = (end + timedelta(days=1)) if end else datetime.now(timezone.utc)
+    order_costs = sales_order_costs_partial(db, orders, as_of=as_of)
+    grouped: dict[str, dict[str, Any]] = {}
+    for order in orders:
+        name = order.platform or "unknown"
+        bucket = grouped.setdefault(name, {
+            "orders": 0,
+            "sales": Decimal("0"),
+            "cost": Decimal("0"),
+            "gross": Decimal("0"),
+            "costIncomplete": False,
+        })
+        bucket["orders"] += 1
+        sales = to_decimal(order.paid_amount) if order.paid_amount is not None else Decimal("0")
+        bucket["sales"] += sales
+        cost, incomplete = order_costs.get(order.id, (None, True))
+        if incomplete:
+            bucket["costIncomplete"] = True
+        # 同 sales_trend：毛利始终含销售额，成本只减已覆盖部分。
+        bucket["gross"] += sales
+        if cost is not None:
+            bucket["cost"] += cost
+            bucket["gross"] -= cost
+    return [
+        {
+            "platform": platform,
+            "orders": bucket["orders"],
+            "salesAmount": _money(bucket["sales"], fine=True),
+            "costAmount": _money(bucket["cost"], fine=True),
+            "grossProfit": _money(bucket["gross"], fine=True),
+            "costIncomplete": bucket["costIncomplete"],
+        }
+        for platform, bucket in sorted(grouped.items(), key=lambda item: item[1]["sales"], reverse=True)
+    ]
 
 
 def sku_ranking(db: Session, limit: int = 20, start: date | None = None, end: date | None = None) -> list[dict[str, Any]]:
-    """SKU 销售额排行（来自订单明细本地副本）。"""
-    rows = (
-        db.query(
-            SalesOrderItem.sku_code,
-            SalesOrderItem.goods_name,
-            func.count(SalesOrderItem.id),
-            func.coalesce(func.sum(SalesOrderItem.amount), 0),
-        )
-        .join(SalesOrder, SalesOrder.id == SalesOrderItem.order_id)
-        .filter(*_range_conds(start, end))
-        .group_by(SalesOrderItem.sku_code, SalesOrderItem.goods_name)
-        .order_by(func.sum(SalesOrderItem.amount).desc())
-        .limit(limit)
+    """SKU 销售额排行：把订单实付按各行成本占比分摊到 SKU。
+
+    吉客云行金额存在 0 值与负数，不能作为收入基数；分摊后各 SKU 金额合计
+    等于业绩口径销售额。个别行缺入库成本时退化为按销售数量占比分摊。
+    """
+    orders = db.query(SalesOrder).filter(*_range_conds(start, end)).all()
+    order_ids = [order.id for order in orders]
+    if not order_ids:
+        return []
+    items = (
+        db.query(SalesOrderItem)
+        .filter(SalesOrderItem.order_id.in_(order_ids))
+        .order_by(SalesOrderItem.order_id, SalesOrderItem.id)
         .all()
     )
-    out = []
-    for sku_code, goods_name, cnt, amt in rows:
-        out.append({
-            "skuCode": sku_code or "",
-            "goodsName": goods_name or "",
-            "orders": int(cnt),
-            "salesAmount": _money(amt),
-        })
-    return out
+    lookup = sales_sku_lookup(db)
+    parsed: list[tuple[SalesOrderItem, int | None, Decimal | None]] = []
+    sku_ids: set[int] = set()
+    for item in items:
+        sku_id = resolve_sales_sku_id(item.sku_id, item.sku_code, lookup)
+        quantity = to_decimal(item.quantity) if item.quantity is not None else None
+        parsed.append((item, sku_id, quantity))
+        if sku_id is not None:
+            sku_ids.add(sku_id)
+    as_of = (
+        datetime.now(timezone.utc)
+        if end is None
+        else datetime.combine(end + timedelta(days=1), datetime.min.time())
+    )
+    inbound_costs = weighted_inbound_costs(db, as_of=as_of, sku_ids=sku_ids)
+
+    weights: dict[int, list[tuple[SalesOrderItem, Decimal]]] = {}
+    for item, sku_id, quantity in parsed:
+        unit_cost = inbound_costs.get(sku_id) if sku_id is not None else None
+        if unit_cost is not None and quantity is not None:
+            weight = unit_cost * quantity
+        elif quantity is not None:
+            weight = quantity
+        elif unit_cost is not None:
+            weight = unit_cost
+        else:
+            weight = Decimal("0")
+        weights.setdefault(item.order_id, []).append((item, weight))
+
+    totals: dict[tuple[str, str], dict[str, Any]] = {}
+    for order in orders:
+        rows = weights.get(order.id)
+        if not rows:
+            continue
+        paid = to_decimal(order.paid_amount) if order.paid_amount is not None else Decimal("0")
+        total_weight = sum((weight for _item, weight in rows), Decimal("0"))
+        for item, weight in rows:
+            share = paid * (weight / total_weight) if total_weight > 0 else paid / len(rows)
+            key = (item.sku_code or "", item.goods_name or "")
+            bucket = totals.setdefault(key, {
+                "skuCode": key[0], "goodsName": key[1], "orders": 0, "amount": Decimal("0"),
+            })
+            bucket["orders"] += 1
+            bucket["amount"] += share
+    ranked = sorted(totals.values(), key=lambda row: row["amount"], reverse=True)[:limit]
+    return [
+        {
+            "skuCode": row["skuCode"],
+            "goodsName": row["goodsName"],
+            "orders": row["orders"],
+            "salesAmount": _money(row["amount"], fine=True),
+        }
+        for row in ranked
+    ]
 
 
 def inventory_summary(db: Session) -> dict[str, Any]:
@@ -245,6 +461,8 @@ def list_products(db: Session, search: str = "", limit: int = 200) -> list[dict[
             "taxCode": sku.tax_code or "",
             "taxCategoryRuleId": sku.tax_category_rule_id,
             "taxCategoryRuleName": _tax_rule_label(tax_rules.get(sku.tax_category_rule_id)),
+            # 货品级耗材策略沿用现有 JSONB 扩展字段，避免为一次业务规则变更增加迁移。
+            "consumablePolicy": (sku.raw or {}).get("consumablePolicy") or "auto",
             "status": sku.status,
         }
         for sku, product in q.limit(limit).all()
@@ -370,11 +588,11 @@ def overview_metrics(db: Session) -> dict[str, Any]:
     """总览首屏 9 指标（规格 4）。全部来自本地库聚合，数据为空如实 None。"""
     paid_orders = (
         db.query(SalesOrder)
-        .filter(SalesOrder.paid_amount.isnot(None))
+        .filter(deal_orders_condition(), SalesOrder.paid_amount.isnot(None))
         .all()
     )
     sales_amount = sum((to_decimal(o.paid_amount) for o in paid_orders), Decimal("0"))
-    order_count = db.query(SalesOrder).count()
+    order_count = db.query(SalesOrder).filter(deal_orders_condition()).count()
 
     refunds = db.query(AftersalesOrder).filter(AftersalesOrder.type == "refund").all()
     refund_amount = sum((to_decimal(r.refund_amount) for r in refunds), Decimal("0"))

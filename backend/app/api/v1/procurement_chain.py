@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
+from datetime import datetime
+from decimal import Decimal
+from typing import Annotated
+
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from app.api.deps import current_actor
+from app.core.audit import audit
 from app.db import get_db
 from app.models.procurement_chain import ProcurementChainLink
 from app.services import procurement_chain_service as service
@@ -171,6 +176,89 @@ class DocumentAmountBody(BaseModel):
     note: str = ""
 
 
+class DocumentDateBody(BaseModel):
+    inbound_at: datetime
+    note: str = ""
+
+
+class DocumentItemPriceBody(BaseModel):
+    unit_price_tax: str
+    note: str = ""
+
+
+class LocalInboundItemBody(BaseModel):
+    allocation_id: int
+    quantity: Annotated[Decimal, Field(gt=0, max_digits=18, decimal_places=4)]
+    unit_price: Annotated[Decimal, Field(ge=0, max_digits=18, decimal_places=4)] | None = None
+
+
+class LocalInboundBody(BaseModel):
+    order_id: int
+    inbound_no: str = Field(default="", max_length=128)
+    inbound_at: datetime | None = None
+    warehouse_id: int | None = None
+    note: str = ""
+    items: list[LocalInboundItemBody] = Field(min_length=1, max_length=500)
+    consumable_usage_enabled: bool | None = None
+    consumable_usage_items: list[ConsumableUsageItemBody] = []
+
+
+@router.post("/local-inbounds")
+def create_local_inbound(body: LocalInboundBody, request: Request, db: Session = Depends(get_db)) -> dict:
+    """由本系统创建采购入库主单，不调用吉客云接口。"""
+    from app.services import local_inbound_service
+
+    try:
+        document, link = local_inbound_service.create_purchase_inbound(
+            db,
+            order_id=body.order_id,
+            inbound_no=body.inbound_no,
+            inbound_at=body.inbound_at,
+            warehouse_id=body.warehouse_id,
+            items=[item.model_dump() for item in body.items],
+            note=body.note,
+            actor=current_actor(request),
+        )
+        # 兼容旧客户端仍携带的耗材字段，但采购入库统一由实际入库明细和
+        # 正品↔耗材映射自动计算；人工修正请使用独立的历史修正接口。
+        from app.services.consumable_service import auto_apply_inbound_usage
+        usage = auto_apply_inbound_usage(db, link.id, note="本系统采购入库按 SKU 耗材映射处理")
+    except (TypeError, ValueError) as exc:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    audit(db, current_actor(request), "purchase.local_inbound.create", "jackyun_goods_documents", document.id, {
+        "inboundNo": document.goodsdoc_no,
+        "platformPurchaseOrderNo": (document.raw or {}).get("platformPurchaseOrderNo"),
+        "linkId": link.id,
+    })
+    return {
+        "ok": True,
+        "documentId": document.id,
+        "inboundNo": document.goodsdoc_no,
+        "linkId": link.id,
+        "source": "local_purchase_inbound",
+        "usage": usage,
+    }
+
+
+@router.delete("/inbound-documents/{document_id}")
+def delete_local_inbound(document_id: int, request: Request, db: Session = Depends(get_db)) -> dict:
+    """删除本系统采购入库；吉客云历史入库单不允许删除。"""
+    from app.services import local_inbound_service
+
+    try:
+        result = local_inbound_service.delete_local_purchase_inbound(db, document_id=document_id)
+    except ValueError as exc:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=str(exc))
+    audit(db, current_actor(request), "purchase.local_inbound.delete", "jackyun_goods_documents", document_id, {
+        "inboundNo": result["inboundNo"],
+        "removedLinkIds": result["removedLinkIds"],
+    })
+    return result
+
+
 @router.patch("/inbound-documents/{document_id}/amount")
 def patch_inbound_document_amount(request: Request, document_id: int, body: DocumentAmountBody,
                                   db: Session = Depends(get_db)) -> dict:
@@ -205,6 +293,44 @@ def recalc_inbound_document_amount(request: Request, document_id: int,
           "jackyun_goods_documents", document_id,
           {"before": result["before"], "after": result["after"]})
     return {"ok": True, "before": result["before"], "after": result["after"]}
+
+
+@router.patch("/inbound-documents/{document_id}/date")
+def patch_inbound_document_date(request: Request, document_id: int, body: DocumentDateBody,
+                                db: Session = Depends(get_db)) -> dict:
+    """人工更正入库单日期（日期决定成本落入哪个报告期，录错会让历史月份取不到成本）。"""
+    from app.services import inbound_edit_service
+
+    try:
+        result = inbound_edit_service.set_document_date(db, document_id, body.inbound_at)
+    except ValueError as exc:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=str(exc))
+    audit(db, current_actor(request), "purchase.inbound.date_correct",
+          "jackyun_goods_documents", document_id,
+          {"before": result["before"], "after": result["after"], "note": body.note})
+    return result
+
+
+@router.patch("/inbound-documents/{document_id}/items/{item_id}/price")
+def patch_inbound_item_price(request: Request, document_id: int, item_id: int,
+                             body: DocumentItemPriceBody, db: Session = Depends(get_db)) -> dict:
+    """人工更正入库明细含税单价，并联动重算该行金额与单据头金额。"""
+    from app.services import inbound_edit_service
+
+    try:
+        result = inbound_edit_service.set_item_unit_price(db, document_id, item_id, body.unit_price_tax)
+    except ValueError as exc:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=str(exc))
+    audit(db, current_actor(request), "purchase.inbound.item_price_correct",
+          "jackyun_goods_document_items", item_id,
+          {key: result[key] for key in (
+              "documentId", "lineNo", "before", "after",
+              "amountTaxBefore", "amountTaxAfter",
+              "documentAmountBefore", "documentAmountAfter",
+          )} | {"note": body.note})
+    return result
 
 
 @router.post("/xref/preview")
@@ -297,19 +423,13 @@ def manual_link(body: LinkBody, db: Session = Depends(get_db)) -> dict:
 def replace_link(link_id: int, body: ReplaceLinkBody, db: Session = Depends(get_db)) -> dict:
     """把一条已有关联原子更换到另一张业务单据。"""
     target_id = body.target_id
-    usage_enabled = body.consumable_usage_enabled
-    usage_items = [item.model_dump() for item in body.consumable_usage_items]
     matcher = service.ProcurementChainMatcher(db)
     usage_result = None
     try:
         link = matcher.replace_link(link_id, target_id, note=body.note)
         if link.target_type == "inbound":
-            if usage_enabled is None:
-                from app.services.consumable_service import auto_apply_inbound_usage
-                usage_result = auto_apply_inbound_usage(db, link.id, note="采购入库自动按 SKU 耗材映射关联")
-            else:
-                from app.services.consumable_service import set_inbound_usage
-                set_inbound_usage(db, link_id=link.id, enabled=usage_enabled, items=usage_items, note=body.note)
+            from app.services.consumable_service import auto_apply_inbound_usage
+            usage_result = auto_apply_inbound_usage(db, link.id, note="采购入库自动按 SKU 耗材映射关联")
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     return {"id": link.id, "confirmed": True, "targetId": link.target_id, "autoUsage": usage_result}
@@ -317,7 +437,7 @@ def replace_link(link_id: int, body: ReplaceLinkBody, db: Session = Depends(get_
 
 @router.post("/links/{link_id}/consumable-usage")
 def set_link_consumable_usage(link_id: int, body: ConsumableUsageBody, db: Session = Depends(get_db)) -> dict:
-    """入库关联的必填耗材出库确认；enabled=False 表示明确不使用。"""
+    """历史入库关联的耗材流水修正接口；正常流程由系统自动计算。"""
     from app.services.consumable_service import set_inbound_usage
 
     try:
@@ -330,19 +450,14 @@ def set_link_consumable_usage(link_id: int, body: ConsumableUsageBody, db: Sessi
 
 @router.post("/links/{link_id}/confirm")
 def confirm_link(link_id: int, body: ConsumableUsageBody | None = Body(None), db: Session = Depends(get_db)) -> dict:
-    """确认一条待确认关联。"""
+    """确认一条待确认关联；入库耗材由系统按实际入库数量自动计算。"""
     matcher = service.ProcurementChainMatcher(db)
     usage_result = None
     try:
-        link = db.get(ProcurementChainLink, link_id)
-        if link is not None and link.target_type == "inbound":
-            if body is not None:
-                from app.services.consumable_service import set_inbound_usage
-                set_inbound_usage(db, link_id=link_id, enabled=body.enabled, items=[item.model_dump() for item in body.items], note=body.note)
-            elif not link.consumable_usage_decided:
-                from app.services.consumable_service import auto_apply_inbound_usage
-                usage_result = auto_apply_inbound_usage(db, link_id, note="采购入库自动按 SKU 耗材映射关联")
         link = matcher.confirm(link_id)
+        if link.target_type == "inbound":
+            from app.services.consumable_service import auto_apply_inbound_usage
+            usage_result = auto_apply_inbound_usage(db, link_id, note="采购入库自动按 SKU 耗材映射关联")
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
     return {"id": link.id, "confirmed": True, "autoUsage": usage_result}

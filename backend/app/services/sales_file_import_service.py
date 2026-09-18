@@ -4,7 +4,8 @@
 - 吉客云开放平台 API 有到期风险；到期后销售业绩改由用户从吉客云客户端导出
   《销售单查询》（含「销售单」+「销售单货品」两个 sheet）手工导入本通道。
 - 金额/业绩维度一律以用户上传表格为准（与采购侧「入库申请单货品」口径一致）。
-- 本通道只落「有效销售单」（已完成/发货在途/待发货 等），取消/待审核/作废单不导入
+- 本通道只落「成交单」（待发/已发/待确认收货/已完成，口径见 services/sales_scope），
+  关闭/取消/作废/待审核/退货/退款单不导入
   （避免污染业绩聚合）；若库内已有同号订单被本文件标记为取消，则删除该残留。
 - 幂等：按 JY 订单号 upsert，重复导入覆盖更新；订单明细整单替换。
 
@@ -16,21 +17,27 @@ from __future__ import annotations
 import hashlib
 from datetime import datetime, timezone
 from io import BytesIO
+from pathlib import Path
 from typing import Any
 
 from openpyxl import load_workbook
 from sqlalchemy import delete
 from sqlalchemy.orm import Session
 
+from app.adapters.bank_file import sanitize_name
+from app.config import settings
 from app.core.audit import audit
+from app.models.catalog import ProductSku
 from app.models.sales import SalesOrder, SalesOrderItem
+from app.services.inbound_cost_service import sales_sku_lookup
+from app.services.sales_scope import is_deal_status
 
 MAX_FILE_BYTES = 100 * 1024 * 1024
 
 # 销售单主表：吉客云导出列名 → 模型字段
 _ORDER_KEYS = ("订单编号",)
 _STATUS_KEYS = ("订单状态",)
-_CHANNEL_KEYS = ("销售渠道", "店铺", "店铺名称")
+_CHANNEL_KEYS = ("销售渠道", "渠道", "店铺", "店铺名称")
 _TYPE_KEYS = ("订单类型",)
 _SETTLE_KEYS = ("结算状态",)
 _ORDERTIME_KEYS = ("下单时间", "订单时间", "创建时间", "拍下时间")
@@ -48,19 +55,17 @@ _EXPRESS_KEYS = ("物流公司",)
 
 # 销售单货品：明细列名 → 模型字段
 _ITEM_ORDER_KEYS = ("订单编号",)
-_ITEM_SKU_KEYS = ("货品编号", "货品编码", "商品编号", "SKU编码")
-_ITEM_NAME_KEYS = ("货品名称", "商品名称", "品名")
-_ITEM_QTY_KEYS = ("数量", "基本数量")
+_ITEM_SKU_KEYS = ("货品编号", "货品编码", "商品编号", "商品编码", "SKU编码", "SKU", "货号", "商品货号", "商家编码")
+_ITEM_NAME_KEYS = ("货品名称", "商品名称", "品名", "商品")
+_ITEM_QTY_KEYS = ("数量", "基本数量", "货品数量", "实发数量")
 _ITEM_PRICE_KEYS = ("单价", "成交单价", "销售单价")
-_ITEM_AMOUNT_KEYS = ("金额", "行金额", "销售额")
+_ITEM_AMOUNT_KEYS = ("金额", "行金额", "销售额", "成交金额", "商品金额")
 _ITEM_DISCOUNT_KEYS = ("优惠", "优惠金额")
 _ITEM_SPEC_KEYS = ("规格", "规格名称")
 _ITEM_UNIT_KEYS = ("单位", "基本单位")
 _ITEM_GIFT_KEYS = ("赠品",)
 
-# 不参与业绩聚合的状态（前缀/精确匹配）
-_CANCELLED_PREFIX = ("已取消", "作废", "已关闭")
-_PENDING_STATUS = ("待审核", "未审核")
+# 不参与业绩聚合的状态统一定义在 sales_scope（成交口径唯一来源）
 
 _ts_fmts = ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d", "%Y/%m/%d %H:%M:%S", "%Y/%m/%d %H:%M", "%Y/%m/%d")
 
@@ -110,13 +115,72 @@ def _row_headers(ws) -> dict[str, int]:
     return {}
 
 
+def _has_header(headers: dict[str, int], aliases: tuple[str, ...]) -> bool:
+    return any(alias in headers for alias in aliases)
+
+
+def _is_order_sheet(headers: dict[str, int]) -> bool:
+    return (
+        _has_header(headers, _ORDER_KEYS)
+        and _has_header(headers, _CHANNEL_KEYS)
+        and _has_header(headers, _STATUS_KEYS)
+    )
+
+
+def _is_item_sheet(headers: dict[str, int]) -> bool:
+    """支持独立明细 Sheet，也支持订单主表中展开的明细列。"""
+    return _has_header(headers, _ITEM_ORDER_KEYS) and (
+        _has_header(headers, _ITEM_SKU_KEYS)
+        or (_has_header(headers, _ITEM_NAME_KEYS) and _has_header(headers, _ITEM_QTY_KEYS))
+    )
+
+
+def _has_item_data(payload: dict[str, Any]) -> bool:
+    return bool(
+        _cell(payload, _ITEM_SKU_KEYS)
+        or (_cell(payload, _ITEM_NAME_KEYS) and _cell(payload, _ITEM_QTY_KEYS))
+    )
+
+
+def _archive_upload(content: bytes, original_name: str, sha: str) -> Path:
+    """保留网页实际收到的原件，便于复核解析结果；同一指纹不重复覆盖。"""
+    root = Path(settings.DATA_DIR).resolve() / "sales-imports"
+    root.mkdir(parents=True, exist_ok=True)
+    clean_name = sanitize_name(original_name or "sales-list.xlsx")
+    target = root / f"{sha}_{clean_name}"
+    try:
+        with target.open("xb") as output:
+            output.write(content)
+    except FileExistsError:
+        pass
+    return target
+
+
+def _collect_item_groups(ws, headers: dict[str, int], *, same_sheet: bool) -> dict[str, list[dict[str, Any]]]:
+    """读取独立明细 Sheet，或主表中按行展开的明细。"""
+    groups: dict[str, list[dict[str, Any]]] = {}
+    current_order_no = ""
+    for row in ws.iter_rows(values_only=True):
+        if not row:
+            continue
+        payload = {name: row[i] for name, i in headers.items() if i < len(row)}
+        order_no = str(_cell(payload, _ITEM_ORDER_KEYS) or "").strip()
+        if order_no == "订单编号":
+            continue
+        has_item_data = _has_item_data(payload)
+        if order_no:
+            current_order_no = order_no
+        elif same_sheet and has_item_data:
+            # Excel 合并单元格在后续行读出来是 None，沿用上一行订单号。
+            order_no = current_order_no
+        if not order_no or not has_item_data:
+            continue
+        groups.setdefault(order_no, []).append(payload)
+    return groups
+
+
 def _is_valid_status(status: str | None) -> bool:
-    if not status:
-        return True
-    s = str(status).strip()
-    if s in _PENDING_STATUS:
-        return False
-    return not s.startswith(_CANCELLED_PREFIX)
+    return is_deal_status(status)
 
 
 def import_sales_file(
@@ -132,20 +196,57 @@ def import_sales_file(
     if len(content) > MAX_FILE_BYTES:
         raise ValueError("文件超过 100 MiB 上限")
 
-    wb = load_workbook(BytesIO(content), read_only=True, data_only=True)
+    sha = hashlib.sha256(content).hexdigest()[:16]
+    archive_path = _archive_upload(content, original_name, sha)
+    try:
+        wb = load_workbook(BytesIO(content), read_only=True, data_only=True)
+    except Exception as exc:
+        raise ValueError("文件格式无法解析，请上传有效的 .xlsx 文件") from exc
     order_ws = None
     item_ws = None
+    sheet_diagnostics: list[dict[str, Any]] = []
     for name in wb.sheetnames:
         ws = wb[name]
         hd = _row_headers(ws)
-        if order_ws is None and _cell(hd, _ORDER_KEYS) is not None and _cell(hd, _CHANNEL_KEYS) is not None and _cell(hd, _STATUS_KEYS) is not None:
+        is_order = _is_order_sheet(hd)
+        is_item = _is_item_sheet(hd)
+        sheet_diagnostics.append({
+            "name": name,
+            "role": "order+item" if is_order and is_item else "order" if is_order else "item" if is_item else "unknown",
+            "headers": list(hd.keys()),
+        })
+        if order_ws is None and is_order:
             order_ws = (ws, hd)
-        elif item_ws is None and _cell(hd, _ITEM_ORDER_KEYS) is not None and _cell(hd, _ITEM_SKU_KEYS) is not None:
+        if item_ws is None and is_item:
             item_ws = (ws, hd)
     if order_ws is None:
+        wb.close()
         raise ValueError("未识别到「销售单」sheet（需要含 订单编号/销售渠道/订单状态 列）")
+    if item_ws is None:
+        wb.close()
+        raise ValueError("未识别到销售明细列，请确认文件包含货品编号（或商品编码）、货品名称和数量")
 
-    sha = hashlib.sha256(content).hexdigest()[:16]
+    # ---------- 货品档案校验：明细货品编码必须已建档，否则整单拒绝（不写任何数据） ----------
+    iws, ihd = item_ws
+    same_sheet_items = iws is order_ws[0]
+    item_groups = _collect_item_groups(iws, ihd, same_sheet=same_sheet_items)
+    known_codes = {
+        str(code).strip().lower()
+        for (code,) in db.query(ProductSku.sku_code).all()
+        if code is not None and str(code).strip()
+    }
+    missing_codes: list[str] = []
+    for lines in item_groups.values():
+        for line in lines:
+            code = str(_cell(line, _ITEM_SKU_KEYS) or "").strip()
+            if (not code or code.lower() not in known_codes) and code not in missing_codes:
+                missing_codes.append(code)
+    if missing_codes:
+        wb.close()
+        raise ValueError(
+            "货品档案缺少以下货品编码，请先建档或修正后再导入：" + ",".join(missing_codes)
+        )
+
     imported_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
 
     # ---------- sheet1 销售单：upsert 有效订单 ----------
@@ -237,20 +338,11 @@ def import_sales_file(
 
     db.flush()
 
-    # ---------- sheet2 销售单货品：整单替换明细 ----------
+    # ---------- sheet2 销售单货品：整单替换明细（item_groups 已在校验阶段解析） ----------
     item_total = 0
     item_order_hits = 0
     if item_ws is not None:
-        iws, ihd = item_ws
-        item_groups: dict[str, list[dict]] = {}
-        for row in iws.iter_rows(values_only=True):
-            if not row:
-                continue
-            payload = {name: row[i] for name, i in ihd.items() if i < len(row)}
-            no = str(_cell(payload, _ITEM_ORDER_KEYS) or "").strip()
-            if not no or not _cell(payload, _ITEM_SKU_KEYS):
-                continue
-            item_groups.setdefault(no, []).append(payload)
+        sku_lookup = sales_sku_lookup(db)
         db_orders = {
             o.order_no: o
             for o in db.query(SalesOrder).filter(SalesOrder.order_no.in_(list(item_groups.keys()))).all()
@@ -265,9 +357,11 @@ def import_sales_file(
                 unit = _num(_cell(line, _ITEM_PRICE_KEYS))
                 amt = _num(_cell(line, _ITEM_AMOUNT_KEYS))
                 discount = _num(_cell(line, _ITEM_DISCOUNT_KEYS))
+                sku_code = str(_cell(line, _ITEM_SKU_KEYS) or "").strip()
                 db.add(SalesOrderItem(
                     order_id=order.id,
-                    sku_code=str(_cell(line, _ITEM_SKU_KEYS) or "").strip(),
+                    sku_id=sku_lookup.get(sku_code.lower()),
+                    sku_code=sku_code,
                     goods_name=str(_cell(line, _ITEM_NAME_KEYS) or "").strip(),
                     quantity=qty,
                     unit_price=unit,
@@ -282,6 +376,13 @@ def import_sales_file(
                 ))
                 item_total += 1
             item_order_hits += 1
+
+    if item_total == 0:
+        wb.close()
+        db.rollback()
+        raise ValueError("未读取到有效销售明细，订单主表未导入，请检查明细列和订单号是否对应")
+
+    wb.close()
 
     db.commit()
 
@@ -303,8 +404,11 @@ def import_sales_file(
         "minDate": min(dates).strftime("%Y-%m-%d") if dates else None,
         "maxDate": max(dates).strftime("%Y-%m-%d") if dates else None,
         "file": original_name,
+        "archiveFile": str(archive_path.relative_to(Path(settings.DATA_DIR).resolve())),
+        "sheets": sheet_diagnostics,
     }
     audit(db, actor, "sales_file.import", "sales_orders", len(seen),
           {"ordersImported": len(seen), "cancelledSkipped": len(cancelled_nos),
-           "removedCancelled": removed_cancelled, "items": item_total})
+           "removedCancelled": removed_cancelled, "items": item_total,
+           "archiveFile": stats["archiveFile"], "sheets": sheet_diagnostics})
     return stats

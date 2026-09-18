@@ -82,9 +82,19 @@ class TaxInvoice(Base, PkMixin, TimestampMixin):
     source_row_index: Mapped[int | None] = mapped_column(Integer, nullable=True)
     match_status: Mapped[str] = mapped_column(String(32), default="unmatched", index=True)
     match_note: Mapped[str] = mapped_column(Text, default="")
+    # 进项发票的业务处理结论：待判断、需处理、暂不处理。
+    processing_status: Mapped[str] = mapped_column(
+        String(16), default="pending", server_default="pending", index=True
+    )
+    # 进项发票 v2 分类（与 processing_status 合并的单一事实字段）：
+    # goods/platform_fee/operating_other=计入运营成本；reimburse_advance/reimburse_operating=计入报销成本；
+    # excluded=不计入任何报销运营；空=待判断（未分类）。
+    category: Mapped[str] = mapped_column(String(32), default="", server_default="", index=True)
     verified: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
     verified_month: Mapped[str] = mapped_column(String(16), default="")
     verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # 销项发票支付方式：corporate=对公账户支出；personal=个人垫付；空=未设置。
+    payment_method: Mapped[str] = mapped_column(String(16), default="", server_default="", index=True)
     raw: Mapped[dict] = mapped_column(JSONB, default=dict)
 
 

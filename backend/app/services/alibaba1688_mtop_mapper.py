@@ -28,6 +28,15 @@ STANDARD_FIELDS = (
     "order_status", "order_time", "pay_time", "order_remark",
 )
 
+_TRACKING_KEYS = {
+    "trackingNo", "logisticNo", "logisticsNo", "waybillNo",
+    "mailNo", "mailno", "expressNo",
+}
+_CARRIER_KEYS = {
+    "logisticsCompany", "logistics_company", "logisticName",
+    "logistic_name", "carrier", "expressCompany", "expressName",
+}
+
 # 订单数组在响应内的候选容器路径（2026-09-04 首捕实测回填，见 data/alibaba1688-capture/）。
 # 实测结构：data.data.result 是 JSON 编码字符串，解析后 data.data 才是订单数组；
 # _walk 会自动穿透 JSON 字符串，因此路径写作 data.result.data.data。
@@ -142,6 +151,38 @@ def _first_hit(raw_order: dict[str, Any], candidates: list[str]) -> tuple[bool, 
     return False, None
 
 
+def _collect_named_values(node: Any, names: set[str]) -> list[str]:
+    """递归收集订单明细中的物流字段；1688 将物流号放在 orderEntries 明细里。"""
+    values: list[str] = []
+
+    def visit(value: Any) -> None:
+        if isinstance(value, dict):
+            for key, child in value.items():
+                if key in names and child not in (None, ""):
+                    text = str(child).strip()
+                    if text and text not in values:
+                        values.append(text)
+                visit(child)
+        elif isinstance(value, list):
+            for child in value:
+                visit(child)
+
+    visit(node)
+    return values
+
+
+def _extract_logistics(raw_order: dict[str, Any]) -> dict[str, str]:
+    """只保留 1688 响应中实际出现的物流事实。"""
+    tracking = _collect_named_values(raw_order, _TRACKING_KEYS)
+    carrier = _collect_named_values(raw_order, _CARRIER_KEYS)
+    result: dict[str, str] = {}
+    if tracking:
+        result["trackingNo"] = "、".join(tracking)
+    if carrier:
+        result["company"] = "、".join(carrier)
+    return result
+
+
 def extract_order_id(raw_order: dict[str, Any]) -> str:
     """增量判重的快速路径：只解析订单号。"""
     _, fields = _effective_paths()
@@ -168,6 +209,7 @@ def map_order(raw_order: dict[str, Any]) -> dict[str, Any]:
         else:
             result[key] = str(value).strip()
     result["_unmapped"] = unmapped
+    result["logistics"] = _extract_logistics(raw_order)
     result["_raw"] = raw_order
     return result
 

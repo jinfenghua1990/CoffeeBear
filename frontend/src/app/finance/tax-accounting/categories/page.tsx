@@ -1,13 +1,16 @@
 "use client";
 
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { useEffect } from "react";
 
 /** 兼容旧地址；财务分类规则已统一收拢到基础档案的财务分类页签。 */
 export default function LegacyTaxCategoryRulesPage() {
+  const router = useRouter();
   useEffect(() => {
-    window.location.replace("/products?productTab=tax-rules");
-  }, []);
+    // 用客户端路由跳转：window.location.replace 会整页重载并清空所有工作区 Tab
+    router.replace("/products?productTab=tax-rules");
+  }, [router]);
 
   return (
     <div className="mx-auto max-w-xl rounded-2xl border border-slate-200 bg-white p-8 text-center">

@@ -2,11 +2,15 @@
 
 原则：
 - 字段、别名、顺序保存在数据库模板中；后台月度任务与前端共用同一模板。
-- 有效销售订单口径与 profit.compute 对齐：订单已支付/完成，或支付状态已成功。
-- 销售净额按 SalesOrderItem.amount - discount_amount，避免另造利润口径。
+- 有效销售订单口径 = 成交口径（sales_scope）：待发/已发/待确认收货/已完成计入，
+  关闭/取消/作废/退货/退款/待审核/待付款单不计入。
+- 销售金额取订单客户实付金额（与业绩总览/月结同口径）；往下拆到 税务编号/产品 时
+  按明细行成本占比分摊，不再使用与实付对不上的吉客云行金额。
 - 按仓库汇总：每行一个仓库，输出 月度时间 / 仓库 / 税务编号 / 发货总数量 / 销售总金额 / 销售总成本。
-- 仓库取订单原始来源的 warehouseName；税务编号取货品档案，成本优先取账期截止前
-  采购入库明细的数量加权平均含税单价，再以货品档案 default_cost 兜底，缺失数据显示为空值或 0。
+- 仓库取订单原始来源的 warehouseName；税务编号取货品档案，成本只取账期截止前
+  采购入库明细的数量加权平均含税单价（与月结/利润中心同口径），不使用货品档案
+  default_cost 兜底；个别 SKU 缺入库成本时按已覆盖部分出数，并在 summary 标记
+  costIncomplete / costMissingDetail，提示补充采购入库成本后重新生成。
 """
 from __future__ import annotations
 
@@ -19,7 +23,7 @@ from typing import Any
 from openpyxl import Workbook
 from openpyxl.styles import Font
 from openpyxl.utils import get_column_letter
-from sqlalchemy import func, or_
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.config import settings
@@ -30,7 +34,8 @@ from app.models.sales import SalesOrder, SalesOrderItem
 from app.services import finance_service
 from app.services.inbound_cost_service import weighted_inbound_costs
 from app.services.monthly_core import month_bounds
-from app.utils.money import quantize
+from app.services.sales_scope import deal_orders_condition
+from app.utils.money import quantize, to_decimal
 
 FIELD_REGISTRY: dict[str, dict[str, str]] = {
     "period": {"label": "月度时间", "type": "text"},
@@ -191,17 +196,35 @@ def save_template(
 
 
 def _valid_order_condition():
-    """与 app.services.profit.compute 的有效销售口径保持一致。"""
-    from sqlalchemy import or_
+    """财务月报口径 = 成交口径（sales_scope）：待发/已发/待确认收货/已完成全部计入。
 
-    return or_(
-        SalesOrder.order_status.in_(["paid", "done", "finished", "已支付", "已完成"]),
-        SalesOrder.pay_status.in_(["paid", "success", "已支付"]),
-    )
+    关闭/取消/作废/退货/退款/待审核/待付款单不计入；不再额外叠加「已付款/已完成」，
+    避免把发货在途、待发货等成交单排除在收入表之外（2026-09-17 与用户确认）。
+    """
+    return deal_orders_condition()
 
 
 def _money(value: Decimal | None) -> Decimal:
     return value if value is not None else Decimal("0")
+
+
+def _order_paid_shares(
+    paid: Decimal, rows: list[tuple[SalesOrderItem, Decimal | None]]
+) -> list[Decimal]:
+    """把订单客户实付金额按行成本（数量 × 入库加权成本）占比分摊到明细行。
+
+    个别行缺入库成本时退化为按销售数量占比；行数据完全不可用时均分。
+    """
+    if not rows:
+        return []
+    weights = [
+        _money(item.quantity) * unit_cost if unit_cost is not None else _money(item.quantity)
+        for item, unit_cost in rows
+    ]
+    total = sum(weights, Decimal("0"))
+    if total <= 0:
+        return [paid / len(rows)] * len(rows)
+    return [paid * (weight / total) for weight in weights]
 
 
 def _string_decimal(value: Decimal | None) -> str:
@@ -263,7 +286,7 @@ def build_report(
         ):
             sku_meta[sku.sku_code] = {
                 "id": sku.id,
-                "cost": sku.default_cost,
+                "name": sku.sku_name or sku.sku_code,
                 "tax_code": (sku.tax_code or "").strip(),
             }
     inbound_costs = weighted_inbound_costs(
@@ -273,6 +296,8 @@ def build_report(
     )
 
     aggregates: dict[str, dict[str, Any]] = {}
+    # 缺入库成本的明细（按 SKU 汇总），用于 summary 告警；不用 default_cost 兜底。
+    cost_missing: dict[str, dict[str, Any]] = {}
     for order in orders:
         warehouse = _warehouse_of(order)
         agg = aggregates.setdefault(warehouse, {
@@ -281,18 +306,25 @@ def build_report(
             "cost": Decimal("0"),
             "tax_codes": set(),
         })
-        for item in items_by_order.get(order.id) or [None]:
-            quantity = _money(item.quantity if item else None)
-            item_amount = _money(item.amount if item else None)
-            discount = _money(item.discount_amount if item else None)
+        # 销售金额 = 订单客户实付金额（与业绩总览/月结同口径），订单级只累加一次；
+        # 吉客云行金额与实付对不上（含 0 值与负数），不再作为收入基数。
+        agg["sales"] += _money(order.paid_amount)
+        for item in items_by_order.get(order.id) or []:
+            quantity = _money(item.quantity)
             agg["quantity"] += quantity
-            agg["sales"] += item_amount - discount
-            if item and item.sku_code:
+            if item.sku_code:
                 meta = sku_meta.get(item.sku_code)
                 if meta:
-                    unit_cost = inbound_costs.get(meta["id"], meta["cost"])
+                    unit_cost = inbound_costs.get(meta["id"])
                     if unit_cost is not None:
                         agg["cost"] += quantity * unit_cost
+                    else:
+                        missed = cost_missing.setdefault(item.sku_code, {
+                            "skuCode": item.sku_code,
+                            "skuName": meta["name"],
+                            "quantity": Decimal("0"),
+                        })
+                        missed["quantity"] += quantity
                     if meta["tax_code"]:
                         agg["tax_codes"].add(meta["tax_code"])
 
@@ -314,6 +346,12 @@ def build_report(
         "totalQuantity": str(sum((Decimal(row["total_quantity"] or "0") for row in rows), Decimal("0"))),
         "salesAmount": _string_decimal(sum((Decimal(row["total_sales"] or "0") for row in rows), Decimal("0"))),
         "costAmount": _string_decimal(sum((Decimal(row["total_cost"] or "0") for row in rows), Decimal("0"))),
+        # 缺入库成本时成本只含已覆盖部分；前端据此提示去补充数据后重新生成。
+        "costIncomplete": bool(cost_missing),
+        "costMissingDetail": [
+            {"skuCode": row["skuCode"], "skuName": row["skuName"], "quantity": str(row["quantity"])}
+            for row in sorted(cost_missing.values(), key=lambda item: item["skuCode"])
+        ],
     }
     return {
         "year": year,
@@ -419,16 +457,157 @@ def _tax_name_map(db: Session) -> dict[str, str]:
     return names
 
 
+def _order_group_sales(db: Session, order_ids: list[int]) -> dict[int, dict[tuple[str, str], Decimal]]:
+    """订单 → (税务编号, 产品) 组销售额；分组口径与 _unbilled_detail_rows 完全一致。
+
+    每组金额 = 订单客户实付金额按明细行成本占比分摊（与总览/月结收入口径一致），
+    不再使用与实付对不上的吉客云行金额。
+    """
+    from app.models.catalog import Product
+
+    result: dict[int, dict[tuple[str, str], Decimal]] = defaultdict(lambda: defaultdict(Decimal))
+    if not order_ids:
+        return result
+    items = (
+        db.query(SalesOrderItem)
+        .filter(SalesOrderItem.order_id.in_(order_ids))
+        .all()
+    )
+    sku_codes = {item.sku_code for item in items if item.sku_code}
+    sku_info: dict[str, dict[str, Any]] = {}
+    if sku_codes:
+        for sku, goods_name in (
+            db.query(ProductSku, Product.goods_name)
+            .outerjoin(Product, Product.id == ProductSku.product_id)
+            .filter(ProductSku.sku_code.in_(sku_codes))
+            .all()
+        ):
+            sku_info[sku.sku_code] = {
+                "id": sku.id,
+                "tax_code": (sku.tax_code or "").strip(),
+                "product": (sku.sku_name or goods_name or sku.sku_code).strip(),
+            }
+    inbound_costs = weighted_inbound_costs(
+        db,
+        as_of=datetime.now(timezone.utc),
+        sku_ids={int(info["id"]) for info in sku_info.values()},
+    )
+    paid_by_order = {
+        order_id: _money(paid)
+        for order_id, paid in db.query(SalesOrder.id, SalesOrder.paid_amount)
+        .filter(SalesOrder.id.in_(order_ids))
+        .all()
+    }
+    rows_by_order: dict[int, list[SalesOrderItem]] = defaultdict(list)
+    for item in items:
+        rows_by_order[item.order_id].append(item)
+    for order_id, order_items in rows_by_order.items():
+        weight_rows: list[tuple[SalesOrderItem, Decimal | None]] = []
+        for item in order_items:
+            info = sku_info.get(item.sku_code or "")
+            weight_rows.append((item, inbound_costs.get(int(info["id"])) if info else None))
+        shares = _order_paid_shares(paid_by_order.get(order_id, Decimal("0")), weight_rows)
+        for item, share in zip(order_items, shares):
+            info = sku_info.get(item.sku_code or "")
+            tax_code = (info or {}).get("tax_code", "")
+            product = (info or {}).get("product") or (item.sku_code or "未匹配货品档案")
+            result[order_id][(tax_code, product)] += share
+    return result
+
+
+def _output_invoiced_by_group(db: Session, start, nxt) -> dict[tuple[str, str], Decimal]:
+    """当月销项发票落到 (税务编号, 产品) 组的已开票金额。
+
+    - 发票口径与 build_unbilled_income_report 完全一致：
+      tax_export / direction=output / status in (issued, red)，开票日期在月内；
+    - 优先按已确认关联（TaxInvoiceLink.target_type="sales_order", confirmed=True）的
+      allocated_amount 归集；同发票未带 allocated_amount 的关联，按所连订单销售额占比
+      从发票价税合计分摊（整张发票都无 allocated_amount 时同理）；
+    - 订单内再按明细行成本占比把订单实付金额落到 (税务编号, 产品) 组。
+    """
+    from app.models.tax import TaxInvoice, TaxInvoiceLink
+
+    invoices = (
+        db.query(TaxInvoice)
+        .filter(
+            TaxInvoice.source_system == "tax_export",
+            TaxInvoice.direction == "output",
+            TaxInvoice.status.in_(("issued", "red")),
+            TaxInvoice.issue_date >= start,
+            TaxInvoice.issue_date < nxt,
+        )
+        .all()
+    )
+    invoice_ids = [row.id for row in invoices]
+    if not invoice_ids:
+        return {}
+    links = (
+        db.query(TaxInvoiceLink)
+        .filter(
+            TaxInvoiceLink.invoice_id.in_(invoice_ids),
+            TaxInvoiceLink.target_type == "sales_order",
+            TaxInvoiceLink.confirmed.is_(True),
+        )
+        .all()
+    )
+    links_by_invoice: dict[int, list[TaxInvoiceLink]] = defaultdict(list)
+    order_ids: set[int] = set()
+    for link in links:
+        links_by_invoice[link.invoice_id].append(link)
+        order_ids.add(int(link.target_id))
+    group_sales_by_order = _order_group_sales(db, sorted(order_ids))
+    order_sales = {
+        order_id: sum(groups.values(), Decimal("0"))
+        for order_id, groups in group_sales_by_order.items()
+    }
+
+    attributed: dict[tuple[str, str], Decimal] = defaultdict(Decimal)
+
+    def _attribute(order_id: int, amount: Decimal) -> None:
+        groups = group_sales_by_order.get(order_id) or {}
+        total_sales = order_sales.get(order_id, Decimal("0"))
+        if not groups or total_sales <= 0:
+            return
+        for key, sales in groups.items():
+            attributed[key] += amount * sales / total_sales
+
+    for invoice in invoices:
+        invoice_links = links_by_invoice.get(invoice.id) or []
+        if not invoice_links:
+            continue
+        total = to_decimal(invoice.total_amount)
+        without_alloc = [ln for ln in invoice_links if ln.allocated_amount is None]
+        for link in invoice_links:
+            if link.allocated_amount is not None:
+                _attribute(int(link.target_id), to_decimal(link.allocated_amount))
+        if not without_alloc:
+            continue
+        denom = sum(
+            (order_sales.get(int(ln.target_id), Decimal("0")) for ln in without_alloc),
+            Decimal("0"),
+        )
+        if denom <= 0:
+            continue
+        for link in without_alloc:
+            sales = order_sales.get(int(link.target_id), Decimal("0"))
+            if sales > 0:
+                _attribute(int(link.target_id), total * sales / denom)
+    return dict(attributed)
+
+
 def _unbilled_detail_rows(db: Session, year: int, month: int) -> list[dict[str, Any]]:
     """无票收入明细：按 税务编号 + 产品 聚合当月有效销售（与销售汇总同口径）。
 
     - 税务编号/产品/成本取自货品档案（ProductSku + Product.goods_name）；
     - 档案缺失的行保留 sku_code，税务编号显示空值，不编造；
-    - 金额 = 商品金额 − 优惠金额，成本 = 数量 × 档案默认成本。
+    - 金额 = 商品金额 − 优惠金额，成本 = 数量 × 档案默认成本；
+    - invoiced = 当月销项发票按已确认关联分摊到该组的已开票金额；
+      unbilled = max(sales − invoiced, 0)，超开的负差如实保留为 0。
     """
     from app.models.catalog import Product
 
     start, nxt = month_bounds(year, month)
+    invoiced_by_group = _output_invoiced_by_group(db, start, nxt)
     orders = (
         db.query(SalesOrder)
         .filter(_valid_order_condition())
@@ -461,7 +640,6 @@ def _unbilled_detail_rows(db: Session, year: int, month: int) -> list[dict[str, 
                 "tax_code": (sku.tax_code or "").strip(),
                 "product": (sku.sku_name or goods_name or sku.sku_code).strip(),
                 "category": (goods_category or "").strip(),
-                "cost": sku.default_cost,
             }
     inbound_costs = weighted_inbound_costs(
         db,
@@ -472,40 +650,50 @@ def _unbilled_detail_rows(db: Session, year: int, month: int) -> list[dict[str, 
     tax_names = _tax_name_map(db)
     groups: dict[tuple[str, str], dict[str, Any]] = {}
     for order in orders:
-        for item in items_by_order.get(order.id) or []:
+        order_items = items_by_order.get(order.id) or []
+        weight_rows: list[tuple[SalesOrderItem, Decimal | None]] = []
+        for item in order_items:
+            info = sku_info.get(item.sku_code or "")
+            weight_rows.append(
+                (item, inbound_costs.get(int(info["id"])) if info else None)
+            )
+        # 销售额 = 订单客户实付金额按明细行成本占比分摊（与总览/月结口径一致）
+        shares = _order_paid_shares(_money(order.paid_amount), weight_rows)
+        for item, share in zip(order_items, shares):
             info = sku_info.get(item.sku_code or "")
             tax_code = (info or {}).get("tax_code", "")
             product = (info or {}).get("product") or (item.sku_code or "未匹配货品档案")
             # 税收分类名称：优先分类规则（用户维护），无规则时兜底用货品档案品类。
             tax_name = tax_names.get(tax_code, "") or (info or {}).get("category", "")
             quantity = _money(item.quantity)
-            sales = _money(item.amount) - _money(item.discount_amount)
             cost = Decimal("0")
-            info_cost = None
             if info:
-                info_cost = inbound_costs.get(info["id"], info.get("cost"))
-            if info_cost is not None:
-                cost = quantity * info_cost
+                info_cost = inbound_costs.get(int(info["id"]))
+                if info_cost is not None:
+                    cost = quantity * info_cost
             agg = groups.setdefault(
                 (tax_code, product),
                 {"quantity": Decimal("0"), "sales": Decimal("0"), "cost": Decimal("0"), "tax_name": tax_name},
             )
             agg["quantity"] += quantity
-            agg["sales"] += sales
+            agg["sales"] += share
             agg["cost"] += cost
 
-    return [
-        {
+    rows: list[dict[str, Any]] = []
+    for (tax_code, product), agg in sorted(groups.items(), key=lambda kv: kv[1]["sales"], reverse=True):
+        invoiced = invoiced_by_group.get((tax_code, product), Decimal("0"))
+        rows.append({
             "period": f"{year}-{month:02d}",
             "taxCode": tax_code,
             "taxName": agg["tax_name"],
             "product": product,
             "quantity": str(agg["quantity"]),
             "sales": _string_decimal(agg["sales"]),
+            "invoiced": _string_decimal(invoiced),
+            "unbilled": _string_decimal(max(agg["sales"] - invoiced, Decimal("0"))),
             "cost": _string_decimal(agg["cost"]),
-        }
-        for (tax_code, product), agg in sorted(groups.items(), key=lambda kv: kv[1]["sales"], reverse=True)
-    ]
+        })
+    return rows
 
 
 def _latest_unbilled_adjustment(
@@ -648,6 +836,10 @@ def build_unbilled_income_report(
     version = adjustment.version if adjustment is not None else _latest_sales_summary_version(
         db, company=company, year=year, month=month,
     )
+    row_invoiced_total = sum((Decimal(d.get("invoiced") or "0") for d in details), Decimal("0"))
+    unattributed = invoiced_total - row_invoiced_total
+    if unattributed < 0:
+        unattributed = Decimal("0")
     return {
         "period": f"{year}-{month:02d}",
         "year": year,
@@ -655,6 +847,8 @@ def build_unbilled_income_report(
         "salesAmount": _string_decimal(sales_total),
         "invoicedAmount": _string_decimal(invoiced_total),
         "unbilledAmount": _string_decimal(unbilled),
+        "rowInvoicedTotal": _string_decimal(row_invoiced_total),
+        "unattributedInvoiced": _string_decimal(unattributed),
         "version": version or None,
         "adjusted": adjustment is not None,
         "selectedKeys": selected_keys,
@@ -667,7 +861,8 @@ def build_unbilled_income_report(
 
 def unbilled_income_xlsx(report: dict[str, Any]) -> bytes:
     """无票收入表：上半部分汇总（销售总额 − 已开票 = 无票收入），下半部分为
-    「税务编号 + 产品」明细（月度时间/税务编号/产品/发货数量/销售金额/销售成本 + 合计）。"""
+    「税务编号 + 产品」明细（月度时间/税务编号/税收分类名称/产品/发货数量/销售金额/
+    已开票金额/无票收入/销售成本 + 合计）。"""
     wb = Workbook()
     ws = wb.active
     ws.title = "无票收入"
@@ -693,26 +888,30 @@ def unbilled_income_xlsx(report: dict[str, Any]) -> bytes:
     ws.append([])
 
     details = report.get("details") or []
-    ws.append(["月度时间", "税务编号", "税收分类名称", "产品", "发货数量", "销售金额", "销售成本"])
+    ws.append(["月度时间", "税务编号", "税收分类名称", "产品", "发货数量", "销售金额", "已开票金额", "无票收入", "销售成本"])
 
     header_row = ws.max_row
     for cell in ws[header_row]:
         cell.font = bold
-    totals = {"quantity": 0.0, "sales": 0.0, "cost": 0.0}
+    totals = {"quantity": 0.0, "sales": 0.0, "invoiced": 0.0, "unbilled": 0.0, "cost": 0.0}
     for d in details:
         quantity, sales, cost = float(d["quantity"]), float(d["sales"]), float(d["cost"])
+        invoiced = float(d.get("invoiced") or 0)
+        unbilled = float(d.get("unbilled") or 0)
         totals["quantity"] += quantity
         totals["sales"] += sales
+        totals["invoiced"] += invoiced
+        totals["unbilled"] += unbilled
         totals["cost"] += cost
-        ws.append([d["period"], d["taxCode"], d.get("taxName", ""), d["product"], quantity, sales, cost])
-    ws.append(["", "", "", "合计", totals["quantity"], totals["sales"], totals["cost"]])
+        ws.append([d["period"], d["taxCode"], d.get("taxName", ""), d["product"], quantity, sales, invoiced, unbilled, cost])
+    ws.append(["", "", "", "合计", totals["quantity"], totals["sales"], totals["invoiced"], totals["unbilled"], totals["cost"]])
     for cell in ws[ws.max_row]:
         cell.font = bold
-    for col in (5, 6, 7):
+    for col in (5, 6, 7, 8, 9):
         for row_idx in range(header_row, ws.max_row + 1):
             ws.cell(row=row_idx, column=col).number_format = "0.00" if col != 5 else "0.####"
 
-    for idx, width in ((1, 14), (2, 26), (3, 18), (4, 34), (5, 12), (6, 14), (7, 14)):
+    for idx, width in ((1, 14), (2, 26), (3, 18), (4, 34), (5, 12), (6, 14), (7, 14), (8, 14), (9, 14)):
         ws.column_dimensions[get_column_letter(idx)].width = width
     ws.freeze_panes = f"A{header_row + 1}"
 

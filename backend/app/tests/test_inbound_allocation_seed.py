@@ -12,6 +12,7 @@ from decimal import Decimal
 
 from app.models.catalog import ProductSku
 from app.models.jackyun import JackyunGoodsDocument, JackyunGoodsDocumentItem
+from app.models.ops import ExceptionRecord
 from app.models.procurement_chain import ProcurementChainLink
 from app.models.purchase import ExternalPurchaseOrder, InboundLink, PurchaseAllocationItem
 from app.services.inbound_allocation_seed import collect_linked_doc_ids_for_po, seed_allocations_for_po
@@ -249,6 +250,29 @@ def test_seed_same_doc_same_sku_takes_single_line(db_session):
         db_session.commit()
 
 
+def test_seed_preserves_source_amount_when_unit_price_is_rounded(db_session):
+    """入库文件以总金额为事实时，分配金额不能被四位单价反算尾差覆盖。"""
+    sku = _mk_sku(db_session, "AMOUNT-001")
+    doc = _mk_doc(db_session, "RK-AMOUNT-001", [])
+    item = _mk_item(db_session, doc.id, 1, "G-AMOUNT-1", "197", "9.8477", sku.id)
+    item.amount_tax = Decimal("1940")
+    po = _mk_po(db_session, "AMOUNT-PO-1")
+    _mk_link(db_session, po.id, doc.id)
+
+    try:
+        result = seed_allocations_for_po(db_session, po)
+        assert result["seeded"] == 1
+        row = db_session.query(PurchaseAllocationItem).filter_by(po_id=po.id).one()
+        assert row.unit_price == Decimal("9.8477")
+        assert row.amount == Decimal("1940.0000")
+    finally:
+        db_session.query(PurchaseAllocationItem).filter_by(po_id=po.id).delete(synchronize_session=False)
+        db_session.query(ProcurementChainLink).filter_by(target_type="inbound", target_id=doc.id).delete(synchronize_session=False)
+        for obj in (po, item, doc, sku):
+            db_session.delete(obj)
+        db_session.commit()
+
+
 def test_seed_prefers_original_order_marker_for_same_doc_same_sku(db_session):
     """同一入库单已有原始订单标记时，按标记取行而不是按表格顺序取行。"""
     sku = _mk_sku(db_session, "EXCL-010")
@@ -313,5 +337,50 @@ def test_remove_link_releases_seeded_rows(db_session):
         db_session.query(PurchaseAllocationItem).delete(synchronize_session=False)
         db_session.query(ProcurementChainLink).filter_by(target_type="inbound", target_id=doc.id).delete(synchronize_session=False)
         for obj in (po, it, doc, sku):
+            db_session.delete(obj)
+        db_session.commit()
+
+
+def test_seed_creates_payment_gap_exception_without_auto_approval(db_session):
+    """1688 实付与入库金额不一致时进入异常中心，不能自动审批。"""
+    sku = _mk_sku(db_session, "COUPON-001")
+    doc = _mk_doc(db_session, "RK-COUPON-001", [])
+    item = _mk_item(db_session, doc.id, 1, sku.sku_code, "2", "10", sku.id)
+    item.raw = {"_1688采购订单": "COUPON-PO-001"}
+    po = ExternalPurchaseOrder(
+        external_order_id="COUPON-PO-001",
+        platform="1688",
+        order_amount=Decimal("20"),
+        paid_amount=Decimal("19.13"),
+        purchase_status="pending_refine",
+        raw={
+            "_raw": {
+                "originalSumPayment": "2000",
+                "sumPayment": "1913",
+                "promotionFeeMap": {"coupon": "87"},
+            }
+        },
+    )
+    db_session.add(po)
+    db_session.flush()
+    _mk_link(db_session, po.id, doc.id)
+
+    try:
+        result = seed_allocations_for_po(db_session, po)
+        db_session.refresh(po)
+        assert result["seeded"] == 1
+        assert result["paymentGap"] == "0.8700"
+        assert po.adjustment_amount is None
+        assert po.purchase_status == "pending_refine"
+        exception = db_session.query(ExceptionRecord).filter_by(
+            code="PURCHASE_PAYMENT_GAP", ref_id=str(po.id)
+        ).one()
+        assert exception.status == "pending"
+        assert exception.detail["paidAmount"] == "19.13"
+        assert exception.detail["inboundAmount"] == "20.0000"
+    finally:
+        db_session.query(PurchaseAllocationItem).filter_by(po_id=po.id).delete(synchronize_session=False)
+        db_session.query(ProcurementChainLink).filter_by(target_type="inbound", target_id=doc.id).delete(synchronize_session=False)
+        for obj in (po, item, doc, sku):
             db_session.delete(obj)
         db_session.commit()

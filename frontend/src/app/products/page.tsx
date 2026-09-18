@@ -1,14 +1,17 @@
 "use client";
 
 import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
+import { syncWorkspaceUrl } from "@/lib/workspace/url-sync";
 import TaxCategoryRulesPanel from "@/components/tax-category-rules-panel";
 import {
   AuthUser,
+  CatalogBulkDeleteItem,
+  CatalogBulkDeleteResult,
   CatalogSkuRow,
   consumablesApi,
   dashboardApi,
   fetchMe,
-  InventorySummary,
   LinkedSkuRef,
   TaxCategoryRule,
   taxAccountingApi,
@@ -16,6 +19,7 @@ import {
   authenticatedFetch,
   masterDataApi,
 } from "@/lib/api";
+import { useTabScopedState, useTabTitle } from "@/lib/workspace/tab-store";
 
 /** 类型中文：single=单品 / bundle=套装 / virtual_bundle=虚拟组合套装（不同商品不同数量组合）。 */
 const TYPE_LABEL: Record<string, string> = { single: "单品", bundle: "套装", virtual_bundle: "虚拟组合套装" };
@@ -38,7 +42,30 @@ type ProductForm = {
 };
 
 const emptyProduct: ProductForm = { jackyun_sku_id: "", sku_code: "", product_type: "single", sku_name: "", barcode: "", unit: "盒", sale_price: "", default_cost: "", cost_mode: "fixed", cost_tolerance_pct: "0.0200", tax_code: "", tax_category_rule_id: "", goods_category: "", status: "active" };
-const qty = (v: string | null) => (v == null || v === "" ? "—" : Number(v).toLocaleString("zh-CN", { maximumFractionDigits: 4 }));
+const catalogDeleteRefText = (ref: { label: string; count: number; numbers?: string[] }) => {
+  const numbers = ref.numbers ?? [];
+  if (!numbers.length) return `${ref.label}${ref.count}条`;
+  const more = numbers.includes("等") ? "等" : "";
+  const nos = numbers.filter((no) => no !== "等");
+  if (ref.label === "销售订单") {
+    return `被销售订单 ${nos.join("、")}${more} 占用·销售订单${ref.count}条`;
+  }
+  // 采购单号为纯数字（1688/外部订单号），其余按入库单号展示
+  const orderNos = nos.filter((no) => /^\d+$/.test(no));
+  const docNos = nos.filter((no) => !/^\d+$/.test(no));
+  const parts = [
+    orderNos.length ? `被采购单 ${orderNos.join("、")}${more} 占用` : "",
+    docNos.length ? `被入库单 ${docNos.join("、")}${more} 占用` : "",
+  ].filter(Boolean);
+  return `${parts.join("、")}·${ref.label}${ref.count}条`;
+};
+const catalogDeleteIssueText = (result: CatalogBulkDeleteResult) => [
+  result.blocked.length
+    ? `${[...new Set(result.blocked.map((item) => item.reason || "已有历史业务引用，不能删除"))].join("；")}：${result.blocked.map((item) => `${item.code}（${item.references.map(catalogDeleteRefText).join("、")}）`).join("；")}`
+    : "",
+  result.invalid.length ? `类型不符：${result.invalid.map((item) => item.code).join("、")}` : "",
+  result.notFound.length ? `不存在：${result.notFound.map((item) => `${item.kind}-${item.id}`).join("、")}` : "",
+].filter(Boolean).join("；");
 
 type KindFilter = "all" | "goods" | "consumable";
 type ProductTab = "catalog" | "bundles" | "taxRules";
@@ -119,21 +146,15 @@ function MasterDataActions({
 function KindBadge({ kind }: { kind: "goods" | "consumable" }) {
   return kind === "consumable"
     ? <span className="mr-1.5 inline-block shrink-0 rounded bg-amber-100 px-1 py-px align-[1px] text-[10px] font-semibold leading-4 text-amber-700">耗</span>
-    : <span className="mr-1.5 inline-block shrink-0 rounded bg-slate-100 px-1 py-px align-[1px] text-[10px] font-semibold leading-4 text-slate-500">品</span>;
+    : <span className="mr-1.5 inline-block shrink-0 rounded bg-emerald-100 px-1 py-px align-[1px] text-[10px] font-semibold leading-4 text-emerald-700">品</span>;
 }
 
-function StockCell({ row }: { row: UnifiedCatalogRow }) {
-  if (row.kind === "goods") {
-    return row.hasMovement
-      ? <span className="tabular-nums text-gray-800">{qty(row.stockOwn)}</span>
-      : <span className="text-xs text-gray-300">无出入库</span>;
-  }
-  return (
-    <span className="tabular-nums">
-      <span className={row.lowStock ? "font-semibold text-amber-600" : "text-gray-800"}>{qty(row.stockOwn)}</span>
-      <span className="text-[11px] text-gray-400"> +厂{qty(row.stockFactory)} +途{qty(row.stockTransit)}</span>
-    </span>
-  );
+function CatalogMetric({ label, value, hint, tone }: { label: string; value: string; hint: string; tone: "blue" | "amber" | "indigo" | "slate" }) {
+  const toneClass = tone === "amber" ? "bg-amber-50 text-amber-600" : tone === "indigo" ? "bg-indigo-50 text-indigo-600" : tone === "slate" ? "bg-slate-100 text-slate-500" : "bg-blue-50 text-blue-600";
+  return <div className="flex items-center justify-between rounded-xl border border-slate-200 bg-white px-4 py-3.5 shadow-sm">
+    <div><div className="text-xs text-slate-500">{label}</div><div className="mt-1 text-2xl font-semibold tracking-tight text-slate-900 tabular-nums">{value}</div><div className="mt-1 text-[11px] text-slate-400">{hint}</div></div>
+    <span className={`flex h-10 w-10 items-center justify-center rounded-xl text-sm font-semibold ${toneClass}`}>{label === "最近变更" ? "时" : label.slice(0, 1)}</span>
+  </div>;
 }
 
 /** 品类单元格：点铅笔进入编辑，回车保存 / Esc 取消。 */
@@ -221,12 +242,13 @@ function ProductEditor({
 }
 
 /** 统一档案表（货品档案 / 套装档案两个页签共用）。selectionKey 形如 kind-id。 */
-function CatalogTable({ rows, onEditConsumable, onEditProduct, onToggleCostMode, onSaveCategory, selected, onToggleRow, onToggleAll, editingProductId, productForm, setProductForm, onSaveProduct, onCancelProduct, taxRules, canEdit }: {
+function CatalogTable({ rows, onEditConsumable, onEditProduct, onToggleCostMode, onSaveCategory, onDeleteRow, selected, onToggleRow, onToggleAll, editingProductId, productForm, setProductForm, onSaveProduct, onCancelProduct, taxRules, canEdit, canDelete }: {
   rows: UnifiedCatalogRow[];
   onEditConsumable: (row: UnifiedCatalogRow) => void;
   onEditProduct: (row: UnifiedCatalogRow) => void;
   onToggleCostMode: (row: UnifiedCatalogRow) => void;
   onSaveCategory: (row: UnifiedCatalogRow, value: string) => Promise<void>;
+  onDeleteRow: (row: UnifiedCatalogRow) => void;
   selected: Set<string>;
   onToggleRow: (row: UnifiedCatalogRow) => void;
   onToggleAll: () => void;
@@ -237,12 +259,13 @@ function CatalogTable({ rows, onEditConsumable, onEditProduct, onToggleCostMode,
   onCancelProduct: () => void;
   taxRules: TaxCategoryRule[];
   canEdit: boolean;
+  canDelete: boolean;
 }) {
   const allChecked = rows.length > 0 && rows.every((r) => selected.has(`${r.kind}-${r.id}`));
   return (
-    <div className="mt-4 overflow-x-auto">
+    <div className="products-catalog-table mt-4">
       <table className="w-full min-w-[1060px] text-sm">
-        <thead className="text-left text-xs text-gray-500">
+        <thead className="products-catalog-table-head text-left text-xs text-gray-500">
           <tr className="border-b border-gray-100">
             <th className="w-8 py-2">
               <input type="checkbox" checked={allChecked} onChange={onToggleAll} title="全选/取消本页" className="h-3.5 w-3.5 accent-blue-600" />
@@ -254,10 +277,7 @@ function CatalogTable({ rows, onEditConsumable, onEditProduct, onToggleCostMode,
             <th className="py-2">条码</th>
             <th className="py-2">财务分类</th>
             <th className="py-2">税务代码</th>
-            <th className="py-2">关联正品</th>
-            <th className="py-2">单位</th>
-            <th className="py-2 text-right">库存</th>
-            <th className="py-2 text-right">安全库存</th>
+            <th className="py-2">关联耗材 / 正品</th>
             <th className="py-2">状态</th>
             <th className="py-2 text-right">操作</th>
           </tr>
@@ -276,43 +296,38 @@ function CatalogTable({ rows, onEditConsumable, onEditProduct, onToggleCostMode,
                 </div>
                 {row.kind === "goods" && row.goodsName && row.goodsName !== row.name && <div className="mt-0.5 truncate pl-6 text-[10px] text-gray-400">{row.goodsName}</div>}
               </td>
-              <td className="py-2.5 text-[11px] text-gray-500">{row.kind === "goods" ? TYPE_LABEL[row.category] ?? row.category : "耗材"}</td>
+              <td className="py-2.5 text-[11px] text-gray-500">{row.kind === "goods" ? (row.category === "single" ? "正品" : TYPE_LABEL[row.category] ?? row.category) : "耗材"}</td>
               <td className="py-2.5"><EditableCategory row={row} onSave={onSaveCategory} canEdit={canEdit} /></td>
               <td className="py-2.5 font-mono text-xs text-gray-600">{row.code}</td>
               <td className="py-2.5 font-mono text-[11px] text-gray-500">{row.barcode || "—"}</td>
-              <td className="max-w-[150px] py-2.5 text-[11px] text-gray-500">{row.taxCategoryRuleName || (row.taxCode ? <span className="text-slate-400" title="已设置直接税务代码，未关联共用财务分类规则">代码直填</span> : <span className="text-gray-300">未设置</span>)}</td>
+              <td className="max-w-[150px] py-2.5 text-[11px] text-gray-500">{row.taxCategoryRuleName || (row.taxCode ? <span className="text-slate-400" title="已设置直接税务代码，未关联共用财务分类规则">已填代码（未关联分类）</span> : <span className="text-gray-300">未设置</span>)}</td>
               <td className="py-2.5 font-mono text-[11px] text-gray-500" title={row.taxCode ? "税收分类编码（开票用）" : "未设置税务代码，点「编辑」补充"}>{row.taxCode || "—"}</td>
-              <td className="max-w-[160px] py-2.5">
+              <td className="max-w-[190px] py-2.5">
                 {row.kind === "consumable"
                   ? (row.linkedSkus.length
                     ? <span className="text-[11px] text-gray-500" title={row.linkedSkus.map((s) => s.skuCode).join(", ")}>{row.linkedSkus.slice(0, 2).map((s) => s.skuCode).join(", ")}{row.linkedSkus.length > 2 ? ` +${row.linkedSkus.length - 2}` : ""}</span>
                     : <span className="text-[11px] text-gray-300">未关联</span>)
                   : <span className="text-[11px] text-gray-300">—</span>}
               </td>
-              <td className="py-2.5 text-gray-500">{row.unit || "—"}</td>
-              <td className="py-2.5 text-right"><StockCell row={row} /></td>
-              <td className="py-2.5 text-right tabular-nums text-gray-500">{row.kind === "consumable" ? qty(row.minStock) : "—"}</td>
               <td className="py-2.5">
-                {row.lowStock
-                  ? <span className="rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-medium text-amber-700">库存预警</span>
-                  : row.status !== "active"
+                {row.status !== "active"
                     ? <span className="rounded-full bg-gray-100 px-2 py-0.5 text-[10px] text-gray-400">停用</span>
                     : <span className="rounded-full bg-emerald-50 px-2 py-0.5 text-[10px] text-emerald-700">正常</span>}
               </td>
               <td className="py-2.5 text-right">
                 {row.kind === "consumable"
-                  ? canEdit && <button onClick={() => onEditConsumable(row)} className="rounded-md px-2 py-1 text-xs font-medium text-amber-600 hover:bg-amber-50">编辑</button>
+                  ? canEdit && <div className="flex justify-end gap-1"><button onClick={() => onEditConsumable(row)} className="rounded-md px-2 py-1 text-xs font-medium text-amber-600 hover:bg-amber-50">编辑</button>{canDelete && <button onClick={() => onDeleteRow(row)} className="rounded-md px-2 py-1 text-xs text-rose-600 hover:bg-rose-50">删除</button>}</div>
                   : <div className="flex justify-end gap-1">
                       {canEdit && <><button onClick={() => editingProductId === row.id ? onCancelProduct() : onEditProduct(row)} className="rounded-md px-2 py-1 text-xs text-gray-500 hover:bg-gray-100">{editingProductId === row.id ? "收起" : "编辑"}</button>
                       <button onClick={() => onToggleCostMode(row)} className="rounded-md px-2 py-1 text-xs text-blue-600 hover:bg-blue-50">
                           切{row.costMode === "dynamic" ? "固定" : "动态"}
-                        </button></>}
+                        </button>{canDelete && <button onClick={() => onDeleteRow(row)} className="rounded-md px-2 py-1 text-xs text-rose-600 hover:bg-rose-50">删除</button>}</>}
                     </div>}
               </td>
             </tr>
             {row.kind === "goods" && editingProductId === row.id && (
               <tr className="bg-blue-50/40">
-                <td colSpan={14} className="p-2">
+                <td colSpan={11} className="p-2">
                   <ProductEditor form={productForm} setForm={setProductForm} onSubmit={onSaveProduct} onCancel={onCancelProduct} taxRules={taxRules} inline />
                 </td>
               </tr>
@@ -327,18 +342,23 @@ function CatalogTable({ rows, onEditConsumable, onEditProduct, onToggleCostMode,
 }
 
 export default function ProductsPage() {
-  const [tab, setTab] = useState<ProductTab>("catalog");
+  // 工作区下每个 Tab 都有自己的 URL，必须读注入的 searchParams 而不是 window.location.search
+  const router = useRouter();
+  const searchParams = useSearchParams();
+  const [tab, setTab] = useTabScopedState<ProductTab>("products.tab", () => {
+    const requested = searchParams.get("tab") || searchParams.get("productTab");
+    return requested === "bundles" || requested === "taxRules" || requested === "tax-rules" ? (requested === "tax-rules" ? "taxRules" : requested) : "catalog";
+  });
   const [currentUser, setCurrentUser] = useState<AuthUser | null>(null);
-  const [inv, setInv] = useState<InventorySummary | null>(null);
   const [catalog, setCatalog] = useState<UnifiedCatalogRow[]>([]);
   const [products, setProducts] = useState<CatalogSkuRow[]>([]);
   const [taxRules, setTaxRules] = useState<TaxCategoryRule[]>([]);
-  const [kind, setKind] = useState<KindFilter>(() => {
-    const initial = new URLSearchParams(window.location.search).get("kind");
+  const [kind, setKind] = useTabScopedState<KindFilter>("products.kind", () => {
+    const initial = searchParams.get("kind");
     return initial === "consumable" || initial === "goods" ? initial : "all";
   });
-  const [search, setSearch] = useState(() => new URLSearchParams(window.location.search).get("q") ?? "");
-  const [bundleSearch, setBundleSearch] = useState("");
+  const [search, setSearch] = useTabScopedState("products.search", () => searchParams.get("q") ?? "");
+  const [bundleSearch, setBundleSearch] = useTabScopedState("products.bundleSearch", "");
   const [err, setErr] = useState("");
   const [msg, setMsg] = useState("");
   const [editing, setEditing] = useState<number | null>(null);
@@ -351,11 +371,20 @@ export default function ProductsPage() {
   const [bulkTaxCode, setBulkTaxCode] = useState("");
   const [bulkOverwrite, setBulkOverwrite] = useState(false);
   const [bulkSaving, setBulkSaving] = useState(false);
+  const [catalogDeleting, setCatalogDeleting] = useState(false);
+  const [statusSaving, setStatusSaving] = useState(false);
+  const [blockedForInactive, setBlockedForInactive] = useState<CatalogBulkDeleteItem[]>([]);
   const [bundleDeleting, setBundleDeleting] = useState(false);
   const [exportingMaster, setExportingMaster] = useState<MasterDataset | null>(null);
   const [importingMaster, setImportingMaster] = useState<MasterDataset | null>(null);
+  const [categoryFilter, setCategoryFilter] = useTabScopedState("products.category", "all");
+  const [statusFilter, setStatusFilter] = useTabScopedState("products.status", "all");
+
+  // 耗材模式下路由表标题（货品档案）不够准确，这里补一个更贴合业务的标题。
+  useTabTitle(kind === "consumable" ? "耗材档案" : null);
 
   const canEdit = currentUser?.roles.some((role) => role === "admin" || role === "operator") ?? false;
+  const canDeleteCatalog = currentUser?.roles.includes("admin") ?? false;
   const canDeleteBundles = currentUser?.roles.includes("admin") ?? false;
 
   useEffect(() => {
@@ -363,25 +392,27 @@ export default function ProductsPage() {
   }, []);
 
   useEffect(() => {
-    const params = new URLSearchParams(window.location.search);
-    const productTab = params.get("productTab");
-    if (productTab === "inventory") window.location.replace("/inventory?tab=goods");
-    else if (productTab === "consumables") window.location.replace("/products?kind=consumable");
+    // 注意：这里必须用工作区注入的 searchParams（每个 Tab 自己那一份），
+    // 且跳转要用 router.replace —— window.location.replace 会整页重载并清空所有工作区 Tab。
+    const productTab = searchParams.get("productTab");
+    if (productTab === "inventory") router.replace("/inventory?tab=goods");
+    else if (productTab === "consumables") router.replace("/products?kind=consumable");
     else if (productTab === "bundles") setTab("bundles");
     else if (productTab === "tax-rules") setTab("taxRules");
-    const requestedKind = params.get("kind");
+    else if (searchParams.get("tab") === "bundles") setTab("bundles");
+    else if (searchParams.get("tab") === "taxRules") setTab("taxRules");
+    const requestedKind = searchParams.get("kind");
     if (requestedKind === "goods" || requestedKind === "consumable") setKind(requestedKind);
-  }, []);
+  }, [router, searchParams]);
 
   const load = useCallback(() => {
     Promise.all([
-      dashboardApi.inventory(),
       dashboardApi.catalogUnified("all", search),
       dashboardApi.products(""),
       taxAccountingApi.categoryRules(),
     ])
-      .then(([inventory, unified, skuRows, rulePayload]) => {
-        setInv(inventory); setCatalog(unified); setProducts(skuRows); setTaxRules(rulePayload.items || []);
+      .then(([unified, skuRows, rulePayload]) => {
+        setCatalog(unified); setProducts(skuRows); setTaxRules(rulePayload.items || []);
       })
       .catch((e) => setErr(String(e)));
   }, [search]);
@@ -402,11 +433,42 @@ export default function ProductsPage() {
     () => bundleRows.filter((row) => selected.has(`${row.kind}-${row.id}`)).map((row) => row.id),
     [bundleRows, selected],
   );
+  const catalogBaseRows = useMemo(
+    () => catalog.filter((r) => !(r.kind === "goods" && (r.category === "bundle" || r.category === "virtual_bundle"))),
+    [catalog],
+  );
+  const categoryOptions = useMemo(
+    () => [...new Set(catalogBaseRows.map((row) => row.goodsCategory).filter(Boolean))].sort(),
+    [catalogBaseRows],
+  );
   const catalogRows = useMemo(() => {
-    const base = catalog.filter((r) => !(r.kind === "goods" && (r.category === "bundle" || r.category === "virtual_bundle")));
-    if (kind === "all") return base;
-    return base.filter((r) => r.kind === kind);
-  }, [catalog, kind]);
+    const filtered = catalogBaseRows
+      .filter((row) => kind === "all" || row.kind === kind)
+      .filter((row) => categoryFilter === "all" || row.goodsCategory === categoryFilter)
+      .filter((row) => statusFilter === "all" || row.status === statusFilter);
+    return [...filtered].sort((a, b) => Number(a.kind !== "goods") - Number(b.kind !== "goods"));
+  }, [catalogBaseRows, categoryFilter, kind, statusFilter]);
+  const selectedCatalogItems = useMemo<CatalogBulkDeleteItem[]>(
+    () => catalogRows
+      .filter((row) => selected.has(`${row.kind}-${row.id}`))
+      .map((row) => ({ kind: row.kind, id: row.id })),
+    [catalogRows, selected],
+  );
+
+  useEffect(() => {
+    const visibleKeys = new Set(
+      tab === "bundles"
+        ? bundleRows.map((row) => `goods-${row.id}`)
+        : tab === "catalog"
+          ? catalogRows.map((row) => `${row.kind}-${row.id}`)
+          : [],
+    );
+    setSelected((prev) => {
+      if (!prev.size) return prev;
+      const next = new Set([...prev].filter((key) => visibleKeys.has(key)));
+      return next.size === prev.size ? prev : next;
+    });
+  }, [tab, bundleRows, catalogRows]);
 
   const saveCostMode = async (row: UnifiedCatalogRow) => {
     const mode = (row.costMode || "fixed") === "fixed" ? "dynamic" : "fixed";
@@ -443,25 +505,93 @@ export default function ProductsPage() {
       load();
     } catch (e) { setErr(String(e)); } finally { setBulkSaving(false); }
   };
-  const deleteSelectedBundles = async () => {
-    if (!canDeleteBundles || !selectedBundleIds.length || bundleDeleting) return;
-    const confirmed = window.confirm(
-      `确认删除选中的 ${selectedBundleIds.length} 个套装档案？已被历史业务引用的档案不会删除。`,
-    );
-    if (!confirmed) return;
+  const setCatalogStatus = async (items: CatalogBulkDeleteItem[], status: "active" | "inactive") => {
+    if (!canDeleteCatalog || !items.length || statusSaving) return;
+    if (status === "inactive") {
+      const confirmed = window.confirm(`停用后不再参与新增业务，但保留全部历史记录。确认停用 ${items.length} 项？`);
+      if (!confirmed) return;
+    }
+    setStatusSaving(true);
+    setErr("");
+    try {
+      const result = await dashboardApi.bulkCatalogStatus(items, status);
+      const label = status === "inactive" ? "停用" : "启用";
+      setMsg(`已${label} ${result.updated} 项${result.notFound.length ? `，${result.notFound.length} 项未找到` : ""}`);
+      const doneKeys = new Set(items.map((item) => `${item.kind}-${item.id}`));
+      setSelected((prev) => new Set([...prev].filter((key) => !doneKeys.has(key))));
+      setBlockedForInactive([]);
+      load();
+    } catch (e) {
+      setErr(String(e));
+    } finally {
+      setStatusSaving(false);
+    }
+  };
+  const deleteCatalogItems = async (items: CatalogBulkDeleteItem[]) => {
+    if (!canDeleteCatalog || !items.length || catalogDeleting) return;
+    setCatalogDeleting(true);
+    setErr("");
+    setBlockedForInactive([]);
+    try {
+      const preview = await dashboardApi.bulkDeleteCatalog(items, true);
+      const previewIssues = catalogDeleteIssueText(preview);
+      if (!preview.deletedItems.length) {
+        setBlockedForInactive(preview.blocked.map((item) => ({ kind: item.kind, id: item.id })));
+        setErr(`没有可删除的档案${previewIssues ? `：${previewIssues}` : ""}。请改为停用，或处理历史引用后删除。`);
+        return;
+      }
+      const confirmed = window.confirm(
+        `本次选中 ${items.length} 项，预计删除 ${preview.deletedItems.length} 项${previewIssues ? `，${previewIssues}` : ""}。\n\n确认继续删除？`,
+      );
+      if (!confirmed) return;
+      const result = await dashboardApi.bulkDeleteCatalog(items);
+      const deletedKeys = new Set(result.deletedItems.map((item) => `${item.kind}-${item.id}`));
+      setSelected((prev) => new Set([...prev].filter((key) => !deletedKeys.has(key))));
+      setMsg(`货品档案删除完成：已删除 ${result.deleted} 项`);
+      const resultIssues = catalogDeleteIssueText(result);
+      if (resultIssues) {
+        setErr(`未删除明细：${resultIssues}。请保留或改为停用。`);
+        if (result.blocked.length) setBlockedForInactive(result.blocked.map((item) => ({ kind: item.kind, id: item.id })));
+      }
+      load();
+    } catch (e) {
+      setErr(String(e));
+    } finally {
+      setCatalogDeleting(false);
+    }
+  };
+  const deleteBundles = async (ids: number[]) => {
+    if (!canDeleteBundles || !ids.length || bundleDeleting) return;
+    const uniqueIds = [...new Set(ids)];
     setBundleDeleting(true);
     setErr("");
     try {
-      const result = await dashboardApi.bulkDeleteBundles(selectedBundleIds);
+      const preview = await dashboardApi.bulkDeleteBundles(uniqueIds, true);
+      const previewRefs = preview.blocked.slice(0, 6).map((item) => {
+        const refs = item.references.map((ref) => `${ref.label}${ref.count}条`).join("、");
+        return `${item.skuCode}${refs ? `（${refs}）` : ""}`;
+      }).join("；");
+      const previewMore = preview.blocked.length > 6 ? `；另有 ${preview.blocked.length - 6} 个档案因引用保留` : "";
+      const confirmed = window.confirm(
+        `本次选中 ${uniqueIds.length} 个套装：预计删除 ${preview.deletedIds.length} 个，保留 ${preview.blocked.length} 个，${preview.invalid.length + preview.notFound.length} 个无效。${previewRefs ? `\n\n保留原因：${previewRefs}${previewMore}` : ""}\n\n确认继续删除？`,
+      );
+      if (!confirmed) return;
+      const result = await dashboardApi.bulkDeleteBundles(uniqueIds);
       setSelected((prev) => {
         const next = new Set(prev);
         result.deletedIds.forEach((id) => next.delete(`goods-${id}`));
         return next;
       });
-      if (result.blocked.length) {
-        const codes = result.blocked.map((item) => item.skuCode).join("、");
+      const blockedDetails = result.blocked.map((item) => {
+        const refs = item.references.map((ref) => `${ref.label}${ref.count}条`).join("、");
+        return `${item.skuCode}${refs ? `（${refs}）` : ""}`;
+      }).join("；");
+      const invalidDetails = result.invalid.map((item) => item.skuCode).join("、");
+      const notFoundDetails = result.notFound.join("、");
+      const notDeleted = [blockedDetails, invalidDetails && `无效档案：${invalidDetails}`, notFoundDetails && `不存在ID：${notFoundDetails}`].filter(Boolean).join("；");
+      if (notDeleted) {
         setMsg(`套装批量删除完成：已删除 ${result.deleted} 个，${result.blocked.length} 个因历史业务引用保留`);
-        setErr(`以下档案未删除：${codes}。请保留或改为停用。`);
+        setErr(`未删除明细：${notDeleted}。请保留或改为停用。`);
       } else {
         setMsg(`套装批量删除完成：已删除 ${result.deleted} 个`);
       }
@@ -471,6 +601,10 @@ export default function ProductsPage() {
     } finally {
       setBundleDeleting(false);
     }
+  };
+  const deleteSelectedBundles = async () => {
+    if (!selectedBundleIds.length) return;
+    await deleteBundles(selectedBundleIds);
   };
   const saveProduct = async (event: React.FormEvent) => {
     event.preventDefault();
@@ -485,9 +619,21 @@ export default function ProductsPage() {
   };
   const startEditProduct = (row: UnifiedCatalogRow) => {
     setEditing(row.id);
-    setProductForm({ jackyun_sku_id: "", sku_code: row.code, product_type: row.category in TYPE_LABEL ? row.category : "single", sku_name: row.name, barcode: row.barcode, unit: row.unit, sale_price: row.salePrice || "", default_cost: row.defaultCost || "", cost_mode: row.costMode || "fixed", cost_tolerance_pct: row.costTolerancePct || "0.0200", tax_code: row.taxCode || "", tax_category_rule_id: row.taxCategoryRuleId ? String(row.taxCategoryRuleId) : "", goods_category: row.goodsCategory || "", status: row.status });
+    setProductForm({ jackyun_sku_id: row.jackyunSkuId || "", sku_code: row.code, product_type: row.category in TYPE_LABEL ? row.category : "single", sku_name: row.name, barcode: row.barcode, unit: row.unit, sale_price: row.salePrice || "", default_cost: row.defaultCost || "", cost_mode: row.costMode || "fixed", cost_tolerance_pct: row.costTolerancePct || "0.0200", tax_code: row.taxCode || "", tax_category_rule_id: row.taxCategoryRuleId ? String(row.taxCategoryRuleId) : "", goods_category: row.goodsCategory || "", status: row.status });
   };
-  const startNewProduct = () => { if (!canEdit) return; setEditing(0); setProductForm(emptyProduct); setTab("catalog"); };
+  const selectTab = (next: ProductTab) => {
+    setTab(next);
+    setSelected(new Set());
+    // 用工作区注入的 searchParams（本 Tab 自己那一份）拼参数，跳转仍走 router，
+    // 这样工作区才会把新 query 同步到本 Tab 的 URL 快照上。
+    const params = new URLSearchParams(searchParams.toString());
+    params.delete("productTab");
+    if (next === "catalog") params.delete("tab");
+    else params.set("tab", next);
+    syncWorkspaceUrl(`/products${params.toString() ? `?${params}` : ""}`);
+  };
+  const startNewProduct = () => { if (!canEdit) return; setEditing(0); setProductForm(emptyProduct); selectTab("catalog"); };
+  const startNewBundle = () => { if (!canEdit) return; setEditing(0); setProductForm({ ...emptyProduct, product_type: "bundle", unit: "套" }); selectTab("bundles"); };
   const exportMasterData = async (dataset: MasterDataset, label: string, template = false) => {
     setExportingMaster(dataset);
     setErr("");
@@ -561,7 +707,7 @@ export default function ProductsPage() {
       setConsumableDraft(emptyConsumable);
       setConsumableEditor("new");
     }
-    setTab("catalog");
+    selectTab("catalog");
     setSkuSearch("");
   };
   const toggleLinkedSku = (skuId: number) => {
@@ -584,7 +730,7 @@ export default function ProductsPage() {
         tax_category_rule_id: consumableDraft.tax_category_rule_id ? Number(consumableDraft.tax_category_rule_id) : undefined,
         sku_ids: consumableDraft.sku_ids,
       });
-      setMsg(consumableEditor === "new" ? "耗材档案已建立（库存请通过采购收货或库存流水登记）" : "耗材档案已更新");
+      setMsg(consumableEditor === "new" ? "耗材档案已建立（库存请通过耗材采购单收货登记；商品入库耗用由绑定关系确认）" : "耗材档案已更新");
       setConsumableEditor(null);
       load();
     } catch (e) { setErr(String(e)); } finally { setSavingConsumable(false); }
@@ -605,6 +751,14 @@ export default function ProductsPage() {
     <input placeholder="税务代码（19 位税收分类编码）" value={bulkTaxCode} onChange={(e) => setBulkTaxCode(e.target.value.replace(/\D/g, ""))} maxLength={21} className="w-56 rounded border bg-white px-2 py-1.5 font-mono" />
     <label className="flex items-center gap-1 text-gray-600"><input type="checkbox" checked={bulkOverwrite} onChange={(e) => setBulkOverwrite(e.target.checked)} className="h-3.5 w-3.5 accent-blue-600" />覆盖已有值（默认仅填空缺）</label>
     <button onClick={applyBulkTaxCode} disabled={bulkSaving || !bulkTaxCode.trim()} className="rounded bg-blue-600 px-3 py-1.5 font-medium text-white hover:bg-blue-700 disabled:opacity-50">{bulkSaving ? "保存中…" : "批量设置税务代码"}</button>
+    {canDeleteCatalog
+      ? <>
+        <button onClick={() => void deleteCatalogItems(selectedCatalogItems)} disabled={catalogDeleting} className="rounded bg-rose-600 px-3 py-1.5 font-medium text-white hover:bg-rose-700 disabled:cursor-wait disabled:opacity-50">{catalogDeleting ? "删除中…" : "删除选中"}</button>
+        <button onClick={() => void setCatalogStatus(selectedCatalogItems, "inactive")} disabled={statusSaving} className="rounded bg-slate-600 px-3 py-1.5 font-medium text-white hover:bg-slate-700 disabled:cursor-wait disabled:opacity-50">{statusSaving ? "处理中…" : "停用选中"}</button>
+        <button onClick={() => void setCatalogStatus(selectedCatalogItems, "active")} disabled={statusSaving} className="rounded border border-emerald-300 bg-white px-3 py-1.5 font-medium text-emerald-700 hover:bg-emerald-50 disabled:cursor-wait disabled:opacity-50">启用选中</button>
+      </>
+      : <><span title="仅管理员可删除货品档案" className="rounded border border-rose-200 bg-white px-3 py-1.5 text-rose-400">删除选中（仅管理员）</span>
+        <span title="仅管理员可停用/启用货品档案" className="rounded border border-slate-200 bg-white px-3 py-1.5 text-slate-400">停用/启用（仅管理员）</span></>}
     <button onClick={() => setSelected(new Set())} className="rounded border bg-white px-3 py-1.5 text-gray-600 hover:bg-gray-50">取消选择</button>
   </div>;
   const bundleBulkBar = selectedBundleIds.length > 0 && <div className="mt-3 flex flex-wrap items-center gap-2 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-xs">
@@ -615,48 +769,67 @@ export default function ProductsPage() {
       : <span title="仅管理员可批量删除套装档案" className="rounded border border-rose-200 bg-white px-3 py-1.5 text-rose-400">批量删除（仅管理员）</span>}
     <button onClick={() => setSelected(new Set())} className="rounded border bg-white px-3 py-1.5 text-gray-600 hover:bg-gray-50">取消选择</button>
   </div>;
-  const inventoryUpdatedLabel = inv?.lastDocumentAt ? new Date(inv.lastDocumentAt).toLocaleString("zh-CN") : "暂无";
+  return <div className="mx-auto max-w-[1600px]">
 
-  return <div>
-    <div className="sticky top-0 z-20 -mx-8 -mt-6 border-b border-gray-200 bg-white/95 px-8 py-5 backdrop-blur">
-      <div>
-        <h1 className="text-xl font-semibold">货品档案</h1>
-        <p className="mt-1 text-sm text-gray-400">货品档案、套装档案、财务分类分别维护，并各自提供独立导入导出模板。</p>
+    <header className="rounded-2xl border border-slate-200 bg-white px-5 py-4 shadow-sm">
+      <div className="flex flex-wrap items-start justify-between gap-4">
+        <div>
+          <div className="text-[11px] font-medium tracking-wide text-blue-600">货品中心 / 基础档案</div>
+          <h1 className="mt-1 text-2xl font-semibold tracking-tight text-slate-900">货品档案</h1>
+          <p className="mt-1 max-w-3xl text-sm leading-6 text-slate-500">统一维护正品、耗材与套装基础资料；库存、仓库与流水统一收口到库存管理。</p>
+        </div>
+        <span className="rounded-full bg-blue-50 px-3 py-1.5 text-xs font-medium text-blue-700">正品与耗材统一档案</span>
+      </div>
+    </header>
+
+    <section className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-4" aria-label="货品档案指标">
+      <CatalogMetric label="正品数量" value={String(counts.baseGoods)} hint="单品档案" tone="blue" />
+      <CatalogMetric label="耗材数量" value={String(counts.consumable)} hint="耗材档案" tone="amber" />
+      <CatalogMetric label="套装数量" value={String(counts.bundles)} hint="套装与虚拟组合" tone="indigo" />
+      <CatalogMetric label="最近变更" value="—" hint="当前接口未返回档案更新时间" tone="slate" />
+    </section>
+
+    {err && <div className="mt-4 rounded-lg bg-red-50 p-3 text-sm text-red-700">{err}{canDeleteCatalog && blockedForInactive.length > 0 && <button onClick={() => void setCatalogStatus(blockedForInactive, "inactive")} disabled={statusSaving} className="ml-3 rounded bg-slate-600 px-2.5 py-1 text-xs font-medium text-white hover:bg-slate-700 disabled:cursor-wait disabled:opacity-60">改为停用（{blockedForInactive.length} 项）</button>}<button className="ml-3" onClick={() => { setErr(""); setBlockedForInactive([]); }}>关闭</button></div>}
+    {msg && <div className="mt-4 rounded-lg bg-green-50 p-3 text-sm text-green-700">{msg}</div>}
+
+    <div className="products-tabbar mt-5 border-b border-slate-200 bg-[#f4f7fb]/95 backdrop-blur">
+      <div className="flex h-12 items-stretch overflow-x-auto border-b border-slate-200">
+        {([["catalog", "货品档案"], ["bundles", "套装档案"], ["taxRules", "财务分类"]] as const).map(([key, label]) => (
+          <button key={key} className={`whitespace-nowrap border-b-2 px-4 text-sm font-medium transition ${tab === key ? "border-blue-600 text-blue-700" : "border-transparent text-slate-500 hover:border-slate-300 hover:text-slate-800"}`} onClick={() => selectTab(key)}>{label}</button>
+        ))}
       </div>
     </div>
 
-    {err && <div className="mt-4 rounded-lg bg-red-50 p-3 text-sm text-red-700">{err}<button className="ml-3" onClick={() => setErr("")}>关闭</button></div>}
-    {msg && <div className="mt-4 rounded-lg bg-green-50 p-3 text-sm text-green-700">{msg}</div>}
-
-    <div className="mt-6 flex gap-2 border-b border-gray-200">
-      {([["catalog", "货品档案"], ["bundles", "套装档案"], ["taxRules", "财务分类"]] as const).map(([key, label]) => (
-        <button key={key} className={`px-4 py-2 text-sm ${tab === key ? "border-b-2 border-blue-600 font-medium text-blue-600" : "text-gray-500"}`} onClick={() => { setTab(key); setSelected(new Set()); }}>{label}</button>
-      ))}
-    </div>
-    <p className="mt-2 text-xs text-gray-400">说明：货品档案仅包含单品和耗材；套装档案单独管理 bundle / virtual_bundle；财务分类规则独立维护并可被货品引用，条码不作主键。</p>
-
-    {tab === "catalog" && <section className="mt-4 rounded-xl border border-gray-200 bg-white p-4">
+    {tab === "catalog" && <section className="mt-4 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
       <div className="flex flex-wrap items-center justify-between gap-3">
-        <div><h2 className="text-sm font-medium text-gray-700">货品档案</h2><p className="mt-1 text-xs text-gray-400">正品（品）继续走吉客云流程；耗材（耗）在本页维护档案和 SKU 映射，库存与流转请到仓库管理。</p><p className="mt-1 text-[11px] text-gray-400">最新库存数据：{inventoryUpdatedLabel}</p></div>
+        <div><h2 className="text-sm font-semibold text-slate-900">正品与耗材</h2><p className="mt-1 text-xs text-slate-500">正品、耗材统一维护基础资料；库存数量与库存状态请前往库存总览。</p></div>
         <div className="flex flex-wrap items-center gap-2">
-          {canEdit && <><button onClick={startNewProduct} className="rounded-lg bg-blue-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-blue-700">+ 新建正品</button>
-          <button onClick={() => openConsumableEditor()} className="rounded-lg bg-amber-500 px-3 py-1.5 text-xs font-medium text-white hover:bg-amber-600">+ 新建耗材</button></>}
+          {canEdit && <><button onClick={startNewProduct} className="rounded-lg bg-blue-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-blue-700">新增正品</button>
+          <button onClick={() => openConsumableEditor()} className="rounded-lg bg-amber-500 px-3 py-1.5 text-xs font-medium text-white hover:bg-amber-600">新增耗材</button></>}
           <MasterDataActions dataset="catalog" label="货品档案" canEdit={canEdit} exporting={exportingMaster} importing={importingMaster} onExport={exportMasterData} onImport={importMasterData} />
-          <div className="flex rounded-lg border border-gray-200 p-0.5 text-xs">{([["all", `全部 ${catalogRows.length}`], ["goods", `正品 ${counts.baseGoods}`], ["consumable", `耗材 ${counts.consumable}`]] as const).map(([key, label]) => (<button key={key} onClick={() => setKind(key)} className={`rounded-md px-2.5 py-1.5 ${kind === key ? "bg-blue-50 font-medium text-blue-600" : "text-gray-500 hover:bg-gray-50"}`}>{label}</button>))}</div>
-          <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="搜索编码、条码或名称" className="w-56 rounded-lg border px-3 py-1.5 text-sm" />
         </div>
+      </div>
+
+      <div className="mt-4 flex flex-wrap items-center gap-2 border-t border-slate-100 pt-4">
+        <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="货品名称、SKU、条码" className="h-9 w-64 rounded-lg border border-slate-200 bg-slate-50/60 px-3 text-sm outline-none focus:border-blue-400 focus:bg-white" />
+        <select aria-label="类型筛选" value={kind} onChange={(e) => setKind(e.target.value as KindFilter)} className="h-9 rounded-lg border border-slate-200 bg-white px-3 text-sm text-slate-600 outline-none focus:border-blue-400"><option value="all">类型：全部</option><option value="goods">类型：正品</option><option value="consumable">类型：耗材</option></select>
+        <select aria-label="品类筛选" value={categoryFilter} onChange={(e) => setCategoryFilter(e.target.value)} className="h-9 max-w-48 rounded-lg border border-slate-200 bg-white px-3 text-sm text-slate-600 outline-none focus:border-blue-400"><option value="all">品类：全部</option>{categoryOptions.map((category) => <option key={category} value={category}>{category}</option>)}</select>
+        <select aria-label="状态筛选" value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)} className="h-9 rounded-lg border border-slate-200 bg-white px-3 text-sm text-slate-600 outline-none focus:border-blue-400"><option value="all">状态：全部</option><option value="active">状态：启用</option><option value="inactive">状态：停用</option></select>
+        <span className="ml-auto text-xs text-slate-400">共 {catalogRows.length} 条</span>
       </div>
 
       {editing === 0 && <ProductEditor form={productForm} setForm={setProductForm} onSubmit={saveProduct} onCancel={() => setEditing(null)} taxRules={taxRules} />}
 
       {bulkBar}
-      <CatalogTable rows={catalogRows} onEditConsumable={openConsumableEditor} onEditProduct={startEditProduct} onToggleCostMode={saveCostMode} onSaveCategory={saveCategory} selected={selected} onToggleRow={toggleRow} onToggleAll={() => toggleAll(catalogRows)} editingProductId={editing} productForm={productForm} setProductForm={setProductForm} onSaveProduct={saveProduct} onCancelProduct={() => setEditing(null)} taxRules={taxRules} canEdit={canEdit} />
+      <CatalogTable rows={catalogRows} onEditConsumable={openConsumableEditor} onEditProduct={startEditProduct} onToggleCostMode={saveCostMode} onSaveCategory={saveCategory} onDeleteRow={(row) => void deleteCatalogItems([{ kind: row.kind, id: row.id }])} selected={selected} onToggleRow={toggleRow} onToggleAll={() => toggleAll(catalogRows)} editingProductId={editing} productForm={productForm} setProductForm={setProductForm} onSaveProduct={saveProduct} onCancelProduct={() => setEditing(null)} taxRules={taxRules} canEdit={canEdit} canDelete={canDeleteCatalog} />
     </section>}
 
-    {tab === "bundles" && <section className="mt-4 rounded-xl border border-gray-200 bg-white p-4">
+    {tab === "bundles" && <section className="mt-4 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
       <div className="flex flex-wrap items-center justify-between gap-3"><div><div className="flex items-center gap-2"><h2 className="text-sm font-medium text-gray-700">套装档案</h2><span className="rounded-full bg-indigo-50 px-2 py-0.5 text-[11px] text-indigo-600">{counts.bundles} 个 SKU</span></div><p className="mt-1 text-xs text-gray-400">单独维护套装与虚拟组合套装 SKU 主档；当前系统没有套装组成明细表，因此模板只维护主档字段，不虚构组成关系。</p></div><div className="flex flex-wrap items-center gap-2"><MasterDataActions dataset="bundles" label="套装" canEdit={canEdit} exporting={exportingMaster} importing={importingMaster} onExport={exportMasterData} onImport={importMasterData} /><input value={bundleSearch} onChange={(e) => setBundleSearch(e.target.value)} placeholder="搜索编码、条码或名称" className="w-56 rounded-lg border px-3 py-1.5 text-sm" /></div></div>
+      {canEdit && editing !== 0 && <div className="mt-3 flex justify-end"><button type="button" onClick={startNewBundle} className="rounded-lg bg-indigo-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-indigo-700">+ 新建套装</button></div>}
+      {editing === 0 && <ProductEditor form={productForm} setForm={setProductForm} onSubmit={saveProduct} onCancel={() => setEditing(null)} taxRules={taxRules} />}
       {bundleBulkBar}
-      <CatalogTable rows={bundleRows} onEditConsumable={openConsumableEditor} onEditProduct={startEditProduct} onToggleCostMode={saveCostMode} onSaveCategory={saveCategory} selected={selected} onToggleRow={toggleRow} onToggleAll={() => toggleAll(bundleRows)} editingProductId={editing} productForm={productForm} setProductForm={setProductForm} onSaveProduct={saveProduct} onCancelProduct={() => setEditing(null)} taxRules={taxRules} canEdit={canEdit} />
+      <CatalogTable rows={bundleRows} onEditConsumable={openConsumableEditor} onEditProduct={startEditProduct} onToggleCostMode={saveCostMode} onSaveCategory={saveCategory} onDeleteRow={(row) => void deleteBundles([row.id])} selected={selected} onToggleRow={toggleRow} onToggleAll={() => toggleAll(bundleRows)} editingProductId={editing} productForm={productForm} setProductForm={setProductForm} onSaveProduct={saveProduct} onCancelProduct={() => setEditing(null)} taxRules={taxRules} canEdit={canEdit} canDelete={canDeleteBundles} />
     </section>}
 
     {tab === "taxRules" && <>
@@ -666,7 +839,7 @@ export default function ProductsPage() {
 
     {consumableEditor !== null && <div className="fixed inset-0 z-modal flex items-center justify-center bg-slate-900/30 p-4" onMouseDown={(e) => { if (e.target === e.currentTarget) setConsumableEditor(null); }}>
       <form onSubmit={saveConsumable} className="max-h-[92vh] w-full max-w-2xl overflow-auto rounded-2xl bg-white p-5 shadow-2xl">
-        <div className="flex items-start justify-between"><div><h3 className="text-base font-semibold text-slate-800">{consumableEditor === "new" ? "新建耗材档案" : "编辑耗材档案"}</h3><p className="mt-1 text-xs text-slate-400">编码首次手填（建议 HC-CH- + 条形码）；库存不在此修改，请走采购收货或库存流水。</p></div><button type="button" onClick={() => setConsumableEditor(null)} className="text-xl leading-none text-slate-300 hover:text-slate-500">×</button></div>
+          <div className="flex items-start justify-between"><div><h3 className="text-base font-semibold text-slate-800">{consumableEditor === "new" ? "新建耗材档案" : "编辑耗材档案"}</h3><p className="mt-1 text-xs text-slate-400">编码首次手填（建议 HC-CH- + 条形码）；库存不在此修改，入库走耗材采购单收货，出库走绑定商品的商品入库单确认耗用。</p></div><button type="button" onClick={() => setConsumableEditor(null)} className="text-xl leading-none text-slate-300 hover:text-slate-500">×</button></div>
         <div className="mt-5 grid grid-cols-2 gap-3 text-xs">
           <label className="col-span-2">耗材编码<span className="text-red-500">*</span><div className="mt-1.5 flex gap-2"><input required value={consumableDraft.code} onChange={(e) => setConsumableDraft({ ...consumableDraft, code: e.target.value })} placeholder="如 HC-CH-2020240528003（多耗材加 -BX/-LB/-CT 后缀）" className="h-9 min-w-0 flex-1 rounded-lg border border-slate-200 px-3 outline-none focus:border-amber-400" /><button type="button" disabled={!consumableDraft.barcode.trim()} onClick={() => setConsumableDraft((d) => ({ ...d, code: `HC-CH-${d.barcode.trim()}` }))} className="h-9 shrink-0 rounded-lg border border-slate-200 px-3 text-slate-600 hover:border-amber-300 hover:text-amber-600 disabled:opacity-40">HC-CH-+条码</button></div></label>
           <label className="col-span-2">耗材名称<span className="text-red-500">*</span><input required value={consumableDraft.name} onChange={(e) => setConsumableDraft({ ...consumableDraft, name: e.target.value })} className="mt-1.5 h-9 w-full rounded-lg border border-slate-200 px-3 outline-none focus:border-amber-400" /></label>

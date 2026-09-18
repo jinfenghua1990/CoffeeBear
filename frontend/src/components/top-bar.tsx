@@ -5,6 +5,8 @@ import { usePathname, useRouter } from "next/navigation";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { authenticatedFetch, logout } from "@/lib/api";
 import { MODULES, resolveModule } from "@/lib/navigation";
+import { syncWorkspaceUrl } from "@/lib/workspace/url-sync";
+import ThemeToggle from "@/components/theme-toggle";
 
 type SearchItem = { label: string; sub: string };
 type SearchGroups = {
@@ -63,18 +65,29 @@ export default function TopBar() {
   const [status, setStatus] = useState<GlobalStatus | null>(null);
   const rootRef = useRef<HTMLDivElement>(null);
   const seqRef = useRef(0);
+  const statusRequestInFlight = useRef(false);
 
   const loadStatus = useCallback(() => {
+    if (statusRequestInFlight.current) return;
+    statusRequestInFlight.current = true;
     authenticatedFetch("/api/v1/system/global-status")
       .then((res) => (res.ok ? res.json() : null))
       .then((data: GlobalStatus | null) => data && setStatus(data))
-      .catch(() => {});
+      .catch(() => {})
+      .finally(() => { statusRequestInFlight.current = false; });
   }, []);
 
   useEffect(() => {
-    loadStatus();
-    const timer = window.setInterval(loadStatus, 60_000);
-    return () => window.clearInterval(timer);
+    const runWhenVisible = () => {
+      if (document.visibilityState === "visible") loadStatus();
+    };
+    runWhenVisible();
+    const timer = window.setInterval(runWhenVisible, 60_000);
+    document.addEventListener("visibilitychange", runWhenVisible);
+    return () => {
+      window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", runWhenVisible);
+    };
   }, [loadStatus]);
 
   useEffect(() => {
@@ -115,7 +128,8 @@ export default function TopBar() {
   function go(href: string) {
     setOpenMenu(null);
     setSearchOpen(false);
-    router.push(href);
+    // 走工作区地址同步，避开静态导出下 router.push 每次 1 秒多的 RSC 往返
+    syncWorkspaceUrl(href, "push");
   }
 
   function submitSearch() {
@@ -142,7 +156,7 @@ export default function TopBar() {
   return (
     <header className="relative z-40 flex h-14 shrink-0 items-center gap-3 border-b border-slate-200 bg-white px-4 shadow-[0_1px_4px_rgba(15,39,70,0.04)]" ref={rootRef}>
       {/* 品牌 + 工作台切换 */}
-      <Link href="/" className="flex shrink-0 items-center gap-2.5">
+      <Link href="/" prefetch={false} className="flex shrink-0 items-center gap-2.5">
         <span className="flex h-9 w-9 items-center justify-center rounded-full bg-[#112a49] text-white">
           <svg viewBox="0 0 24 24" className="h-5 w-5" fill="none" aria-hidden="true">
             <path d="M5 8h12v7a5 5 0 0 1-5 5h-2a5 5 0 0 1-5-5V8Z" fill="currentColor" />
@@ -183,6 +197,7 @@ export default function TopBar() {
             <Link
               key={module.key}
               href={module.href}
+              prefetch={false}
               aria-current={isActive ? "page" : undefined}
               className={`shrink-0 rounded-lg px-3.5 py-2 text-[13px] font-medium transition-colors ${
                 isActive ? "bg-blue-50 text-blue-600" : "text-slate-600 hover:bg-slate-50 hover:text-slate-900"
@@ -208,7 +223,7 @@ export default function TopBar() {
             value={keyword}
             onChange={(event) => setKeyword(event.target.value)}
             onFocus={() => hasHits && setSearchOpen(true)}
-            placeholder="搜索商品、SKU、订单、供应商…"
+            placeholder="搜索货品、SKU、订单、供应商…"
             className="min-w-0 flex-1 bg-transparent text-[13px] text-slate-700 outline-none placeholder:text-slate-400"
           />
         </form>
@@ -274,6 +289,7 @@ export default function TopBar() {
               )}
               <Link
                 href="/data-center-import?tab=alibaba1688"
+                prefetch={false}
                 onClick={() => setOpenMenu(null)}
                 className="mt-1 block rounded-lg px-2.5 py-1.5 text-[12px] text-blue-600 hover:bg-slate-50"
               >
@@ -285,6 +301,7 @@ export default function TopBar() {
 
         <Link
           href="/exceptions"
+          prefetch={false}
           className="relative flex h-8 w-8 items-center justify-center rounded-lg text-slate-500 hover:bg-slate-100"
           aria-label="异常中心"
         >
@@ -301,6 +318,7 @@ export default function TopBar() {
 
         <Link
           href="/settings"
+          prefetch={false}
           className="flex h-8 w-8 items-center justify-center rounded-lg text-slate-500 hover:bg-slate-100"
           aria-label="系统设置"
         >
@@ -309,6 +327,8 @@ export default function TopBar() {
             <path d="M10 2.8v2m0 10.4v2M2.8 10h2m10.4 0h2M4.9 4.9l1.4 1.4m7.4 7.4 1.4 1.4m0-10.2-1.4 1.4M6.3 13.7l-1.4 1.4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
           </svg>
         </Link>
+
+        <ThemeToggle />
 
         <div className="relative">
           <button
@@ -324,6 +344,7 @@ export default function TopBar() {
             <div className="absolute right-0 top-full z-50 mt-1.5 w-44 rounded-xl border border-slate-200 bg-white p-1.5 shadow-lg">
               <Link
                 href="/settings"
+                prefetch={false}
                 onClick={() => setOpenMenu(null)}
                 className="block rounded-lg px-3 py-2 text-[13px] text-slate-700 hover:bg-slate-50"
               >
@@ -331,6 +352,7 @@ export default function TopBar() {
               </Link>
               <Link
                 href="/automation"
+                prefetch={false}
                 onClick={() => setOpenMenu(null)}
                 className="block rounded-lg px-3 py-2 text-[13px] text-slate-700 hover:bg-slate-50"
               >

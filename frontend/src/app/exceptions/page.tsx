@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
+import { useRouter } from "next/navigation";
 import { ExceptionRow, getExceptions, updateExceptionStatus } from "@/lib/api";
 
 const STATUS_LABEL: Record<string, string> = {
@@ -23,6 +24,8 @@ export default function ExceptionsPage() {
   const [rows, setRows] = useState<ExceptionRow[]>([]);
   const [filter, setFilter] = useState<string>("pending");
   const [err, setErr] = useState("");
+  const [message, setMessage] = useState("");
+  const router = useRouter();
 
   const load = useCallback(() => {
     getExceptions()
@@ -32,14 +35,24 @@ export default function ExceptionsPage() {
 
   useEffect(load, [load]);
 
-  async function act(id: number, status: string) {
-    await updateExceptionStatus(id, status, "");
-    load();
+  async function act(id: number, status: string, code: string) {
+    setErr("");
+    try {
+      await updateExceptionStatus(id, status, "");
+      setMessage(
+        code === "PURCHASE_PAYMENT_GAP" && status === "confirmed"
+          ? "金额差异已确认，采购内容已完成，订单已进入待采购单流程。"
+          : "异常状态已更新。",
+      );
+      load();
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+    }
   }
 
   return (
     <div>
-      <div className="flex items-center justify-between">
+      <header className="app-page-header -mx-1 flex items-center justify-between gap-3 bg-[#f4f7fb]/95 pb-3 backdrop-blur">
         <h1 className="text-xl font-semibold">异常中心</h1>
         <div className="flex gap-1.5">
           {["pending", "confirmed", "resolved", "ignored", "all"].map((s) => (
@@ -54,9 +67,10 @@ export default function ExceptionsPage() {
             </button>
           ))}
         </div>
-      </div>
+      </header>
 
       {err && <div className="mt-4 rounded-lg bg-red-50 p-3 text-sm text-red-700">{err}</div>}
+      {message && <div className="mt-4 rounded-lg bg-emerald-50 p-3 text-sm text-emerald-700">{message}</div>}
 
       <div className="mt-4 overflow-hidden rounded-xl border border-gray-200 bg-white">
         {rows.length === 0 ? (
@@ -87,6 +101,11 @@ export default function ExceptionsPage() {
                         {String(r.detail.latest)}
                       </div>
                     )}
+                    {r.code === "PURCHASE_PAYMENT_GAP" && Boolean(r.detail?.externalOrderId) && (
+                      <div className="mt-0.5 text-xs text-amber-700">
+                        订单号 {String(r.detail.externalOrderId)} · 1688 实付 ¥{String(r.detail.paidAmount ?? "—")} · 入库 ¥{String(r.detail.inboundAmount ?? "—")} · 差额 ¥{String(r.detail.difference ?? "—")}
+                      </div>
+                    )}
                   </td>
                   <td className="px-4 py-2.5">
                     <span
@@ -102,18 +121,27 @@ export default function ExceptionsPage() {
                   </td>
                   <td className="px-4 py-2.5">
                     <div className="flex gap-1.5 text-xs">
+                      {(() => {
+                        const poId = r.detail?.poId ?? r.detail?.orderId;
+                        if (!poId) return null;
+                        return (
+                          <button onClick={() => router.push(`/purchase/workbench?view=orders&order=${poId}`)} className="rounded bg-indigo-600 px-2 py-0.5 text-white hover:bg-indigo-700">
+                            去处理
+                          </button>
+                        );
+                      })()}
                       {r.status !== "resolved" && (
-                        <button onClick={() => act(r.id, "resolved")} className="text-emerald-600 hover:underline">
+                        <button onClick={() => act(r.id, "resolved", r.code)} className="text-emerald-600 hover:underline">
                           解决
                         </button>
                       )}
                       {r.status === "pending" && (
-                        <button onClick={() => act(r.id, "confirmed")} className="text-sky-600 hover:underline">
-                          确认
+                        <button onClick={() => act(r.id, "confirmed", r.code)} className="text-sky-600 hover:underline">
+                          {r.code === "PURCHASE_PAYMENT_GAP" ? "确认金额并继续" : "确认"}
                         </button>
                       )}
                       {r.status !== "ignored" && (
-                        <button onClick={() => act(r.id, "ignored")} className="text-gray-400 hover:underline">
+                        <button onClick={() => act(r.id, "ignored", r.code)} className="text-gray-400 hover:underline">
                           忽略
                         </button>
                       )}

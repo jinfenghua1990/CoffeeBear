@@ -13,22 +13,9 @@ from app.services.procurement_consistency import (
     assign_shared_inbound_item,
     completion_snapshot,
     jackyun_group_summary,
-    merge_orders_to_jackyun_po,
-    merge_suggestions,
 )
 
 router = APIRouter(prefix="/purchase", tags=["purchase-consistency"])
-
-
-class MergeAllocationBody(BaseModel):
-    po_id: int = Field(..., gt=0)
-    alloc_amount: Decimal = Field(..., gt=0)
-
-
-class MergeGroupBody(BaseModel):
-    purch_no: str = Field(..., min_length=1, max_length=128)
-    allocations: list[MergeAllocationBody] = Field(..., min_length=2, max_length=50)
-    note: str = Field("", max_length=256)
 
 
 class InboundSplitAssignmentBody(BaseModel):
@@ -40,31 +27,6 @@ class InboundSplitAssignmentBody(BaseModel):
 class InboundSplitBody(BaseModel):
     source_item_id: int = Field(..., gt=0)
     assignments: list[InboundSplitAssignmentBody] = Field(..., min_length=2, max_length=50)
-
-
-@router.get("/merge-suggestions")
-def get_merge_suggestions(db: Session = Depends(get_db)) -> dict[str, Any]:
-    """推荐“多张线上采购单 → 1 张吉客云采购单”，只推荐，不自动落库。"""
-    return merge_suggestions(db)
-
-
-@router.post("/merge-groups")
-def create_merge_group(
-    body: MergeGroupBody,
-    request: Request,
-    db: Session = Depends(get_db),
-) -> dict[str, Any]:
-    """原子建立采购合并组；金额不闭环时整组拒绝，不留下半组数据。"""
-    try:
-        return merge_orders_to_jackyun_po(
-            db,
-            purch_no=body.purch_no,
-            allocations=[item.model_dump() for item in body.allocations],
-            actor=current_actor(request),
-            note=body.note,
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
 
 
 @router.get("/jackyun-groups/{jackyun_po_id}")

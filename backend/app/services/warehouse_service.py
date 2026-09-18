@@ -16,6 +16,31 @@ def display_code(row: Warehouse) -> str:
     return (row.code or (f"JKY-{row.jackyun_warehouse_id}" if row.jackyun_warehouse_id else f"WH-{row.id}")).upper()
 
 
+def resolve_warehouse_reference(
+    db: Session, *, code: str | None = "", name: str | None = "",
+) -> tuple[str, str]:
+    """把外部文件里的仓库编号或仓库名归一为本系统仓库档案。"""
+    source_code = str(code or "").strip()
+    source_name = str(name or "").strip()
+    candidates: dict[str, list[Warehouse]] = {}
+    for row in db.query(Warehouse).all():
+        for value in (row.jackyun_warehouse_id, row.code, row.name):
+            key = str(value or "").strip().casefold()
+            if not key:
+                continue
+            bucket = candidates.setdefault(key, [])
+            if row not in bucket:
+                bucket.append(row)
+
+    for value in (source_code, source_name):
+        bucket = candidates.get(value.casefold()) if value else None
+        if bucket and len(bucket) == 1:
+            row = bucket[0]
+            return display_code(row), row.name.strip() or source_name or source_code
+
+    return source_code, source_name
+
+
 def serialize(row: Warehouse) -> dict:
     return {
         "id": row.id,

@@ -402,8 +402,10 @@ def test_inbound_file_preserves_rows_and_registers_non_1688_order(db_session):
         assert po.raw["inboundAmountTotal"] == "22"
         link = db_session.query(ProcurementChainLink).filter_by(external_po_id=po.id, target_id=document.id).one()
         assert link.confirmed is True
-        assert link.consumable_usage_decided is True
-        assert link.consumable_usage_enabled is False
+        # 没有正品↔耗材映射时不能伪造“本次不使用”；保持待维护，补齐映射后自动补扣。
+        assert link.consumable_usage_decided is False
+        assert link.consumable_usage_enabled is None
+        assert "待维护耗材映射" in (link.note or "")
         # 重复来源行复用同一入库明细，不因“用过一次”而丢掉第二行。
         assert result["matched"] == 2
         assert db_session.get(JackyunGoodsDocumentItem, item.id).apply_quantity == 1

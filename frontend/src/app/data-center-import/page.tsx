@@ -10,9 +10,9 @@ import { TaxInvoicesPanel } from "./panels/tax-invoices";
 import { authenticatedFetch, masterDataApi } from "@/lib/api";
 
 const TABS = [
-  { key: "alibaba1688", label: "1688 订单", desc: "1688 卖家中心导出订单" },
+  { key: "alibaba1688", label: "1688 采购订单", desc: "在线拉取或上传导出文件" },
   { key: "external_orders", label: "其他渠道采购订单", desc: "拼多多、淘宝、线下等订单号主档" },
-  { key: "jackyun", label: "吉客云业务单据", desc: "采购单、入库单、结算单等客户端导出文件" },
+  { key: "jackyun", label: "吉客云采购/入库单", desc: "采购单、采购入库单、结算单等客户端导出文件" },
   { key: "tax", label: "税务发票清单", desc: "税务系统官方发票清单" },
 ] as const;
 
@@ -33,7 +33,7 @@ const EXPORTS: ExportOption[] = [
   { key: "external_orders", label: "其他渠道订单号库", hint: "淘宝、拼多多、线下采购订单", loop: true, importKey: "external_orders" },
   { key: "production_orders", label: "生产订单（内部）", hint: "仅核验不回导", loop: false },
   { key: "material_flow", label: "生产采购链路", hint: "仅核验不回导", loop: false },
-  { key: "inbound_documents", label: "吉客云入库单", hint: "入库单 + 入库明细 · 仅核验", loop: false },
+  { key: "inbound_documents", label: "吉客云入库单（导出核验）", hint: "入库单 + 入库明细 · 仅核验", loop: false },
   { key: "sales_items", label: "销售明细", hint: "销售单查询货品行 · 仅核验", loop: false },
   { key: "tax_invoices", label: "发票台账", hint: "发票关联与认证状态 · 仅核验", loop: false },
 ] as const;
@@ -109,11 +109,23 @@ export default function DataCenterImportPage() {
 
   return (
     <div>
-      <h1 className="text-xl font-semibold">数据接入</h1>
-      <p className="mt-1 max-w-4xl text-sm leading-6 text-gray-500">
-        所有外部文件先在这里导入、预览、确认；业务事实也可以按数据维度导出，方便你在 Excel 中手动核验订单、入库、库存和成本链路。
-      </p>
-      {returnOrder && <div className="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-indigo-100 bg-indigo-50/60 px-4 py-3 text-sm text-indigo-800"><span>正在为采购订单 <b className="font-mono">{returnOrder}</b> 补充原始资料。确认导入后，回到订单完成关联。</span><Link href={`/purchase/workbench?view=orders&order=${encodeURIComponent(returnOrder)}`} className="rounded-md bg-white px-3 py-1.5 text-xs font-medium text-indigo-600 shadow-sm">返回当前订单</Link></div>}
+      <header className="app-page-header -mx-1 bg-[#f4f7fb]/95 pb-3 backdrop-blur">
+        <div className="flex flex-wrap items-start justify-between gap-4">
+          <div>
+            <h1 className="text-xl font-semibold">数据接入</h1>
+            <p className="mt-1 max-w-4xl text-sm leading-6 text-gray-500">
+              所有外部文件先在这里导入、预览、确认；业务事实也可以按数据维度导出，方便你在 Excel 中手动核验订单、入库、库存和成本链路。
+            </p>
+          </div>
+          {tab === "alibaba1688" && (
+            <div className="flex shrink-0 flex-wrap gap-2">
+              <Link href="#data-source-panel" className="rounded-lg bg-indigo-600 px-3.5 py-2 text-xs font-medium text-white shadow-sm hover:bg-indigo-700">开始拉取 1688 采购订单</Link>
+              <Link href="/purchase/workbench?view=orders" className="rounded-lg border border-slate-200 bg-white px-3.5 py-2 text-xs font-medium text-slate-600 shadow-sm hover:bg-slate-50">查看采购订单</Link>
+            </div>
+          )}
+        </div>
+        {returnOrder && <div className="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-indigo-100 bg-indigo-50/60 px-4 py-3 text-sm text-indigo-800"><span>正在为采购订单 <b className="font-mono">{returnOrder}</b> 补充原始资料。确认导入后，回到订单完成关联。</span><Link href={`/purchase/workbench?view=orders&order=${encodeURIComponent(returnOrder)}`} className="rounded-md bg-white px-3 py-1.5 text-xs font-medium text-indigo-600 shadow-sm">返回当前订单</Link></div>}
+      </header>
 
       {/* 页签已上移为左侧「数据中台」二级菜单（lib/navigation.ts），此处仅按 ?tab= 渲染面板 */}
 
@@ -134,7 +146,7 @@ export default function DataCenterImportPage() {
                 className={`flex items-center justify-between rounded-lg border bg-white px-3 py-2.5 text-xs transition hover:border-indigo-300 hover:bg-indigo-50 ${tab === item.key ? "border-indigo-300 ring-1 ring-indigo-200" : "border-indigo-100"}`}
               >
                 <span><span className="font-medium text-slate-800">{item.label}</span><span className="ml-2 text-[10px] text-slate-400">{item.desc}</span></span>
-                <span className="shrink-0 text-indigo-600">上传 →</span>
+                <span className="shrink-0 text-indigo-600">{item.key === "alibaba1688" ? "拉取 / 上传 →" : "上传 →"}</span>
               </Link>
             ))}
           </div>

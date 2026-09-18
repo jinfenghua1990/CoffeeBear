@@ -21,6 +21,32 @@ def fingerprint(payload: dict) -> str:
     return hashlib.sha256(json.dumps(payload, sort_keys=True, default=str, ensure_ascii=False).encode()).hexdigest()
 
 
+def build_consumable_purchase_number(
+    db: Session,
+    *,
+    ordered_on: date,
+    reference_no: str = "",
+    source_order_id: int | None = None,
+) -> str:
+    """生成耗材采购入库主单号：有平台订单号时固定以 HC+平台订单号为主。"""
+    source = db.get(Alibaba1688Order, source_order_id) if source_order_id is not None else None
+    platform_order_no = reference_no.strip() or (source.external_order_id if source else "")
+    if platform_order_no:
+        base = f"HC{platform_order_no}"
+        if len(base) > 40:
+            raise ValueError("平台采购单号过长，无法生成 HC 入库单号")
+    else:
+        base = f"HC{ordered_on:%Y%m%d}-{uuid4().hex[:8].upper()}"
+
+    candidate = base
+    suffix = 2
+    while db.query(ConsumablePurchase.id).filter(ConsumablePurchase.number == candidate).first() is not None:
+        marker = f"-{suffix}"
+        candidate = f"{base[:40 - len(marker)]}{marker}"
+        suffix += 1
+    return candidate
+
+
 def source_orders(db: Session, search: str = "") -> list[dict]:
     query = db.query(Alibaba1688Order).join(Alibaba1688FileImport, Alibaba1688Order.import_id == Alibaba1688FileImport.id).filter(
         Alibaba1688Order.row_status == "active", Alibaba1688FileImport.lifecycle == "active",
@@ -110,8 +136,13 @@ def create_purchase(db: Session, *, request_key: str, supplier_name: str, ordere
             raise ValueError("耗材不存在或已停用")
         if item["quantity"] <= 0 or item["unit_cost"] < 0:
             raise ValueError("采购数量必须大于 0，单价不能为负")
+    from app.services.supplier_sync_service import ensure_supplier
+    ensure_supplier(db, supplier_name, platform="1688" if source_order_id is not None else "线下")
+    number = build_consumable_purchase_number(
+        db, ordered_on=ordered_on, reference_no=reference_no, source_order_id=source_order_id,
+    )
     row_id = db.scalar(insert(ConsumablePurchase).values(
-        number=f"HC{ordered_on:%Y%m%d}-{uuid4().hex[:8].upper()}", request_key=request_key,
+        number=number, request_key=request_key,
         request_fingerprint=digest, supplier_name=supplier_name, ordered_on=ordered_on,
         source_order_id=source_order_id, reference_no=reference_no, status="ordered", note=note, created_by=actor,
     ).on_conflict_do_nothing().returning(ConsumablePurchase.id))

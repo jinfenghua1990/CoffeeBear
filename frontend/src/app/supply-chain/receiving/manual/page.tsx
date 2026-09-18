@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { useSearchParams } from "next/navigation";
 import { authenticatedFetch } from "@/lib/api";
 
 type ProductionItem = {
@@ -81,6 +82,7 @@ async function responseError(response: Response, fallback: string) {
 }
 
 export default function ReceivingPage() {
+  const searchParams = useSearchParams();
   const [orders, setOrders] = useState<ProductionOrder[]>([]);
   const [selectedKey, setSelectedKey] = useState("");
   const [candidates, setCandidates] = useState<Candidate[]>([]);
@@ -129,8 +131,8 @@ export default function ReceivingPage() {
       return;
     }
     if (!pendingRows.some(({ order, item }) => `${order.id}:${item.id}` === selectedKey)) {
-      const params = new URLSearchParams(window.location.search);
-      const requestedOrderId = Number(params.get("orderId") ?? 0);
+      // 工作区下读本 Tab 冻结的 searchParams，隐藏 Tab 读 window.location.search 会命中别的 Tab
+      const requestedOrderId = Number(searchParams.get("orderId") ?? 0);
       const requested = pendingRows.find(({ order }) => order.id === requestedOrderId);
       const first = requested ?? pendingRows[0];
       setSelectedKey(`${first.order.id}:${first.item.id}`);

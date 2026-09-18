@@ -14,8 +14,6 @@ from app.models.tax import TaxInvoice, TaxInvoiceLink
 from app.services.procurement_consistency import (
     assign_shared_inbound_item,
     completion_snapshot,
-    jackyun_group_summary,
-    merge_orders_to_jackyun_po,
 )
 
 
@@ -44,67 +42,10 @@ def test_external_purchase_order_number_is_scoped_by_platform(db_session):
     }
 
 
-def test_merge_group_rejects_unbalanced_total_without_partial_links(db_session):
-    first = _po("MERGE-BAD-A", "300")
-    second = _po("MERGE-BAD-B", "200")
-    jpo = JackyunPurchaseOrder(
-        jackyun_purch_id="JY-MERGE-BAD",
-        purch_no="CG-MERGE-BAD",
-        supplier_name="合并测试供应商",
-        amount=Decimal("500"),
+def _link_merged(po_id: int, jpo_id: int, alloc: str) -> JackyunPurchaseOrderLink:
+    return JackyunPurchaseOrderLink(
+        po_id=po_id, jackyun_po_id=jpo_id, relation_kind="merged", alloc_amount=Decimal(alloc),
     )
-    db_session.add_all([first, second, jpo])
-    db_session.flush()
-
-    with pytest.raises(ValueError, match="不一致"):
-        merge_orders_to_jackyun_po(
-            db_session,
-            purch_no=jpo.purch_no,
-            allocations=[
-                {"po_id": first.id, "alloc_amount": "300"},
-                {"po_id": second.id, "alloc_amount": "190"},
-            ],
-        )
-
-    assert db_session.query(JackyunPurchaseOrderLink).filter_by(jackyun_po_id=jpo.id).count() == 0
-    assert first.purchase_status == "confirmed"
-    assert second.purchase_status == "confirmed"
-
-
-def test_merge_group_is_atomic_and_balanced(db_session):
-    first = _po("MERGE-OK-A", "300")
-    second = _po("MERGE-OK-B", "200", "taobao")
-    jpo = JackyunPurchaseOrder(
-        jackyun_purch_id="JY-MERGE-OK",
-        purch_no="CG-MERGE-OK",
-        supplier_name="合并测试供应商",
-        amount=Decimal("500"),
-    )
-    db_session.add_all([first, second, jpo])
-    db_session.flush()
-
-    result = merge_orders_to_jackyun_po(
-        db_session,
-        purch_no=jpo.purch_no,
-        allocations=[
-            {"po_id": first.id, "alloc_amount": "300"},
-            {"po_id": second.id, "alloc_amount": "200"},
-        ],
-        actor="pytest",
-    )
-
-    assert result["balanced"] is True
-    assert result["orderCount"] == 2
-    assert Decimal(result["difference"]) == 0
-    links = db_session.query(JackyunPurchaseOrderLink).filter_by(jackyun_po_id=jpo.id).all()
-    assert {link.po_id: link.alloc_amount for link in links} == {
-        first.id: Decimal("300"),
-        second.id: Decimal("200"),
-    }
-    assert all(link.relation_kind == "merged" for link in links)
-    assert first.purchase_status == "jackyun_linked"
-    assert second.purchase_status == "jackyun_linked"
-    assert jackyun_group_summary(db_session, jpo.id)["balanced"] is True
 
 
 def test_shared_inbound_line_can_be_split_with_quantity_ceiling(db_session):
@@ -161,15 +102,11 @@ def test_shared_inbound_line_can_be_split_with_quantity_ceiling(db_session):
     )
     db_session.add_all([first_alloc, second_alloc])
     db_session.flush()
-    merge_orders_to_jackyun_po(
-        db_session,
-        purch_no=jpo.purch_no,
-        allocations=[
-            {"po_id": first.id, "alloc_amount": "400"},
-            {"po_id": second.id, "alloc_amount": "600"},
-        ],
-        actor="pytest",
-    )
+    db_session.add_all([
+        _link_merged(first.id, jpo.id, "400"),
+        _link_merged(second.id, jpo.id, "600"),
+    ])
+    db_session.flush()
 
     result = assign_shared_inbound_item(
         db_session,
@@ -231,15 +168,11 @@ def test_jackyun_target_invoice_is_apportioned_back_to_merged_source_orders(db_s
     )
     db_session.add_all([first, second, jpo])
     db_session.flush()
-    merge_orders_to_jackyun_po(
-        db_session,
-        purch_no=jpo.purch_no,
-        allocations=[
-            {"po_id": first.id, "alloc_amount": "300"},
-            {"po_id": second.id, "alloc_amount": "200"},
-        ],
-        actor="pytest",
-    )
+    db_session.add_all([
+        _link_merged(first.id, jpo.id, "300"),
+        _link_merged(second.id, jpo.id, "200"),
+    ])
+    db_session.flush()
     invoice = TaxInvoice(
         invoice_key="|INV-GROUP-001",
         invoice_number="INV-GROUP-001",

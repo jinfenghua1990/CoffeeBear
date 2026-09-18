@@ -25,7 +25,10 @@ class Product(Base, PkMixin, TimestampMixin):
 
 class ProductSku(Base, PkMixin, TimestampMixin):
     __tablename__ = "product_skus"
-    __table_args__ = (UniqueConstraint("jackyun_sku_id", name="uq_sku_jackyun_id"),)
+    __table_args__ = (
+        UniqueConstraint("jackyun_sku_id", name="uq_sku_jackyun_id"),
+        UniqueConstraint("sku_code", name="uq_sku_code"),
+    )
 
     product_id: Mapped[int | None] = mapped_column(BigInteger, index=True, nullable=True)
     jackyun_sku_id: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)

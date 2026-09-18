@@ -147,12 +147,28 @@ export type SystemHealth = {
   components: Record<string, "up" | "down" | string>;
 };
 
+let overviewCache: { value: Overview; expiresAt: number } | null = null;
+let overviewRequest: Promise<Overview> | null = null;
+
 export async function getOverview(): Promise<Overview> {
-  const res = await authenticatedFetch("/api/v1/system/overview", {
+  if (overviewCache && overviewCache.expiresAt > Date.now()) {
+    return overviewCache.value;
+  }
+  if (overviewRequest) return overviewRequest;
+  overviewRequest = authenticatedFetch("/api/v1/system/overview", {
     cache: "no-store",
-  });
-  if (!res.ok) throw new Error(`overview ${res.status}`);
-  return res.json();
+  })
+    .then(async (res) => {
+      if (!res.ok) throw new Error(`overview ${res.status}`);
+      const value = (await res.json()) as Overview;
+      // 页面切换时短时间内会同时挂载状态栏和业务页，共享同一份读取结果。
+      overviewCache = { value, expiresAt: Date.now() + 10_000 };
+      return value;
+    })
+    .finally(() => {
+      overviewRequest = null;
+    });
+  return overviewRequest;
 }
 
 export async function getSystemHealth(): Promise<SystemHealth> {
@@ -197,12 +213,14 @@ export async function updateExceptionStatus(
   id: number,
   status: string,
   note: string
-): Promise<void> {
-  await authenticatedFetch(`/api/v1/exceptions/${id}/status`, {
+): Promise<{ ok: boolean; status: string; workflow?: { purchaseStatus?: string; adjustmentAmount?: string } }> {
+  const res = await authenticatedFetch(`/api/v1/exceptions/${id}/status`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ status, note }),
   });
+  if (!res.ok) throw new Error(`异常处理失败（${res.status}）`);
+  return res.json();
 }
 
 // ---------- 回款中心（Phase 5） ----------
@@ -221,10 +239,16 @@ export type ReconTxn = {
   txnDate: string;
   direction: string;
   amount: string;
+  accountNo?: string;
+  accountName?: string;
+  bankName?: string;
   counterpartyName: string;
   summary: string;
   voucherNo: string;
   matched: boolean;
+  invoiceMatched?: boolean;
+  matchStatus?: "matched" | "unmatched" | "not_applicable" | string;
+  matchedAt?: string | null;
 };
 
 export type SettlementRow = {
@@ -271,6 +295,27 @@ async function jsonFetch<T>(url: string, init?: RequestInit): Promise<T> {
   return res.json();
 }
 
+/**
+ * 创建耗材采购单使用请求标识幂等，因此网络在服务重启窗口短暂中断时可以安全重试一次。
+ * 若第二次仍无法连通，给出可操作的中文提示，不把浏览器原始的 Failed to fetch 直接展示给用户。
+ */
+async function jsonFetchWithNetworkRetry<T>(url: string, init?: RequestInit): Promise<T> {
+  try {
+    return await jsonFetch<T>(url, init);
+  } catch (caught) {
+    if (!(caught instanceof TypeError) || !/fetch|network/i.test(caught.message)) throw caught;
+    await new Promise((resolve) => window.setTimeout(resolve, 600));
+    try {
+      return await jsonFetch<T>(url, init);
+    } catch (retryCaught) {
+      if (retryCaught instanceof TypeError && /fetch|network/i.test(retryCaught.message)) {
+        throw new Error("采购服务暂时无法连接，请稍后重试；系统会自动避免重复建单");
+      }
+      throw retryCaught;
+    }
+  }
+}
+
 /** 仅校验状态码的 DELETE（软删除接口返回 204 无响应体）。 */
 async function noContentFetch(url: string): Promise<void> {
   const res = await authenticatedFetch(url, { method: "DELETE" });
@@ -287,7 +332,7 @@ export const reconApi = {
     jsonFetch<{ id: number }>("/api/v1/reconciliation/rules", { method: "POST", body: JSON.stringify(body) }),
   deleteRule: (id: number) =>
     jsonFetch<{ ok: boolean }>(`/api/v1/reconciliation/rules/${id}`, { method: "DELETE" }),
-  transactions: () => jsonFetch<ReconTxn[]>("/api/v1/reconciliation/transactions"),
+  transactions: (limit = 500) => jsonFetch<ReconTxn[]>(`/api/v1/reconciliation/transactions?limit=${limit}`),
   createTxn: (body: Record<string, unknown>) =>
     jsonFetch<{ id: number; created: boolean; fingerprint: string }>("/api/v1/reconciliation/transactions", {
       method: "POST",
@@ -336,9 +381,12 @@ export type ProfitCompute = {
   goodsCost: string | null;
   grossProfit: string | null;
   costMissingSkus: number[];
+  costMissingDetail?: { skuId: number; skuCode: string; skuName: string; quantity: string }[];
   unmappedItems: number[];
   quantityMissingItems: number[];
   costMissing: boolean;
+  warning?: string | null;
+  error?: string | null;
   note: string;
 };
 
@@ -358,8 +406,8 @@ export const profitApi = {
 
 // ---------- 经营看板（Phase 2） ----------
 
-export type TrendPoint = { date: string; orders: number; salesAmount: string | null };
-export type PlatformRow = { platform: string; orders: number; salesAmount: string | null };
+export type TrendPoint = { date: string; orders: number; salesAmount: string | null; costAmount?: string | null; grossProfit?: string | null; costIncomplete?: boolean };
+export type PlatformRow = { platform: string; orders: number; salesAmount: string | null; costAmount?: string | null; grossProfit?: string | null; costIncomplete?: boolean };
 export type SkuRow = { skuCode: string; goodsName: string; orders: number; salesAmount: string | null };
 export type InventorySummary = {
   skuCount: number;
@@ -370,6 +418,36 @@ export type InventorySummary = {
   appliedDocumentCount?: number;
   note?: string;
 };
+/** 正品 SKU 逐笔出入库流水行：来自吉客云入库/出库单明细的真实单据事实。 */
+export type SkuTransactionRow = {
+  occurredAt: string | null;
+  direction: "inbound" | "outbound";
+  documentNo: string;
+  warehouseId: number | null;
+  warehouseName: string;
+  quantity: number;
+  balanceBefore: number;
+  balanceAfter: number;
+  supplierName: string;
+  companyName: string;
+  matchedSkuId: number | null;
+  matchStatus: string;
+};
+
+export type SkuTransactionPayload = {
+  sku: {
+    skuId: number;
+    skuCode: string;
+    skuName: string;
+    barcode: string;
+    unit: string;
+    goodsName: string;
+  };
+  total: number;
+  rows: SkuTransactionRow[];
+  balance: number;
+};
+
 export type InventorySkuRow = {
   skuId: number;
   jackyunSkuId: string;
@@ -401,6 +479,7 @@ export type CatalogSkuRow = {
   barcode: string; unit: string; salePrice: string | null; defaultCost: string | null;
   costMode: "fixed" | "dynamic"; costTolerancePct: string; taxCode: string;
   taxCategoryRuleId: number | null; taxCategoryRuleName: string; status: string;
+  consumablePolicy?: "auto" | "none";
 };
 
 export type TaxCategoryRule = {
@@ -413,6 +492,7 @@ export type LinkedSkuRef = { skuId: number; skuCode: string; skuName: string };
 
 export type BundleBulkDeleteResult = {
   ok: boolean;
+  dryRun: boolean;
   requested: number;
   deleted: number;
   deletedIds: number[];
@@ -424,6 +504,30 @@ export type BundleBulkDeleteResult = {
   }>;
   invalid: Array<{ id: number; skuCode: string; reason: string }>;
   notFound: number[];
+};
+
+export type CatalogBulkDeleteItem = { kind: "goods" | "consumable"; id: number };
+export type CatalogBulkDeleteResult = {
+  ok: boolean;
+  dryRun: boolean;
+  requested: number;
+  deleted: number;
+  deletedItems: Array<{ kind: "goods" | "consumable"; id: number; code: string }>;
+  blocked: Array<{
+    kind: "goods" | "consumable";
+    id: number;
+    code: string;
+    reason: string;
+    references: Array<{ label: string; count: number; numbers?: string[] }>;
+  }>;
+  invalid: Array<{ kind: "goods" | "consumable"; id: number; code: string; reason: string }>;
+  notFound: Array<{ kind: "goods" | "consumable"; id: number }>;
+};
+
+export type CatalogBulkStatusResult = {
+  updated: number;
+  items: Array<{ kind: "goods" | "consumable"; id: number; code: string; status: string }>;
+  notFound: Array<{ kind: "goods" | "consumable"; id: number }>;
 };
 
 /** 统一货品档案行：kind=goods（正品，库存读吉客云快照）/ kind=consumable（耗材，库存本系统三仓维护）。 */
@@ -456,6 +560,11 @@ export type ConsumableRow = {
   minStockQty: string; usageRate: string; taxCode: string;
   taxCategoryRuleId: number | null; taxCategoryRuleName: string;
   status: string; mappingCount: number; linkedSkus: LinkedSkuRef[]; lowStock: boolean;
+  mappingDetails?: Array<LinkedSkuRef & { usagePerUnit: string | null }>;
+  totalStockQty?: string; totalUsedQty?: string; currentStockQty?: string;
+  lossQty?: string; adjustmentQty?: string; pendingProductionQty?: string;
+  usagePerUnit?: string | null; supportQty?: string | null; coveragePct?: string | null;
+  gapQty?: string | null; inventoryStatus?: "正常" | "偏低" | "缺货";
 };
 export type ConsumableMappingRow = {
   id: number; skuId: number; skuCode: string; skuName: string;
@@ -469,6 +578,7 @@ export type ConsumableTransactionRow = {
   factoryBefore: string | null; factoryAfter: string | null;
   sourceType: string; sourceId: number | null; note: string; occurredAt: string | null;
   purchaseId: number | null; orderId: number | null;
+  inboundDocumentId: number | null; inboundDocumentNo: string; inboundDocumentAt: string | null; inboundWarehouseName: string;
 };
 
 export type ConsumablePurchaseItem = {
@@ -505,6 +615,9 @@ export const dashboardApi = {
     const q = new URLSearchParams({ search, limit: String(limit) });
     return jsonFetch<InventorySkuRow[]>(`/api/v1/dashboard/inventory/skus?${q}`);
   },
+  /** 正品 SKU 逐笔出入库流水（本地吉客云单据事实，口径与库存运算一致）。 */
+  skuTransactions: (skuId: number, limit = 500) =>
+    jsonFetch<SkuTransactionPayload>(`/api/v1/dashboard/inventory/sku-transactions?sku_id=${skuId}&limit=${limit}`),
   products: (search = "", limit = 200) => {
     const q = new URLSearchParams({ search, limit: String(limit) });
     return jsonFetch<CatalogSkuRow[]>(`/api/v1/dashboard/products?${q}`);
@@ -512,6 +625,10 @@ export const dashboardApi = {
   updateCostPolicy: (skuId: number, costMode: "fixed" | "dynamic", costTolerancePct?: string) =>
     jsonFetch<{ id: number; costMode: string; costTolerancePct: string }>(`/api/v1/dashboard/products/${skuId}/cost-policy`, {
       method: "POST", body: JSON.stringify({ cost_mode: costMode, cost_tolerance_pct: costTolerancePct }),
+    }),
+  updateConsumablePolicy: (skuId: number, policy: "auto" | "none") =>
+    jsonFetch<{ id: number; consumablePolicy: "auto" | "none" }>(`/api/v1/dashboard/products/${skuId}/consumable-policy`, {
+      method: "POST", body: JSON.stringify({ policy }),
     }),
   saveProduct: (body: Record<string, unknown>) =>
     jsonFetch<{ id: number; skuCode: string; jackyunSkuId: string }>("/api/v1/dashboard/products/save", { method: "POST", body: JSON.stringify(body) }),
@@ -523,9 +640,17 @@ export const dashboardApi = {
     jsonFetch<{ updated: number; skipped: number; missing: number }>("/api/v1/dashboard/catalog/tax-code/bulk", {
       method: "POST", body: JSON.stringify({ items, tax_code: taxCode, overwrite }),
     }),
-  bulkDeleteBundles: (ids: number[]) =>
+  bulkDeleteBundles: (ids: number[], dryRun = false) =>
     jsonFetch<BundleBulkDeleteResult>("/api/v1/dashboard/catalog/bundles/bulk-delete", {
-      method: "POST", body: JSON.stringify({ ids }),
+      method: "POST", body: JSON.stringify({ ids, dry_run: dryRun }),
+    }),
+  bulkDeleteCatalog: (items: CatalogBulkDeleteItem[], dryRun = false) =>
+    jsonFetch<CatalogBulkDeleteResult>("/api/v1/dashboard/catalog/bulk-delete", {
+      method: "POST", body: JSON.stringify({ items, dry_run: dryRun }),
+    }),
+  bulkCatalogStatus: (items: CatalogBulkDeleteItem[], status: "active" | "inactive") =>
+    jsonFetch<CatalogBulkStatusResult>("/api/v1/dashboard/catalog/bulk-status", {
+      method: "POST", body: JSON.stringify({ items, status }),
     }),
   updateCategory: (kind: "goods" | "consumable", id: number, category: string) =>
     jsonFetch<{ ok: boolean; category: string }>("/api/v1/dashboard/catalog/category", {
@@ -557,7 +682,7 @@ export const consumablesApi = {
   purchases: (search = "", sourceOrderId?: number, orderNo?: string) => jsonFetch<ConsumablePurchaseRow[]>(`/api/v1/consumables/purchases?search=${encodeURIComponent(search)}${sourceOrderId ? `&source_order_id=${sourceOrderId}` : ""}${orderNo ? `&order_no=${encodeURIComponent(orderNo)}` : ""}`),
   purchase: (id: number) => jsonFetch<ConsumablePurchaseDetail>(`/api/v1/consumables/purchases/${id}`),
   purchaseSources: (search = "") => jsonFetch<ConsumablePurchaseSource[]>(`/api/v1/consumables/purchases/source-orders?search=${encodeURIComponent(search)}`),
-  createPurchase: (body: Record<string, unknown>) => jsonFetch<ConsumablePurchaseDetail>("/api/v1/consumables/purchases", { method: "POST", body: JSON.stringify(body) }),
+  createPurchase: (body: Record<string, unknown>) => jsonFetchWithNetworkRetry<ConsumablePurchaseDetail>("/api/v1/consumables/purchases", { method: "POST", body: JSON.stringify(body) }),
   receivePurchase: (id: number, body: Record<string, unknown>) => jsonFetch<ConsumablePurchaseDetail>(`/api/v1/consumables/purchases/${id}/receipts`, { method: "POST", body: JSON.stringify(body) }),
   cancelPurchase: (id: number) => jsonFetch<ConsumablePurchaseDetail>(`/api/v1/consumables/purchases/${id}/cancel`, { method: "POST" }),
   reopenPurchase: (id: number) => jsonFetch<ConsumablePurchaseDetail>(`/api/v1/consumables/purchases/${id}/reopen`, { method: "POST" }),
@@ -1004,6 +1129,19 @@ export type Alibaba1688BrowserJob = {
   errorSummary: string;
 };
 
+export type Alibaba1688SyncMode = "incremental" | "range" | "single";
+export type Alibaba1688TimeField = "order_time" | "pay_time";
+export type Alibaba1688SyncOptions = {
+  mode: Alibaba1688SyncMode;
+  startDate?: string;
+  endDate?: string;
+  orderNo?: string;
+  supplier?: string;
+  keyword?: string;
+  onlyUnfinished?: boolean;
+  timeField?: Alibaba1688TimeField;
+};
+
 export const alibaba1688BrowserApi = {
   status: () => jsonFetch<Alibaba1688BrowserStatus>("/api/v1/alibaba1688-browser/status"),
   login: () =>
@@ -1011,10 +1149,10 @@ export const alibaba1688BrowserApi = {
       "/api/v1/alibaba1688-browser/login",
       { method: "POST" }
     ),
-  sync: () =>
+  sync: (options: Alibaba1688SyncOptions = { mode: "incremental" }) =>
     jsonFetch<{ ok: boolean; taskId: string; status: string }>(
       "/api/v1/alibaba1688-browser/sync",
-      { method: "POST" }
+      { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(options) }
     ),
   jobs: (limit = 10) =>
     jsonFetch<Alibaba1688BrowserJob[]>(`/api/v1/alibaba1688-browser/jobs?limit=${limit}`),
@@ -1108,6 +1246,20 @@ export type TaxInvoiceImportRow = {
   createdAt: string | null;
 };
 
+export type TaxInvoiceProcessingStatus = "pending" | "required" | "not_required";
+
+/** 进项发票 v2 分类（6 个 key + 空=待判断），与 processing_status 合并后的单一分类字段 */
+export type TaxInvoiceCategoryV2 =
+  | "goods"
+  | "platform_fee"
+  | "operating_other"
+  | "reimburse_advance"
+  | "reimburse_operating"
+  | "excluded";
+
+/** 销项发票分类（独立枚举，与进项 6+1 互斥）：空=待判断 */
+export type TaxInvoiceCategoryOutput = "buyer_sales" | "platform_service";
+
 export type TaxInvoiceRow = {
   id: number;
   direction: "input" | "output" | "unknown";
@@ -1126,12 +1278,67 @@ export type TaxInvoiceRow = {
   currency: string;
   matchStatus: "matched" | "unmatched" | "needs_review";
   matchNote: string;
+  processingStatus: TaxInvoiceProcessingStatus;
+  /** 分类 key：进项 goods/platform_fee/operating_other/reimburse_advance/reimburse_operating/excluded；销项 buyer_sales/platform_service；空=待判断 */
+  category: string;
+  /** 分类中文文案（后端权威，与 category 一致） */
+  categoryLabel: string;
   sourceImportId: number | null;
   sourceRowIndex: number | null;
   /** 进项发票是否已勾选认证（税务侧抵扣） */
   verified: boolean;
   /** 认证所属月份，如 2026-08 */
   verifiedMonth: string;
+  /** 销项发票支付方式：corporate=对公账户支出；personal=个人垫付；空=未设置 */
+  paymentMethod: string;
+  invoiceStatusLabel: string;
+  redStatus: "none" | "red_offset" | "voided_blue" | string;
+  redRelatedInvoiceNo: string;
+  redNoticeNo: string;
+  /** 发票池展示用的采购/入库关联摘要 */
+  links: Array<{
+    /** tax_invoice_links 主键，解除关联时使用 */
+    id: number;
+    targetType: string;
+    targetId: number;
+    targetNo: string;
+    targetLabel: string;
+    allocatedAmount: number | null;
+    matchMethod: string;
+    confirmed: boolean;
+    note: string;
+  }>;
+  purchaseOrderNos: string[];
+  inboundNos: string[];
+  /** 当前有效导入批次中解析出的开票明细摘要 */
+  lineItems: Array<{
+    goodsName: string | null;
+    spec: string | null;
+    unit: string | null;
+    quantity: string | number | null;
+    unitPrice: string | number | null;
+    amount: string | number | null;
+    taxRate: string | number | null;
+    taxAmount: string | number | null;
+    totalAmount: string | number | null;
+    remark: string | null;
+  }>;
+  lineItemCount: number;
+};
+
+/** 发票人工关联候选（销项→销售订单；采购类→1688 文件订单 / 吉客云采购单） */
+export type TaxInvoicePurchaseCandidate = {
+  targetType: string;
+  targetId: number;
+  orderNo: string;
+  supplier: string;
+  /** 销售订单候选：买家/客户（采购候选为空） */
+  buyer?: string;
+  orderDate: string | null;
+  amount: string | null;
+  amountDiff: string | null;
+  linkedInvoiceId: number | null;
+  linkedInvoiceNo: string | null;
 };
 
 export type TaxInvoiceSummary = {
@@ -1139,6 +1346,41 @@ export type TaxInvoiceSummary = {
   byDirection: Record<string, number>;
   byStatus: Record<string, number>;
   byMatchStatus: Record<string, number>;
+  byProcessing?: Record<string, number>;
+  /** v2 分类计数（进项；key 为 6 个分类 + ""=待判断） */
+  byCategory?: Record<string, number>;
+  /** 派生组计数：operating=计入运营成本 / reimburse=计入报销成本 / excluded=不计入 / pending=待判断 */
+  byCategoryGroup?: Record<string, number>;
+  byVerification: Record<string, number>;
+  inputVerification: Record<string, number>;
+  inputTotalAmount: number;
+  rawInputTotalAmount: number;
+  excludedRedAmount: number;
+  activeBatchCount: number;
+  sourceRowCount: number;
+  duplicateRowCount: number;
+};
+
+/** 发票货物明细行（官方清单导入记录中的一行；解析失败的数字保留原文） */
+export type TaxInvoiceLine = {
+  goodsName: string | null;
+  spec: string | null;
+  unit: string | null;
+  quantity: string | number | null;
+  unitPrice: string | number | null;
+  amount: string | number | null;
+  taxRate: string | number | null;
+  taxAmount: string | number | null;
+  totalAmount: string | number | null;
+  remark: string | null;
+};
+
+export type TaxInvoiceLinesResponse = {
+  items: TaxInvoiceLine[];
+  total: number;
+  sumAmount: number | null;
+  sumTax: number | null;
+  sumTotal: number | null;
 };
 
 export const taxInvoiceApi = {
@@ -1147,19 +1389,62 @@ export const taxInvoiceApi = {
     return jsonFetch<TaxInvoiceImportRow[]>(`/api/v1/tax-invoices/imports${q}`);
   },
   summary: () => jsonFetch<TaxInvoiceSummary>("/api/v1/tax-invoices/summary"),
-  invoices: (params: { direction?: string; status?: string; matchStatus?: string; verified?: boolean } = {}) => {
+  invoices: (params: { direction?: string; status?: string; matchStatus?: string; processingStatus?: string; category?: string; verified?: boolean; limit?: number; offset?: number } = {}) => {
     const q = new URLSearchParams();
     if (params.direction) q.set("direction", params.direction);
     if (params.status) q.set("status", params.status);
     if (params.matchStatus) q.set("match_status", params.matchStatus);
+    if (params.processingStatus) q.set("processing_status", params.processingStatus);
+    if (params.category !== undefined) q.set("category", params.category);
     if (params.verified !== undefined) q.set("verified", String(params.verified));
+    if (params.limit !== undefined) q.set("limit", String(params.limit));
+    if (params.offset !== undefined) q.set("offset", String(params.offset));
     return jsonFetch<TaxInvoiceRow[]>(`/api/v1/tax-invoices${q.toString() ? `?${q}` : ""}`);
   },
+  lines: (invoiceId: number) =>
+    jsonFetch<TaxInvoiceLinesResponse>(`/api/v1/tax-invoices/${invoiceId}/lines`),
+  setProcessingStatus: (invoiceId: number, processingStatus: "pending" | "required" | "not_required") =>
+    jsonFetch<TaxInvoiceRow>(`/api/v1/tax-invoices/${invoiceId}/processing-status`, {
+      method: "PATCH",
+      body: JSON.stringify({ processing_status: processingStatus }),
+    }),
   bulkVerify: (invoiceIds: number[], verified: boolean, verifiedMonth: string) =>
     jsonFetch<{ ok: boolean; processed: number; items: unknown[] }>("/api/v1/tax-invoices/bulk-verify", {
       method: "POST",
       body: JSON.stringify({ invoice_ids: invoiceIds, verified, verified_month: verifiedMonth }),
     }),
+  bulkSetCategory: (invoiceIds: number[], category: string) =>
+    jsonFetch<{ ok: boolean; processed: number }>("/api/v1/tax-invoices/bulk-category", {
+      method: "POST",
+      body: JSON.stringify({ invoice_ids: invoiceIds, category }),
+    }),
+  bulkSetPaymentMethod: (invoiceIds: number[], paymentMethod: string) =>
+    jsonFetch<{ ok: boolean; processed: number }>("/api/v1/tax-invoices/bulk-payment-method", {
+      method: "POST",
+      body: JSON.stringify({ invoice_ids: invoiceIds, payment_method: paymentMethod }),
+    }),
+  purchaseCandidates: (invoiceId: number, keyword = "") => {
+    const q = new URLSearchParams();
+    if (keyword) q.set("keyword", keyword);
+    return jsonFetch<TaxInvoicePurchaseCandidate[]>(
+      `/api/v1/tax-invoices/${invoiceId}/purchase-link-candidates${q.toString() ? `?${q}` : ""}`
+    );
+  },
+  linkPurchase: (
+    invoiceId: number,
+    body: { targetType: string; targetId: number; allocatedAmount?: string | number | null; note?: string }
+  ) =>
+    jsonFetch<{ ok: boolean; id: number; orderNo: string }>(`/api/v1/tax-invoices/${invoiceId}/purchase-links`, {
+      method: "POST",
+      body: JSON.stringify({
+        target_type: body.targetType,
+        target_id: body.targetId,
+        allocated_amount: body.allocatedAmount ?? undefined,
+        note: body.note ?? "",
+      }),
+    }),
+  unlinkPurchase: (invoiceId: number, linkId: number) =>
+    jsonFetch<{ ok: boolean }>(`/api/v1/tax-invoices/${invoiceId}/purchase-links/${linkId}`, { method: "DELETE" }),
   upload: async (file: File, period?: string, autoConfirm = false) => {
     const form = new FormData();
     form.append("file", file);
@@ -1250,6 +1535,10 @@ export type ChainInbound = {
   linkId: number | null;
   targetId: number;
   goodsdocNo: string;
+  source?: string;
+  isLocal?: boolean;
+  platformPurchaseOrderNo?: string;
+  externalReferenceNo?: string;
   date: string | null;
   warehouseName: string;
   supplier: string;
@@ -1646,6 +1935,47 @@ export const procurementChainApi = {
     jsonFetch<{ ok: boolean; before: string | null; after: string }>(`/api/v1/procurement-chain/inbound-documents/${documentId}/recalc-amount`, {
       method: "POST",
     }),
+  correctInboundDate: (documentId: number, inboundAt: string, note = "") =>
+    jsonFetch<{ ok: boolean; documentId: number; before: string | null; after: string }>(`/api/v1/procurement-chain/inbound-documents/${documentId}/date`, {
+      method: "PATCH",
+      body: JSON.stringify({ inbound_at: inboundAt, note }),
+    }),
+  correctInboundItemPrice: (documentId: number, itemId: number, unitPriceTax: string, note = "") =>
+    jsonFetch<{
+      ok: boolean;
+      documentId: number;
+      itemId: number;
+      lineNo: number;
+      before: string | null;
+      after: string;
+      amountTaxAfter: string | null;
+      documentAmountAfter: string;
+    }>(`/api/v1/procurement-chain/inbound-documents/${documentId}/items/${itemId}/price`, {
+      method: "PATCH",
+      body: JSON.stringify({ unit_price_tax: unitPriceTax, note }),
+    }),
+  createLocalInbound: (body: {
+    order_id: number;
+    inbound_no?: string;
+    inbound_at?: string | null;
+    warehouse_id?: number | null;
+    note?: string;
+    items: Array<{ allocation_id: number; quantity: string; unit_price?: string | null }>;
+    consumable_usage_enabled?: boolean | null;
+    consumable_usage_items?: Array<{ consumable_id: number; quantity: string }>;
+  }) => jsonFetch<{
+    ok: boolean;
+    documentId: number;
+    inboundNo: string;
+    linkId: number;
+    source: string;
+    usage: { status: string; items: unknown[] };
+  }>("/api/v1/procurement-chain/local-inbounds", { method: "POST", body: JSON.stringify(body) }),
+  deleteLocalInbound: (documentId: number) =>
+    jsonFetch<{ ok: boolean; documentId: number; inboundNo: string }>(
+      `/api/v1/procurement-chain/inbound-documents/${documentId}`,
+      { method: "DELETE" },
+    ),
 };
 
 // ---------- 采购执行中心（5 步骤任务视角） ----------
@@ -1700,6 +2030,22 @@ export type WorkbenchSummary = {
   completedOrders: number;
 };
 
+/** 采购工作台异常摘要：由异常中心记录压缩而来，message 为可直接展示的原因。 */
+export type WorkbenchExceptionInfo = {
+  type: string;
+  title: string;
+  status: string;
+  severity: string;
+  reason: string;
+  actionRequired: string;
+  paidAmount: number | null;
+  inboundAmount: number | null;
+  difference: number | null;
+  suggestedAdjustment: number | null;
+  message: string;
+  createdAt: string | null;
+};
+
 export type WorkbenchOrderItem = {
   orderId: number;
   externalPoId: number | null;
@@ -1718,6 +2064,8 @@ export type WorkbenchOrderItem = {
   orderStatus: string;
   purchaseStatus: string;
   hasException: boolean;
+  /** 命中的异常摘要（报错原因，供界面直接展示）。 */
+  exceptionInfo?: WorkbenchExceptionInfo[];
   firstUndone: string | null;
   firstUndoneLabel: string;
   firstUndoneShort: string;
@@ -1776,7 +2124,7 @@ export type WorkbenchOrder = {
   freight: number | null;
   discount: number | null;
   paidAmount: number | null;
-  /** 1688 源单有付款时间且实付大于 0，表示平台付款事实已确认。 */
+  /** 1688 源单实付大于 0，表示平台付款事实已确认；付款时间可能因导入字段缺失而为空。 */
   paidOn1688?: boolean;
   paidOn1688At?: string | null;
   /** 1688 微调金额：红包等导致开票金额与订单实付的零头差；平衡目标 = 实付 + 微调 */
@@ -1787,12 +2135,21 @@ export type WorkbenchOrder = {
   purchaseStatus: string;
   /** 后端根据入库/发票/付款事实计算出的收尾卡点。 */
   closeoutStage?: string | null;
+  /** 发票池自动匹配结果：采购订单详情只读展示，不在订单弹窗内人工维护。 */
+  invoiceStatus?: "pending" | "partial" | "done" | "none" | string;
+  invoicedAmount?: number | null;
+  invoiceOutstanding?: number | null;
   /** 采购单步骤按 Excel 口径跳过（吉客云未建采购单、入库闭环即放行） */
   jackyunPoBypassed?: boolean;
   title: string | null;
   hasException: boolean;
+  /** 命中的异常摘要（报错原因，供界面直接展示）。 */
+  exceptionInfo?: WorkbenchExceptionInfo[];
   logistics?: Record<string, unknown>;
   shipStatus?: string;
+  /** 采购订单计划入库仓库；实际入库后以入库单仓库为准。 */
+  warehouseId?: number | null;
+  warehouseName?: string;
 };
 
 export type WorkbenchDetail = {
@@ -1813,6 +2170,9 @@ export type WorkbenchDetail = {
   stepTotal: number;
   warehouse?: {
     warehouseName: string;
+    warehouseId?: number | null;
+    targetWarehouseId?: number | null;
+    targetWarehouseName?: string;
     jackyunWarehouseId: string;
     isSellable: boolean | null;
     currentStock: number | null;
@@ -1870,7 +2230,7 @@ export const procurementWorkbenchApi = {
   summary: () => jsonFetch<WorkbenchSummary>("/api/v1/procurement-workbench/summary"),
   orders: (
     params: {
-      status?: "all" | "pending" | "done" | "order" | "content" | "sku" | "jackyun_po" | "closeout" | "refine" | "po" | "inbound" | "invoice" | "exception";
+      status?: "all" | "pending" | "done" | "order" | "content" | "sku" | "jackyun_po" | "closeout" | "refine" | "po" | "inbound" | "transit" | "invoice" | "exception";
       q?: string;
       sortBy?: "date" | "amount" | "status";
       page?: number;
@@ -1904,6 +2264,7 @@ export const procurementWorkbenchApi = {
       orderId: number;
       orderNo: string;
       removedPoIds?: number[];
+      removedInboundIds?: number[];
       recoverable?: boolean;
     }>(`/api/v1/procurement-workbench/orders/${orderId}/soft-delete`, { method: "POST" }),
   /** 编辑订单主档（供应商/标题/金额等）：1688 单改源单事实并同步副本，独有单改副本；后端留审计 */
@@ -1912,6 +2273,7 @@ export const procurementWorkbenchApi = {
     body: Partial<{
       supplier_name: string;
       title: string;
+      external_order_id: string;
       ordered_at: string;
       goods_total: string;
       freight: string;
@@ -1920,6 +2282,7 @@ export const procurementWorkbenchApi = {
       order_amount: string;
       paid_amount: string;
       platform: string;
+      warehouse_id: number | null;
     }>
   ) =>
     jsonFetch<{ ok: boolean; mode: "file" | "external"; orderNo: string }>(
@@ -2132,7 +2495,8 @@ export type PendingAllocation = {
 export type AllocationBodyInput = {
   sku_id: number;
   quantity: string;
-  unit_price: string;
+  amount: string;
+  unit_price?: string | null;
 };
 
 export const skuMatchingApi = {
@@ -2179,4 +2543,76 @@ export const skuMatchingApi = {
     ),
   skus: () =>
     jsonFetch<CatalogSkuRow[]>("/api/v1/dashboard/products?limit=500"),
+};
+
+// ---------- 快递物流（物流成本管理） ----------
+
+export type LogisticsMonthRow = {
+  type: "month" | "bill";
+  period: string;
+  periodLabel: string;
+  carrier: string;
+  billId: number | null;
+  shippedCount: number;
+  unitPrice: string | null;
+  estimatedAmount: string;
+  actualAmount: string | null;
+  actualUnitPrice: string | null;
+  difference: string | null;
+  status: string;
+  statusLabel: string;
+  invoiceStatus: string;
+};
+
+export type LogisticsWorkbench = {
+  cards: {
+    monthShippedCount: number;
+    monthEstimatedAmount: string;
+    pendingEstimatedAmount: string;
+    latestActualUnitPrice: string | null;
+    annualLogisticsCost: string;
+  };
+  months: LogisticsMonthRow[];
+  settings: { defaultUnitPrice: string };
+};
+
+export type LogisticsBill = {
+  id: number;
+  periodLabel: string;
+  periodStart: string | null;
+  periodEnd: string | null;
+  carrier: string;
+  waybillCount: number | null;
+  estimatedAmount: string | null;
+  actualAmount: string | null;
+  actualUnitPrice: string | null;
+  difference: string | null;
+  status: string;
+  statusLabel: string;
+  invoiceStatus: string;
+  invoiceStatusLabel: string;
+  note: string;
+  matchedCount: number | null;
+  unmatchedCount: number | null;
+  duplicateCount: number | null;
+  abnormalCount: number | null;
+  createdAt: string | null;
+};
+
+export const logisticsApi = {
+  workbench: () => jsonFetch<LogisticsWorkbench>("/api/v1/logistics/workbench"),
+  settings: () => jsonFetch<{ defaultUnitPrice: string }>("/api/v1/logistics/settings"),
+  updateSetting: (defaultUnitPrice: string) =>
+    jsonFetch<{ defaultUnitPrice: string }>("/api/v1/logistics/settings", {
+      method: "PUT",
+      body: JSON.stringify({ default_unit_price: defaultUnitPrice }),
+    }),
+  bills: () => jsonFetch<{ items: LogisticsBill[] }>("/api/v1/logistics/bills"),
+  bill: (id: number) => jsonFetch<LogisticsBill>(`/api/v1/logistics/bills/${id}`),
+  createBill: (body: Record<string, unknown>) =>
+    jsonFetch<LogisticsBill>("/api/v1/logistics/bills", { method: "POST", body: JSON.stringify(body) }),
+  settleBill: (id: number) =>
+    jsonFetch<LogisticsBill>(`/api/v1/logistics/bills/${id}/settle`, { method: "POST" }),
+  deleteBill: (id: number) =>
+    jsonFetch<{ ok: boolean }>(`/api/v1/logistics/bills/${id}`, { method: "DELETE" }),
 };

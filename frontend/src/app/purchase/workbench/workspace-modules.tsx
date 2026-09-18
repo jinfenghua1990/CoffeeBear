@@ -10,15 +10,12 @@ const modules = {
   products: dynamic(() => import("@/app/products/page"), { loading }),
   inventory_goods: dynamic(() => import("@/app/products/inventory-goods/page"), { loading }),
   inventory_consumables: dynamic(() => import("@/app/products/inventory-consumables/page"), { loading }),
-  payments: dynamic(() => import("@/app/payments/page"), { loading }),
-  profit: dynamic(() => import("@/app/profit/page"), { loading }),
   finance: dynamic(() => import("@/app/finance/page"), { loading }),
   exceptions: dynamic(() => import("@/app/exceptions/page"), { loading }),
   automation: dynamic(() => import("@/app/automation/page"), { loading }),
   settings: dynamic(() => import("@/app/settings/page"), { loading }),
   imports: dynamic(() => import("@/app/data-center-import/page"), { loading }),
   tax: dynamic(() => import("./invoice-reconciliation-view"), { loading }),
-  merge: dynamic(() => import("@/app/purchase/merge/page"), { loading }),
 };
 
 export function WorkspaceModule({ view }: { view: WorkbenchView }) {

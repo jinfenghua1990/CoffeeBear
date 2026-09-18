@@ -26,11 +26,12 @@ from app.services.procurement_chain_service import (
     ChainPrefetch,
     _order_row,
     _source_pairs,
+    chain_snapshot,
     order_supplier_history,
     supplier_detail,
     supplier_summaries,
 )
-from app.services.purchase_service import update_external_po
+from app.services.purchase_service import _UNSET, _validate_target_warehouse, update_external_po
 from app.utils.money import to_decimal
 
 # 订单类型：正品 / 耗材（外包装等包材采购）。
@@ -103,8 +104,9 @@ def _logistics_value(logistics: dict[str, Any], *keys: str) -> str:
 def _supply_chain_list_fields(row: dict[str, Any]) -> dict[str, Any]:
     """把采购主单折叠成供应链工作台表格所需的跨维度字段。
 
-    优先使用已确认的 SKU 分配，其次才回退到 1688 原始商品行；仓库和入库单只从
-    已关联的真实入库单读取。这样视觉表格里的每一个字段都能追溯到现有业务事实。
+    优先使用已确认的 SKU 分配，其次才回退到 1688 原始商品行；仓库优先读取已关联的
+    真实入库单，尚未入库时回退到采购订单的计划仓库。这样列表既能提前显示去向，
+    又不会把计划仓库冒充成实际入库事实。
     """
     allocations = row.get("allocations") or []
     consumable = row.get("consumable") or {}
@@ -132,6 +134,7 @@ def _supply_chain_list_fields(row: dict[str, Any]) -> dict[str, Any]:
         primary_inbound.get("warehouseName")
         or consumable.get("warehouseName")
         or (consumable.get("location") if consumable.get("location") not in {"own", "factory"} else "")
+        or row.get("targetWarehouseName")
         or ""
     )
     inbound_numbers: list[str] = []
@@ -149,6 +152,7 @@ def _supply_chain_list_fields(row: dict[str, Any]) -> dict[str, Any]:
         "productUnit": product_unit,
         "itemCount": len(item_rows),
         "warehouseName": warehouse_name,
+        "warehouseId": row.get("targetWarehouseId"),
         "logisticsNo": _logistics_value(logistics, "trackingNo", "tracking_no", "logisticsNo", "logistics_no", "waybillNo", "waybill_no", "logisticNo", "logistic_no"),
         "logisticsCompany": _logistics_value(logistics, "company", "logisticsCompany", "logistics_company", "logisticName", "logistic_name", "carrier"),
         "expectedArrival": _logistics_value(logistics, "expectedArrival", "expected_arrival", "eta", "estimatedArrival"),
@@ -172,6 +176,8 @@ def edit_order_main_fields(
     order_amount=None,
     paid_amount=None,
     platform: str | None = None,
+    external_order_id: str | None = None,
+    warehouse_id: int | None | object = _UNSET,
 ) -> dict:
     """网页交互编辑订单主档（供应商/标题/金额等），全部留审计。
 
@@ -179,7 +185,8 @@ def edit_order_main_fields(
       优惠 / 实付），并按导入口径同步工作流副本：
       ``order_amount = goods + freight - discount``、``paid_amount = 实付``。
     - 工作流独有订单（order_id<0，无 1688 原件）：直接更新副本主档字段
-      （复用采购中心 update_external_po，自带校验与审计）。
+      （复用采购中心 update_external_po，自带校验与审计）。该类本地采购单的
+      订单号就是系统主单号，允许在这里修正。
     """
     order: Alibaba1688Order | None = None
     external: ExternalPurchaseOrder | None = None
@@ -192,12 +199,22 @@ def edit_order_main_fields(
         raise ValueError("订单不存在或已被删除")
 
     if order is None:
+        if external_order_id is None:
+            order_no = None
+        elif not external_order_id.strip():
+            raise ValueError("采购订单号不能为空")
+        else:
+            order_no = external_order_id
         update_external_po(
             db, external,  # type: ignore[arg-type]
+            external_order_id=order_no,
             platform=platform, supplier_name=supplier_name, title=title, ordered_at=ordered_at,
-            order_amount=order_amount, paid_amount=paid_amount, actor=actor,
+            order_amount=order_amount, paid_amount=paid_amount, warehouse_id=warehouse_id, actor=actor,
         )
         return {"ok": True, "mode": "external", "orderNo": external.external_order_id}  # type: ignore[union-attr]
+
+    if external_order_id is not None and external_order_id.strip() != (order.external_order_id or "").strip():
+        raise ValueError("1688 原始订单号不能修改，请以原始平台订单号为准")
 
     def _money(value, label: str, *, non_negative: bool = True) -> Decimal:
         parsed = to_decimal(value)
@@ -209,6 +226,12 @@ def edit_order_main_fields(
 
     before: dict[str, object] = {}
     after: dict[str, object] = {}
+    target_warehouse = None
+    if warehouse_id is not _UNSET:
+        target_warehouse = _validate_target_warehouse(db, warehouse_id)  # type: ignore[arg-type]
+        before["warehouseId"] = order.warehouse_id
+        after["warehouseId"] = target_warehouse.id if target_warehouse is not None else None
+        order.warehouse_id = target_warehouse.id if target_warehouse is not None else None
     if supplier_name is not None:
         name = supplier_name.strip()
         if not name:
@@ -246,6 +269,8 @@ def edit_order_main_fields(
         external.title = title.strip()
         after["title"] = external.title
     if external is not None:
+        if warehouse_id is not _UNSET:
+            external.warehouse_id = target_warehouse.id if target_warehouse is not None else None
         if money_changed:
             before.setdefault("copyOrderAmount", str(external.order_amount))
             before.setdefault("copyPaidAmount", str(external.paid_amount))
@@ -315,13 +340,13 @@ def rename_supplier(db: Session, *, old_name: str, new_name: str, actor: str = "
     }
 
 # 5 步骤：采购员日常推进的执行漏斗
-# 顺序即采购员在系统里的推进路径；dimension 决定 UI 上的色点（与 7 环节共用配色）。
+# 顺序即采购员在系统里的推进路径；吉客云采购单只作为历史参考，不再阻塞本系统入库。
 WORKBENCH_STEPS: list[dict] = [
     {"key": "order",      "no": 1, "label": "1688 已下单",    "short": "1688",    "dimension": "1688",     "href": "/alibaba1688-import", "act": "导入 1688 订单"},
     {"key": "content",    "no": 2, "label": "确认采购内容",    "short": "采购内容", "dimension": "purchase", "href": "/purchase",          "act": "去采购中心细化"},
     {"key": "sku",        "no": 3, "label": "选择吉客云货品",  "short": "选货品",   "dimension": "purchase", "href": "/purchase",          "act": "关联吉客云 SKU"},
-    {"key": "jackyun_po", "no": 4, "label": "生成采购单",      "short": "采购单",   "dimension": "jackyun",  "href": "/jackyun-import",    "act": "导入吉客云采购单"},
-    {"key": "closeout",   "no": 5, "label": "入库/发票/付款",  "short": "收尾",     "dimension": "jackyun",  "href": "/jackyun-import",    "act": "查看入库/付款/发票"},
+    {"key": "jackyun_po", "no": 4, "label": "本系统采购单",    "short": "采购单",   "dimension": "purchase", "href": "/purchase",          "act": "查看本系统采购单"},
+    {"key": "closeout",   "no": 5, "label": "入库/发票/付款",  "short": "收尾",     "dimension": "purchase", "href": "/purchase",          "act": "查看入库/发票/付款"},
 ]
 WORKBENCH_TOTAL = len(WORKBENCH_STEPS)
 
@@ -338,8 +363,14 @@ def _step_states(row: dict) -> dict[str, dict]:
     consumable_received = bool(consumable.get("received"))
     consumable_items = consumable.get("items") or []
     consumable_codes = [i.get("code") for i in consumable_items if i.get("code")]
+    # 耗材单（本平台）：录入 HC 明细即内容已确认，且无需吉客云货品/采购单。
+    is_consumable = consumable_received or bool(consumable_items)
 
-    if row.get("purchaseContentComplete"):
+    if consumable_items and not consumable_received:
+        content_detail = f"耗材已录入 {len(consumable_items)} 项"
+        if consumable_codes:
+            content_detail += "：" + "、".join(consumable_codes)
+    elif row.get("purchaseContentComplete"):
         content_detail = "已细化"
     elif consumable_received:
         content_detail = f"耗材已收货 {len(consumable_items)} 项"
@@ -358,12 +389,16 @@ def _step_states(row: dict) -> dict[str, dict]:
         or sum(i.get("amount") or 0 for i in order_items)
         or None
     )
-    inbound_ready = (
-        bool(inbound) and all(item.get("consumableUsageDecided") for item in inbound)
-    ) or consumable_received
+    # 入库状态只由真实入库事实决定。耗材映射/自动扣减是入库后的独立处理结果，
+    # 不能因为映射尚未维护就把已经有入库单的订单继续显示为“待入库”。
+    inbound_ready = bool(inbound) or consumable_received
     invoice = row.get("invoice") or []
     settlement = row.get("settlement") or []
-    paid_any = any(s.get("paid") for s in settlement) or bool(row.get("paidOn1688"))
+    try:
+        reported_paid = Decimal(str(row.get("paidAmount"))) > 0 if row.get("paidAmount") is not None else False
+    except (TypeError, ValueError):
+        reported_paid = False
+    paid_any = any(s.get("paid") for s in settlement) or bool(row.get("paidOn1688")) or reported_paid
     invoice_status = row.get("invoiceStatus") or "none"
     invoice_done = invoice_status == "done"
     invoice_outstanding = row.get("invoiceOutstanding")
@@ -388,9 +423,9 @@ def _step_states(row: dict) -> dict[str, dict]:
             "amount": content_amount,
         },
         "sku": {
-            "done": consumable_received or (bool(allocations) and all(a.get("skuId") for a in allocations)),
+            "done": is_consumable or (bool(allocations) and all(a.get("skuId") for a in allocations)),
             "detail": (
-                "耗材（本平台）无需吉客云货品" if consumable_received
+                "耗材（本平台）无需吉客云货品" if is_consumable
                 else (
                     f"{len(sku_linked)}/{len(allocations)} SKU 已关联吉客云"
                     if allocations else "无 SKU 明细"
@@ -399,15 +434,15 @@ def _step_states(row: dict) -> dict[str, dict]:
             "amount": None,
         },
         "jackyun_po": {
-            "done": consumable_received or bool(purchase_orders) or bool(row.get("jackyunPoBypassed")),
+            "done": is_consumable or (bool(allocations) and all(a.get("skuId") for a in allocations)),
             "detail": (
-                "耗材不生成吉客云采购单" if consumable_received
+                "耗材采购单已建立" if is_consumable
                 else (
-                    f"已生成 {len(purchase_orders)} 张" if purchase_orders
-                    else ("已按 Excel 口径跳过（入库闭环）" if row.get("jackyunPoBypassed") else "未生成采购单")
+                    "本系统采购单已建立" if allocations and all(a.get("skuId") for a in allocations)
+                    else "待完成本系统采购明细"
                 )
             ),
-            "amount": sum(p.get("amount") or 0 for p in purchase_orders) or None,
+            "amount": sum(a.get("amount") or 0 for a in allocations) or None,
         },
         "closeout": {
             "done": inbound_ready and invoice_done and paid_any,
@@ -439,7 +474,11 @@ def closeout_stage(row: dict, step_states: dict[str, dict] | None = None) -> str
         return "awaiting_inbound"
     if (row.get("invoiceOutstanding") or 0) > 0 or not (row.get("invoice") or []):
         return "awaiting_invoice"
-    paid_any = any(s.get("paid") for s in (row.get("settlement") or [])) or bool(row.get("paidOn1688"))
+    try:
+        reported_paid = Decimal(str(row.get("paidAmount"))) > 0 if row.get("paidAmount") is not None else False
+    except (TypeError, ValueError):
+        reported_paid = False
+    paid_any = any(s.get("paid") for s in (row.get("settlement") or [])) or bool(row.get("paidOn1688")) or reported_paid
     if not paid_any:
         return "awaiting_payment"
     return "open"
@@ -448,8 +487,8 @@ def closeout_stage(row: dict, step_states: dict[str, dict] | None = None) -> str
 # ---------- 接口实现 ----------
 def funnel(db: Session) -> dict:
     """5 步漏斗：每步 count = 已完成该步的订单数。"""
-    pf = ChainPrefetch(db)
-    rows = [_order_row(db, o, ext, pf=pf) for o, ext in _source_pairs(db)]
+    pairs, pf = chain_snapshot(db)
+    rows = [_order_row(db, o, ext, pf=pf) for o, ext in pairs]
     total = len(rows)
     done_count = {step["key"]: 0 for step in WORKBENCH_STEPS}
     for row in rows:
@@ -465,8 +504,8 @@ def funnel(db: Session) -> dict:
 
 def todos(db: Session) -> dict:
     """5 个待办计数：按「最早未完成步骤」归类，加和 = 待处理订单数。"""
-    pf = ChainPrefetch(db)
-    rows = [_order_row(db, o, ext, pf=pf) for o, ext in _source_pairs(db)]
+    pairs, pf = chain_snapshot(db)
+    rows = [_order_row(db, o, ext, pf=pf) for o, ext in pairs]
     total = len(rows)
     counts = {step["key"]: 0 for step in WORKBENCH_STEPS}
     pending_total = 0
@@ -489,21 +528,28 @@ def todos(db: Session) -> dict:
 def _pending_queue(row: dict) -> str | None:
     """返回订单当前唯一的待处理队列，保证统计卡与圆环可以加总。"""
     allocations = row.get("allocations") or []
-    if not row.get("purchaseContentComplete") or not allocations or any(
-        not allocation.get("skuId") for allocation in allocations
+    consumable = row.get("consumable") or {}
+    consumable_items = consumable.get("items") or []
+    # 耗材单：HC 明细即采购内容（_order_row 已据此置 purchaseContentComplete），
+    # 无需 1688 SKU 分摊，也不生成吉客云采购单，下一步是登记耗材入库。
+    if not consumable_items and (
+        not row.get("purchaseContentComplete") or not allocations or any(
+            not allocation.get("skuId") for allocation in allocations
+        )
     ):
         return "refine"
 
-    purchase_orders = row.get("purchaseOrders") or []
-    if not purchase_orders and not row.get("jackyunPoBypassed"):
-        return "po"
-
     inbound = row.get("inbound") or []
-    inbound_ready = (
-        bool(inbound) and all(item.get("consumableUsageDecided") for item in inbound)
-    ) or bool((row.get("consumable") or {}).get("received"))
-    if purchase_orders and not inbound_ready:
-        return "inbound"
+    # 有真实入库单即完成入库阶段；耗材映射未完成只保留为提示，不阻塞收尾状态。
+    inbound_ready = bool(inbound) or bool(consumable.get("received"))
+    if consumable_items:
+        if not consumable.get("received"):
+            return "inbound"
+    else:
+        # 本系统采购主单已经由 ExternalPurchaseOrder 承载；吉客云采购单是历史参考，
+        # 不再作为入库前置条件。没有入库或入库尚未确认时，统一进入待入库。
+        if not inbound or not inbound_ready:
+            return "inbound"
 
     invoice_status = str(row.get("invoiceStatus") or "").strip().lower()
     invoice_outstanding = float(row.get("invoiceOutstanding") or 0)
@@ -515,8 +561,8 @@ def _pending_queue(row: dict) -> str | None:
 
 def summary(db: Session) -> dict:
     """采购工作台统计指标，全部基于本地已落库事实。"""
-    pf = ChainPrefetch(db)
-    rows = [_order_row(db, o, ext, pf=pf) for o, ext in _source_pairs(db)]
+    pairs, pf = chain_snapshot(db)
+    rows = [_order_row(db, o, ext, pf=pf) for o, ext in pairs]
     today = datetime.now().date()
     consumable_nos = _consumable_source_nos(db)
     new_orders = 0
@@ -569,10 +615,10 @@ def summary(db: Session) -> dict:
                 consumable_transit += 1
             if inbound_ready:
                 consumable_inbound += 1
-    exception_ids = _exception_order_ids(db)
+    exception_refs = _exception_refs(db)
     exception_count = sum(
         1 for row in rows
-        if row["orderId"] in exception_ids or row.get("externalPoId") in exception_ids
+        if _row_has_exception(row, exception_refs)
     )
     return {
         "totalOrders": len(rows),
@@ -622,37 +668,109 @@ def _time_group_label(t: datetime | None, today: date) -> str:
 
 _VALID_STATUSES = {
     "all", "pending", "done", "order", "content", "sku", "jackyun_po", "closeout",
-    "refine", "po", "inbound", "invoice", "exception",
+    "refine", "po", "inbound", "transit", "invoice", "exception",
 }
 
 
-def _exception_order_ids(db: Session) -> set[int]:
-    """读取明确关联到采购单的异常；没有 ref 的全局异常不误标所有订单。"""
+def _exception_summary(rec: ExceptionRecord) -> dict[str, Any]:
+    """把异常记录压缩成前端可直接展示的摘要（标题/原因/金额差异/建议处理）。"""
+    detail = rec.detail if isinstance(rec.detail, dict) else {}
+    paid = _number(detail.get("paidAmount"))
+    inbound = _number(detail.get("inboundAmount"))
+    difference = _number(detail.get("difference"))
+    if paid is not None and inbound is not None:
+        if difference is None:
+            gap_text = "金额不一致"
+        elif difference > 0:
+            gap_text = f"入库金额比实付多 ¥{difference:,.2f}"
+        elif difference < 0:
+            gap_text = f"入库金额比实付少 ¥{abs(difference):,.2f}"
+        else:
+            gap_text = "金额一致"
+        message = f"1688 实付 ¥{paid:,.2f}，实际入库金额 ¥{inbound:,.2f}，{gap_text}"
+    else:
+        message = str(detail.get("reason") or rec.title or "")
+    return {
+        "type": rec.type or rec.code or "",
+        "title": rec.title or "",
+        "status": rec.status or "",
+        "severity": rec.severity or "",
+        "reason": str(detail.get("reason") or ""),
+        "actionRequired": str(detail.get("actionRequired") or ""),
+        "paidAmount": paid,
+        "inboundAmount": inbound,
+        "difference": difference,
+        "suggestedAdjustment": _number(detail.get("suggestedAdjustment")),
+        "message": message,
+        "createdAt": rec.created_at.isoformat() if rec.created_at else None,
+    }
+
+
+def _exception_refs(db: Session) -> tuple[dict[int, list[dict]], dict[int, list[dict]]]:
+    """分别读取文件订单 ID 与工作流采购单 ID 的待处理异常，避免自增 ID 碰撞误标。
+
+    已确认/已解决的异常保留在异常中心作为历史记录，但不再阻塞采购工作台。
+    返回 (file_order_exceptions, purchase_order_exceptions)：键为对应表主键，
+    值为该对象的异常摘要列表（供前端展示报错原因）；键成员判断与 set 等价。
+    """
     rows = (
         db.query(ExceptionRecord)
-        .filter(ExceptionRecord.status.in_(("pending", "confirmed")))
+        .filter(ExceptionRecord.status == "pending")
         .all()
     )
-    ids: set[int] = set()
+    file_orders: dict[int, list[dict]] = {}
+    purchase_orders: dict[int, list[dict]] = {}
     for row in rows:
-        if row.ref_table in ("alibaba1688_orders", "external_purchase_orders") and row.ref_id:
+        summary = _exception_summary(row)
+        if row.ref_table == "alibaba1688_orders" and row.ref_id:
             try:
-                ids.add(int(row.ref_id))
+                file_orders.setdefault(int(row.ref_id), []).append(summary)
             except (TypeError, ValueError):
                 continue
+            continue
+        if row.ref_table == "external_purchase_orders" and row.ref_id:
+            try:
+                purchase_orders.setdefault(int(row.ref_id), []).append(summary)
+            except (TypeError, ValueError):
+                continue
+            continue
+        # 兼容没有明确 ref_table 的历史异常；有明确 ref_table 时不读取混合 detail。
         detail = row.detail or {}
-        for key in ("orderId", "order_id", "poId", "po_id"):
+        for key in ("orderId", "order_id"):
             value = detail.get(key)
             if value is not None:
                 try:
-                    ids.add(int(value))
+                    file_orders.setdefault(int(value), []).append(summary)
                 except (TypeError, ValueError):
                     pass
-    return ids
+        for key in ("poId", "po_id"):
+            value = detail.get(key)
+            if value is not None:
+                try:
+                    purchase_orders.setdefault(int(value), []).append(summary)
+                except (TypeError, ValueError):
+                    pass
+    return file_orders, purchase_orders
+
+
+def _row_has_exception(row: dict, exception_refs: tuple[dict[int, list[dict]], dict[int, list[dict]]]) -> bool:
+    file_order_ids, purchase_order_ids = exception_refs
+    return row.get("orderId") in file_order_ids or row.get("externalPoId") in purchase_order_ids
+
+
+def _row_exception_info(row: dict, exception_refs: tuple[dict[int, list[dict]], dict[int, list[dict]]]) -> list[dict]:
+    """返回该订单命中的异常摘要列表（空列表 = 无异常）。"""
+    file_orders, purchase_orders = exception_refs
+    items: list[dict] = []
+    if row.get("orderId") is not None:
+        items.extend(file_orders.get(row["orderId"], []))
+    if row.get("externalPoId") is not None:
+        items.extend(purchase_orders.get(row["externalPoId"], []))
+    return items
 
 
 def _matches_status(row: dict, states: dict[str, dict], first: str | None, status: str,
-                    exception_ids: set[int]) -> bool:
+                    exception_refs: tuple[dict[int, list[dict]], dict[int, list[dict]]]) -> bool:
     if status == "all":
         return True
     if status == "done":
@@ -666,7 +784,10 @@ def _matches_status(row: dict, states: dict[str, dict], first: str | None, statu
     if status == "invoice":
         return _pending_queue(row) == "invoice"
     if status == "exception":
-        return row.get("orderId") in exception_ids or row.get("externalPoId") in exception_ids
+        return _row_has_exception(row, exception_refs)
+    # 在途：与 summary 的 transitOrders 同口径（已发货/已到货未入库）。
+    if status == "transit":
+        return str(row.get("purchaseStatus") or "").strip() in {"shipped", "arrived"}
     if status == "pending":
         return first is not None
     return first == status
@@ -687,10 +808,10 @@ def list_orders(
 ) -> dict:
     """按下单时间倒序、按时间标签分组的订单列表；支持状态和日期筛选。"""
     status = status if status in _VALID_STATUSES else "all"
-    pf = ChainPrefetch(db)
-    rows = [_order_row(db, o, ext, pf=pf) for o, ext in _source_pairs(db)]
+    pairs, pf = chain_snapshot(db)
+    rows = [_order_row(db, o, ext, pf=pf) for o, ext in pairs]
     today = datetime.now().date()
-    exception_ids = _exception_order_ids(db)
+    exception_refs = _exception_refs(db)
     consumable_nos = _consumable_source_nos(db)
     channel = channel if channel in {"all", "1688", "pdd", "taobao", "other"} else "all"
     kind = kind if kind in {"all", "goods", "consumable"} else "all"
@@ -711,7 +832,7 @@ def list_orders(
             continue
         if end_date is not None and (order_day is None or order_day > end_date):
             continue
-        if not _matches_status(row, states, first, status, exception_ids):
+        if not _matches_status(row, states, first, status, exception_refs):
             continue
         if channel != "all" and _channel_key(row.get("platform")) != channel:
             continue
@@ -738,17 +859,16 @@ def list_orders(
             "orderDate": row.get("orderDate"),
             "orderStatus": row.get("orderStatus") or "",
             "purchaseStatus": row.get("purchaseStatus") or "",
-            "hasException": row.get("orderId") in exception_ids or row.get("externalPoId") in exception_ids,
+            "hasException": _row_has_exception(row, exception_refs),
+            "exceptionInfo": _row_exception_info(row, exception_refs),
             "doneCount": row.get("doneCount") or 0,
             "stageTotal": row.get("stageTotal") or WORKBENCH_TOTAL,
             "firstUndone": first,
-            "firstUndoneLabel": first_step["label"] if first_step else "已完成",
-            "firstUndoneShort": first_step["short"] if first_step else "已完成",
+        "firstUndoneLabel": first_step["label"] if first_step else "开票完成",
+        "firstUndoneShort": first_step["short"] if first_step else "开票完成",
             "firstUndoneDimension": first_step["dimension"] if first_step else "purchase",
             "stepStates": states,
-            "inboundDone": (
-                bool(row.get("inbound")) and all(item.get("consumableUsageDecided") for item in row.get("inbound") or [])
-            ) or bool((row.get("consumable") or {}).get("received")),
+            "inboundDone": bool(row.get("inbound")) or bool((row.get("consumable") or {}).get("received")),
             "invoiceDone": bool(row.get("invoice")),
             "invoiceStatus": row.get("invoiceStatus") or "none",
             "invoicedAmount": row.get("invoicedAmount"),
@@ -791,10 +911,10 @@ def list_orders(
 
 def workbench(db: Session, order_id: int) -> dict | None:
     """选中订单的工作面板：5 步骤每步的状态 + 关键明细 + 跳转入口。"""
-    pf = ChainPrefetch(db)
+    pairs, pf = chain_snapshot(db)
     order: Alibaba1688Order | None = None
     external: ExternalPurchaseOrder | None = None
-    for candidate_order, candidate_external in _source_pairs(db):
+    for candidate_order, candidate_external in pairs:
         candidate_id = candidate_order.id if candidate_order is not None else -candidate_external.id
         if candidate_id == order_id:
             order, external = candidate_order, candidate_external
@@ -809,7 +929,7 @@ def workbench(db: Session, order_id: int) -> dict | None:
     states = _step_states(row)
     closeout_stage_value = closeout_stage(row, states)
     supplier = row.get("supplier") or ""
-    exception_ids = _exception_order_ids(db)
+    exception_refs = _exception_refs(db)
     consumable_nos = _consumable_source_nos(db)
     return {
         "order": {
@@ -840,7 +960,8 @@ def workbench(db: Session, order_id: int) -> dict | None:
             "invoicedAmount": row.get("invoicedAmount"),
             "invoiceOutstanding": row.get("invoiceOutstanding"),
             "title": row.get("title"),
-            "hasException": row.get("orderId") in exception_ids or row.get("externalPoId") in exception_ids,
+            "hasException": _row_has_exception(row, exception_refs),
+            "exceptionInfo": _row_exception_info(row, exception_refs),
             "logistics": row.get("logistics") or {},
             "shipStatus": row.get("shipStatus") or "",
         },
@@ -871,11 +992,16 @@ def _warehouse_block(db: Session, row: dict[str, Any]) -> dict[str, Any]:
     """
     inbound = row.get("inbound") or []
     consumable = row.get("consumable") or {}
-    warehouse_name = str(
+    actual_warehouse_name = str(
         (inbound[0].get("warehouseName") if inbound else "")
         or consumable.get("warehouseName")
         or (consumable.get("location") if consumable.get("location") not in {"own", "factory"} else "")
         or ""
+    )
+    target_warehouse_id = row.get("targetWarehouseId")
+    target_warehouse_name = str(row.get("targetWarehouseName") or "")
+    warehouse_name = str(
+        actual_warehouse_name or target_warehouse_name
     )
     allocations = row.get("allocations") or []
     sku_ids = [a.get("skuId") for a in allocations if a.get("skuId")]
@@ -901,6 +1027,9 @@ def _warehouse_block(db: Session, row: dict[str, Any]) -> dict[str, Any]:
 
     return {
         "warehouseName": warehouse_name,
+        "warehouseId": wh.id if wh is not None else None,
+        "targetWarehouseId": target_warehouse_id,
+        "targetWarehouseName": target_warehouse_name,
         "jackyunWarehouseId": jackyun_wh_id,
         "isSellable": is_sellable,
         "currentStock": current_stock,

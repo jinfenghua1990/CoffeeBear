@@ -4,6 +4,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.api.deps import current_actor
@@ -23,6 +24,7 @@ from app.models.purchase import (
 )
 from app.models.tax import TaxInvoice, TaxInvoiceImport, TaxInvoiceImportRecord, TaxInvoiceLink
 from app.services import purchase_service as svc
+from app.services.allocation import balance_check
 from app.services.procurement_chain_service import _source_pairs, is_reference_only_external_po
 
 router = APIRouter(prefix="/purchase", tags=["purchase"])
@@ -49,6 +51,7 @@ class CreatePOBody(BaseModel):
     order_amount: str | None = None
     paid_amount: str | None = None
     buyer_account: str = ""
+    warehouse_id: int | None = None
     # 货品类型（goods=正品 / consumable=耗材）：录入时选了就落 order_kind_override，
     # 不选则由工作台自动判定（HC 单/耗材档案/供应商关键词）。
     order_kind: str = Field("", pattern="^(|goods|consumable)$")
@@ -62,6 +65,7 @@ class UpdatePOBody(BaseModel):
     order_amount: str | None = None
     paid_amount: str | None = None
     buyer_account: str | None = None
+    warehouse_id: int | None = None
 
 
 @router.get("/orders")
@@ -97,16 +101,41 @@ def list_orders(
             Alibaba1688Order.row_status == "deleted"
         ).all()
     }
+    pos = query.limit(limit).offset(offset).all()
+    po_ids = [po.id for po in pos]
+    allocations_by_po: dict[int, list[PurchaseAllocationItem]] = {}
+    for item in db.query(PurchaseAllocationItem).filter(
+        PurchaseAllocationItem.po_id.in_(po_ids)
+    ).all() if po_ids else []:
+        allocations_by_po.setdefault(item.po_id, []).append(item)
+    expenses_by_po: dict[int, list[PurchaseExtraExpense]] = {}
+    for expense in db.query(PurchaseExtraExpense).filter(
+        PurchaseExtraExpense.po_id.in_(po_ids)
+    ).all() if po_ids else []:
+        expenses_by_po.setdefault(expense.po_id, []).append(expense)
+    tax_invoice_counts = {
+        po_id: count
+        for po_id, count in db.query(
+            TaxInvoiceLink.target_id, func.count(TaxInvoiceLink.id)
+        ).filter(
+            TaxInvoiceLink.target_type == "external_purchase_order",
+            TaxInvoiceLink.target_id.in_(po_ids),
+            TaxInvoiceLink.match_method != "rejected",
+        ).group_by(TaxInvoiceLink.target_id).all()
+    } if po_ids else {}
+
     out = []
-    for po in query.limit(limit).offset(offset).all():
+    for po in pos:
         if po.external_order_id in removed_nos:
             continue
         if is_reference_only_external_po(po):
             continue
-        bal = svc.balance_of(db, po)
-        tax_invoice_count = db.query(TaxInvoiceLink).filter_by(
-            target_type="external_purchase_order", target_id=po.id
-        ).count()
+        bal = balance_check(
+            po.effective_paid_amount,
+            [item.amount for item in allocations_by_po.get(po.id, [])],
+            [expense.amount for expense in expenses_by_po.get(po.id, [])],
+        )
+        tax_invoice_count = tax_invoice_counts.get(po.id, 0)
         out.append({
             "id": po.id, "externalOrderId": po.external_order_id, "supplierName": po.supplier_name,
             "platform": po.platform or "other", "buyerAccount": po.buyer_account or "",
@@ -132,6 +161,7 @@ def create_order(body: CreatePOBody, request: Request,
             db, external_order_id=body.external_order_id, supplier_name=body.supplier_name,
             title=body.title, ordered_at=body.ordered_at, order_amount=body.order_amount,
             paid_amount=body.paid_amount, buyer_account=body.buyer_account,
+            warehouse_id=body.warehouse_id,
             platform=body.platform,
             actor=current_actor(request),
         )
@@ -139,9 +169,9 @@ def create_order(body: CreatePOBody, request: Request,
         raise HTTPException(400, str(exc))
     if body.order_kind and po.order_kind_override != body.order_kind:
         po.order_kind_override = body.order_kind
-        audit(db, current_actor(request), "purchase.order.kind_override", "external_purchase_orders",
-              po.id, after={"kind": body.order_kind}, note="手工录入时指定货品类型")
         db.commit()
+        audit(db, current_actor(request), "purchase.order.kind_override", "external_purchase_orders",
+              po.id, detail={"kind": body.order_kind, "note": "手工录入时指定货品类型"})
     source = next((o for o, ext in _source_pairs(db) if ext and ext.id == po.id), None)
     return {"id": po.id, "workbenchOrderId": source.id if source else -po.id,
             "externalOrderId": po.external_order_id, "purchaseStatus": po.purchase_status}
@@ -154,10 +184,7 @@ def update_order(po_id: int, body: UpdatePOBody, request: Request,
     po = _po_or_404(db, po_id)
     try:
         svc.update_external_po(
-            db, po, platform=body.platform, supplier_name=body.supplier_name,
-            title=body.title, ordered_at=body.ordered_at, order_amount=body.order_amount,
-            paid_amount=body.paid_amount, buyer_account=body.buyer_account,
-            actor=current_actor(request),
+            db, po, actor=current_actor(request), **body.model_dump(exclude_unset=True)
         )
     except ValueError as exc:
         raise HTTPException(400, str(exc))
@@ -169,7 +196,9 @@ class AllocationBody(BaseModel):
     sku_code: str = ""
     goods_name: str = ""
     quantity: str
-    unit_price: str
+    # 新建/编辑时优先填写总价，单价由后端按总价 / 数量计算；保留 unit_price 兼容旧调用方。
+    unit_price: str | None = None
+    amount: str | None = None
     note: str = ""
 
 
@@ -180,7 +209,7 @@ def add_allocation(po_id: int, body: AllocationBody, request: Request,
     try:
         row = svc.add_allocation(db, po, sku_id=body.sku_id, sku_code=body.sku_code,
                                  goods_name=body.goods_name, quantity=body.quantity,
-                                 unit_price=body.unit_price, note=body.note,
+                                 unit_price=body.unit_price, amount=body.amount, note=body.note,
                                  actor=current_actor(request))
     except ValueError as exc:
         raise HTTPException(400, str(exc))
@@ -287,16 +316,19 @@ class ConfirmAndResyncBody(BaseModel):
     note: str = ""
 
 
-def _resync_jky_web_stockin(db: Session) -> dict[str, Any]:
-    """同步触发 jky_web 入库单同步（最近 7 天），用于确认后的本地回写验证。"""
+def _resync_jky_web_stockin(db: Session, *, required: bool = False) -> dict[str, Any]:
+    """按需同步吉客云入库单；未配置时，确认采购内容不阻塞本地流程。"""
     resync: dict[str, Any] = {"attempted": False, "ok": None, "error": None}
-    resync["attempted"] = True
     try:
         from app.adapters.jky_web import JkyWebClient, JkyWebError, JkyWebSessionError
         from app.services.jky_web_sync_service import sync_stockin
         if not settings.JKY_WEB_SIGN_SECRET:
-            resync.update({"ok": False, "error": "JKY_WEB_SIGN_SECRET 未配置，无法回写"})
+            if required:
+                resync.update({"attempted": True, "ok": False, "error": "JKY_WEB_SIGN_SECRET 未配置，无法回写"})
+            else:
+                resync["skippedReason"] = "吉客云入库同步未配置，已按本系统入库流程跳过"
             return resync
+        resync["attempted"] = True
         try:
             client = JkyWebClient(db)
             from datetime import datetime, timedelta, timezone
@@ -317,8 +349,8 @@ def _resync_jky_web_stockin(db: Session) -> dict[str, Any]:
 @router.post("/orders/{po_id}/confirm-and-resync")
 def confirm_and_resync(po_id: int, body: ConfirmAndResyncBody | None,
                        request: Request, db: Session = Depends(get_db)) -> dict[str, Any]:
-    """整单总确认：金额/耗材/吉客云 PO 关联校验 → 推进状态 → 尝试回写本地（同步拉一次吉客云入库单）。
-    返回 {ok, status, balance, resync: {ok, ...}}，前端可展示回写是否生效。
+    """整单总确认：金额/耗材/吉客云 PO 关联校验 → 推进状态 → 可选同步本地入库事实。
+    返回 {ok, status, balance, resync: {ok, ...}}，前端可展示同步结果。
     """
     po = _po_or_404(db, po_id)
     actor = current_actor(request)
@@ -347,7 +379,7 @@ def resync_jky_web(po_id: int, request: Request,
     """
     po = _po_or_404(db, po_id)
     actor = current_actor(request)
-    resync = _resync_jky_web_stockin(db)
+    resync = _resync_jky_web_stockin(db, required=True)
     audit(db, actor, "purchase.po.resync_jky_web", "external_purchase_orders", po.id, {"resync": resync})
     return {"ok": True, "purchaseStatus": po.purchase_status, "resync": resync}
 
@@ -561,6 +593,9 @@ def order_detail(po_id: int, db: Session = Depends(get_db)) -> dict[str, Any]:
     )
     tax_invoices = []
     for link in tax_links:
+        # 已拒绝的历史候选不是有效关联，不能继续出现在采购单详情或票数统计中。
+        if link.match_method == "rejected":
+            continue
         invoice = db.get(TaxInvoice, link.invoice_id)
         if invoice is None:
             continue
