@@ -11,7 +11,7 @@ export DATA_DIR=/Users/gino/ecommerce-dashboard/data
 
 VENV=/Users/gino/ecommerce-dashboard/backend/.venv
 export PATH="/Users/gino/.workbuddy/binaries/node/versions/22.22.2-2/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
-export API_BIND_HOST="${API_BIND_HOST:-192.168.3.199}"
+export API_BIND_HOST="${API_BIND_HOST:-0.0.0.0}"
 
 # ---------- 后端：api / worker / beat ----------
 source "$VENV/bin/activate"

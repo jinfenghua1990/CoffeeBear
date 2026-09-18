@@ -725,7 +725,7 @@ export default function PurchaseWorkbenchPage() {
       setNotice(parts.join("，"));
       await Promise.all([
         loadSummary(),
-        ...(view === "orders" ? [] : [loadBoard(), loadFunnelTodos()]),
+        ...(view === "orders" || view === "chain" ? [] : [loadChain()]),
         view === "orders" ? loadOrders() : view === "chain" ? loadChain() : view === "matching" ? loadMatching() : loadSuppliers(),
       ]);
     } catch (caught) {
@@ -770,7 +770,7 @@ export default function PurchaseWorkbenchPage() {
     setBusyAction("refresh");
     await Promise.all([
       loadSummary(),
-      ...(view === "orders" ? [] : [loadBoard(), loadFunnelTodos()]),
+      ...(view === "orders" || view === "chain" ? [] : [loadChain()]),
       view === "orders" ? loadOrders() : view === "chain" ? loadChain() : view === "matching" ? loadMatching() : loadSuppliers(),
     ]);
     setNotice("采购工作台已刷新");
