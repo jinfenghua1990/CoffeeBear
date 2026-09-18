@@ -44,6 +44,12 @@ def system_update_status() -> dict[str, Any]:
     return system_update_service.status_payload(include_log=True)
 
 
+@router.get("/update/readiness", dependencies=[Depends(require_roles("admin"))])
+def system_update_readiness() -> dict[str, Any]:
+    from app.services import system_update_service
+    return system_update_service.update_readiness()
+
+
 @router.post("/update/check", dependencies=[Depends(require_roles("admin"))])
 def system_update_check(request: Request) -> dict[str, Any]:
     from app.services import system_update_service
@@ -66,7 +72,7 @@ def system_update_apply(request: Request) -> dict[str, Any]:
     from app.services import system_update_service
     try:
         return system_update_service.start_update(actor=current_actor(request))
-    except ValueError as exc:
+    except (ValueError, RuntimeError) as exc:
         from fastapi import HTTPException
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 

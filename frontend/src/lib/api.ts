@@ -209,6 +209,24 @@ export type SystemUpdateHistory = {
   rollbackErrors?: string[];
 };
 
+export type SystemUpdateReadinessCheck = {
+  key: string;
+  label: string;
+  status: "ok" | "warn" | "error";
+  detail: string;
+  blocking: boolean;
+};
+
+export type SystemUpdateReadiness = {
+  ready: boolean;
+  checks: SystemUpdateReadinessCheck[];
+  blockingCount: number;
+  warningCount: number;
+  branch: string;
+  remote: string;
+  checkedAt: string;
+};
+
 export type SystemUpdateStatus = {
   phase?: string;
   progress?: number;
@@ -237,6 +255,10 @@ export type SystemUpdateStatus = {
   backupData?: string;
   error?: string;
   rollbackErrors?: string[];
+  lastInstallResult?: "success" | "failed" | "rolled_back" | string;
+  lastInstallAt?: string;
+  lastInstallFromSha?: string;
+  lastInstallToSha?: string;
   logs?: string[];
   history?: SystemUpdateHistory[];
   settings: SystemUpdateSettings;
@@ -244,6 +266,7 @@ export type SystemUpdateStatus = {
 
 export const systemUpdateApi = {
   status: () => jsonFetch<SystemUpdateStatus>("/api/v1/system/update/status"),
+  readiness: () => jsonFetch<SystemUpdateReadiness>("/api/v1/system/update/readiness"),
   check: () => jsonFetch<SystemUpdateStatus>("/api/v1/system/update/check", { method: "POST" }),
   saveSettings: (body: Partial<Pick<SystemUpdateSettings, "enabled" | "mode" | "checkIntervalMinutes" | "autoUpdateHour" | "autoUpdateWindowMinutes">>) =>
     jsonFetch<{ ok: boolean; settings: SystemUpdateSettings }>("/api/v1/system/update/settings", {

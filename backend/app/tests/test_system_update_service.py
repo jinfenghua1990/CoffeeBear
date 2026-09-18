@@ -86,3 +86,81 @@ def test_check_for_updates_returns_complete_status(monkeypatch, tmp_path: Path):
     assert result["latestSha"] == latest
     assert result["settings"]["mode"] == "auto_download"
     assert result["changes"][0]["subject"] == "new"
+
+
+def test_manual_check_still_works_when_background_service_disabled(monkeypatch, tmp_path: Path):
+    current = "3" * 40
+    latest = "4" * 40
+    status_file = tmp_path / "status.json"
+    settings_file = tmp_path / "settings.json"
+    history_file = tmp_path / "history.jsonl"
+
+    monkeypatch.setattr(service, "_status_path", lambda: status_file)
+    monkeypatch.setattr(service, "_settings_path", lambda: settings_file)
+    monkeypatch.setattr(service, "_history_path", lambda: history_file)
+    monkeypatch.setattr(service, "_repo_root", lambda: tmp_path)
+    monkeypatch.setattr(
+        service,
+        "load_update_settings",
+        lambda: {
+            "enabled": False,
+            "mode": "manual",
+            "checkIntervalMinutes": 10,
+            "autoUpdateHour": 3,
+            "autoUpdateWindowMinutes": 60,
+            "branch": service.settings.SYSTEM_UPDATE_BRANCH,
+            "remote": service.settings.SYSTEM_UPDATE_REMOTE,
+        },
+    )
+
+    calls: list[tuple[str, ...]] = []
+
+    def fake_git(*args: str, timeout: int = 60) -> str:
+        calls.append(args)
+        if args == ("rev-parse", "HEAD"):
+            return current
+        if args == ("branch", "--show-current"):
+            return service.settings.SYSTEM_UPDATE_BRANCH
+        if args == ("status", "--porcelain"):
+            return ""
+        if args[:2] == ("fetch", "--quiet"):
+            return ""
+        if args == ("rev-parse", "FETCH_HEAD"):
+            return latest
+        raise AssertionError(f"unexpected git call: {args}")
+
+    monkeypatch.setattr(service, "_git", fake_git)
+    monkeypatch.setattr(
+        service,
+        "_run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr=""),
+    )
+    monkeypatch.setattr(service, "_commit_info", lambda sha: {"sha": sha, "shortSha": sha[:10], "subject": "x", "committedAt": "2026-09-19T00:00:00+08:00"})
+    monkeypatch.setattr(service, "_changes", lambda old, new: [])
+
+    result = service.check_for_updates(actor="pytest", automatic=False)
+    assert result["updateAvailable"] is True
+    assert any(call[:2] == ("fetch", "--quiet") for call in calls)
+
+
+def test_start_update_stops_when_readiness_is_blocked(monkeypatch):
+    monkeypatch.setattr(
+        service,
+        "update_readiness",
+        lambda: {
+            "ready": False,
+            "blockingCount": 1,
+            "warningCount": 0,
+            "checks": [
+                {
+                    "key": "branch",
+                    "label": "当前分支",
+                    "status": "error",
+                    "detail": "wrong branch",
+                    "blocking": True,
+                }
+            ],
+        },
+    )
+    with pytest.raises(ValueError, match="更新环境未就绪"):
+        service.start_update(actor="pytest")

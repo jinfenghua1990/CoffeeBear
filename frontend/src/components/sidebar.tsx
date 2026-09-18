@@ -15,7 +15,7 @@ export default function Sidebar() {
   const groups = module.groups ?? [{ label: "", items: module.items ?? [] }];
 
   return (
-    <aside className="flex h-full w-[208px] shrink-0 flex-col overflow-hidden bg-[#112a49] text-white shadow-[8px_0_28px_rgba(15,39,70,0.08)]">
+    <aside className="app-sidebar flex h-full w-[208px] shrink-0 flex-col overflow-hidden text-white shadow-[8px_0_28px_rgba(15,39,70,0.08)]">
       <div className="border-b border-white/10 px-4 pb-4 pt-5">
         <div className="truncate text-[17px] font-semibold tracking-wide text-white">{module.title}</div>
         <div className="mt-1 text-[10px] font-medium tracking-wide text-slate-400">电商经营数据平台 · 内销工作台</div>
@@ -46,7 +46,7 @@ function SidebarItem({ item, pathname, searchParams }: { item: SecondaryItem; pa
       aria-current={active ? "page" : undefined}
       className={`group flex items-center gap-3 rounded-lg px-3 py-2.5 text-[13px] transition-all ${
         active
-          ? "bg-[#2574e8] font-medium text-white shadow-[0_6px_18px_rgba(37,116,232,.28)]"
+          ? "app-sidebar-active font-medium text-white shadow-[0_6px_18px_rgba(37,116,232,.28)]"
           : "text-slate-200 hover:bg-white/8 hover:text-white"
       }`}
     >

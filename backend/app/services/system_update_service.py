@@ -13,6 +13,7 @@ import re
 import shutil
 import subprocess
 import threading
+import urllib.request
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -23,7 +24,7 @@ from app.config import settings
 
 _SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 _MODES = {"manual", "auto_download", "auto_update"}
-_ACTIVE_PHASES = {"queued", "preflight", "backup", "installing", "migrating", "building", "restarting", "healthcheck", "rollback"}
+_ACTIVE_PHASES = {"queued", "preflight", "backup", "quiescing", "installing", "migrating", "building", "restarting", "healthcheck", "rollback"}
 _LOCK = threading.RLock()
 
 
@@ -224,7 +225,8 @@ def check_for_updates(*, actor: str = "system", automatic: bool = False) -> dict
     """fetch 指定受控分支并比较版本；fetch 只下载对象，不改变工作区。"""
     with _LOCK:
         cfg = load_update_settings()
-        if not cfg["enabled"]:
+        # enabled 只控制后台轮询；管理员手工“检查更新”始终可用。
+        if automatic and not cfg["enabled"]:
             return status_payload(include_log=False)
 
         root = _repo_root()
@@ -300,6 +302,180 @@ def _in_auto_window(cfg: dict[str, Any]) -> bool:
     return _minute_in_window(minute, start, cfg["autoUpdateWindowMinutes"])
 
 
+def update_readiness() -> dict[str, Any]:
+    """检查当前 Mac 原生部署是否具备安全自更新条件，不修改代码和数据库。"""
+    root = _repo_root()
+    cfg = load_update_settings()
+    checks: list[dict[str, Any]] = []
+
+    def add(key: str, label: str, status: str, detail: str, *, blocking: bool = False) -> None:
+        checks.append({
+            "key": key,
+            "label": label,
+            "status": status,
+            "detail": detail,
+            "blocking": blocking,
+        })
+
+    git_dir = root / ".git"
+    add(
+        "git_repo", "Git 仓库",
+        "ok" if git_dir.exists() else "error",
+        str(root) if git_dir.exists() else f"{root} 不是 Git 工作区",
+        blocking=not git_dir.exists(),
+    )
+
+    current_branch = ""
+    dirty = False
+    remote_url = ""
+    if git_dir.exists():
+        try:
+            current_branch = _git("branch", "--show-current", timeout=10)
+            branch_ok = current_branch == cfg["branch"]
+            add(
+                "branch", "当前分支",
+                "ok" if branch_ok else "error",
+                f"{current_branch or '(detached)'} / 目标 {cfg['branch']}",
+                blocking=not branch_ok,
+            )
+        except Exception as exc:
+            add("branch", "当前分支", "error", str(exc), blocking=True)
+
+        try:
+            dirty = bool(_git("status", "--porcelain", timeout=10))
+            add(
+                "worktree", "工作区状态",
+                "error" if dirty else "ok",
+                "存在未提交修改，自动更新会停止" if dirty else "干净，可安全快进更新",
+                blocking=dirty,
+            )
+        except Exception as exc:
+            add("worktree", "工作区状态", "error", str(exc), blocking=True)
+
+        try:
+            remote_url = _git("remote", "get-url", cfg["remote"], timeout=10)
+            add("remote", "Git 远端", "ok", f"{cfg['remote']} · {remote_url}")
+        except Exception as exc:
+            add("remote", "Git 远端", "error", str(exc), blocking=True)
+
+    python_path = root / "backend" / ".venv" / "bin" / "python"
+    add(
+        "python", "Python 虚拟环境",
+        "ok" if python_path.is_file() else "error",
+        str(python_path),
+        blocking=not python_path.is_file(),
+    )
+
+    for command, label in (("git", "Git 命令"), ("make", "make"), ("node", "Node.js"), ("npm", "npm"), ("pg_dump", "pg_dump"), ("psql", "psql")):
+        resolved = shutil.which(command)
+        add(
+            command, label,
+            "ok" if resolved else "error",
+            resolved or f"未在 PATH 中找到 {command}",
+            blocking=resolved is None,
+        )
+
+    pip_path = root / "backend" / ".venv" / "bin" / "pip"
+    add(
+        "pip", "Python pip",
+        "ok" if pip_path.is_file() else "error",
+        str(pip_path),
+        blocking=not pip_path.is_file(),
+    )
+
+    runner_path = root / "scripts" / "system_update_runner.py"
+    add(
+        "update_runner", "更新执行器",
+        "ok" if runner_path.is_file() else "error",
+        str(runner_path),
+        blocking=not runner_path.is_file(),
+    )
+
+    quiesce_path = root / "scripts" / "quiesce-update-workers.sh"
+    add(
+        "quiesce_workers", "后台任务暂停脚本",
+        "ok" if quiesce_path.is_file() else "error",
+        str(quiesce_path),
+        blocking=not quiesce_path.is_file(),
+    )
+
+    backup_path = root / "scripts" / "backup.sh"
+    backup_ok = backup_path.is_file() and os.access(backup_path, os.X_OK)
+    add(
+        "backup_script", "备份脚本",
+        "ok" if backup_ok else "error",
+        str(backup_path) if backup_ok else f"{backup_path} 不存在或不可执行",
+        blocking=not backup_ok,
+    )
+
+    launchctl = shutil.which("launchctl")
+    launch_label = getattr(settings, "SYSTEM_UPDATE_LAUNCH_LABEL", "com.gino.ecommerce-dashboard")
+    if launchctl:
+        service_ref = f"gui/{os.getuid()}/{launch_label}"
+        probe = _run([launchctl, "print", service_ref], timeout=10)
+        running_ok = probe.returncode == 0
+        add(
+            "launch_agent", "LaunchAgent",
+            "ok" if running_ok else "error",
+            service_ref if running_ok else f"{service_ref} 未加载，更新后无法自动重启",
+            blocking=not running_ok,
+        )
+    else:
+        add("launch_agent", "LaunchAgent", "error", "未找到 launchctl", blocking=True)
+
+    try:
+        state_dir = _state_dir()
+        probe_file = state_dir / ".write-test"
+        probe_file.write_text("ok", encoding="utf-8")
+        probe_file.unlink(missing_ok=True)
+        add("state_dir", "更新状态目录", "ok", str(state_dir))
+    except Exception as exc:
+        add("state_dir", "更新状态目录", "error", str(exc), blocking=True)
+
+    try:
+        disk = shutil.disk_usage(root)
+        free_gb = disk.free / (1024 ** 3)
+        disk_status = "error" if free_gb < 1 else ("warn" if free_gb < 3 else "ok")
+        add(
+            "disk_space", "可用磁盘空间",
+            disk_status,
+            f"{free_gb:.1f} GB 可用",
+            blocking=free_gb < 1,
+        )
+    except Exception as exc:
+        add("disk_space", "可用磁盘空间", "warn", str(exc))
+
+    frontend_index = root / "frontend" / "out" / "index.html"
+    add(
+        "frontend_build", "当前前端产物",
+        "ok" if frontend_index.is_file() else "warn",
+        str(frontend_index) if frontend_index.is_file() else "当前无 frontend/out，更新时会重新构建",
+    )
+
+    try:
+        with urllib.request.urlopen(settings.SYSTEM_UPDATE_HEALTH_URL, timeout=3) as response:
+            health_ok = response.status == 200
+        add(
+            "health", "当前服务健康检查",
+            "ok" if health_ok else "warn",
+            settings.SYSTEM_UPDATE_HEALTH_URL,
+        )
+    except Exception as exc:
+        add("health", "当前服务健康检查", "warn", f"{settings.SYSTEM_UPDATE_HEALTH_URL} · {exc}")
+
+    blockers = [item for item in checks if item["blocking"] and item["status"] == "error"]
+    warnings = [item for item in checks if item["status"] == "warn"]
+    return {
+        "ready": len(blockers) == 0,
+        "checks": checks,
+        "blockingCount": len(blockers),
+        "warningCount": len(warnings),
+        "branch": cfg["branch"],
+        "remote": cfg["remote"],
+        "checkedAt": _now_iso(),
+    }
+
+
 def _cleanup_old_artifacts(keep: int = 30) -> None:
     state_dir = _state_dir()
     for pattern in ("update_*.log", "runner_*.py"):
@@ -317,6 +493,10 @@ def _cleanup_old_artifacts(keep: int = 30) -> None:
 
 def start_update(*, actor: str = "system") -> dict[str, Any]:
     with _LOCK:
+        readiness = update_readiness()
+        if not readiness["ready"]:
+            labels = "、".join(item["label"] for item in readiness["checks"] if item["blocking"] and item["status"] == "error")
+            raise ValueError(f"更新环境未就绪：{labels}。请先在更新中心查看环境自检。")
         runtime = _read_json(_status_path(), {})
         if _pid_running(runtime.get("pid")) and runtime.get("phase") in _ACTIVE_PHASES:
             raise ValueError("已有更新任务正在执行")

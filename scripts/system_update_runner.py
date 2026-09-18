@@ -34,6 +34,7 @@ class Runner:
         self.state_dir = self.data_dir / "system-update"
         self.status_file = self.state_dir / "status.json"
         self.history_file = self.state_dir / "history.jsonl"
+        self.maintenance_file = self.state_dir / "maintenance.json"
         self.venv_python = self.root / "backend" / ".venv" / "bin" / "python"
         self.pip = self.root / "backend" / ".venv" / "bin" / "pip"
         self.previous_sha = ""
@@ -41,6 +42,7 @@ class Runner:
         self.changed_files: list[str] = []
         self.git_switched = False
         self.migration_started = False
+        self.workers_quiesced = False
         self.state_dir.mkdir(parents=True, exist_ok=True)
 
     def log(self, message: str) -> None:
@@ -66,6 +68,25 @@ class Runner:
         tmp.write_text(json.dumps(value, ensure_ascii=False, indent=2), encoding="utf-8")
         os.replace(tmp, self.status_file)
         self.log(f"{phase} {progress}% · {message}")
+
+    def set_maintenance(self, enabled: bool, message: str = "") -> None:
+        if enabled:
+            payload = {
+                "active": True,
+                "message": message or "系统正在更新，请稍候",
+                "runId": self.read_status().get("runId"),
+                "startedAt": now_iso(),
+            }
+            tmp = self.maintenance_file.with_suffix(".json.tmp")
+            tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+            os.replace(tmp, self.maintenance_file)
+            self.log("已进入维护模式")
+        else:
+            try:
+                self.maintenance_file.unlink()
+            except FileNotFoundError:
+                pass
+            self.log("已退出维护模式")
 
     def history(self, result: str, message: str, **extra: Any) -> None:
         row = {
@@ -181,15 +202,32 @@ class Runner:
 
     def backup(self) -> None:
         self.status("backup", 18, "更新前备份数据库和业务文件")
+        started = time.time()
         self.run([str(self.root / "scripts" / "backup.sh")], timeout=3600)
         backups = self.root / "backups"
-        db_backups = sorted(backups.glob("db_*.dump"), key=lambda p: p.stat().st_mtime, reverse=True)
-        data_backups = sorted(backups.glob("data_*.tar.gz"), key=lambda p: p.stat().st_mtime, reverse=True)
+        db_backups = sorted(
+            (p for p in backups.glob("db_*.dump") if p.stat().st_mtime >= started - 2 and p.stat().st_size > 0),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+        data_backups = sorted(
+            (p for p in backups.glob("data_*.tar.gz") if p.stat().st_mtime >= started - 2 and p.stat().st_size > 0),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+        if not db_backups:
+            raise RuntimeError("备份脚本已结束，但未发现本次新生成的有效数据库备份")
         self.status(
             "backup", 25, "备份完成",
-            backupDb=str(db_backups[0]) if db_backups else "",
+            backupDb=str(db_backups[0]),
             backupData=str(data_backups[0]) if data_backups else "",
         )
+
+    def quiesce_workers(self) -> None:
+        self.status("quiescing", 28, "暂停 worker / beat，避免迁移期间后台继续写库")
+        helper = self.root / "scripts" / "quiesce-update-workers.sh"
+        self.run(["bash", str(helper)], timeout=120)
+        self.workers_quiesced = True
 
     def switch_code(self) -> None:
         self.status("installing", 30, "切换到已下载的新版本")
@@ -286,16 +324,25 @@ class Runner:
                 error=cause,
                 rollbackErrors=rollback_errors,
                 finishedAt=now_iso(),
+                lastInstallResult="failed",
+                lastInstallAt=now_iso(),
+                lastInstallFromSha=self.previous_sha,
+                lastInstallToSha=self.args.target,
             )
             self.history("failed", "更新失败且自动回滚未完全成功", error=cause, rollbackErrors=rollback_errors)
             return False
 
+        self.set_maintenance(False)
         self.status(
             "rolled_back", 100, "更新失败，已自动恢复上一版本",
             error=cause,
             rollbackErrors=[],
             currentSha=self.previous_sha,
             finishedAt=now_iso(),
+            lastInstallResult="rolled_back",
+            lastInstallAt=now_iso(),
+            lastInstallFromSha=self.previous_sha,
+            lastInstallToSha=self.args.target,
         )
         self.history("rolled_back", "更新失败，已自动恢复上一版本", error=cause)
         return True
@@ -305,21 +352,36 @@ class Runner:
         try:
             self.preflight()
             if self.previous_sha == self.args.target:
-                self.status("success", 100, "当前已经是目标版本", currentSha=self.previous_sha, finishedAt=now_iso())
+                self.status(
+                    "success", 100, "当前已经是目标版本",
+                    currentSha=self.previous_sha,
+                    finishedAt=now_iso(),
+                    lastInstallResult="success",
+                    lastInstallAt=now_iso(),
+                    lastInstallFromSha=self.previous_sha,
+                    lastInstallToSha=self.args.target,
+                )
                 self.history("success", "无需更新，当前已经是目标版本")
                 return 0
+            self.set_maintenance(True, "系统正在安装更新，业务操作已暂时锁定")
             self.backup()
+            self.quiesce_workers()
             self.switch_code()
             self.install_dependencies()
             self.migrate()
             self.build_frontend()
             self.restart()
+            self.set_maintenance(False)
             self.status(
                 "success", 100, "系统更新完成",
                 currentSha=self.args.target,
                 previousSha=self.previous_sha,
                 finishedAt=now_iso(),
                 rollbackErrors=[],
+                lastInstallResult="success",
+                lastInstallAt=now_iso(),
+                lastInstallFromSha=self.previous_sha,
+                lastInstallToSha=self.args.target,
             )
             self.history("success", "系统更新完成")
             return 0
@@ -329,7 +391,21 @@ class Runner:
             if self.git_switched:
                 self.rollback(message)
             else:
-                self.status("failed", 100, "更新在切换代码前失败，未修改当前版本", error=message, finishedAt=now_iso())
+                if self.workers_quiesced:
+                    try:
+                        self.run(["make", "restart"], timeout=120)
+                    except Exception as restart_exc:
+                        message = f"{message}；恢复后台服务失败：{restart_exc}"
+                self.set_maintenance(False)
+                self.status(
+                    "failed", 100, "更新在切换代码前失败，未修改当前版本",
+                    error=message,
+                    finishedAt=now_iso(),
+                    lastInstallResult="failed",
+                    lastInstallAt=now_iso(),
+                    lastInstallFromSha=self.previous_sha,
+                    lastInstallToSha=self.args.target,
+                )
                 self.history("failed", "更新在切换代码前失败", error=message)
             return 1
 

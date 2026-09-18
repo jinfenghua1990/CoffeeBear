@@ -1,33 +1,72 @@
 export type Theme = "light" | "dark";
+export type ThemeMode = "system" | Theme;
 
-const STORAGE_KEY = "app-theme";
+const STORAGE_KEY = "app-theme-mode";
+const LEGACY_STORAGE_KEY = "app-theme";
 
 export function getSystemTheme(): Theme {
   if (typeof window === "undefined") return "light";
   return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
 }
 
-/** 首次渲染用：localStorage 有记录用记录，否则跟随系统。 */
-export function getInitialTheme(): Theme {
-  if (typeof window === "undefined") return "light";
-  const stored = localStorage.getItem(STORAGE_KEY);
-  return stored === "light" || stored === "dark" ? stored : getSystemTheme();
+export function getStoredThemeMode(): ThemeMode {
+  if (typeof window === "undefined") return "system";
+  const stored = window.localStorage.getItem(STORAGE_KEY);
+  if (stored === "system" || stored === "light" || stored === "dark") return stored;
+
+  // 兼容旧版只保存 light/dark 的 app-theme。
+  const legacy = window.localStorage.getItem(LEGACY_STORAGE_KEY);
+  if (legacy === "light" || legacy === "dark") return legacy;
+  return "system";
 }
 
-export function applyThemeClass(theme: Theme) {
-  document.documentElement.classList.toggle("dark", theme === "dark");
+export function resolveTheme(mode: ThemeMode): Theme {
+  return mode === "system" ? getSystemTheme() : mode;
 }
 
-export function setStoredTheme(theme: Theme) {
-  localStorage.setItem(STORAGE_KEY, theme);
+export function applyThemeMode(mode: ThemeMode): Theme {
+  const resolved = resolveTheme(mode);
+  const root = document.documentElement;
+  root.classList.toggle("dark", resolved === "dark");
+  root.dataset.themeMode = mode;
+  root.dataset.theme = resolved;
+  root.style.colorScheme = resolved;
+  return resolved;
 }
 
-/** 仅当用户未手动设置过主题时，跟随系统深浅色变化。返回取消监听函数。 */
+export function setStoredThemeMode(mode: ThemeMode) {
+  window.localStorage.setItem(STORAGE_KEY, mode);
+  window.localStorage.removeItem(LEGACY_STORAGE_KEY);
+}
+
+export function setThemeMode(mode: ThemeMode): Theme {
+  setStoredThemeMode(mode);
+  return applyThemeMode(mode);
+}
+
+/** 监听系统主题；仅在 mode=system 时通知页面切换。 */
 export function watchSystemTheme(onChange: (theme: Theme) => void): () => void {
   const mq = window.matchMedia("(prefers-color-scheme: dark)");
   const handler = () => {
-    if (!localStorage.getItem(STORAGE_KEY)) onChange(mq.matches ? "dark" : "light");
+    if (getStoredThemeMode() === "system") {
+      onChange(mq.matches ? "dark" : "light");
+    }
   };
   mq.addEventListener("change", handler);
   return () => mq.removeEventListener("change", handler);
+}
+
+/** 兼容旧调用。 */
+export function getInitialTheme(): Theme {
+  return resolveTheme(getStoredThemeMode());
+}
+
+/** 兼容旧调用。 */
+export function applyThemeClass(theme: Theme) {
+  applyThemeMode(theme);
+}
+
+/** 兼容旧调用。 */
+export function setStoredTheme(theme: Theme) {
+  setThemeMode(theme);
 }

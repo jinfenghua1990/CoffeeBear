@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { login } from "@/lib/api";
+import ThemeToggle from "@/components/theme-toggle";
 
 const USERNAME_KEY = "ecdp_remember_username";
 
@@ -44,16 +45,17 @@ export default function LoginPage() {
   }
 
   return (
-    <div className="flex min-h-screen items-center justify-center bg-gray-50 px-4">
-      <div className="w-full max-w-sm rounded-2xl border border-gray-200 bg-white p-8 shadow-sm">
+    <div className="app-shell relative flex min-h-screen items-center justify-center px-4">
+      <div className="absolute right-5 top-5"><ThemeToggle /></div>
+      <div className="w-full max-w-sm rounded-2xl border border-slate-200 bg-white p-8 shadow-sm">
         <div className="text-center">
           <div className="text-xl font-semibold tracking-tight">电商经营数据平台</div>
-          <div className="mt-1 text-xs text-gray-400">吉客云 · 1688 采购 · 浙江农信</div>
+          <div className="mt-1 text-xs text-slate-400">吉客云 · 1688 采购 · 浙江农信</div>
         </div>
 
         <form onSubmit={handleSubmit} className="mt-8 space-y-4">
           <div>
-            <label htmlFor="username" className="block text-sm font-medium text-gray-700">
+            <label htmlFor="username" className="block text-sm font-medium text-slate-700">
               用户名
             </label>
             <input
@@ -62,11 +64,11 @@ export default function LoginPage() {
               onChange={(e) => setUsername(e.target.value)}
               autoComplete="username"
               required
-              className="mt-1.5 block w-full rounded-lg border border-gray-300 px-3 py-2 text-sm shadow-sm outline-none transition-colors focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100"
+              className="mt-1.5 block w-full rounded-lg border border-slate-300 px-3 py-2 text-sm shadow-sm outline-none transition-colors focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100"
             />
           </div>
           <div>
-            <label htmlFor="password" className="block text-sm font-medium text-gray-700">
+            <label htmlFor="password" className="block text-sm font-medium text-slate-700">
               密码
             </label>
             <input
@@ -76,16 +78,16 @@ export default function LoginPage() {
               onChange={(e) => setPassword(e.target.value)}
               autoComplete="current-password"
               required
-              className="mt-1.5 block w-full rounded-lg border border-gray-300 px-3 py-2 text-sm shadow-sm outline-none transition-colors focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100"
+              className="mt-1.5 block w-full rounded-lg border border-slate-300 px-3 py-2 text-sm shadow-sm outline-none transition-colors focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100"
             />
           </div>
 
-          <label className="flex cursor-pointer select-none items-center gap-2 text-sm text-gray-600">
+          <label className="flex cursor-pointer select-none items-center gap-2 text-sm text-slate-600">
             <input
               type="checkbox"
               checked={remember}
               onChange={(e) => setRemember(e.target.checked)}
-              className="h-4 w-4 rounded border-gray-300 accent-indigo-600"
+              className="h-4 w-4 rounded border-slate-300 accent-indigo-600"
             />
             记住登录（此电脑 30 天内免输入）
           </label>

@@ -154,7 +154,7 @@ export default function TopBar() {
         : "暂无同步";
 
   return (
-    <header className="relative z-40 flex h-14 shrink-0 items-center gap-3 border-b border-slate-200 bg-white px-4 shadow-[0_1px_4px_rgba(15,39,70,0.04)]" ref={rootRef}>
+    <header className="app-topbar relative z-40 flex h-14 shrink-0 items-center gap-3 border-b px-4 shadow-[0_1px_4px_rgba(15,39,70,0.04)]" ref={rootRef}>
       {/* 品牌 + 工作台切换 */}
       <Link href="/" prefetch={false} className="flex shrink-0 items-center gap-2.5">
         <span className="flex h-9 w-9 items-center justify-center rounded-full bg-[#112a49] text-white">
@@ -179,7 +179,7 @@ export default function TopBar() {
           <ChevronDown />
         </button>
         {openMenu === "workspace" && (
-          <div className="absolute left-0 top-full z-dropdown mt-1.5 w-52 rounded-xl border border-slate-200 bg-white p-1.5 shadow-lg">
+          <div className="absolute left-0 top-full z-dropdown mt-1.5 w-52 app-popover rounded-xl border p-1.5 shadow-lg">
             <div className="flex items-center justify-between rounded-lg bg-slate-50 px-3 py-2 text-[13px] font-medium text-slate-800">
               内销工作台
               <span className="text-[10px] font-normal text-blue-600">当前</span>
@@ -228,7 +228,7 @@ export default function TopBar() {
           />
         </form>
         {searchOpen && hasHits && (
-          <div className="absolute left-0 top-full z-dropdown mt-1.5 max-h-[420px] w-full overflow-y-auto rounded-xl border border-slate-200 bg-white p-2 shadow-lg">
+          <div className="absolute left-0 top-full z-dropdown mt-1.5 max-h-[420px] w-full overflow-y-auto app-popover rounded-xl border p-2 shadow-lg">
             {GROUP_META.map(({ key, title }) => {
               const items = groups[key];
               if (items.length === 0) return null;
@@ -269,7 +269,7 @@ export default function TopBar() {
             <span className="hidden 2xl:inline">{syncText}</span>
           </button>
           {openMenu === "sync" && (
-            <div className="absolute right-0 top-full z-dropdown mt-1.5 w-64 rounded-xl border border-slate-200 bg-white p-2 shadow-lg">
+            <div className="absolute right-0 top-full z-dropdown mt-1.5 w-64 app-popover rounded-xl border p-2 shadow-lg">
               <div className="px-2 py-1 text-[10px] font-medium tracking-wide text-slate-400">数据源同步状态</div>
               {(status?.sources ?? []).map((source) => (
                 <div key={source.provider} className="flex items-center justify-between rounded-lg px-2.5 py-1.5 text-[12px]">
@@ -330,7 +330,7 @@ export default function TopBar() {
             </svg>
           </button>
           {openMenu === "settings" && (
-            <div className="absolute right-0 top-full z-dropdown mt-1.5 w-52 rounded-xl border border-slate-200 bg-white p-1.5 shadow-lg">
+            <div className="absolute right-0 top-full z-dropdown mt-1.5 w-52 app-popover rounded-xl border p-1.5 shadow-lg">
               <div className="px-3 py-1.5 text-[10px] font-medium tracking-wide text-slate-400">系统管理</div>
               <Link
                 href="/settings"
@@ -376,7 +376,7 @@ export default function TopBar() {
             <ChevronDown />
           </button>
           {openMenu === "account" && (
-            <div className="absolute right-0 top-full z-dropdown mt-1.5 w-44 rounded-xl border border-slate-200 bg-white p-1.5 shadow-lg">
+            <div className="absolute right-0 top-full z-dropdown mt-1.5 w-44 app-popover rounded-xl border p-1.5 shadow-lg">
               <Link
                 href="/settings#account-security"
                 prefetch={false}

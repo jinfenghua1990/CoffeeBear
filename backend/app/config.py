@@ -52,6 +52,7 @@ class Settings(BaseSettings):
     SYSTEM_UPDATE_BRANCH: str = "codex/ui-coherence-v1.6.4"
     SYSTEM_UPDATE_REPO_ROOT: str = ""
     SYSTEM_UPDATE_HEALTH_URL: str = "http://127.0.0.1:8000/healthz"
+    SYSTEM_UPDATE_LAUNCH_LABEL: str = "com.gino.ecommerce-dashboard"
 
     # 数据中心导入回收站保留天数：软删除的导入超过该天数后由 Celery 定时任务硬删除。
     RECYCLE_BIN_RETENTION_DAYS: int = 30

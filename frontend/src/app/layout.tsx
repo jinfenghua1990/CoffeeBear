@@ -12,7 +12,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
   return (
     <html lang="zh-CN">
       <head>
-        <script dangerouslySetInnerHTML={{ __html: `(function(){try{var s=localStorage.getItem("app-theme");var d=s?s==="dark":window.matchMedia("(prefers-color-scheme: dark)").matches;if(d)document.documentElement.classList.add("dark");}catch(e){}})();` }} />
+        <script dangerouslySetInnerHTML={{ __html: `(function(){try{var m=localStorage.getItem("app-theme-mode");if(m!=="system"&&m!=="light"&&m!=="dark"){var l=localStorage.getItem("app-theme");m=l==="light"||l==="dark"?l:"system"}var r=m==="system"?(window.matchMedia("(prefers-color-scheme: dark)").matches?"dark":"light"):m;var e=document.documentElement;e.classList.toggle("dark",r==="dark");e.dataset.themeMode=m;e.dataset.theme=r;e.style.colorScheme=r;}catch(e){}})();` }} />
       </head>
       <body>
         <GlobalResizableTables />

@@ -5,7 +5,7 @@ from contextlib import asynccontextmanager, suppress
 
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.api.deps import require_auth
@@ -48,6 +48,37 @@ app.add_middleware(
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["Authorization", "Content-Type"],
 )
+
+
+@app.middleware("http")
+async def system_update_maintenance(request, call_next):
+    """更新期间暂停普通业务 API，保留更新状态、认证与健康检查。
+
+    静态前端仍可打开，管理员可以持续查看更新进度；业务写操作不会在迁移窗口内继续发生。
+    """
+    path = request.url.path
+    allowed = (
+        path == "/healthz"
+        or path.startswith("/api/v1/system/update")
+        or path.startswith("/api/v1/auth/")
+    )
+    if path.startswith("/api/v1") and not allowed:
+        maintenance_file = os.path.join(settings.DATA_DIR, "system-update", "maintenance.json")
+        if os.path.isfile(maintenance_file):
+            message = "系统正在更新，业务操作已暂时锁定"
+            try:
+                import json
+                with open(maintenance_file, "r", encoding="utf-8") as fh:
+                    payload = json.load(fh)
+                message = str(payload.get("message") or message)
+            except Exception:
+                pass
+            return JSONResponse(
+                status_code=503,
+                content={"detail": message, "maintenance": True},
+                headers={"Retry-After": "15"},
+            )
+    return await call_next(request)
 
 
 @app.middleware("http")

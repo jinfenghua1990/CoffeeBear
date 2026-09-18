@@ -58,7 +58,7 @@ export default function AuthShell({ children }: { children: React.ReactNode }) {
   if (!ready) return null;
 
   return (
-    <div className="flex h-screen w-full min-w-0 flex-col overflow-hidden bg-[#f4f7fb]">
+    <div className="app-shell flex h-screen w-full min-w-0 flex-col overflow-hidden">
       <TopBar />
       <div className="flex min-h-0 w-full flex-1">
         <div className="relative h-full w-[208px] shrink-0">
