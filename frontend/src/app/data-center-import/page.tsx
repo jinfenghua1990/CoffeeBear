@@ -16,6 +16,8 @@ const TABS = [
   { key: "tax", label: "税务发票清单", desc: "税务系统官方发票清单" },
 ] as const;
 
+const VISIBLE_IMPORT_TABS = TABS.filter((item) => item.key !== "tax");
+
 type TabKey = (typeof TABS)[number]["key"];
 const TAB_KEYS = TABS.map((t) => t.key) as readonly string[];
 
@@ -112,8 +114,8 @@ export default function DataCenterImportPage() {
       <header className="app-page-header -mx-1 bg-[#f4f7fb]/95 pb-3 backdrop-blur">
         <div className="flex flex-wrap items-start justify-between gap-4">
           <div>
-            <h1 className="text-xl font-semibold">数据接入</h1>
-            <p className="mt-1 max-w-4xl text-sm leading-6 text-gray-500">
+            <h1 className="text-xl font-semibold text-slate-900">数据接入</h1>
+            <p className="mt-1 max-w-4xl text-sm leading-6 text-slate-500">
               所有外部文件先在这里导入、预览、确认；业务事实也可以按数据维度导出，方便你在 Excel 中手动核验订单、入库、库存和成本链路。
             </p>
           </div>
@@ -130,16 +132,16 @@ export default function DataCenterImportPage() {
       {/* 数据接入不再占顶部一级菜单；从各业务区进入后，由隐藏的数据接入侧栏切换来源。 */}
 
       <section id="data-tools" className="mt-5 grid gap-4 xl:grid-cols-[minmax(300px,0.8fr)_minmax(560px,1.5fr)]">
-        <div className="rounded-xl border border-indigo-100 bg-indigo-50/45 p-4">
+        <div className="rounded-xl border border-indigo-100 bg-indigo-50/40 p-4">
           <div className="flex items-start justify-between gap-3">
             <div>
-              <h2 className="text-sm font-semibold text-indigo-950">导入数据</h2>
-              <p className="mt-1 text-xs leading-5 text-indigo-700">选择来源后上传文件。默认会保留原始行，可关闭自动确认后逐行检查。</p>
+              <h2 className="text-sm font-semibold text-slate-900">导入数据</h2>
+              <p className="mt-1 text-xs leading-5 text-slate-500">选择来源后上传文件。默认会保留原始行，可关闭自动确认后逐行检查。</p>
             </div>
             <span className="rounded-full bg-white px-2 py-1 text-[10px] font-medium text-indigo-600">预览 · 确认</span>
           </div>
           <div className="mt-3 grid gap-2 sm:grid-cols-2 xl:grid-cols-1">
-            {TABS.map((item) => (
+            {VISIBLE_IMPORT_TABS.map((item) => (
               <Link
                 key={item.key}
                 href={`/data-center-import?tab=${item.key}#data-source-panel`}

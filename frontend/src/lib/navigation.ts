@@ -92,7 +92,11 @@ export const MODULES: ModuleDef[] = [
     title: "供应链中心",
     href: "/supply-chain",
     match: (p) =>
-      p.startsWith("/supply-chain") || p.startsWith("/purchase") || p.startsWith("/procurement") || p.startsWith("/suppliers"),
+      p.startsWith("/supply-chain")
+      || p.startsWith("/purchase")
+      || p.startsWith("/procurement")
+      || p.startsWith("/suppliers")
+      || p.startsWith("/data-center-import"),
     items: [
       { href: "/supply-chain", label: "供应链总览", icon: "home" },
       { href: "/suppliers", label: "供应商档案", icon: "box" },
@@ -131,15 +135,12 @@ export const MODULES: ModuleDef[] = [
   },
   {
     key: "data",
-    label: "数据",
-    title: "数据接入",
-    href: "/data-center-import?tab=alibaba1688",
+    label: "异常",
+    title: "异常中心",
+    href: "/exceptions",
     showInTop: false,
-    match: (p) => p.startsWith("/data-center-import") || p.startsWith("/exceptions"),
+    match: (p) => p.startsWith("/exceptions"),
     items: [
-      { href: "/data-center-import?tab=alibaba1688", label: "1688 接入", icon: "import" },
-      { href: "/data-center-import?tab=external_orders", label: "其他渠道采购", icon: "cart" },
-      { href: "/data-center-import?tab=jackyun", label: "吉客云数据", icon: "box" },
       { href: "/exceptions", label: "异常中心", icon: "alert" },
     ],
   },

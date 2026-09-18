@@ -96,8 +96,8 @@ export default function SettingsPage() {
   return (
     <div>
       <header className="app-page-header -mx-1 bg-[#f4f7fb]/95 pb-3 backdrop-blur">
-        <h1 className="text-xl font-semibold">系统设置</h1>
-        <p className="mt-2 max-w-3xl text-sm leading-6 text-gray-500">
+        <h1 className="text-xl font-semibold text-slate-900">系统设置</h1>
+        <p className="mt-2 max-w-3xl text-sm leading-6 text-slate-500">
           这里只保留账号安全、数据连接和系统级参数。仓库、生产、货品等业务配置统一回到各自业务页面维护。
         </p>
       </header>
@@ -119,25 +119,25 @@ export default function SettingsPage() {
         </div>
       </div>
 
-      <div id="account-security" className="mt-6 scroll-mt-24 max-w-3xl rounded-xl border border-gray-200 bg-white p-4">
+      <div id="account-security" className="mt-6 scroll-mt-24 max-w-3xl rounded-xl border border-slate-200 bg-white p-4">
         <div className="text-sm font-medium">账号安全 · 修改密码</div>
         <div className="mt-3 flex flex-wrap items-end gap-3">
           <div>
-            <div className="text-xs text-gray-500">原密码</div>
+            <div className="text-xs text-slate-500">原密码</div>
             <input
               type="password"
               value={pwOld}
               onChange={(e) => setPwOld(e.target.value)}
-              className="mt-1 block w-52 rounded-lg border border-gray-300 px-3 py-1.5 text-sm outline-none focus:border-indigo-500"
+              className="mt-1 block w-52 rounded-lg border border-slate-300 px-3 py-1.5 text-sm outline-none focus:border-indigo-500"
             />
           </div>
           <div>
-            <div className="text-xs text-gray-500">新密码（至少 8 位）</div>
+            <div className="text-xs text-slate-500">新密码（至少 8 位）</div>
             <input
               type="password"
               value={pwNew}
               onChange={(e) => setPwNew(e.target.value)}
-              className="mt-1 block w-52 rounded-lg border border-gray-300 px-3 py-1.5 text-sm outline-none focus:border-indigo-500"
+              className="mt-1 block w-52 rounded-lg border border-slate-300 px-3 py-1.5 text-sm outline-none focus:border-indigo-500"
             />
           </div>
           <button
@@ -148,15 +148,15 @@ export default function SettingsPage() {
             修改密码
           </button>
         </div>
-        {pwMsg && <div className="mt-2 text-xs text-gray-600">{pwMsg}</div>}
+        {pwMsg && <div className="mt-2 text-xs text-slate-600">{pwMsg}</div>}
       </div>
 
       <div className="mt-6 grid max-w-3xl grid-cols-1 gap-3">
         {items.map((it) => (
-          <div key={it.id} className="flex items-center justify-between rounded-xl border border-gray-200 bg-white p-4">
+          <div key={it.id} className="flex items-center justify-between rounded-xl border border-slate-200 bg-white p-4">
             <div>
               <div className="text-sm font-medium">{it.name}</div>
-              <div className="mt-0.5 text-xs text-gray-400">
+              <div className="mt-0.5 text-xs text-slate-400">
                 {it.mode} · Phase {it.phase}
                 {it.errorSummary ? ` · ${it.errorSummary.slice(0, 80)}` : ""}
               </div>
@@ -166,9 +166,9 @@ export default function SettingsPage() {
         ))}
       </div>
 
-      <div className="mt-6 max-w-3xl rounded-xl border border-gray-200 bg-white p-4">
+      <div className="mt-6 max-w-3xl rounded-xl border border-slate-200 bg-white p-4">
         <div className="text-sm font-medium">吉客云 MCP 连接测试</div>
-        <p className="mt-1 text-xs text-gray-400">
+        <p className="mt-1 text-xs text-slate-400">
           真实调用 MCP：initialize → tools/list，返回已订阅工具清单。失败原因会写入异常中心与同步日志。
         </p>
         <button
@@ -186,7 +186,7 @@ export default function SettingsPage() {
         {jackyun.tools && (
           <div className="mt-2 flex flex-wrap gap-1.5">
             {jackyun.tools.map((t) => (
-              <span key={t} className="rounded bg-gray-100 px-2 py-0.5 font-mono text-[11px] text-gray-600">
+              <span key={t} className="rounded bg-slate-100 px-2 py-0.5 font-mono text-[11px] text-slate-600">
                 {t}
               </span>
             ))}
@@ -194,9 +194,9 @@ export default function SettingsPage() {
         )}
       </div>
 
-      <div className="mt-6 max-w-3xl rounded-xl border border-gray-200 bg-white p-4">
+      <div className="mt-6 max-w-3xl rounded-xl border border-slate-200 bg-white p-4">
         <div className="text-sm font-medium">1688 采购授权</div>
-        <p className="mt-1 text-xs text-gray-400">
+        <p className="mt-1 text-xs text-slate-400">
           只读同步已发生的买家订单，不下单、不付款。需先在 1688 开放平台创建应用（AppKey/Secret + 回调地址），
           配置到 .env 后点击「连接 1688」跳官方授权。
         </p>
@@ -219,7 +219,7 @@ export default function SettingsPage() {
           >
             连接 1688
           </button>
-          <span className="text-xs text-gray-400">回调地址示例：{typeof window !== "undefined" ? `${window.location.origin}/api/v1/integrations/alibaba1688/callback` : "…"}</span>
+          <span className="text-xs text-slate-400">回调地址示例：{typeof window !== "undefined" ? `${window.location.origin}/api/v1/integrations/alibaba1688/callback` : "…"}</span>
         </div>
       </div>
 
@@ -228,23 +228,23 @@ export default function SettingsPage() {
         请勿在路由器做端口转发，勿将 8000 暴露公网；如需公网访问，必须增加 TLS 和更严格的网络边界。
       </div>
 
-      <div className="mt-6 max-w-3xl rounded-xl border border-gray-200 bg-white p-4">
+      <div className="mt-6 max-w-3xl rounded-xl border border-slate-200 bg-white p-4">
         <div className="text-sm font-medium">期初初始化（一次性向导）</div>
-        <p className="mt-1 text-xs text-gray-400">
+        <p className="mt-1 text-xs text-slate-400">
           允许不平：期初 + 本期发生 − 本期结算 = 期末；历史差异进入差异池，不篡改历史订单（规格 1.5 / 11）。
         </p>
 
         <div className="mt-3 flex flex-wrap items-center gap-2">
-          <select value={oKind} onChange={(e) => setOKind(e.target.value)} className="rounded-lg border border-gray-300 px-3 py-1.5 text-sm">
+          <select value={oKind} onChange={(e) => setOKind(e.target.value)} className="rounded-lg border border-slate-300 px-3 py-1.5 text-sm">
             {Object.entries(KIND_LABEL).map(([k, label]) => (
               <option key={k} value={k}>{label}</option>
             ))}
           </select>
-          <input value={oRef} onChange={(e) => setORef(e.target.value)} placeholder="平台名 / 账户 / SKU" className="w-40 rounded-lg border border-gray-300 px-3 py-1.5 text-sm" />
-          <input value={oAmount} onChange={(e) => setOAmount(e.target.value)} placeholder="金额" className="w-28 rounded-lg border border-gray-300 px-3 py-1.5 text-sm" />
-          <input value={oQty} onChange={(e) => setOQty(e.target.value)} placeholder="数量(库存)" className="w-28 rounded-lg border border-gray-300 px-3 py-1.5 text-sm" />
-          <input value={oDate} onChange={(e) => setODate(e.target.value)} type="date" className="rounded-lg border border-gray-300 px-3 py-1.5 text-sm" />
-          <input value={oNote} onChange={(e) => setONote(e.target.value)} placeholder="备注" className="w-32 rounded-lg border border-gray-300 px-3 py-1.5 text-sm" />
+          <input value={oRef} onChange={(e) => setORef(e.target.value)} placeholder="平台名 / 账户 / SKU" className="w-40 rounded-lg border border-slate-300 px-3 py-1.5 text-sm" />
+          <input value={oAmount} onChange={(e) => setOAmount(e.target.value)} placeholder="金额" className="w-28 rounded-lg border border-slate-300 px-3 py-1.5 text-sm" />
+          <input value={oQty} onChange={(e) => setOQty(e.target.value)} placeholder="数量(库存)" className="w-28 rounded-lg border border-slate-300 px-3 py-1.5 text-sm" />
+          <input value={oDate} onChange={(e) => setODate(e.target.value)} type="date" className="rounded-lg border border-slate-300 px-3 py-1.5 text-sm" />
+          <input value={oNote} onChange={(e) => setONote(e.target.value)} placeholder="备注" className="w-32 rounded-lg border border-slate-300 px-3 py-1.5 text-sm" />
           <button onClick={addOpening} className="rounded-lg bg-indigo-600 px-3 py-1.5 text-sm text-white hover:bg-indigo-700">
             保存期初
           </button>
@@ -254,7 +254,7 @@ export default function SettingsPage() {
         {opening && opening.items.length > 0 && (
           <table className="mt-4 w-full text-left text-sm">
             <thead>
-              <tr className="border-b border-gray-200 text-xs text-gray-400">
+              <tr className="border-b border-slate-200 text-xs text-slate-400">
                 <th className="py-2 pr-4 font-medium">类别</th>
                 <th className="py-2 pr-4 font-medium">对象</th>
                 <th className="py-2 pr-4 font-medium">金额</th>
@@ -264,12 +264,12 @@ export default function SettingsPage() {
             </thead>
             <tbody>
               {opening.items.map((r) => (
-                <tr key={r.id} className="border-b border-gray-100">
+                <tr key={r.id} className="border-b border-slate-100">
                   <td className="py-2 pr-4">{KIND_LABEL[r.kind] ?? r.kind}</td>
-                  <td className="py-2 pr-4 text-gray-600">{r.ref || "—"}</td>
+                  <td className="py-2 pr-4 text-slate-600">{r.ref || "—"}</td>
                   <td className="py-2 pr-4 tabular-nums">{r.amount !== null ? `¥${r.amount}` : "—"}</td>
                   <td className="py-2 pr-4 tabular-nums">{r.quantity ?? "—"}</td>
-                  <td className="py-2 text-gray-400">{r.note}</td>
+                  <td className="py-2 text-slate-400">{r.note}</td>
                 </tr>
               ))}
             </tbody>
@@ -277,7 +277,7 @@ export default function SettingsPage() {
         )}
 
         {opening && (
-          <div className="mt-4 flex flex-wrap gap-4 border-t border-gray-100 pt-3 text-xs text-gray-500">
+          <div className="mt-4 flex flex-wrap gap-4 border-t border-slate-100 pt-3 text-xs text-slate-500">
             <span>差异池：<b className={Number(opening.summary.differencePool) !== 0 ? "text-amber-600" : ""}>
               {opening.summary.differencePool !== "0" ? `¥${opening.summary.differencePool}` : "0（平衡）"}
             </b></span>

@@ -302,6 +302,9 @@ html.global-column-resizing * {
 .dark .border-slate-300 { border-color: #3f4e6b; }
 
 /* 彩色文字 */
+.dark .text-indigo-950 { color: #e0e7ff; }
+.dark .text-indigo-900 { color: #c7d2fe; }
+.dark .text-indigo-800 { color: #b9c4fd; }
 .dark .text-indigo-700 { color: #a5b4fc; }
 .dark .text-indigo-600 { color: #a5b4fc; }
 .dark .text-indigo-500 { color: #818cf8; }
@@ -317,8 +320,24 @@ html.global-column-resizing * {
 .dark .text-violet-700 { color: #c4b5fd; }
 .dark .text-sky-700 { color: #7dd3fc; }
 .dark .text-orange-700 { color: #fdba74; }
+.dark .text-red-700 { color: #fca5a5; }
 .dark .text-red-600 { color: #f87171; }
+.dark .text-red-500 { color: #fb7185; }
+.dark .text-amber-500 { color: #fbbf24; }
+.dark .text-orange-600 { color: #fdba74; }
+.dark .text-sky-600 { color: #7dd3fc; }
+.dark .text-sky-500 { color: #38bdf8; }
+.dark .text-blue-500 { color: #60a5fa; }
+.dark .text-emerald-500 { color: #34d399; }
+.dark .text-violet-600 { color: #c4b5fd; }
+.dark .text-slate-200 { color: #e2e8f0; }
 
+/* ring-inset 状态标签也使用暗色边框色 */
+.dark .ring-amber-200 { --tw-ring-color: #b45309; }
+.dark .ring-sky-200 { --tw-ring-color: #0284c7; }
+.dark .ring-emerald-200 { --tw-ring-color: #047857; }
+.dark .ring-red-200 { --tw-ring-color: #be123c; }
+.dark .ring-indigo-200 { --tw-ring-color: #4338ca; }
 
 /* 表格行分隔与斑马纹 —— 增强暗色下的行区分度 */
 .dark tbody tr {

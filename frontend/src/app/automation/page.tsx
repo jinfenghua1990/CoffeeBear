@@ -7,9 +7,9 @@ const STATUS_STYLE: Record<string, string> = {
   running: "bg-indigo-50 text-indigo-700",
   success: "bg-emerald-50 text-emerald-700",
   failed: "bg-red-50 text-red-700",
-  skipped: "bg-gray-100 text-gray-500",
+  skipped: "bg-slate-100 text-slate-500",
   pending: "bg-amber-50 text-amber-700",
-  unknown: "bg-gray-100 text-gray-500",
+  unknown: "bg-slate-100 text-slate-500",
 };
 
 const JOB_TYPE_LABEL: Record<string, string> = {
@@ -83,20 +83,20 @@ export default function AutomationPage() {
   return (
     <div>
       <header className="app-page-header -mx-1 bg-[#f4f7fb]/95 pb-3 backdrop-blur">
-        <h1 className="text-xl font-semibold">自动化</h1>
-        <p className="mt-1 text-sm text-gray-400">
-          Celery Beat 定时同步。所有外部同步仅在凭证配置后真正执行；未配置如实跳过（见同步日志）。吉客云订单按配置自动故障切换。
+        <h1 className="text-xl font-semibold text-slate-900">自动化任务</h1>
+        <p className="mt-1 text-sm text-slate-400">
+          统一查看定时同步、手工触发和运行日志。只有已配置凭证的数据源才会真正执行；未配置任务会如实跳过。
         </p>
       </header>
 
       {err && <div className="mt-4 rounded-lg bg-red-50 p-3 text-sm text-red-700">{err}</div>}
       {message && <div className="mt-4 rounded-lg bg-indigo-50 p-3 text-sm text-indigo-700">{message}</div>}
 
-      <section className="mt-5 rounded-xl border border-gray-200 bg-white p-4">
+      <section className="mt-5 rounded-xl border border-slate-200 bg-white p-4">
         <div className="flex items-center justify-between gap-3">
           <div>
-            <h2 className="text-sm font-medium text-gray-700">吉客云订单获取中心</h2>
-            <p className="mt-1 text-xs text-gray-400">
+            <h2 className="text-sm font-medium text-slate-700">吉客云订单获取中心</h2>
+            <p className="mt-1 text-xs text-slate-400">
               优先级：{jkyOrderStatus?.providerPriority.join(" → ") || "jky_web → jky_rpa → jky_api"}；只推进成功且通过校验的同步游标。
             </p>
           </div>
@@ -110,21 +110,21 @@ export default function AutomationPage() {
         </div>
         <div className="mt-3 grid grid-cols-3 gap-2">
           {(jkyOrderStatus?.channels ?? []).map((channel) => (
-            <div key={channel.provider} className="rounded-lg border border-gray-100 bg-gray-50 p-2">
-              <div className="text-xs font-medium text-gray-700">{channel.label}</div>
-              <div className={`mt-1 text-xs ${channel.status === "connected" ? "text-emerald-600" : channel.configured ? "text-amber-600" : "text-gray-400"}`}>
+            <div key={channel.provider} className="rounded-lg border border-slate-100 bg-slate-50 p-2">
+              <div className="text-xs font-medium text-slate-700">{channel.label}</div>
+              <div className={`mt-1 text-xs ${channel.status === "connected" ? "text-emerald-600" : channel.configured ? "text-amber-600" : "text-slate-400"}`}>
                 {channel.status}{channel.verified ? " · 已验证" : " · 未验证"}
               </div>
-              {channel.errorSummary && <div className="mt-1 truncate text-[10px] text-gray-400" title={channel.errorSummary}>{channel.errorSummary}</div>}
+              {channel.errorSummary && <div className="mt-1 truncate text-[10px] text-slate-400" title={channel.errorSummary}>{channel.errorSummary}</div>}
             </div>
           ))}
         </div>
       </section>
 
-      <section className="mt-5 rounded-xl border border-gray-200 bg-white p-4">
-        <h2 className="text-sm font-medium text-gray-700">定时任务（beat schedule）</h2>
+      <section className="mt-5 rounded-xl border border-slate-200 bg-white p-4">
+        <h2 className="text-sm font-medium text-slate-700">定时任务（beat schedule）</h2>
         <table className="mt-2 w-full text-sm">
-          <thead className="text-left text-xs text-gray-500">
+          <thead className="text-left text-xs text-slate-500">
             <tr>
               <th className="py-2 font-medium">任务</th>
               <th className="py-2 font-medium">频率</th>
@@ -132,12 +132,12 @@ export default function AutomationPage() {
               <th className="py-2 text-right font-medium">操作</th>
             </tr>
           </thead>
-          <tbody className="divide-y divide-gray-100">
+          <tbody className="divide-y divide-slate-100">
             {schedule.map((s) => (
               <tr key={`${s.task}-${s.args}`}>
                 <td className="py-2 font-medium">{s.label}</td>
-                <td className="py-2 text-gray-500">{s.frequency}</td>
-                <td className="py-2 font-mono text-xs text-gray-400">{s.task}({s.args || ""})</td>
+                <td className="py-2 text-slate-500">{s.frequency}</td>
+                <td className="py-2 font-mono text-xs text-slate-400">{s.task}({s.args || ""})</td>
                 <td className="py-2 text-right">
                   {(s.task === "tasks.sync_jky_orders" || s.task === "tasks.sync_jackyun" || s.task === "tasks.sync_1688") ? (
                     <button
@@ -147,7 +147,7 @@ export default function AutomationPage() {
                     >
                       {running === `${s.task}-${s.args}` ? "排队中…" : "立即同步"}
                     </button>
-                  ) : <span className="text-xs text-gray-300">自动</span>}
+                  ) : <span className="text-xs text-slate-300">自动</span>}
                 </td>
               </tr>
             ))}
@@ -156,25 +156,25 @@ export default function AutomationPage() {
       </section>
 
       <div className="mt-4 grid grid-cols-2 gap-4">
-        <section className="rounded-xl border border-gray-200 bg-white p-4">
-          <h2 className="text-sm font-medium text-gray-700">最近同步任务</h2>
+        <section className="rounded-xl border border-slate-200 bg-white p-4">
+          <h2 className="text-sm font-medium text-slate-700">最近同步任务</h2>
           {jobs.length === 0 ? (
-            <div className="mt-3 py-6 text-center text-sm text-gray-400">暂无任务记录（beat 触发后出现）</div>
+            <div className="mt-3 py-6 text-center text-sm text-slate-400">暂无任务记录（beat 触发后出现）</div>
           ) : (
             <table className="mt-2 w-full text-sm">
-              <tbody className="divide-y divide-gray-100">
+              <tbody className="divide-y divide-slate-100">
                 {jobs.map((j) => (
                   <tr key={j.id}>
                     <td className="py-2">
                       <span className="font-mono text-xs">{JOB_TYPE_LABEL[j.jobType] ?? j.jobType}</span>
-                      <span className="ml-1 text-[10px] text-gray-400">({j.provider})</span>
+                      <span className="ml-1 text-[10px] text-slate-400">({j.provider})</span>
                     </td>
                     <td className="py-2">
                       <span className={`inline-flex rounded-full px-2 py-0.5 text-xs ${STATUS_STYLE[j.status] ?? STATUS_STYLE.unknown}`}>
                         {j.status}
                       </span>
                     </td>
-                    <td className="py-2 text-right text-xs text-gray-400">
+                    <td className="py-2 text-right text-xs text-slate-400">
                       {j.startedAt ? new Date(j.startedAt).toLocaleString("zh-CN") : "—"}
                     </td>
                   </tr>
@@ -184,19 +184,19 @@ export default function AutomationPage() {
           )}
         </section>
 
-        <section className="rounded-xl border border-gray-200 bg-white p-4">
-          <h2 className="text-sm font-medium text-gray-700">同步日志</h2>
+        <section className="rounded-xl border border-slate-200 bg-white p-4">
+          <h2 className="text-sm font-medium text-slate-700">同步日志</h2>
           {logs.length === 0 ? (
-            <div className="mt-3 py-6 text-center text-sm text-gray-400">暂无日志</div>
+            <div className="mt-3 py-6 text-center text-sm text-slate-400">暂无日志</div>
           ) : (
             <div className="mt-2 max-h-96 space-y-1.5 overflow-auto text-xs">
               {logs.map((l) => (
                 <div key={l.id} className="flex gap-2">
-                  <span className={`shrink-0 ${l.level === "error" ? "text-red-500" : l.level === "warn" ? "text-amber-500" : "text-gray-400"}`}>
+                  <span className={`shrink-0 ${l.level === "error" ? "text-red-500" : l.level === "warn" ? "text-amber-500" : "text-slate-400"}`}>
                     [{l.level}]
                   </span>
-                  <span className="flex-1 break-all text-gray-600">{l.message}</span>
-                  <span className="shrink-0 text-gray-300">#{l.id}</span>
+                  <span className="flex-1 break-all text-slate-600">{l.message}</span>
+                  <span className="shrink-0 text-slate-300">#{l.id}</span>
                 </div>
               ))}
             </div>
