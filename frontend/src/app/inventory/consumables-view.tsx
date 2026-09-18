@@ -202,7 +202,7 @@ export default function ConsumableInventoryView({ rows, loading, error, onReload
         </div>
         <div className="mt-3 flex items-center gap-2 rounded-lg border border-blue-100 bg-blue-50/70 px-3 py-2 text-xs leading-5 text-blue-800">
           <span className="flex h-4 w-4 shrink-0 items-center justify-center rounded-full bg-blue-600 text-[10px] font-bold text-white">i</span>
-          <span>覆盖率说明：覆盖率 = 可支撑数量 ÷ 待生产数量 × 100%　|　可支撑数量 = 当前耗材库存 ÷ 单件正品耗材用量　|　≥100% 表示库存充足，&lt;100% 表示存在缺口　|　暂无待生产订单时显示「充足」</span>
+          <span>覆盖率说明：覆盖率 = 当前可用耗材 ÷ 待生产所需耗材 × 100%　|　可支撑正品数 = 当前耗材库存 ÷ 单件正品耗材用量　|　≥100% 表示库存充足，&lt;100% 表示存在耗材缺口　|　暂无待生产订单时显示「充足」</span>
         </div>
       </header>
 

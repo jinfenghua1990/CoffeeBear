@@ -4,7 +4,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
-from sqlalchemy import func
+from sqlalchemy import and_, exists, func, or_
 from sqlalchemy.orm import Session
 
 from app.api.deps import current_actor
@@ -25,7 +25,7 @@ from app.models.purchase import (
 from app.models.tax import TaxInvoice, TaxInvoiceImport, TaxInvoiceImportRecord, TaxInvoiceLink
 from app.services import purchase_service as svc
 from app.services.allocation import balance_check
-from app.services.procurement_chain_service import _source_pairs, is_reference_only_external_po
+from app.services.procurement_chain_service import _source_pairs
 
 router = APIRouter(prefix="/purchase", tags=["purchase"])
 
@@ -95,12 +95,27 @@ def list_orders(
             | ExternalPurchaseOrder.supplier_name.ilike(like)
             | ExternalPurchaseOrder.title.ilike(like)
         )
-    # 用户在 1688 导入明细中删除的订单号，其工作流副本也不作为订单残留展示。
-    removed_nos = {
-        no for (no,) in db.query(Alibaba1688Order.external_order_id).filter(
-            Alibaba1688Order.row_status == "deleted"
-        ).all()
-    }
+    # 分页前在数据库层排除两类“非真实采购主单”，避免先 limit/offset 后 Python 剔除
+    # 导致页面条数不足、翻页漏单。
+    deleted_source = exists().where(and_(
+        Alibaba1688Order.external_order_id == ExternalPurchaseOrder.external_order_id,
+        Alibaba1688Order.row_status == "deleted",
+    ))
+    active_source = exists().where(and_(
+        Alibaba1688Order.external_order_id == ExternalPurchaseOrder.external_order_id,
+        Alibaba1688Order.row_status != "deleted",
+    ))
+    query = query.filter(
+        or_(
+            ExternalPurchaseOrder.platform != "1688",
+            ~deleted_source,
+            active_source,
+        ),
+        or_(
+            ExternalPurchaseOrder.raw["referenceOnly"].astext.is_(None),
+            ExternalPurchaseOrder.raw["referenceOnly"].astext != "true",
+        ),
+    )
     pos = query.limit(limit).offset(offset).all()
     po_ids = [po.id for po in pos]
     allocations_by_po: dict[int, list[PurchaseAllocationItem]] = {}
@@ -126,10 +141,6 @@ def list_orders(
 
     out = []
     for po in pos:
-        if po.external_order_id in removed_nos:
-            continue
-        if is_reference_only_external_po(po):
-            continue
         bal = balance_check(
             po.effective_paid_amount,
             [item.amount for item in allocations_by_po.get(po.id, [])],

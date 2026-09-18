@@ -280,7 +280,9 @@ def overview(db: Session, year: int, month: int) -> dict[str, Any]:
 
 def _split_match_invoice_to_txns(
     db: Session, invoice: TaxInvoice, txns: list[BankTransaction],
-    actor: str, target_type: str = "bank_transaction"
+    actor: str, target_type: str = "bank_transaction",
+    allocated_by_invoice: dict[int, Decimal] | None = None,
+    allocated_by_txn: dict[int, Decimal] | None = None,
 ) -> tuple[int, Decimal]:
     """把一张发票拆给多笔流水（合计金额相等）。
 
@@ -288,13 +290,21 @@ def _split_match_invoice_to_txns(
     返回 (匹配流水数, 已分配金额)。
     """
     target = _dec(invoice.total_amount)
-    allocated = _invoice_bank_allocated(db, invoice.id)
+    allocated = (
+        allocated_by_invoice.get(invoice.id, Decimal("0.0000"))
+        if allocated_by_invoice is not None
+        else _invoice_bank_allocated(db, invoice.id)
+    )
     count = 0
     for txn in txns:
         if target - allocated <= TOLERANCE:
             break
         txn_amount = _dec(txn.amount)
-        txn_used = _txn_bank_allocated(db, txn.id)
+        txn_used = (
+            allocated_by_txn.get(txn.id, Decimal("0.0000"))
+            if allocated_by_txn is not None
+            else _txn_bank_allocated(db, txn.id)
+        )
         txn_remaining = txn_amount - txn_used
         if txn_remaining <= TOLERANCE:
             continue
@@ -322,6 +332,10 @@ def _split_match_invoice_to_txns(
         db.add(link_row)
         db.flush()
         allocated += portion
+        if allocated_by_invoice is not None:
+            allocated_by_invoice[invoice.id] = allocated
+        if allocated_by_txn is not None:
+            allocated_by_txn[txn.id] = txn_used + portion
         count += 1
     if invoice.match_status == "unmatched" and target - allocated <= TOLERANCE:
         invoice.match_status = "matched"
@@ -330,7 +344,9 @@ def _split_match_invoice_to_txns(
 
 def _split_match_txn_to_invoices(
     db: Session, txn: BankTransaction, invoices: list[TaxInvoice],
-    actor: str, target_type: str = "bank_transaction"
+    actor: str, target_type: str = "bank_transaction",
+    allocated_by_invoice: dict[int, Decimal] | None = None,
+    allocated_by_txn: dict[int, Decimal] | None = None,
 ) -> tuple[int, Decimal]:
     """把一笔流水拆给多张发票（合计金额相等）。
 
@@ -338,13 +354,21 @@ def _split_match_txn_to_invoices(
     返回 (匹配发票数, 已分配金额)。
     """
     target = _dec(txn.amount)
-    allocated = _txn_bank_allocated(db, txn.id)
+    allocated = (
+        allocated_by_txn.get(txn.id, Decimal("0.0000"))
+        if allocated_by_txn is not None
+        else _txn_bank_allocated(db, txn.id)
+    )
     count = 0
     for invoice in invoices:
         if target - allocated <= TOLERANCE:
             break
         inv_amount = _dec(invoice.total_amount)
-        inv_used = _invoice_bank_allocated(db, invoice.id)
+        inv_used = (
+            allocated_by_invoice.get(invoice.id, Decimal("0.0000"))
+            if allocated_by_invoice is not None
+            else _invoice_bank_allocated(db, invoice.id)
+        )
         inv_remaining = inv_amount - inv_used
         if inv_remaining <= TOLERANCE:
             if invoice.match_status == "unmatched":
@@ -373,6 +397,10 @@ def _split_match_txn_to_invoices(
         db.add(link_row)
         db.flush()
         allocated += portion
+        if allocated_by_txn is not None:
+            allocated_by_txn[txn.id] = allocated
+        if allocated_by_invoice is not None:
+            allocated_by_invoice[invoice.id] = inv_used + portion
         count += 1
         if invoice.match_status == "unmatched" and inv_amount - (inv_used + portion) <= TOLERANCE:
             invoice.match_status = "matched"
@@ -507,7 +535,7 @@ def auto_match(db: Session, year: int, month: int, actor: str = "system") -> dic
     # 银行付款维度按“剩余未分摊金额”判断，不依赖跨业务共用的 match_status。
     leftover_invoices = [
         inv for inv in invoices
-        if _dec(inv.total_amount) - _invoice_bank_allocated(db, inv.id) > TOLERANCE
+        if _dec(inv.total_amount) - allocated_by_invoice.get(inv.id, Decimal("0")) > TOLERANCE
     ]
     # 仍未配的流水
     leftover_txns = [t for t in txns if t.id not in existing_txn_ids]
@@ -528,14 +556,14 @@ def auto_match(db: Session, year: int, month: int, actor: str = "system") -> dic
         txn_list = sorted(txn_groups[norm], key=lambda x: x.txn_date)
         for inv in inv_list:
             inv_total = _dec(inv.total_amount)
-            inv_remaining = inv_total - _invoice_bank_allocated(db, inv.id)
+            inv_remaining = inv_total - allocated_by_invoice.get(inv.id, Decimal("0"))
             if inv_remaining <= TOLERANCE:
                 continue
             # 同名流水按“可用剩余额”累计；历史已部分分配的发票只补齐剩余部分。
             running = Decimal("0.0000")
             needed_txns = []
             for t in txn_list:
-                txn_remaining = _dec(t.amount) - _txn_bank_allocated(db, t.id)
+                txn_remaining = _dec(t.amount) - allocated_by_txn.get(t.id, Decimal("0"))
                 if txn_remaining <= TOLERANCE:
                     continue
                 if running >= inv_remaining - TOLERANCE:
@@ -543,7 +571,11 @@ def auto_match(db: Session, year: int, month: int, actor: str = "system") -> dic
                 needed_txns.append(t)
                 running += txn_remaining
             if running >= inv_remaining - TOLERANCE and needed_txns:
-                cnt, allocated = _split_match_invoice_to_txns(db, inv, needed_txns, actor)
+                cnt, allocated = _split_match_invoice_to_txns(
+                    db, inv, needed_txns, actor,
+                    allocated_by_invoice=allocated_by_invoice,
+                    allocated_by_txn=allocated_by_txn,
+                )
                 if cnt > 0:
                     split_matched += cnt
                     split_details.append({
@@ -554,7 +586,7 @@ def auto_match(db: Session, year: int, month: int, actor: str = "system") -> dic
                         "txnDates": [t.txn_date.isoformat() for t in needed_txns],
                     })
                     for t in needed_txns:
-                        if _txn_bank_allocated(db, t.id) >= _dec(t.amount) - TOLERANCE:
+                        if allocated_by_txn.get(t.id, Decimal("0")) >= _dec(t.amount) - TOLERANCE:
                             existing_txn_ids.add(t.id)
 
     # 第三轮：把仍未配的"大流水"拆给多张同名小发票
@@ -566,10 +598,14 @@ def auto_match(db: Session, year: int, month: int, actor: str = "system") -> dic
             continue
         candidates = [
             inv for inv in inv_groups[norm]
-            if _dec(inv.total_amount) - _invoice_bank_allocated(db, inv.id) > TOLERANCE
+            if _dec(inv.total_amount) - allocated_by_invoice.get(inv.id, Decimal("0")) > TOLERANCE
         ]
         if len(candidates) >= 2:
-            cnt, allocated = _split_match_txn_to_invoices(db, txn, candidates, actor)
+            cnt, allocated = _split_match_txn_to_invoices(
+                db, txn, candidates, actor,
+                allocated_by_invoice=allocated_by_invoice,
+                allocated_by_txn=allocated_by_txn,
+            )
             if cnt > 0:
                 big_txn_split_matched += cnt
                 split_details.append({
@@ -600,17 +636,14 @@ def auto_match(db: Session, year: int, month: int, actor: str = "system") -> dic
             supplier_norm = _normalize_name(s.name)
             for inv in leftover_invoices:
                 inv_total = _dec(inv.total_amount)
-                inv_remaining = inv_total - _invoice_bank_allocated(db, inv.id)
+                inv_remaining = inv_total - allocated_by_invoice.get(inv.id, Decimal("0"))
                 txn_total = _dec(txn.amount)
-                txn_remaining = txn_total - _txn_bank_allocated(db, txn.id)
+                txn_remaining = txn_total - allocated_by_txn.get(txn.id, Decimal("0"))
                 if inv_remaining <= TOLERANCE or txn_remaining <= TOLERANCE:
                     continue
                 # 供应商银行账户是强证据，但仍只在双方“剩余金额”相等时自动落库。
                 if supplier_norm == _normalize_name(inv.seller_name) and abs(inv_remaining - txn_remaining) <= TOLERANCE:
-                    existing = db.query(TaxInvoiceLink).filter_by(
-                        invoice_id=inv.id, target_type=TARGET_TYPE, target_id=txn.id
-                    ).first()
-                    if existing is None:
+                    if (inv.id, txn.id) not in existing_invoice_txn:
                         portion = min(inv_remaining, txn_remaining)
                         link_row = TaxInvoiceLink(
                             invoice_id=inv.id,
@@ -624,12 +657,15 @@ def auto_match(db: Session, year: int, month: int, actor: str = "system") -> dic
                         )
                         db.add(link_row)
                         db.flush()
-                        if inv.match_status == "unmatched" and inv_total - (_invoice_bank_allocated(db, inv.id)) <= TOLERANCE:
+                        allocated_by_invoice[inv.id] = allocated_by_invoice.get(inv.id, Decimal("0")) + portion
+                        allocated_by_txn[txn.id] = allocated_by_txn.get(txn.id, Decimal("0")) + portion
+                        existing_invoice_txn.add((inv.id, txn.id))
+                        if inv.match_status == "unmatched" and inv_total - allocated_by_invoice[inv.id] <= TOLERANCE:
                             inv.match_status = "matched"
                             msg = f"已匹配（供应商银行账户强匹配）{txn.txn_date.isoformat()} ¥{portion}"
                             inv.match_note = f"{inv.match_note}；{msg}" if inv.match_note else msg
                         supplier_matched += 1
-                        if _txn_bank_allocated(db, txn.id) >= txn_total - TOLERANCE:
+                        if allocated_by_txn.get(txn.id, Decimal("0")) >= txn_total - TOLERANCE:
                             existing_txn_ids.add(txn.id)
                         supplier_details.append({
                             "invoiceId": inv.id,
