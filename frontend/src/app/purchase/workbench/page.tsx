@@ -91,13 +91,13 @@ const DIM_DOT: Record<string, string> = {
 };
 /** 环节补数据入口：站内跳导入页，或切到工作台其它视图 */
 const STAGE_ACTION: Record<string, { href?: string; view?: ViewMode; act: string }> = {
-  order: { href: "/alibaba1688-import", act: "导入 1688 订单" },
+  order: { href: "/data-center-import?tab=alibaba1688", act: "导入 1688 订单" },
   sku: { view: "matching", act: "配置 SKU 匹配" },
   jackyunPo: { href: "/purchase/workbench?view=orders", act: "查看本系统采购单" },
-  inbound: { href: "/jackyun-import", act: "导入入库单" },
-  invoice: { href: "/tax-invoices", act: "导入发票清单" },
-  paid: { href: "/jackyun-import", act: "导入结算单" },
-  verified: { href: "/tax-invoices", act: "查看发票清单" },
+  inbound: { href: "/data-center-import?tab=jackyun", act: "导入入库单" },
+  invoice: { href: "/finance/invoices", act: "导入发票清单" },
+  paid: { href: "/data-center-import?tab=jackyun", act: "导入结算单" },
+  verified: { href: "/finance/invoices", act: "查看发票清单" },
 };
 type IconName =
   | "dashboard"

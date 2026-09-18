@@ -513,18 +513,21 @@ def _serialize_invoice(row: TaxInvoice, context: dict | None = None, db: Session
     # categoryLabel 跟随最终 category（含明细兜底识别），保证前后端文案一致；
     # 销项走独立 OUTPUT_CATEGORY 文案（空 = 待判断）。
     payload["categoryLabel"] = category_label_for_direction(row.direction, payload.get("category") or "")
-    # 进项发票的支付方式自动从银行流水关联计算：有银行流水关联=对公账户支出，无=个人垫付；
-    # 未传 db 的纯序列化场景无法判定，返回空值而不是猜测。
-    if row.direction == "input" and db is not None:
-        from app.models.tax import TaxInvoiceLink
-        has_bank_link = db.query(TaxInvoiceLink).filter(
-            TaxInvoiceLink.invoice_id == row.id,
-            TaxInvoiceLink.target_type == "bank_transaction",
-            TaxInvoiceLink.match_method != "rejected",
-        ).count() > 0
-        payload["paymentMethod"] = "corporate" if has_bank_link else "personal"
-    else:
-        payload["paymentMethod"] = ""
+    # 支付方式：
+    # - 进项：由银行付款关联自动推导（列表批量场景可通过 context 预先注入，避免逐票查询）；
+    # - 销项：直接回显用户维护的 payment_method，不能在序列化时抹掉。
+    if "paymentMethod" not in payload:
+        if row.direction == "input" and db is not None:
+            has_bank_link = db.query(TaxInvoiceLink.id).filter(
+                TaxInvoiceLink.invoice_id == row.id,
+                TaxInvoiceLink.target_type == "bank_transaction",
+                TaxInvoiceLink.match_method != "rejected",
+            ).first() is not None
+            payload["paymentMethod"] = "corporate" if has_bank_link else "personal"
+        elif row.direction == "output":
+            payload["paymentMethod"] = row.payment_method or ""
+        else:
+            payload["paymentMethod"] = ""
     return payload
 
 
@@ -547,8 +550,10 @@ def _invoice_business_context(db: Session, rows: list[TaxInvoice]) -> dict[int, 
         .all()
     )
     by_type: dict[str, set[int]] = {}
+    links_by_invoice: dict[int, list[TaxInvoiceLink]] = {}
     for link in links:
         by_type.setdefault(link.target_type, set()).add(link.target_id)
+        links_by_invoice.setdefault(link.invoice_id, []).append(link)
 
     alibaba = {
         row.id: row
@@ -617,7 +622,7 @@ def _invoice_business_context(db: Session, rows: list[TaxInvoice]) -> dict[int, 
     }
     result: dict[int, dict] = {}
     for invoice_id in invoice_ids:
-        invoice_links = [link for link in links if link.invoice_id == invoice_id]
+        invoice_links = links_by_invoice.get(invoice_id, [])
         purchase_nos: list[str] = []
         inbound_nos: list[str] = []
         link_rows: list[dict] = []
@@ -988,6 +993,21 @@ def list_invoices(
     context = _invoice_business_context(db, rows)
     red_context = _red_trace_context(rows)
     line_context = invoice_line_summaries(db, rows)
+    input_invoice_ids = [row.id for row in rows if row.direction == "input"]
+    bank_linked_invoice_ids = {
+        invoice_id
+        for (invoice_id,) in (
+            db.query(TaxInvoiceLink.invoice_id)
+            .filter(
+                TaxInvoiceLink.invoice_id.in_(input_invoice_ids),
+                TaxInvoiceLink.target_type == "bank_transaction",
+                TaxInvoiceLink.match_method != "rejected",
+            )
+            .distinct()
+            .all()
+            if input_invoice_ids else []
+        )
+    }
     result = []
     for row in rows:
         ctx = {
@@ -995,6 +1015,10 @@ def list_invoices(
             **red_context.get(row.id, {}),
             **line_context.get(row.id, {"lineItems": [], "lineItemCount": 0}),
         }
+        if row.direction == "input":
+            ctx["paymentMethod"] = "corporate" if row.id in bank_linked_invoice_ids else "personal"
+        elif row.direction == "output":
+            ctx["paymentMethod"] = row.payment_method or ""
         # 明细兜底识别只面向进项（6+1）；销项分类不按货物名推断，空即待判断。
         if not row.category and row.direction != "output":
             ctx["category"] = classify_category_from_items(
@@ -1312,7 +1336,6 @@ def set_processing_status(
     status_to_category = {"required": "goods", "not_required": "reimburse_operating", "pending": ""}
     invoice.category = status_to_category[processing_status]
     invoice.processing_status = _derive_processing_status(invoice.category)
-    db.commit()
     audit(
         db,
         actor,
@@ -1320,7 +1343,9 @@ def set_processing_status(
         "tax_invoices",
         invoice.id,
         {"processingStatus": processing_status, "category": invoice.category},
+        commit=False,
     )
+    db.commit()
     return invoice
 
 
@@ -1339,9 +1364,11 @@ def set_invoice_categories(
     for invoice in invoices:
         invoice.category = category
         invoice.processing_status = derived
+        audit(
+            db, actor, "tax.invoice.set_category", "tax_invoices", invoice.id,
+            {"category": category}, commit=False,
+        )
     db.commit()
-    for invoice in invoices:
-        audit(db, actor, "tax.invoice.set_category", "tax_invoices", invoice.id, {"category": category})
     return invoices
 
 
@@ -1368,9 +1395,11 @@ def set_invoice_payment_methods(
             raise ValueError(f"发票 #{invoice.id} 不是销项发票，不能设置支付方式")
     for invoice in invoices:
         invoice.payment_method = payment_method
+        audit(
+            db, actor, "tax.invoice.set_payment_method", "tax_invoices", invoice.id,
+            {"payment_method": payment_method}, commit=False,
+        )
     db.commit()
-    for invoice in invoices:
-        audit(db, actor, "tax.invoice.set_payment_method", "tax_invoices", invoice.id, {"payment_method": payment_method})
     return invoices
 
 

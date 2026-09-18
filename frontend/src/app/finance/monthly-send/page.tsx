@@ -235,6 +235,11 @@ export default function MonthlySendPage() {
   const [msg, setMsg] = useState("");
   const [busy, setBusy] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
+  const filesRequestSeq = useRef(0);
+  const intakeRequestSeq = useRef(0);
+  const unbilledRequestSeq = useRef(0);
+  const matchRequestSeq = useRef(0);
+  const pickerRequestSeq = useRef(0);
   const uploadKind = useRef<"交易明细" | "回单详情" | "purchase_inbound" | "sales_query">("交易明细");
 
   const period = periods.find((p) => sel && p.year === sel.year && p.month === sel.month) || null;
@@ -268,36 +273,40 @@ export default function MonthlySendPage() {
 
   const loadFiles = useCallback(() => {
     if (!sel) return;
+    const seq = ++filesRequestSeq.current;
     authenticatedFetch(`/api/v1/finance/${sel.year}/${sel.month}/files`, { cache: "no-store" })
       .then((r) => r.json())
-      .then(setFiles)
+      .then((rows) => { if (seq === filesRequestSeq.current) setFiles(rows); })
       .catch(() => {});
   }, [sel]);
 
   const loadIntake = useCallback(() => {
     if (!sel) return;
+    const seq = ++intakeRequestSeq.current;
     authenticatedFetch(`/api/v1/finance/${sel.year}/${sel.month}/intake`, { cache: "no-store" })
       .then((r) => r.json())
-      .then(setIntake)
-      .catch(() => setIntake(null));
+      .then((data) => { if (seq === intakeRequestSeq.current) setIntake(data); })
+      .catch(() => { if (seq === intakeRequestSeq.current) setIntake(null); });
   }, [sel]);
 
   const loadUnbilled = useCallback(() => {
     if (!sel) return;
+    const seq = ++unbilledRequestSeq.current;
     authenticatedFetch(`/api/v1/finance/unbilled/preview?year=${sel.year}&month=${sel.month}`, { cache: "no-store" })
       .then((r) => (r.ok ? r.json() : null))
-      .then(setUnbilled)
+      .then((data) => { if (seq === unbilledRequestSeq.current) setUnbilled(data); })
       .catch(() => {});
   }, [sel]);
 
   const loadMatch = useCallback(() => {
     if (!sel) return;
+    const seq = ++matchRequestSeq.current;
     setMatchLoading(true);
     authenticatedFetch(`/api/v1/finance/payment-invoice-match/${sel.year}/${sel.month}`, { cache: "no-store" })
       .then((r) => (r.ok ? r.json() : null))
-      .then(setMatchData)
-      .catch(() => setMatchData(null))
-      .finally(() => setMatchLoading(false));
+      .then((data) => { if (seq === matchRequestSeq.current) setMatchData(data); })
+      .catch(() => { if (seq === matchRequestSeq.current) setMatchData(null); })
+      .finally(() => { if (seq === matchRequestSeq.current) setMatchLoading(false); });
   }, [sel]);
 
   const loadMailStatus = useCallback(() => {
@@ -317,18 +326,22 @@ export default function MonthlySendPage() {
   // 弹层切"全部未配发票"时拉取全量未匹配进项票（端点上限 500，靠搜索缩小范围）
   useEffect(() => {
     if (!pickerTxn || pickerScope !== "all") return;
+    const seq = ++pickerRequestSeq.current;
     authenticatedFetch("/api/v1/tax-invoices?direction=input&match_status=unmatched&limit=500", { cache: "no-store" })
       .then((r) => (r.ok ? r.json() : []))
-      .then((rows: Array<Record<string, unknown>>) => setAllInvoices(rows.map((row) => ({
-        id: Number(row.id),
-        invoiceNumber: String(row.invoiceNumber || ""),
-        sellerName: String(row.sellerName || ""),
-        issueDate: String(row.issueDate || "").slice(0, 10),
-        totalAmount: String(row.totalAmount || "0"),
-        remaining: String(row.totalAmount || "0"),
-        suggested: false,
-      }))))
-      .catch(() => setAllInvoices([]));
+      .then((rows: Array<Record<string, unknown>>) => {
+        if (seq !== pickerRequestSeq.current) return;
+        setAllInvoices(rows.map((row) => ({
+          id: Number(row.id),
+          invoiceNumber: String(row.invoiceNumber || ""),
+          sellerName: String(row.sellerName || ""),
+          issueDate: String(row.issueDate || "").slice(0, 10),
+          totalAmount: String(row.totalAmount || "0"),
+          remaining: String(row.totalAmount || "0"),
+          suggested: false,
+        })));
+      })
+      .catch(() => { if (seq === pickerRequestSeq.current) setAllInvoices([]); });
   }, [pickerTxn, pickerScope]);
   useEffect(() => {
     if (!unbilled) {

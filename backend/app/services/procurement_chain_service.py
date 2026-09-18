@@ -981,8 +981,8 @@ def purge_voided_invoice_links(db: Session, actor: str = "system", dry_run: bool
     早期版本没有过滤作废票，历史库里可能残留这类关联：已红冲的蓝字票被计进
     采购金额，会造成票面金额虚高。默认 dry_run，确认清单后再实际删除。
     """
-    links = (
-        db.query(TaxInvoiceLink)
+    link_rows = (
+        db.query(TaxInvoiceLink, TaxInvoice)
         .join(TaxInvoice, TaxInvoice.id == TaxInvoiceLink.invoice_id)
         .filter(
             TaxInvoiceLink.target_type == "alibaba1688_order",
@@ -991,28 +991,26 @@ def purge_voided_invoice_links(db: Session, actor: str = "system", dry_run: bool
         .all()
     )
     items: list[dict] = []
-    for link in links:
-        inv = db.get(TaxInvoice, link.invoice_id)
+    for link, inv in link_rows:
         items.append({
             "linkId": link.id,
             "orderId": link.target_id,
             "invoiceId": link.invoice_id,
-            "invoiceNo": _invoice_no(inv) if inv is not None else "",
-            "amount": float(inv.total_amount) if inv is not None and inv.total_amount is not None else None,
-            "status": (inv.status if inv is not None else "") or "",
-            "issueDate": inv.issue_date.isoformat() if inv is not None and inv.issue_date else None,
+            "invoiceNo": _invoice_no(inv),
+            "amount": float(inv.total_amount) if inv.total_amount is not None else None,
+            "status": inv.status or "",
+            "issueDate": inv.issue_date.isoformat() if inv.issue_date else None,
         })
     if dry_run:
         return {"ok": True, "dryRun": True, "matched": len(items), "removed": 0, "items": items}
-    for link in links:
-        inv = db.get(TaxInvoice, link.invoice_id)
+    for link, inv in link_rows:
         db.delete(link)
-        if inv is not None:
-            inv.match_status = "unmatched"
-            inv.match_note = f"{(inv.match_note or '')}；已解除作废票关联".strip("；")
+        inv.match_status = "unmatched"
+        inv.match_note = f"{(inv.match_note or '')}；已解除作废票关联".strip("；")
         audit(
             db, actor, "procurement.invoice.purge_voided", "tax_invoice_link", str(link.id),
             {"invoiceId": link.invoice_id, "orderId": link.target_id},
+            commit=False,
         )
     db.commit()
     return {"ok": True, "dryRun": False, "matched": len(items), "removed": len(items), "items": items}
@@ -2518,20 +2516,28 @@ def get_order_detail(db: Session, order_id: int) -> dict | None:
             "confidence": float(link.confidence) if link.confidence is not None else None,
             "note": link.note or "",
         })
-    # 发票建议
-    for link in db.query(TaxInvoiceLink).filter_by(
-        target_type="alibaba1688_order", target_id=order.id, confirmed=False
-    ).filter(TaxInvoiceLink.match_method != "rejected").all():
-        inv = db.get(TaxInvoice, link.invoice_id)
+    # 发票建议：一次 join 取齐发票，避免每条建议再单独 db.get。
+    invoice_suggestion_rows = (
+        db.query(TaxInvoiceLink, TaxInvoice)
+        .join(TaxInvoice, TaxInvoice.id == TaxInvoiceLink.invoice_id)
+        .filter(
+            TaxInvoiceLink.target_type == "alibaba1688_order",
+            TaxInvoiceLink.target_id == order.id,
+            TaxInvoiceLink.confirmed.is_(False),
+            TaxInvoiceLink.match_method != "rejected",
+        )
+        .all()
+    )
+    for link, inv in invoice_suggestion_rows:
         suggestions.append({
             "kind": "invoice",
             "linkId": link.id,
             "targetId": link.invoice_id,
             "targetType": "invoice",
-            "targetNo": _invoice_no(inv) if inv is not None else str(link.invoice_id),
-            "targetAmount": float(inv.total_amount) if (inv is not None and inv.total_amount is not None) else None,
-            "targetDate": inv.issue_date.isoformat() if (inv is not None and inv.issue_date) else None,
-            "targetSupplier": inv.seller_name if inv is not None else "",
+            "targetNo": _invoice_no(inv),
+            "targetAmount": float(inv.total_amount) if inv.total_amount is not None else None,
+            "targetDate": inv.issue_date.isoformat() if inv.issue_date else None,
+            "targetSupplier": inv.seller_name or "",
             "confidence": float(link.confidence) if link.confidence is not None else None,
             "note": link.note or "",
         })
