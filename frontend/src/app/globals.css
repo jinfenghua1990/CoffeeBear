@@ -176,15 +176,79 @@ body {
   background: #6366f1;
 }
 
+.global-column-dragger {
+  position: absolute;
+  top: 50%;
+  left: 2px;
+  z-index: 29;
+  width: 12px;
+  height: 22px;
+  transform: translateY(-50%);
+  cursor: grab;
+  touch-action: none;
+  opacity: 0;
+  transition: opacity 120ms ease, background-color 120ms ease;
+}
+
+.global-column-dragger::before {
+  content: "⋮⋮";
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  color: #94a3b8;
+  font-size: 10px;
+  line-height: 1;
+  letter-spacing: -3px;
+}
+
+.global-reorderable-table th:hover > .global-column-dragger,
+.global-column-dragger:focus {
+  opacity: 0.9;
+}
+
+.global-column-dragger:active {
+  cursor: grabbing;
+}
+
+.global-column-dragging {
+  opacity: 0.6;
+}
+
+.global-column-drop-before {
+  box-shadow: inset 3px 0 0 #6366f1;
+}
+
+.global-column-drop-after {
+  box-shadow: inset -3px 0 0 #6366f1;
+}
+
 html.global-column-resizing,
 html.global-column-resizing * {
   cursor: col-resize !important;
   user-select: none !important;
 }
 
+html.global-column-reordering {
+  user-select: none !important;
+}
+
 .dark .global-column-resizer:hover::after,
 .dark .global-column-resizer.is-active::after {
   background: #818cf8;
+}
+
+.dark .global-column-dragger::before {
+  color: #64748b;
+}
+
+.dark .global-column-drop-before {
+  box-shadow: inset 3px 0 0 #818cf8;
+}
+
+.dark .global-column-drop-after {
+  box-shadow: inset -3px 0 0 #818cf8;
 }
 
 ::selection {
