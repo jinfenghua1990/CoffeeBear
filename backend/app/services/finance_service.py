@@ -205,6 +205,13 @@ def delete_archive_file(db: Session, file_id: int, actor: str = "system") -> dic
     row = db.get(ArchiveFile, file_id)
     if row is None:
         raise ValueError(f"归档文件不存在：{file_id}")
+    referenced = (
+        db.query(FinanceDeliveryFile.id)
+        .filter(FinanceDeliveryFile.archive_file_id == file_id)
+        .first()
+    )
+    if referenced is not None:
+        raise ValueError("该原始资料已被财务交付包引用，请先删除未发送的交付包；已发送版本不可破坏")
     stored_path, company, year, month = row.stored_path, row.company, row.period_year, row.period_month
     name, version = row.original_name, row.version
     db.delete(row)
@@ -223,10 +230,12 @@ def delete_archive_file(db: Session, file_id: int, actor: str = "system") -> dic
 
 
 def delete_delivery_package(db: Session, package_id: int, actor: str = "system") -> dict[str, Any]:
-    """删除交付包记录及磁盘 ZIP（不可恢复）。已发送记录同样可删，仅移除记录与文件。"""
+    """只允许删除未发送交付包；SENT 版本永久保留，确保财务发送审计链可追溯。"""
     row = db.get(FinanceDeliveryPackage, package_id)
     if row is None:
         raise ValueError(f"交付包不存在：{package_id}")
+    if row.status == "SENT":
+        raise ValueError("该交付包已经发送给财务，属于不可变审计版本，禁止删除")
     zip_path, version, status = row.zip_path, row.version, row.status
     db.delete(row)
     db.commit()

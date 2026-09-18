@@ -156,7 +156,7 @@ export default function ConsumableInventoryView({ rows, loading, error, onReload
   }, [selected]);
 
   function exportRows() {
-    const header = ["耗材编号", "耗材名称", "绑定正品编号", "绑定正品名称", "总库存", "累计已用", "当前库存", "使用占比", "可支撑数量", "覆盖率", "状态"];
+    const header = ["耗材编号", "耗材名称", "绑定正品编号", "绑定正品名称", "总库存", "累计已用", "当前库存", "使用占比", "可支撑正品数", "覆盖率", "状态"];
     const lines = visibleRows.map((row) => {
       const mappings = mappingDetails(row);
       const codes = mappings.map((item) => item.skuCode).join(" + ");
@@ -263,7 +263,7 @@ export default function ConsumableInventoryView({ rows, loading, error, onReload
                 <th className="px-3 py-2.5 text-right">累计已用</th>
                 <th className="px-3 py-2.5 text-right">当前库存</th>
                 <th className="px-3 py-2.5">使用占比</th>
-                <th className="px-3 py-2.5 text-right">可支撑数量</th>
+                <th className="px-3 py-2.5 text-right">可支撑正品数</th>
                 <th className="px-3 py-2.5 text-right">覆盖率</th>
                 <th className="px-3 py-2.5">状态</th>
               </tr>
@@ -316,10 +316,10 @@ function ConsumableDetailDrawer({ row, transactions, loading, error, onClose, on
     ["累计已用", row.totalUsedQty ?? row.usedQty],
     ["当前库存", row.currentStockQty ?? row.availableQty],
     ["在途数量", row.transitQty],
-    ["待生产数量", row.pendingProductionQty ?? "0"],
-    ["可支撑数量", row.supportQty],
+    ["待生产需耗材", row.pendingProductionQty ?? "0"],
+    ["可支撑正品数", row.supportQty],
     ["覆盖率", coverageDisplay],
-    ["缺口数量", row.gapQty ?? "0"],
+    ["耗材缺口", row.gapQty ?? "0"],
   ];
   return (
     <div className="fixed inset-0 z-modal flex justify-end" role="dialog" aria-modal="true" aria-label="耗材库存详情">

@@ -38,6 +38,18 @@ _OPEN_PRODUCTION_STATUSES = {
 }
 
 
+def _coverage_metrics(available: Decimal, pending_consumable: Decimal, usage_per_unit: Decimal) -> tuple[Decimal | None, Decimal | None, Decimal]:
+    """返回（可支撑正品数, 覆盖率%, 耗材缺口）；覆盖率始终使用同一耗材数量单位。"""
+    available_nonnegative = max(available, Decimal("0"))
+    support = available_nonnegative / usage_per_unit if usage_per_unit > 0 else None
+    coverage = (
+        available_nonnegative / pending_consumable * Decimal("100")
+        if pending_consumable > 0 else None
+    )
+    gap = max(pending_consumable - available_nonnegative, Decimal("0"))
+    return support, coverage, gap
+
+
 def _inventory_context(db: Session, rows: list[Consumable]) -> dict[int, dict]:
     """批量准备耗材经营视图所需的映射、流水和待生产数据。"""
     row_ids = [row.id for row in rows]
@@ -98,8 +110,7 @@ def _inventory_context(db: Session, rows: list[Consumable]) -> dict[int, dict]:
         usage_values = usage_by_consumable[row.id]
         usage_per_unit = max(usage_values) if usage_values else Decimal("0")
         pending = pending_by_consumable[row.id]
-        support = max(available, Decimal("0")) / usage_per_unit if usage_per_unit > 0 else None
-        coverage = support / pending * Decimal("100") if support is not None and pending > 0 else None
+        support, coverage, gap = _coverage_metrics(available, pending, usage_per_unit)
         if coverage is None or coverage >= Decimal("100"):
             inventory_status = "正常"
         elif coverage >= Decimal("60"):
@@ -114,7 +125,7 @@ def _inventory_context(db: Session, rows: list[Consumable]) -> dict[int, dict]:
             "usagePerUnit": usage_per_unit if usage_per_unit > 0 else None,
             "supportQty": support,
             "coveragePct": coverage,
-            "gapQty": max(pending - support, Decimal("0")) if support is not None else None,
+            "gapQty": gap,
             "inventoryStatus": inventory_status,
         }
     return context

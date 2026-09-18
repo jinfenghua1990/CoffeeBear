@@ -12,8 +12,10 @@ def audit(
     object_type: str = "",
     object_id: str = "",
     detail: dict[str, Any] | None = None,
+    *,
+    commit: bool = True,
 ) -> None:
-    """所有调整/状态变更必须写审计日志（规格 1.6 / 11 / 12）。"""
+    """所有调整/状态变更必须写审计日志；commit=False 时由上层统一提交/回滚。"""
     db.add(
         AuditLog(
             actor=actor or "system",
@@ -23,4 +25,5 @@ def audit(
             detail=detail or {},
         )
     )
-    db.commit()
+    if commit:
+        db.commit()

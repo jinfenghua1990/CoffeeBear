@@ -881,53 +881,79 @@ def register_order_invoice(db: Session, po: ExternalPurchaseOrder, *, invoice_no
 
 def create_invoice(db: Session, *, invoice_no: str, invoice_amount, invoice_date=None,
                    supplier_name: str = "", actor: str = "system") -> PurchaseInvoice:
+    number = (invoice_no or "").strip()
+    amount = to_decimal(invoice_amount)
+    if not number:
+        raise ValueError("请填写真实发票号码")
+    if not amount.is_finite() or amount <= 0:
+        raise ValueError("发票金额必须大于 0")
+    existing = db.query(PurchaseInvoice).filter(PurchaseInvoice.invoice_no == number).first()
+    if existing is not None:
+        raise ValueError("该发票号码已存在，请直接关联现有发票，避免重复建票")
     row = PurchaseInvoice(
-        invoice_no=invoice_no or "",
+        invoice_no=number,
         supplier_name=supplier_name or "",
-        invoice_amount=to_decimal(invoice_amount),
+        invoice_amount=amount,
         invoice_date=invoice_date,
         status="received",
     )
     db.add(row)
     db.commit()
     audit(db, actor, "purchase.invoice.create", "purchase_invoices", row.id,
-          {"invoiceNo": invoice_no, "amount": str(row.invoice_amount)})
+          {"invoiceNo": number, "amount": str(row.invoice_amount)})
     return row
 
 
 def link_invoice(db: Session, invoice: PurchaseInvoice, po: ExternalPurchaseOrder,
                  allocated_amount, actor: str = "system") -> PurchaseInvoiceLink:
     alloc = to_decimal(allocated_amount)
-    if alloc <= 0:
+    if not alloc.is_finite() or alloc <= 0:
         raise ValueError("分摊金额必须大于 0")
-    # 发票金额超采购金额 → 异常 + 拒绝
-    if po.paid_amount is not None and alloc > to_decimal(po.paid_amount):
-        _ensure_exception(db, "INVOICE_OVER_PO", "发票金额超采购金额",
-                          f"PO {po.external_order_id} 分摊 {alloc} > 实付 {po.paid_amount}")
-        db.commit()
-        raise ValueError(f"分摊金额 {alloc} 超过订单实付 {po.paid_amount}")
+
+    # 同时锁住订单和发票，避免两个并发请求分别通过“剩余额度”检查后共同造成超额。
+    db.refresh(po, with_for_update=True)
+    db.refresh(invoice, with_for_update=True)
+
     exists = db.query(PurchaseInvoiceLink).filter_by(invoice_id=invoice.id, po_id=po.id).first()
     if exists:
         raise ValueError("该发票已关联此订单")
-    # 一票多单分配不平 → 异常 + 拒绝
-    linked_sum = money_sum([
-        l.allocated_amount for l in db.query(PurchaseInvoiceLink).filter_by(invoice_id=invoice.id).all()
-    ] + [alloc])
-    if invoice.invoice_amount is not None and linked_sum > to_decimal(invoice.invoice_amount):
-        _ensure_exception(db, "INVOICE_ALLOCATION_UNBALANCED", "一票多单分配不平",
-                          f"发票 {invoice.invoice_no or invoice.id} 已分摊合计 {linked_sum} > 票面 {invoice.invoice_amount}")
-        db.commit()
-        raise ValueError(f"分摊合计 {linked_sum} 超过票面金额 {invoice.invoice_amount}")
+
+    po_limit = po.paid_amount if po.paid_amount is not None else po.order_amount
+    po_existing = money_sum(
+        link.allocated_amount
+        for link in db.query(PurchaseInvoiceLink).filter_by(po_id=po.id).all()
+    )
+    if po_limit is not None and po_existing + alloc > to_decimal(po_limit):
+        _ensure_exception(
+            db, "INVOICE_OVER_PO", "采购单累计发票分摊超额",
+            f"PO {po.external_order_id} 已分摊 {po_existing} + 本次 {alloc} > 采购金额 {po_limit}",
+        )
+        db.flush()
+        raise ValueError(
+            f"本单累计发票分摊 {po_existing + alloc} 超过采购金额 {po_limit}"
+        )
+
+    invoice_existing = money_sum(
+        link.allocated_amount
+        for link in db.query(PurchaseInvoiceLink).filter_by(invoice_id=invoice.id).all()
+    )
+    invoice_total = to_decimal(invoice.invoice_amount)
+    if invoice_total <= 0:
+        raise ValueError("发票票面金额必须大于 0")
+    if invoice_existing + alloc > invoice_total:
+        _ensure_exception(
+            db, "INVOICE_ALLOCATION_UNBALANCED", "一票多单分配不平",
+            f"发票 {invoice.invoice_no or invoice.id} 已分摊 {invoice_existing} + 本次 {alloc} > 票面 {invoice_total}",
+        )
+        db.flush()
+        raise ValueError(
+            f"发票累计分摊 {invoice_existing + alloc} 超过票面金额 {invoice_total}"
+        )
 
     link = PurchaseInvoiceLink(invoice_id=invoice.id, po_id=po.id, allocated_amount=alloc)
     db.add(link)
-    db.commit()
-    # 派生该订单的发票状态
-    po_total = money_sum([
-        l.allocated_amount
-        for l in db.query(PurchaseInvoiceLink).filter_by(po_id=po.id).all()
-    ])
-    po.invoice_status = derive_invoice_status(po.paid_amount, po_total, po.invoice_status)
+    po_total = po_existing + alloc
+    po.invoice_status = derive_invoice_status(po_limit, po_total, po.invoice_status)
     db.commit()
     audit(db, actor, "purchase.invoice.link", "purchase_invoice_links", link.id,
           {"invoiceId": invoice.id, "poId": po.id, "allocated": str(alloc),

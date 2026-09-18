@@ -672,15 +672,12 @@ class ProcurementChainMatcher:
         ).first()
         if link.target_type == "inbound":
             from app.services.consumable_service import _reverse_inbound_usage
+            from app.services.inbound_allocation_seed import release_inbound_seeds_for_link
+            # 耗材冲回、自动 SKU 分配释放、链路切换必须处于同一事务。
             _reverse_inbound_usage(self.db, link.id)
             link.consumable_usage_decided = False
             link.consumable_usage_enabled = None
-            # 释放旧入库单反填的 SKU 分配行（target_id 尚未变更，release 按旧单定位）
-            try:
-                from app.services.inbound_allocation_seed import release_inbound_seeds_for_link
-                release_inbound_seeds_for_link(self.db, link, actor="system")
-            except Exception:
-                self.db.rollback()
+            release_inbound_seeds_for_link(self.db, link, actor="system", commit=False)
         if duplicate is not None:
             if duplicate.target_type == "inbound":
                 from app.services.consumable_service import _reverse_inbound_usage
@@ -726,21 +723,19 @@ class ProcurementChainMatcher:
             raise ValueError("请选择有效的进项发票")
         target_type = "alibaba1688_order" if source else "external_purchase_order"
         target_id = source.id if source else external.id
-        link = self.db.query(TaxInvoiceLink).filter_by(
-            target_type=target_type, target_id=target_id, invoice_id=invoice_id
-        ).first()
+        from app.services import tax_invoice_service
+        result = tax_invoice_service.link_purchase_order(
+            self.db,
+            invoice_id=invoice_id,
+            target_type=target_type,
+            target_id=target_id,
+            allocated_amount=None,
+            note=note or "人工选择关联",
+            actor="system",
+        )
+        link = self.db.get(TaxInvoiceLink, result["id"])
         if link is None:
-            link = TaxInvoiceLink(
-                invoice_id=invoice_id, target_type=target_type, target_id=target_id,
-                match_method="manual", note=note,
-            )
-            self.db.add(link)
-        link.match_method = "manual"
-        link.confidence = Decimal("1")
-        link.note = note or "人工选择关联"
-        link.confirmed = True
-        mark_invoice_linked(invoice, link.note)
-        self.db.commit()
+            raise ValueError("发票关联写入失败")
         return link
 
     def confirm(self, link_id: int) -> ProcurementChainLink:
@@ -771,24 +766,26 @@ class ProcurementChainMatcher:
 
     def remove_link(self, link_id: int) -> None:
         link = self.db.get(ProcurementChainLink, link_id)
-        if link is not None:
+        if link is None:
+            return
+        try:
             if link.target_type == "inbound":
                 from app.services.consumable_service import _reverse_inbound_usage
+                from app.services.inbound_allocation_seed import release_inbound_seeds_for_link
                 _reverse_inbound_usage(self.db, link.id)
                 link.consumable_usage_decided = False
                 link.consumable_usage_enabled = None
-                # 释放该入库单反填的 SKU 分配行，避免残留行占用明细行、虚增订单金额
-                try:
-                    from app.services.inbound_allocation_seed import release_inbound_seeds_for_link
-                    release_inbound_seeds_for_link(self.db, link, actor="system")
-                except Exception:
-                    self.db.rollback()
+                # 与耗材冲回保持同一事务；任一步失败时整笔解除回滚。
+                release_inbound_seeds_for_link(self.db, link, actor="system", commit=False)
             # 保留拒绝/解除记录，避免下次“生成匹配建议”又把同一组合推回来。
             link.confirmed = False
             link.match_method = "rejected"
             link.confidence = None
             link.note = "人工拒绝或解除关联"
             self.db.commit()
+        except Exception:
+            self.db.rollback()
+            raise
 
     def remove_invoice_link(self, link_id: int) -> None:
         link = self.db.get(TaxInvoiceLink, link_id)

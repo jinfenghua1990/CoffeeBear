@@ -1681,12 +1681,72 @@ def link_purchase_order(
         default_note = "人工关联采购单"
         audit_action = "tax_invoice.link_purchase"
 
-    amount = quantize(to_decimal(allocated_amount)) if allocated_amount is not None else invoice.total_amount
+    # 锁定发票，避免并发手工关联同时通过剩余额度检查。
+    db.refresh(invoice, with_for_update=True)
     link = (
         db.query(TaxInvoiceLink)
         .filter_by(invoice_id=invoice.id, target_type=target_type, target_id=target_id)
         .first()
     )
+
+    domain_types = PURCHASE_LINK_TARGET_TYPES if target_type in PURCHASE_LINK_TARGET_TYPES else (SALES_LINK_TARGET_TYPE,)
+    invoice_total = quantize(to_decimal(invoice.total_amount))
+    if invoice_total <= 0:
+        raise ValueError("发票价税合计必须大于 0")
+
+    other_invoice_alloc = sum(
+        (
+            quantize(to_decimal(row.allocated_amount))
+            for row in db.query(TaxInvoiceLink).filter(
+                TaxInvoiceLink.invoice_id == invoice.id,
+                TaxInvoiceLink.target_type.in_(domain_types),
+                TaxInvoiceLink.match_method != "rejected",
+                TaxInvoiceLink.id != (link.id if link is not None else -1),
+            ).all()
+        ),
+        Decimal("0"),
+    )
+
+    if target_type == SALES_LINK_TARGET_TYPE:
+        target_limit_raw = target.paid_amount if target.paid_amount is not None else target.order_amount
+    else:
+        target_limit_raw = _purchase_target_brief(target_type, target)["amount"]
+    target_limit = quantize(to_decimal(target_limit_raw)) if target_limit_raw is not None else None
+    other_target_alloc = sum(
+        (
+            quantize(to_decimal(row.allocated_amount))
+            for row in db.query(TaxInvoiceLink).filter(
+                TaxInvoiceLink.target_type == target_type,
+                TaxInvoiceLink.target_id == target_id,
+                TaxInvoiceLink.match_method != "rejected",
+                TaxInvoiceLink.id != (link.id if link is not None else -1),
+            ).all()
+        ),
+        Decimal("0"),
+    )
+
+    if allocated_amount is None:
+        invoice_remaining = invoice_total - other_invoice_alloc
+        target_remaining = (
+            target_limit - other_target_alloc
+            if target_limit is not None and target_limit > 0
+            else invoice_remaining
+        )
+        amount = min(invoice_remaining, target_remaining)
+    else:
+        amount = quantize(to_decimal(allocated_amount))
+
+    if not amount.is_finite() or amount <= 0:
+        raise ValueError("分摊金额必须大于 0")
+    if other_invoice_alloc + amount > invoice_total:
+        raise ValueError(
+            f"发票累计分摊 {other_invoice_alloc + amount} 超过票面金额 {invoice_total}"
+        )
+    if target_limit is not None and target_limit > 0 and other_target_alloc + amount > target_limit:
+        raise ValueError(
+            f"该业务单累计发票分摊 {other_target_alloc + amount} 超过订单金额 {target_limit}"
+        )
+
     if link is None:
         link = TaxInvoiceLink(invoice_id=invoice.id, target_type=target_type, target_id=target_id)
         db.add(link)
@@ -1696,7 +1756,8 @@ def link_purchase_order(
     link.confirmed = True
     link.note = note or default_note
 
-    if invoice.match_status == "unmatched":
+    # 只有业务维度累计覆盖整张发票时才推进 matched；部分分摊不能伪装成已配平。
+    if invoice.match_status == "unmatched" and invoice_total - (other_invoice_alloc + amount) <= Decimal("0.01"):
         invoice.match_status = "matched"
         msg = f"{default_note} {order_no}"
         invoice.match_note = f"{invoice.match_note}；{msg}" if invoice.match_note else msg

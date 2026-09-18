@@ -21,7 +21,7 @@ from app.models.purchase import (
     PurchaseInvoiceLink,
 )
 from app.services import procurement_workbench_service as service
-from app.services.procurement_chain_service import _source_pairs
+from app.services.platform_purchase_guard import platform_source_pairs as _source_pairs
 
 router = APIRouter(prefix="/procurement-workbench", tags=["采购执行中心"])
 
@@ -98,10 +98,8 @@ def create_invoice_match(
     1688 平台单优先挂 1688 源单，与采购链路口径一致；写 manual 关联后，
     发票对账推导对该票改为"以手工为准"，不再自动 FIFO。
     """
-    from decimal import Decimal
-
-    from app.models.tax import TaxInvoice, TaxInvoiceLink
-    from app.services.procurement_chain_service import mark_invoice_linked
+    from app.models.tax import TaxInvoice
+    from app.services import tax_invoice_service
 
     inv = db.get(TaxInvoice, invoice_id)
     if inv is None or inv.direction != "input":
@@ -113,26 +111,29 @@ def create_invoice_match(
     if po.platform == "1688":
         src = (
             db.query(Alibaba1688Order)
-            .filter(Alibaba1688Order.external_order_id == po.external_order_id)
+            .filter(
+                Alibaba1688Order.external_order_id == po.external_order_id,
+                Alibaba1688Order.row_status != "deleted",
+            )
+            .order_by(Alibaba1688Order.id.desc())
             .first()
         )
         if src is not None:
             target_type, target_id = "alibaba1688_order", src.id
-    link = (
-        db.query(TaxInvoiceLink)
-        .filter_by(invoice_id=invoice_id, target_type=target_type, target_id=target_id)
-        .first()
-    )
-    if link is None:
-        link = TaxInvoiceLink(invoice_id=invoice_id, target_type=target_type, target_id=target_id)
-        db.add(link)
-    link.match_method = "manual"
-    link.confidence = Decimal("1")
-    link.confirmed = True
-    link.note = "供应商画像手工匹配"
-    mark_invoice_linked(inv, link.note)
-    db.commit()
-    return {"ok": True, "id": link.id, "invoiceId": invoice_id, "poId": po_id}
+    try:
+        result = tax_invoice_service.link_purchase_order(
+            db,
+            invoice_id=invoice_id,
+            target_type=target_type,
+            target_id=target_id,
+            allocated_amount=None,
+            note="供应商画像手工匹配",
+            actor="system",
+        )
+    except (ValueError, LookupError) as exc:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {**result, "invoiceId": invoice_id, "poId": po_id}
 
 
 @router.delete("/invoice-match/{link_id}")

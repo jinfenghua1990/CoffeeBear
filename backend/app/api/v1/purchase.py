@@ -528,9 +528,13 @@ def unlink_registered_invoice(link_id: int, request: Request, db: Session = Depe
 @router.post("/invoices")
 def create_invoice(body: InvoiceBody, request: Request,
                    db: Session = Depends(get_db)) -> dict[str, Any]:
-    row = svc.create_invoice(db, invoice_no=body.invoice_no, invoice_amount=body.invoice_amount,
-                             invoice_date=body.invoice_date, supplier_name=body.supplier_name,
-                             actor=current_actor(request))
+    try:
+        row = svc.create_invoice(db, invoice_no=body.invoice_no, invoice_amount=body.invoice_amount,
+                                 invoice_date=body.invoice_date, supplier_name=body.supplier_name,
+                                 actor=current_actor(request))
+    except ValueError as exc:
+        db.rollback()
+        raise HTTPException(400, str(exc))
     return {"id": row.id, "invoiceNo": row.invoice_no, "invoiceAmount": str(row.invoice_amount)}
 
 
@@ -550,6 +554,7 @@ def link_invoice(invoice_id: int, body: InvoiceLinkBody, request: Request,
         svc.link_invoice(db, invoice, po, body.allocated_amount,
                          actor=current_actor(request))
     except ValueError as exc:
+        db.rollback()
         raise HTTPException(400, str(exc))
     return {"ok": True, "poInvoiceStatus": po.invoice_status}
 

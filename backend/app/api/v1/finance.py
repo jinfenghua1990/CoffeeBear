@@ -380,7 +380,8 @@ def remove_archive_file(file_id: int, request: Request, db: Session = Depends(ge
     try:
         return finance_service.delete_archive_file(db, file_id, actor=current_actor(request))
     except ValueError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        status = 404 if "不存在" in str(exc) else 409
+        raise HTTPException(status_code=status, detail=str(exc)) from exc
 
 
 @router.delete("/packages/{package_id}")
@@ -389,7 +390,8 @@ def remove_delivery_package(package_id: int, request: Request, db: Session = Dep
     try:
         return finance_service.delete_delivery_package(db, package_id, actor=current_actor(request))
     except ValueError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        status = 404 if "不存在" in str(exc) else 409
+        raise HTTPException(status_code=status, detail=str(exc)) from exc
 
 
 @router.post("/{year}/{month}/check")

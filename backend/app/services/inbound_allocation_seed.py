@@ -172,6 +172,8 @@ def release_inbound_seeds_for_link(
     db: Session,
     link: ProcurementChainLink,
     actor: str = "system",
+    *,
+    commit: bool = True,
 ) -> dict:
     """解除/更换入库单链路时，释放该链路来源入库单反填的 SKU 分配行。
 
@@ -222,9 +224,13 @@ def release_inbound_seeds_for_link(
              "sourceItemId": row.source_item_id,
              "note": row.note or "",
              "reason": "解除/更换入库单关联，释放反填行"},
+            commit=commit,
         )
         released += 1
-    db.commit()
+    if commit:
+        db.commit()
+    else:
+        db.flush()
     return {"released": released, "poId": po.id, "docId": doc_id}
 
 
