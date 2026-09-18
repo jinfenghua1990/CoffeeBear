@@ -833,19 +833,67 @@ def auto_confirm_pending_links(db: Session, actor: str = "system") -> dict:
     skipped_orphans = 0
     inbound_links: list[ProcurementChainLink] = []
 
+    # 自动确认会遍历整批链路；先把循环中会访问的对象一次性预取，
+    # 避免每条链路重复 db.get 形成 N+1。这里只替换读取方式，不改变任何确认条件。
+    source_ids = {
+        link.order_id for link in chain_links if link.order_id is not None
+    } | {
+        link.target_id for link in invoice_links if link.target_type == "alibaba1688_order"
+    }
+    external_ids = {
+        link.external_po_id for link in chain_links if link.external_po_id is not None
+    } | {
+        link.target_id for link in invoice_links if link.target_type == "external_purchase_order"
+    }
+    inbound_ids = {
+        link.target_id for link in chain_links if link.target_type == "inbound"
+    }
+    settlement_ids = {
+        link.target_id for link in chain_links if link.target_type == "settlement"
+    }
+    invoice_ids = {link.invoice_id for link in invoice_links}
+
+    sources_by_id = (
+        {row.id: row for row in db.query(Alibaba1688Order).filter(Alibaba1688Order.id.in_(source_ids)).all()}
+        if source_ids else {}
+    )
+    external_by_id = (
+        {row.id: row for row in db.query(ExternalPurchaseOrder).filter(ExternalPurchaseOrder.id.in_(external_ids)).all()}
+        if external_ids else {}
+    )
+    inbound_by_id = (
+        {row.id: row for row in db.query(JackyunGoodsDocument).filter(JackyunGoodsDocument.id.in_(inbound_ids)).all()}
+        if inbound_ids else {}
+    )
+    settlements_by_id = (
+        {row.id: row for row in db.query(JackyunPurchaseSettlement).filter(JackyunPurchaseSettlement.id.in_(settlement_ids)).all()}
+        if settlement_ids else {}
+    )
+    invoices_by_id = (
+        {row.id: row for row in db.query(TaxInvoice).filter(TaxInvoice.id.in_(invoice_ids)).all()}
+        if invoice_ids else {}
+    )
+    source_import_ids = {
+        row.import_id for row in sources_by_id.values() if row.import_id is not None
+    }
+    source_imports_by_id = (
+        {row.id: row for row in db.query(Alibaba1688FileImport).filter(Alibaba1688FileImport.id.in_(source_import_ids)).all()}
+        if source_import_ids else {}
+    )
+
     for link in chain_links:
         if link.order_id is not None:
-            source = db.get(Alibaba1688Order, link.order_id)
+            source = sources_by_id.get(link.order_id)
             if source is None or source.row_status == "deleted":
                 skipped_orphans += 1
                 continue
             if source.import_id:
-                source_import = db.get(Alibaba1688FileImport, source.import_id)
+                source_import = source_imports_by_id.get(source.import_id)
                 if source_import is not None and source_import.lifecycle != "active":
                     skipped_orphans += 1
                     continue
         elif link.external_po_id is not None:
-            external = db.get(ExternalPurchaseOrder, link.external_po_id)
+            external = external_by_id.get(link.external_po_id)
             if external is None or is_reference_only_external_po(external):
                 skipped_orphans += 1
                 continue
@@ -854,7 +902,7 @@ def auto_confirm_pending_links(db: Session, actor: str = "system") -> dict:
             continue
 
         if link.target_type == "inbound":
-            target = db.get(JackyunGoodsDocument, link.target_id)
+            target = inbound_by_id.get(link.target_id)
             if target is None or target.document_type != "inbound":
                 skipped_orphans += 1
                 continue
@@ -876,7 +924,7 @@ def auto_confirm_pending_links(db: Session, actor: str = "system") -> dict:
             continue
 
         if link.target_type == "settlement":
-            if db.get(JackyunPurchaseSettlement, link.target_id) is None:
+            if settlements_by_id.get(link.target_id) is None:
                 skipped_orphans += 1
                 continue
             if not link.confirmed:
@@ -888,21 +936,21 @@ def auto_confirm_pending_links(db: Session, actor: str = "system") -> dict:
         skipped_orphans += 1
 
     for link in invoice_links:
-        invoice = db.get(TaxInvoice, link.invoice_id)
+        invoice = invoices_by_id.get(link.invoice_id)
         if invoice is None:
             skipped_orphans += 1
             continue
         if link.target_type == "alibaba1688_order":
-            source = db.get(Alibaba1688Order, link.target_id)
+            source = sources_by_id.get(link.target_id)
             if source is None or source.row_status == "deleted":
                 skipped_orphans += 1
                 continue
             if source.import_id:
-                source_import = db.get(Alibaba1688FileImport, source.import_id)
+                source_import = source_imports_by_id.get(source.import_id)
                 if source_import is not None and source_import.lifecycle != "active":
                     skipped_orphans += 1
                     continue
-        elif db.get(ExternalPurchaseOrder, link.target_id) is None:
+        elif external_by_id.get(link.target_id) is None:
             skipped_orphans += 1
             continue
         if not link.confirmed:

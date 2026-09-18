@@ -417,6 +417,9 @@ export default function PurchaseWorkbenchPage() {
   const [inboundMatch, setInboundMatch] = useState<InboundMatchSummary | null>(null);
   const [pendingAlloc, setPendingAlloc] = useState<PendingAllocation[]>([]);
   const [matchingBusy, setMatchingBusy] = useState(false);
+  // 订单 / 供应商 / 匹配 / 链路四个主视图共用 loading。
+  // 用单一序号保证“最后一次请求”才允许写回，避免快速切换视图时旧请求覆盖当前页面。
+  const viewRequestSeq = useRef(0);
 
   // 新建采购单弹窗开着时视为「有未保存内容」，关闭 Tab 需要二次确认
   useTabDirty(newOrderOpen);
@@ -512,13 +515,16 @@ export default function PurchaseWorkbenchPage() {
 
 
   const loadOrders = useCallback(async () => {
+    const seq = ++viewRequestSeq.current;
     setLoading(true);
     setError("");
     if (startDate && endDate && startDate > endDate) {
-      setOrders([]);
-      setTotal(0);
-      setError("开始日期不能晚于结束日期");
-      setLoading(false);
+      if (seq === viewRequestSeq.current) {
+        setOrders([]);
+        setTotal(0);
+        setError("开始日期不能晚于结束日期");
+        setLoading(false);
+      }
       return;
     }
     try {
@@ -533,6 +539,7 @@ export default function PurchaseWorkbenchPage() {
         kind: kindFilter,
         warehouse: warehouseFilter || undefined,
       });
+      if (seq !== viewRequestSeq.current) return;
       const items = result.groups.flatMap((group) => group.items);
       setOrders(items);
       setTotal(result.total);
@@ -541,20 +548,23 @@ export default function PurchaseWorkbenchPage() {
       requestedOrder.current = null;
       setSelectedOrderId((current) => requested ?? items.find(item => item.orderId === current)?.orderId ?? items[0]?.orderId ?? null);
     } catch {
+      if (seq !== viewRequestSeq.current) return;
       setOrders([]);
       setTotal(0);
       setOutstandingTotal(0);
       setError("订单数据加载失败，请刷新后重试");
     } finally {
-      setLoading(false);
+      if (seq === viewRequestSeq.current) setLoading(false);
     }
   }, [channelFilter, endDate, kindFilter, query, startDate, statusFilter, warehouseFilter, page]);
 
   const loadSuppliers = useCallback(async () => {
+    const seq = ++viewRequestSeq.current;
     setLoading(true);
     setError("");
     try {
       const result = await procurementWorkbenchApi.suppliers(200);
+      if (seq !== viewRequestSeq.current) return;
       setSuppliers(result.items);
       setSelectedSupplierName((current) => {
         if (result.items.length === 0) return null;
@@ -563,15 +573,17 @@ export default function PurchaseWorkbenchPage() {
           : result.items[0].supplierName;
       });
     } catch {
+      if (seq !== viewRequestSeq.current) return;
       setSuppliers([]);
       setSelectedSupplierName(null);
       setError("供应商数据加载失败，请刷新后重试");
     } finally {
-      setLoading(false);
+      if (seq === viewRequestSeq.current) setLoading(false);
     }
   }, []);
 
   const loadMatching = useCallback(async () => {
+    const seq = ++viewRequestSeq.current;
     setLoading(true);
     setError("");
     try {
@@ -579,12 +591,13 @@ export default function PurchaseWorkbenchPage() {
         skuMatchingApi.inboundSummary(),
         skuMatchingApi.pending(100),
       ]);
+      if (seq !== viewRequestSeq.current) return;
       setInboundMatch(match);
       setPendingAlloc(pending);
     } catch {
-      setError("匹配数据加载失败，请刷新后重试");
+      if (seq === viewRequestSeq.current) setError("匹配数据加载失败，请刷新后重试");
     } finally {
-      setLoading(false);
+      if (seq === viewRequestSeq.current) setLoading(false);
     }
   }, []);
 
@@ -604,21 +617,24 @@ export default function PurchaseWorkbenchPage() {
   }, [loadMatching]);
 
   const loadChain = useCallback(async () => {
+    const seq = ++viewRequestSeq.current;
     setLoading(true);
     setError("");
     try {
       const result = await procurementChainApi.workspace(500);
+      if (seq !== viewRequestSeq.current) return;
       setChainOverview(result.overview);
       setChainOrders(result.orders.items);
       setChainTotal(result.orders.total);
       setChainPending(result.pending.items);
     } catch {
+      if (seq !== viewRequestSeq.current) return;
       setChainOverview(null);
       setChainOrders([]);
       setChainPending([]);
       setError("链路数据加载失败，请刷新后重试");
     } finally {
-      setLoading(false);
+      if (seq === viewRequestSeq.current) setLoading(false);
     }
   }, []);
 
@@ -652,9 +668,9 @@ export default function PurchaseWorkbenchPage() {
 
   useEffect(() => {
     if (!pageActive) return;
-    // summary 同一份快照已经包含统计卡、付款率、漏斗和待办。
+    // summary 与当前子视图无关；只在页面重新激活时加载，业务动作完成后再显式刷新。
     void loadSummary();
-  }, [loadSummary, pageActive, view]);
+  }, [loadSummary, pageActive]);
 
   useEffect(() => {
     if (!pageActive) return;
