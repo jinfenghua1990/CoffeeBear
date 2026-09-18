@@ -607,15 +607,11 @@ export default function PurchaseWorkbenchPage() {
     setLoading(true);
     setError("");
     try {
-      const [overview, orderResult, pendingResult] = await Promise.all([
-        procurementChainApi.overview(),
-        procurementChainApi.orders(500),
-        procurementChainApi.pending(),
-      ]);
-      setChainOverview(overview);
-      setChainOrders(orderResult.items);
-      setChainTotal(orderResult.total);
-      setChainPending(pendingResult.items);
+      const result = await procurementChainApi.workspace(500);
+      setChainOverview(result.overview);
+      setChainOrders(result.orders.items);
+      setChainTotal(result.orders.total);
+      setChainPending(result.pending.items);
     } catch {
       setChainOverview(null);
       setChainOrders([]);

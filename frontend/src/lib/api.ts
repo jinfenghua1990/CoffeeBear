@@ -1644,7 +1644,7 @@ export type ChainOrderRow = {
 };
 
 export type PendingLink = {
-  kind: "chain" | "invoice";
+  kind: "chain" | "settlement" | "invoice";
   linkId: number;
   orderId: number;
   orderNo: string;
@@ -1657,6 +1657,12 @@ export type PendingLink = {
   targetSupplier: string;
   confidence: number | null;
   note: string;
+};
+
+export type ChainWorkspace = {
+  overview: ChainOverview;
+  orders: { total: number; items: ChainOrderRow[] };
+  pending: { items: PendingLink[] };
 };
 
 /** 单订单详情内的待确认关联建议。 */
@@ -1842,6 +1848,8 @@ export type ChainRecordList = {
 };
 
 export const procurementChainApi = {
+  workspace: (limit = 500) =>
+    jsonFetch<ChainWorkspace>(`/api/v1/procurement-chain/workspace?limit=${limit}`),
   overview: () => jsonFetch<ChainOverview>("/api/v1/procurement-chain/overview"),
   orders: (limit = 500) =>
     jsonFetch<{ total: number; items: ChainOrderRow[] }>(`/api/v1/procurement-chain/orders?limit=${limit}`),

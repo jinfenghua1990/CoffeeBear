@@ -2539,10 +2539,8 @@ def get_order_detail(db: Session, order_id: int) -> dict | None:
     return row
 
 
-def overview(db: Session) -> dict:
-    """链路漏斗统计，与详情表共用同一行级聚合，避免两套口径。"""
-    pairs, pf = chain_snapshot(db)
-    rows = [_order_row(db, order, external, pf=pf) for order, external in pairs]
+def _overview_from_rows(rows: list[dict]) -> dict:
+    """基于已聚合订单行计算链路漏斗，供 overview/workspace 共用。"""
     total = len(rows)
     done_by_stage: dict[str, int] = {stage["key"]: 0 for stage in CHAIN_STAGES}
     for row in rows:
@@ -2550,7 +2548,6 @@ def overview(db: Session) -> dict:
             if done:
                 done_by_stage[key] += 1
 
-    # 7 环节漏斗（前端按顺序渲染）
     stages = [
         {
             **stage,
@@ -2567,7 +2564,6 @@ def overview(db: Session) -> dict:
         "total": total,
         "stageTotal": STAGE_TOTAL,
         "stages": stages,
-        # 兼容旧前端字段：命名保持不变，值统一从同一套环节口径派生
         "refined": _count("sku"),
         "jackyunLinked": _count("jackyunPo"),
         "inbound": _count("inbound"),
@@ -2577,6 +2573,24 @@ def overview(db: Session) -> dict:
         "pending": sum(row["pendingCount"] for row in rows),
     }
 
+
+def overview(db: Session) -> dict:
+    """兼容独立漏斗接口；当前链路工作台优先使用 workspace 聚合接口。"""
+    pairs, pf = chain_snapshot(db)
+    rows = [_order_row(db, order, external, pf=pf) for order, external in pairs]
+    return _overview_from_rows(rows)
+
+
+def workspace(db: Session, limit: int = 500, offset: int = 0) -> dict:
+    """一次返回漏斗、订单和待确认建议，并只构造一次全量订单行。"""
+    pairs, pf = chain_snapshot(db)
+    rows = [_order_row(db, order, external, pf=pf) for order, external in pairs]
+    total = len(rows)
+    return {
+        "overview": _overview_from_rows(rows),
+        "orders": {"total": total, "items": rows[offset:offset + limit]},
+        "pending": list_pending(db),
+    }
 
 def list_pending(db: Session) -> dict:
     """待确认的关联建议，供人工确认或拒绝。"""

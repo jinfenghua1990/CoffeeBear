@@ -19,6 +19,16 @@ from app.services import procurement_chain_service as service
 router = APIRouter(prefix="/procurement-chain", tags=["采购全链路"])
 
 
+@router.get("/workspace")
+def chain_workspace(
+    limit: int = Query(500, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+    db: Session = Depends(get_db),
+) -> dict:
+    """当前链路工作台聚合入口：一次返回漏斗、订单和待确认建议。"""
+    return service.workspace(db, limit=limit, offset=offset)
+
+
 @router.get("/overview")
 def chain_overview(db: Session = Depends(get_db)) -> dict:
     """五环节漏斗统计。"""
