@@ -515,6 +515,15 @@ def _order_group_sales(db: Session, order_ids: list[int]) -> dict[int, dict[tupl
     return result
 
 
+def _remaining_invoice_amount(total: Decimal, links) -> Decimal:
+    """整张发票扣除已显式分摊金额后，剩余可供空分摊关联自动分配的金额。"""
+    explicitly_allocated = sum(
+        (to_decimal(link.allocated_amount) for link in links if link.allocated_amount is not None),
+        Decimal("0"),
+    )
+    return total - explicitly_allocated
+
+
 def _output_invoiced_by_group(db: Session, start, nxt) -> dict[tuple[str, str], Decimal]:
     """当月销项发票落到 (税务编号, 产品) 组的已开票金额。
 
@@ -577,11 +586,13 @@ def _output_invoiced_by_group(db: Session, start, nxt) -> dict[tuple[str, str], 
             continue
         total = to_decimal(invoice.total_amount)
         without_alloc = [ln for ln in invoice_links if ln.allocated_amount is None]
+        remaining = _remaining_invoice_amount(total, invoice_links)
         for link in invoice_links:
             if link.allocated_amount is not None:
                 _attribute(int(link.target_id), to_decimal(link.allocated_amount))
         if not without_alloc:
             continue
+        # 只把剩余未分摊金额分给 allocated_amount 为空的订单，避免重复计算。
         denom = sum(
             (order_sales.get(int(ln.target_id), Decimal("0")) for ln in without_alloc),
             Decimal("0"),
@@ -591,7 +602,7 @@ def _output_invoiced_by_group(db: Session, start, nxt) -> dict[tuple[str, str], 
         for link in without_alloc:
             sales = order_sales.get(int(link.target_id), Decimal("0"))
             if sales > 0:
-                _attribute(int(link.target_id), total * sales / denom)
+                _attribute(int(link.target_id), remaining * sales / denom)
     return dict(attributed)
 
 
@@ -600,7 +611,7 @@ def _unbilled_detail_rows(db: Session, year: int, month: int) -> list[dict[str, 
 
     - 税务编号/产品/成本取自货品档案（ProductSku + Product.goods_name）；
     - 档案缺失的行保留 sku_code，税务编号显示空值，不编造；
-    - 金额 = 商品金额 − 优惠金额，成本 = 数量 × 档案默认成本；
+    - 销售金额取订单客户实付并按明细成本/数量权重分摊，成本取采购入库加权成本；
     - invoiced = 当月销项发票按已确认关联分摊到该组的已开票金额；
       unbilled = max(sales − invoiced, 0)，超开的负差如实保留为 0。
     """

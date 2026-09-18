@@ -83,7 +83,10 @@ def _chain_links_for_po(db: Session, po: ExternalPurchaseOrder, target_type: str
     query = db.query(ProcurementChainLink).filter(
         ProcurementChainLink.target_type == target_type,
         ProcurementChainLink.confirmed.is_(True),
-        ProcurementChainLink.match_method != "rejected",
+        or_(
+            ProcurementChainLink.match_method.is_(None),
+            ProcurementChainLink.match_method != "rejected",
+        ),
     )
     if source is not None:
         query = query.filter(or_(
@@ -122,7 +125,10 @@ def _shared_target_ratio(db: Session, po: ExternalPurchaseOrder, target_type: st
         ProcurementChainLink.target_type == target_type,
         ProcurementChainLink.target_id == target_id,
         ProcurementChainLink.confirmed.is_(True),
-        ProcurementChainLink.match_method != "rejected",
+        or_(
+            ProcurementChainLink.match_method.is_(None),
+            ProcurementChainLink.match_method != "rejected",
+        ),
     ).all()
     peer_pos = [candidate for candidate in (_po_for_chain_link(db, link) for link in all_links) if candidate is not None]
     peer_ids = {candidate.id for candidate in peer_pos}

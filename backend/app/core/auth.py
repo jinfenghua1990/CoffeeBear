@@ -7,6 +7,7 @@
 """
 
 import base64
+import binascii
 import hashlib
 import hmac
 import json
@@ -102,5 +103,5 @@ def decode_token(token: str) -> dict | None:
         if int(payload.get("exp", 0)) < time.time():
             return None
         return payload
-    except (ValueError, TypeError, json.JSONDecodeError):
+    except (ValueError, TypeError, json.JSONDecodeError, binascii.Error, UnicodeDecodeError):
         return None

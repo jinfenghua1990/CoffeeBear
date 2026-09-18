@@ -100,6 +100,67 @@ WITH checks AS (
   FROM procurement_chain_links l
   LEFT JOIN jackyun_purchase_settlements s ON s.id = l.target_id
   WHERE l.target_type = 'settlement' AND s.id IS NULL
+
+  UNION ALL
+  SELECT 'external_purchase_order_raw_items.po_id -> external_purchase_orders.id', i.id
+  FROM external_purchase_order_raw_items i
+  LEFT JOIN external_purchase_orders p ON p.id = i.po_id
+  WHERE p.id IS NULL
+
+  UNION ALL
+  SELECT 'purchase_allocation_items.po_id -> external_purchase_orders.id', i.id
+  FROM purchase_allocation_items i
+  LEFT JOIN external_purchase_orders p ON p.id = i.po_id
+  WHERE p.id IS NULL
+
+  UNION ALL
+  SELECT 'purchase_allocation_items.sku_id -> product_skus.id', i.id
+  FROM purchase_allocation_items i
+  LEFT JOIN product_skus p ON p.id = i.sku_id
+  WHERE i.sku_id IS NOT NULL AND p.id IS NULL
+
+  UNION ALL
+  SELECT 'purchase_allocation_items.source_item_id -> jackyun_goods_document_items.id', i.id
+  FROM purchase_allocation_items i
+  LEFT JOIN jackyun_goods_document_items d ON d.id = i.source_item_id
+  WHERE i.source_item_id IS NOT NULL AND d.id IS NULL
+
+  UNION ALL
+  SELECT 'purchase_extra_expenses.po_id -> external_purchase_orders.id', e.id
+  FROM purchase_extra_expenses e
+  LEFT JOIN external_purchase_orders p ON p.id = e.po_id
+  WHERE p.id IS NULL
+
+  UNION ALL
+  SELECT 'purchase_invoice_links.invoice_id -> purchase_invoices.id', l.id
+  FROM purchase_invoice_links l
+  LEFT JOIN purchase_invoices i ON i.id = l.invoice_id
+  WHERE i.id IS NULL
+
+  UNION ALL
+  SELECT 'purchase_invoice_links.po_id -> external_purchase_orders.id', l.id
+  FROM purchase_invoice_links l
+  LEFT JOIN external_purchase_orders p ON p.id = l.po_id
+  WHERE p.id IS NULL
+
+  UNION ALL
+  SELECT 'tax_invoice_import_records.import_id -> tax_invoice_imports.id', r.id
+  FROM tax_invoice_import_records r
+  LEFT JOIN tax_invoice_imports i ON i.id = r.import_id
+  WHERE i.id IS NULL
+
+  UNION ALL
+  SELECT 'tax_invoice_import_records.invoice_id -> tax_invoices.id', r.id
+  FROM tax_invoice_import_records r
+  LEFT JOIN tax_invoices i ON i.id = r.invoice_id
+  WHERE r.invoice_id IS NOT NULL AND i.id IS NULL
+
+  UNION ALL
+  SELECT 'tax_invoice_links.invoice_id -> tax_invoices.id', l.id
+  FROM tax_invoice_links l
+  LEFT JOIN tax_invoices i ON i.id = l.invoice_id
+  WHERE i.id IS NULL
+
 ), ranked AS (
   SELECT relation, id, row_number() OVER (PARTITION BY relation ORDER BY id) AS rn
   FROM checks
@@ -117,7 +178,17 @@ WITH checks AS (
     ('jackyun_goods_document_items.document_id -> jackyun_goods_documents.id'),
     ('jackyun_goods_document_items.matched_sku_id -> product_skus.id'),
     ('procurement_chain_links.target_id(inbound) -> jackyun_goods_documents.id'),
-    ('procurement_chain_links.target_id(settlement) -> jackyun_purchase_settlements.id')
+    ('procurement_chain_links.target_id(settlement) -> jackyun_purchase_settlements.id'),
+    ('external_purchase_order_raw_items.po_id -> external_purchase_orders.id'),
+    ('purchase_allocation_items.po_id -> external_purchase_orders.id'),
+    ('purchase_allocation_items.sku_id -> product_skus.id'),
+    ('purchase_allocation_items.source_item_id -> jackyun_goods_document_items.id'),
+    ('purchase_extra_expenses.po_id -> external_purchase_orders.id'),
+    ('purchase_invoice_links.invoice_id -> purchase_invoices.id'),
+    ('purchase_invoice_links.po_id -> external_purchase_orders.id'),
+    ('tax_invoice_import_records.import_id -> tax_invoice_imports.id'),
+    ('tax_invoice_import_records.invoice_id -> tax_invoices.id'),
+    ('tax_invoice_links.invoice_id -> tax_invoices.id')
 )
 SELECT n.relation,
        count(r.id) AS orphan_count,
@@ -145,7 +216,17 @@ SELECT
   (SELECT count(*) FROM jackyun_goods_document_items i LEFT JOIN jackyun_goods_documents d ON d.id=i.document_id WHERE d.id IS NULL) +
   (SELECT count(*) FROM jackyun_goods_document_items i LEFT JOIN product_skus p ON p.id=i.matched_sku_id WHERE i.matched_sku_id IS NOT NULL AND p.id IS NULL) +
   (SELECT count(*) FROM procurement_chain_links l LEFT JOIN jackyun_goods_documents d ON d.id=l.target_id WHERE l.target_type='inbound' AND d.id IS NULL) +
-  (SELECT count(*) FROM procurement_chain_links l LEFT JOIN jackyun_purchase_settlements s ON s.id=l.target_id WHERE l.target_type='settlement' AND s.id IS NULL);
+  (SELECT count(*) FROM procurement_chain_links l LEFT JOIN jackyun_purchase_settlements s ON s.id=l.target_id WHERE l.target_type='settlement' AND s.id IS NULL) +
+  (SELECT count(*) FROM external_purchase_order_raw_items i LEFT JOIN external_purchase_orders p ON p.id=i.po_id WHERE p.id IS NULL) +
+  (SELECT count(*) FROM purchase_allocation_items i LEFT JOIN external_purchase_orders p ON p.id=i.po_id WHERE p.id IS NULL) +
+  (SELECT count(*) FROM purchase_allocation_items i LEFT JOIN product_skus p ON p.id=i.sku_id WHERE i.sku_id IS NOT NULL AND p.id IS NULL) +
+  (SELECT count(*) FROM purchase_allocation_items i LEFT JOIN jackyun_goods_document_items d ON d.id=i.source_item_id WHERE i.source_item_id IS NOT NULL AND d.id IS NULL) +
+  (SELECT count(*) FROM purchase_extra_expenses e LEFT JOIN external_purchase_orders p ON p.id=e.po_id WHERE p.id IS NULL) +
+  (SELECT count(*) FROM purchase_invoice_links l LEFT JOIN purchase_invoices i ON i.id=l.invoice_id WHERE i.id IS NULL) +
+  (SELECT count(*) FROM purchase_invoice_links l LEFT JOIN external_purchase_orders p ON p.id=l.po_id WHERE p.id IS NULL) +
+  (SELECT count(*) FROM tax_invoice_import_records r LEFT JOIN tax_invoice_imports i ON i.id=r.import_id WHERE i.id IS NULL) +
+  (SELECT count(*) FROM tax_invoice_import_records r LEFT JOIN tax_invoices i ON i.id=r.invoice_id WHERE r.invoice_id IS NOT NULL AND i.id IS NULL) +
+  (SELECT count(*) FROM tax_invoice_links l LEFT JOIN tax_invoices i ON i.id=l.invoice_id WHERE i.id IS NULL);
 "
 TOTAL="$("${PSQL[@]}" -Atc "$TOTAL_SQL")"
 

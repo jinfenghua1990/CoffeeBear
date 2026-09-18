@@ -41,7 +41,8 @@ test-db: ## 重建并迁移 pytest 专用测试库（<POSTGRES_DB>_test，confte
 	psql -h localhost -U "$${POSTGRES_USER}" -d postgres -q -c "DROP DATABASE IF EXISTS $${POSTGRES_DB}_test;" && \
 	psql -h localhost -U "$${POSTGRES_USER}" -d postgres -q -c "CREATE DATABASE $${POSTGRES_DB}_test OWNER $${POSTGRES_USER};" && \
 	psql -h localhost -U "$${POSTGRES_USER}" -d "$${POSTGRES_DB}_test" -q -c "ALTER SCHEMA public OWNER TO $${POSTGRES_USER};" && \
-	TEST_URL=$$(cd "$(BACKEND)" && "$(VENV)/bin/python" -c "from dotenv import dotenv_values; print(dotenv_values('.env').get('TEST_DATABASE_URL',''))") && \
+	TEST_URL="$${TEST_DATABASE_URL:-}"; \
+	if [[ -z "$$TEST_URL" ]]; then echo "缺少 TEST_DATABASE_URL，请在项目根目录 .env 中配置"; exit 2; fi; \
 	cd "$(BACKEND)" && DATABASE_URL="$$TEST_URL" "$(VENV)/bin/alembic" upgrade head >/dev/null && echo "测试库 $${POSTGRES_DB}_test 已重建并迁移到 head"
 
 lint: ## 编译检查后端 Python 文件

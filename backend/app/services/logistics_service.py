@@ -111,6 +111,32 @@ def _cover_month(bill: LogisticsBill, year: int, month: int) -> bool:
     return bill.period_start < e and bill.period_end >= s
 
 
+def _actual_amount_for_year(db: Session, bill: LogisticsBill, year: int) -> Decimal:
+    """跨年度账单只按本年度覆盖部分计入年度物流成本，避免整张账单跨年重复计两次。"""
+    if bill.actual_amount is None or bill.period_start is None or bill.period_end is None:
+        return Decimal("0")
+    tz = bill.period_start.tzinfo or _tz()
+    bill_start = datetime.combine(bill.period_start.date(), time.min, tzinfo=tz)
+    bill_end = _exclusive_period_end(bill.period_end)
+    year_start = datetime(year, 1, 1, tzinfo=_tz())
+    year_end = datetime(year + 1, 1, 1, tzinfo=_tz())
+    overlap_start = max(bill_start, year_start)
+    overlap_end = min(bill_end, year_end)
+    if overlap_start >= overlap_end:
+        return Decimal("0")
+
+    total_count = _shipped_count_range(db, bill_start, bill_end)
+    year_count = _shipped_count_range(db, overlap_start, overlap_end)
+    if total_count > 0:
+        return bill.actual_amount * Decimal(year_count) / Decimal(total_count)
+
+    total_seconds = Decimal(str((bill_end - bill_start).total_seconds()))
+    overlap_seconds = Decimal(str((overlap_end - overlap_start).total_seconds()))
+    if total_seconds <= 0:
+        return Decimal("0")
+    return bill.actual_amount * overlap_seconds / total_seconds
+
+
 def _settled_bills(db: Session) -> list[LogisticsBill]:
     return (
         db.query(LogisticsBill)
@@ -193,12 +219,9 @@ def workbench(db: Session) -> dict:
         (Decimal(r["shippedCount"]) * unit_price) if r["type"] == "month" else Decimal("0")
         for r in rows
     )
-    # 本年度物流成本 = 当年已核销账单实际金额(重叠本年) + 当年未出账月份预估
-    annual = Decimal("0")
-    for b in settled:
-        if b.period_end is not None and b.period_end >= datetime(year, 1, 1, tzinfo=_tz()) \
-                and b.period_start is not None and b.period_start < datetime(year + 1, 1, 1, tzinfo=_tz()):
-            annual += b.actual_amount or Decimal("0")
+    # 本年度物流成本 = 已核销账单在本年度覆盖部分的实际金额 + 未出账月份预估。
+    # 跨年度半年账单按当年真实出库单占比分摊，避免同一张账单在两个年度各计全额。
+    annual = sum((_actual_amount_for_year(db, b, year) for b in settled), Decimal("0"))
     annual += open_est
 
     latest_actual = None
@@ -233,10 +256,19 @@ def _row_sort_key(row: dict):
         return (0, period)
 
 
+def _exclusive_period_end(end: datetime) -> datetime:
+    """把账单结束日期统一转换为下一天 00:00 的排他边界。"""
+    tz = end.tzinfo or _tz()
+    next_day = end.date() + timedelta(days=1)
+    return datetime.combine(next_day, time.min, tzinfo=tz)
+
+
 def _estimate_for_period(db: Session, start: datetime | None, end: datetime | None, unit_price: Decimal) -> Decimal:
-    if start is None or end is None or start >= end:
+    if start is None or end is None or start.date() > end.date():
         return Decimal("0")
-    cnt = _shipped_count_range(db, start, end + timedelta(days=1))
+    start_tz = start.tzinfo or _tz()
+    inclusive_start = datetime.combine(start.date(), time.min, tzinfo=start_tz)
+    cnt = _shipped_count_range(db, inclusive_start, _exclusive_period_end(end))
     return Decimal(cnt) * unit_price
 
 
@@ -313,7 +345,11 @@ def settle_bill(db: Session, bill_id: int) -> LogisticsBill:
         raise ValueError("账单金额为空，无法核销")
     unit_price = default_unit_price(db)
     est = _estimate_for_period(db, bill.period_start, bill.period_end, unit_price)
-    count = _shipped_count_range(db, bill.period_start, (bill.period_end or bill.period_start) + timedelta(days=1))
+    start = bill.period_start
+    end = bill.period_end or bill.period_start
+    start_tz = start.tzinfo or _tz()
+    inclusive_start = datetime.combine(start.date(), time.min, tzinfo=start_tz)
+    count = _shipped_count_range(db, inclusive_start, _exclusive_period_end(end))
     unit = None
     if count > 0:
         unit = bill.actual_amount / Decimal(count)

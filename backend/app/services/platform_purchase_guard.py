@@ -25,6 +25,14 @@ from app.services.import_lifecycle import filter_active_import, filter_active_ro
 from app.services.procurement_chain_service import is_reference_only_external_po
 
 
+def _effective_removed_order_nos(
+    deleted_source_nos: set[str],
+    active_source_nos: set[str],
+) -> set[str]:
+    """只有不存在有效副本的历史删除订单号才真正视为 removed。"""
+    return deleted_source_nos - active_source_nos
+
+
 def platform_source_pairs(
     db: Session,
     externals: list[ExternalPurchaseOrder] | None = None,
@@ -43,14 +51,16 @@ def platform_source_pairs(
         .order_by(Alibaba1688Order.id.desc())
         .all()
     )
-    removed_nos = {
+    source_nos = {no for (no,) in db.query(Alibaba1688Order.external_order_id).all()}
+    active_source_nos = {row.external_order_id for row in file_orders}
+    deleted_source_nos = {
         no
         for (no,) in db.query(Alibaba1688Order.external_order_id).filter(
             Alibaba1688Order.row_status == "deleted"
         ).all()
     }
-    source_nos = {no for (no,) in db.query(Alibaba1688Order.external_order_id).all()}
-    active_source_nos = {row.external_order_id for row in file_orders}
+    # 历史批次 deleted 副本不能覆盖最新 active 副本。
+    removed_nos = _effective_removed_order_nos(deleted_source_nos, active_source_nos)
 
     if externals is None:
         externals = (
