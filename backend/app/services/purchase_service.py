@@ -158,9 +158,12 @@ def create_external_po(db: Session, *, external_order_id: str, supplier_name: st
                        buyer_account: str = "", platform: str = "1688", raw: dict | None = None,
                        warehouse_id: int | None = None,
                        actor: str = "system") -> ExternalPurchaseOrder:
-    """登记/同步一笔外部采购订单。幂等：已存在则更新状态字段，绝不重复生成。"""
+    """登记/同步一笔外部采购订单。幂等键固定为 渠道 + 外部订单号。"""
     platform = normalize_platform(platform)
     warehouse = _validate_target_warehouse(db, warehouse_id)
+    external_order_id = (external_order_id or "").strip()
+    if not external_order_id:
+        raise ValueError("采购订单号不能为空")
     po = db.query(ExternalPurchaseOrder).filter_by(
         platform=platform, external_order_id=external_order_id
     ).first()
@@ -460,6 +463,13 @@ def advance_status(db: Session, po: ExternalPurchaseOrder, nxt: str,
                    actor: str = "system") -> None:
     if not validate_transition(po.purchase_status, nxt):
         raise ValueError(f"非法状态流转: {po.purchase_status} → {nxt}")
+    if nxt == "done":
+        # 完成态强校验直接属于采购状态机本身，不再通过启动时 monkey patch 动态替换函数。
+        from app.services.procurement_consistency import completion_snapshot
+        snapshot = completion_snapshot(db, po)
+        if not snapshot["complete"]:
+            detail = "；".join(snapshot["issues"][:6]) or "采购链路尚未闭环"
+            raise ValueError(f"不能标记完成：{detail}")
     if nxt == "producing" and _has_actual_inbound(db, po):
         raise ValueError("该订单已有实际入库关联，不能回到生产中；请按开票、付款和核验继续收尾")
     if nxt == "confirmed":

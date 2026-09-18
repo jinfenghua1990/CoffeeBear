@@ -37,11 +37,9 @@ from app.api.v1 import (
     warehouses,
 )
 from app.services.platform_purchase_guard import install_platform_purchase_guards
-from app.services.procurement_consistency import install_purchase_guards
 
-# V1.6.3：保持历史 API 不变，统一安装采购闭环强校验与跨渠道同号隔离。
+# 跨渠道同号隔离仍保留兼容守卫；采购状态/建单强校验已进入正式 service。
 install_platform_purchase_guards()
-install_purchase_guards()
 
 api_router = APIRouter(prefix="/api/v1")
 api_router.include_router(auth.router)
