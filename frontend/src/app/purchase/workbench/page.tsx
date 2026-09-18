@@ -17,12 +17,10 @@ import {
   authenticatedFetch,
   consumablesApi,
   dashboardApi,
-  procurementBoardApi,
   procurementChainApi,
   procurementWorkbenchApi,
   skuMatchingApi,
   warehousesApi,
-  type BoardOverview,
   type CatalogSkuRow,
   type ConsumableMappingRow,
   type ConsumablePurchaseItem,
@@ -421,7 +419,6 @@ export default function PurchaseWorkbenchPage() {
   const [inboundMatch, setInboundMatch] = useState<InboundMatchSummary | null>(null);
   const [pendingAlloc, setPendingAlloc] = useState<PendingAllocation[]>([]);
   const [matchingBusy, setMatchingBusy] = useState(false);
-  const [boardOverview, setBoardOverview] = useState<BoardOverview | null>(null);
   const [funnel, setFunnel] = useState<WorkbenchFunnel | null>(null);
   const [todos, setTodos] = useState<WorkbenchTodo | null>(null);
 
@@ -633,15 +630,6 @@ export default function PurchaseWorkbenchPage() {
     }
   }, []);
 
-  const loadBoard = useCallback(async () => {
-    try {
-      setBoardOverview(await procurementBoardApi.overview());
-    } catch {
-      // 看板数据为增强展示（付款率环），失败不阻塞工作台主体。
-      setBoardOverview(null);
-    }
-  }, []);
-
   const loadFunnelTodos = useCallback(async () => {
     try {
       const [f, t] = await Promise.all([
@@ -688,12 +676,9 @@ export default function PurchaseWorkbenchPage() {
   useEffect(() => {
     if (!pageActive) return;
     void loadSummary();
-    // 订单视图只渲染摘要和订单列表；看板付款率、漏斗和待办卡只在其他视图显示。
-    if (view !== "orders") {
-      void loadBoard();
-      void loadFunnelTodos();
-    }
-  }, [loadBoard, loadFunnelTodos, loadSummary, pageActive, view]);
+    // 漏斗和待办卡只在非订单视图显示；付款率已经合并进 summary，不再重复跑旧看板快照。
+    if (view !== "orders") void loadFunnelTodos();
+  }, [loadFunnelTodos, loadSummary, pageActive, view]);
 
   useEffect(() => {
     if (!pageActive) return;
@@ -1051,7 +1036,6 @@ export default function PurchaseWorkbenchPage() {
           {["orders", "suppliers", "chain", "matching"].includes(view) && (
             <KpiGrid
               summary={summary}
-              board={boardOverview}
               funnel={funnel}
               todos={todos}
               onOpenChain={() => changeView("chain")}
@@ -1187,9 +1171,8 @@ function HeaderButton({ icon, primary, busy, disabled, onClick, children }: {
   );
 }
 
-function KpiGrid({ summary, board, funnel, todos, onOpenChain }: {
+function KpiGrid({ summary, funnel, todos, onOpenChain }: {
   summary: WorkbenchSummary | null;
-  board: BoardOverview | null;
   funnel: WorkbenchFunnel | null;
   todos: WorkbenchTodo | null;
   onOpenChain?: () => void;
@@ -1204,8 +1187,8 @@ function KpiGrid({ summary, board, funnel, todos, onOpenChain }: {
     { label: "异常数", value: summary?.exceptionCount ?? "—", hint: "需人工处理", icon: "reconcile", tone: "red" },
     {
       label: "已付款率",
-      value: board ? `${board.paidRate}%` : "—",
-      hint: board ? `已付 ${fmtMoney(board.paidAmount)} / 应付 ${fmtMoney(board.totalAmount)}` : "看板数据未就绪",
+      value: summary ? `${summary.paidRate}%` : "—",
+      hint: summary ? `已付 ${fmtMoney(summary.paidAmount)} / 应付 ${fmtMoney(summary.totalAmount)}` : "采购摘要未就绪",
       icon: "reconcile",
       tone: "teal",
     },

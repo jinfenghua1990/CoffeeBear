@@ -2028,6 +2028,9 @@ export type WorkbenchSummary = {
   consumableInbound: number;
   transitOrders: number;
   completedOrders: number;
+  paidRate: number;
+  paidAmount: number;
+  totalAmount: number;
 };
 
 /** 采购工作台异常摘要：由异常中心记录压缩而来，message 为可直接展示的原因。 */

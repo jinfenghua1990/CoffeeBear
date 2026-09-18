@@ -559,6 +559,24 @@ def _pending_queue(row: dict) -> str | None:
     return None
 
 
+def _paid_amount(row: dict, cap: float | None = None) -> float:
+    """合并结算与平台付款事实：同一订单取较大值，避免把同一笔付款重复相加。"""
+    settlement_paid = sum(
+        float(item.get("paidAmount") or item.get("amount") or 0)
+        for item in row.get("settlement") or []
+        if item.get("paid")
+    )
+    platform_paid = (
+        float(row.get("paidAmount") or row.get("amount") or 0)
+        if row.get("paidOn1688")
+        else 0.0
+    )
+    paid = max(settlement_paid, platform_paid)
+    if cap is not None:
+        paid = min(paid, max(0.0, cap))
+    return paid
+
+
 def summary(db: Session) -> dict:
     """采购工作台统计指标，全部基于本地已落库事实。"""
     pairs, pf = chain_snapshot(db)
@@ -578,7 +596,13 @@ def summary(db: Session) -> dict:
     consumable_inbound = 0
     transit_orders = 0
     completed_orders = 0
+    paid_amount = 0.0
+    total_amount = 0.0
     for row in rows:
+        amount = float(row.get("amount") or 0)
+        total_amount += amount
+        paid_amount += _paid_amount(row, cap=amount)
+
         order_date = _parse_dt(row.get("orderDate"))
         if order_date is not None and order_date.date() == today:
             new_orders += 1
@@ -636,6 +660,9 @@ def summary(db: Session) -> dict:
         "consumableInbound": consumable_inbound,
         "transitOrders": transit_orders,
         "completedOrders": completed_orders,
+        "paidRate": round(paid_amount / total_amount * 100) if total_amount else 0,
+        "paidAmount": round(paid_amount, 2),
+        "totalAmount": round(total_amount, 2),
     }
 
 
