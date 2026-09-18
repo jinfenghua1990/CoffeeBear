@@ -159,37 +159,42 @@ function installResizableTable(table: HTMLTableElement, tableIndex: number) {
   });
 }
 
-function scanTables(root: ParentNode = document) {
-  const tables = Array.from(root.querySelectorAll("table")) as HTMLTableElement[];
+function scanTables(root: ParentNode | Element = document) {
+  const tables: HTMLTableElement[] = [];
+  if (root instanceof HTMLTableElement) tables.push(root);
+  tables.push(...Array.from(root.querySelectorAll("table")) as HTMLTableElement[]);
   tables.forEach((table, index) => installResizableTable(table, index));
 }
 
 export default function GlobalResizableTables() {
   useEffect(() => {
     let frame = window.requestAnimationFrame(() => scanTables());
+    const pendingRoots = new Set<Element>();
+
+    const scheduleScan = () => {
+      window.cancelAnimationFrame(frame);
+      frame = window.requestAnimationFrame(() => {
+        for (const root of pendingRoots) scanTables(root);
+        pendingRoots.clear();
+      });
+    };
 
     const observer = new MutationObserver((mutations) => {
-      let needsScan = false;
       for (const mutation of mutations) {
         if (mutation.type !== "childList" || mutation.addedNodes.length === 0) continue;
         for (const node of Array.from(mutation.addedNodes)) {
           if (!(node instanceof Element)) continue;
-          if (node.matches("table") || node.querySelector("table")) {
-            needsScan = true;
-            break;
-          }
+          if (node.matches("table") || node.querySelector("table")) pendingRoots.add(node);
         }
-        if (needsScan) break;
       }
-      if (!needsScan) return;
-      window.cancelAnimationFrame(frame);
-      frame = window.requestAnimationFrame(() => scanTables());
+      if (pendingRoots.size) scheduleScan();
     });
 
     observer.observe(document.body, { childList: true, subtree: true });
 
     return () => {
       window.cancelAnimationFrame(frame);
+      pendingRoots.clear();
       observer.disconnect();
       document.documentElement.classList.remove("global-column-resizing");
     };

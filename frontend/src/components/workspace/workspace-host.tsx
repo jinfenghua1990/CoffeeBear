@@ -25,17 +25,20 @@ export default function WorkspaceHost() {
 function WorkspaceLayout() {
   const ws = useWorkspace();
   const { unresolved } = useWorkspaceRouting();
+  const wsRef = useRef(ws);
+  wsRef.current = ws;
 
-  // 存在未保存内容时，刷新/关闭浏览器给出原生提示
+  // 只绑定一次浏览器关闭监听；工作区 context 每次状态变化都会换引用，
+  // 不能因此反复 remove/add 全局监听。
   useEffect(() => {
     function onBeforeUnload(event: BeforeUnloadEvent) {
-      if (!ws.anyDirty()) return;
+      if (!wsRef.current.anyDirty()) return;
       event.preventDefault();
       event.returnValue = "";
     }
     window.addEventListener("beforeunload", onBeforeUnload);
     return () => window.removeEventListener("beforeunload", onBeforeUnload);
-  }, [ws]);
+  }, []);
 
   return (
     <>
@@ -103,6 +106,8 @@ function useWorkspaceRouting(): { unresolved: boolean } {
 
 function WorkspacePanel({ tab, active }: { tab: WorkspaceTab; active: boolean }) {
   const ws = useWorkspace();
+  const wsRef = useRef(ws);
+  wsRef.current = ws;
   const scrollRef = useRef<HTMLDivElement>(null);
   const Component = routeComponent(tab.pathname);
 
@@ -110,25 +115,25 @@ function WorkspacePanel({ tab, active }: { tab: WorkspaceTab; active: boolean })
   const element = useMemo(() => (Component ? <Component /> : null), [Component]);
   const bare = tab.pathname === "/purchase/workbench";
 
-  // 滚动位置：隐藏时保留，切回时兜底恢复（刷新后由 sessionStorage 恢复）
+  // 滚动监听按 Tab 只绑定一次；不能因为其它 Tab 状态变化而给所有保活页重复解绑/重绑。
   useEffect(() => {
     const node = scrollRef.current;
     if (!node) return;
-    const onScroll = () => ws.setScrollTop(tab.id, node.scrollTop);
+    const onScroll = () => wsRef.current.setScrollTop(tab.id, node.scrollTop);
     node.addEventListener("scroll", onScroll, { passive: true });
     return () => {
       node.removeEventListener("scroll", onScroll);
-      ws.setScrollTop(tab.id, node.scrollTop);
+      wsRef.current.setScrollTop(tab.id, node.scrollTop);
     };
-  }, [ws, tab.id]);
+  }, [tab.id]);
 
   useEffect(() => {
     if (!active) return;
     const node = scrollRef.current;
     if (!node) return;
-    const saved = ws.getScrollTop(tab.id);
+    const saved = wsRef.current.getScrollTop(tab.id);
     if (saved > 0 && Math.abs(node.scrollTop - saved) > 1) node.scrollTop = saved;
-  }, [active, ws, tab.id]);
+  }, [active, tab.id]);
 
   return (
     <div

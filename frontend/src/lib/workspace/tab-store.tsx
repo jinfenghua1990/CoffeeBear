@@ -203,9 +203,19 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       const existing = options?.forceNew ? undefined : stateRef.current.tabs.find((tab) => tab.identity === identity);
       if (existing) {
         if (existing.pathname === pathname && existing.search !== search) {
-          // 同一个业务对象：把新的查询参数合并进原 Tab，页面自身响应变化
+          // 同一个业务对象：同步 query 的同时刷新标题/业务标识，避免“销售明细”仍显示旧 Tab 标题。
           stateRef.current.tabs = stateRef.current.tabs.map((tab) =>
-            tab.id === existing.id ? { ...tab, search, title: null, lastActiveAt: Date.now() } : tab,
+            tab.id === existing.id
+              ? {
+                  ...tab,
+                  search,
+                  title: null,
+                  baseTitle: tabTitle(entry, search),
+                  businessId: tabBusinessId(entry, search),
+                  identity,
+                  lastActiveAt: Date.now(),
+                }
+              : tab,
           );
         }
         stateRef.current.activeId = existing.id;
@@ -281,6 +291,10 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       if (!keep) return;
       stateRef.current.tabs = stateRef.current.tabs.filter((tab) => tab.id === id || tab.pinned || !tab.closable);
       stateRef.current.activeId = id;
+      const alive = new Set(stateRef.current.tabs.map((tab) => tab.id));
+      for (const key of Object.keys(scrollRef.current)) if (!alive.has(key)) delete scrollRef.current[key];
+      for (const key of Object.keys(scopeRef.current)) if (!alive.has(key)) delete scopeRef.current[key];
+      for (const dirty of [...dirtyRef.current]) if (!alive.has(dirty)) dirtyRef.current.delete(dirty);
       bump();
       schedulePersist();
     }
@@ -364,8 +378,18 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     function updateSearch(id: string, search: string) {
       const tab = findById(id);
       if (!tab || tab.search === search) return;
+      const entry = entryOf(tab.pathname);
+      const identity = tabIdentity(tab.pathname, search, entry);
       stateRef.current.tabs = stateRef.current.tabs.map((item) =>
-        item.id === id ? { ...item, search, baseTitle: tabTitle(entryOf(item.pathname), search) } : item,
+        item.id === id
+          ? {
+              ...item,
+              search,
+              baseTitle: tabTitle(entry, search),
+              businessId: tabBusinessId(entry, search),
+              identity,
+            }
+          : item,
       );
       bump();
       schedulePersist();
