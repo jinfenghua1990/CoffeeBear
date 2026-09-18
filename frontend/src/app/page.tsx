@@ -2,7 +2,6 @@
 
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useRouter } from "next/navigation";
 import StatusBadge from "@/components/status-badge";
 import {
   authenticatedFetch,
@@ -11,11 +10,12 @@ import {
   fetchMe,
   getOverview,
   type AuthUser,
+  logisticsApi,
+  type LogisticsWorkbench,
   procurementWorkbenchApi,
   type ConsumableRow,
   type IntegrationStatus,
   type InventorySummary,
-  type SalesOrderRow,
   type TrendPoint,
   type WorkbenchSummary,
 } from "@/lib/api";
@@ -37,7 +37,7 @@ type DashboardState = {
   completedPurchaseOrders: number;
   inventory: InventorySummary | null;
   consumables: ConsumableRow[];
-  orders: SalesOrderRow[];
+  logistics: LogisticsWorkbench | null;
   production: ProductionOrder[];
   integrations: IntegrationStatus[];
 };
@@ -48,7 +48,7 @@ const EMPTY_STATE: DashboardState = {
   completedPurchaseOrders: 0,
   inventory: null,
   consumables: [],
-  orders: [],
+  logistics: null,
   production: [],
   integrations: [],
 };
@@ -71,12 +71,6 @@ function quantity(value: string | number | null | undefined) {
 function shortDate(value: string | null | undefined) {
   if (!value) return "—";
   return value.slice(0, 10).replaceAll("-", "/");
-}
-
-function salesStatusLabel(value: string | null | undefined) {
-  const raw = (value ?? "").trim();
-  if (!raw) return "未标记";
-  return /^\d+$/.test(raw) ? `平台状态 ${raw}` : raw;
 }
 
 type DashboardIconName =
@@ -177,86 +171,6 @@ function Panel({
   );
 }
 
-function TrendChart({
-  points,
-  loading,
-  rangeStart,
-  rangeEnd,
-  onRangeStartChange,
-  onRangeEndChange,
-}: {
-  points: TrendPoint[];
-  loading: boolean;
-  rangeStart: string;
-  rangeEnd: string;
-  onRangeStartChange: (value: string) => void;
-  onRangeEndChange: (value: string) => void;
-}) {
-
-  const width = 720;
-  const height = 190;
-  const chartTop = 12;
-  const chartBottom = 162;
-  const maxSales = Math.max(1, ...points.map((point) => number(point.salesAmount)));
-  const maxOrders = Math.max(1, ...points.map((point) => point.orders));
-  const step = width / points.length;
-  const barWidth = Math.max(3, step * 0.58);
-  const orderPoints = points
-    .map((point, index) => {
-      const x = index * step + step / 2;
-      const y = chartBottom - (point.orders / maxOrders) * (chartBottom - chartTop);
-      return `${x},${y}`;
-    })
-    .join(" ");
-
-  return (
-    <div className="mt-3">
-      <div className="mb-2 flex flex-wrap items-center justify-between gap-2 text-[11px] text-slate-500">
-        <div className="flex items-center gap-4">
-          <span className="flex items-center gap-1.5"><i className="h-2 w-2 rounded-sm bg-indigo-400" />销售额</span>
-          <span className="flex items-center gap-1.5"><i className="h-2 w-2 rounded-full bg-emerald-400" />订单数</span>
-          <span>有效数据日 {points.length}</span>
-        </div>
-        <div className="flex items-center gap-1.5 text-[10px] text-slate-400">
-          <input aria-label="销售趋势开始日期" type="date" value={rangeStart} max={rangeEnd} onChange={(event) => onRangeStartChange(event.target.value)} className="rounded border border-slate-200 bg-white px-1.5 py-1 text-[10px] text-slate-600 outline-none focus:border-indigo-400" />
-          <span>→</span>
-          <input aria-label="销售趋势结束日期" type="date" value={rangeEnd} min={rangeStart} onChange={(event) => onRangeEndChange(event.target.value)} className="rounded border border-slate-200 bg-white px-1.5 py-1 text-[10px] text-slate-600 outline-none focus:border-indigo-400" />
-        </div>
-      </div>
-      {loading ? <div className="flex h-56 items-center justify-center text-sm text-slate-400">正在加载销售趋势…</div> : !points.length ? <div className="flex h-56 items-center justify-center text-sm text-slate-400">该日期范围暂无销售趋势数据，请先导入销售清单。</div> : <>
-      <svg viewBox={`0 0 ${width} ${height}`} className="h-56 w-full" role="img" aria-label="销售额和订单数趋势">
-        {[0, 1, 2, 3].map((line) => {
-          const y = chartTop + ((chartBottom - chartTop) / 3) * line;
-          return <line key={line} x1="0" x2={width} y1={y} y2={y} stroke="#e2e8f0" strokeDasharray="3 4" />;
-        })}
-        {points.map((point, index) => {
-          const barHeight = (number(point.salesAmount) / maxSales) * (chartBottom - chartTop);
-          const x = index * step + (step - barWidth) / 2;
-          const y = chartBottom - barHeight;
-          return (
-            <rect key={point.date} x={x} y={y} width={barWidth} height={Math.max(1, barHeight)} rx="3" fill="#7da8f5" opacity="0.9">
-              <title>{`${point.date} · ${money(point.salesAmount)} · ${point.orders} 单`}</title>
-            </rect>
-          );
-        })}
-        <polyline points={orderPoints} fill="none" stroke="#35b9a4" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" />
-        {points.map((point, index) => {
-          const x = index * step + step / 2;
-          const y = chartBottom - (point.orders / maxOrders) * (chartBottom - chartTop);
-          return <circle key={`order-${point.date}`} cx={x} cy={y} r="2.5" fill="#35b9a4" />;
-        })}
-        <line x1="0" x2={width} y1={chartBottom} y2={chartBottom} stroke="#cbd5e1" />
-      </svg>
-      <div className="mt-1 flex justify-between text-[10px] text-slate-400">
-        <span>{shortDate(points[0]?.date)}</span>
-        <span>{shortDate(points[Math.floor(points.length / 2)]?.date)}</span>
-        <span>{shortDate(points[points.length - 1]?.date)}</span>
-      </div>
-      </>}
-    </div>
-  );
-}
-
 type StatusSegment = { label: string; count: number; color: string; href?: string };
 
 function StatusDonut({ segments, centerLabel }: { segments: StatusSegment[]; centerLabel: string }) {
@@ -310,47 +224,27 @@ function PanelLoading({ label }: { label: string }) {
   return <div className="flex h-52 items-center justify-center text-sm text-slate-400">正在加载{label}…</div>;
 }
 
-function initialTrendRange() {
-  const end = new Date();
-  const start = new Date(end);
-  start.setDate(start.getDate() - 29);
-  return { start: localIso(start), end: localIso(end) };
-}
-
-function localIso(value: Date) {
-  return `${value.getFullYear()}-${String(value.getMonth() + 1).padStart(2, "0")}-${String(value.getDate()).padStart(2, "0")}`;
-}
-
 export default function OverviewPage() {
-  const router = useRouter();
   const [state, setState] = useState<DashboardState>(EMPTY_STATE);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [user, setUser] = useState<AuthUser | null>(null);
   const [now, setNow] = useState<Date | null>(null);
-  const initialRange = useMemo(initialTrendRange, []);
-  const [trendStart, setTrendStart] = useState(initialRange.start);
-  const [trendEnd, setTrendEnd] = useState(initialRange.end);
   const loadRequest = useRef(0);
 
   const load = useCallback(async () => {
     const requestId = ++loadRequest.current;
     setLoading(true);
     setError("");
-    if (trendStart > trendEnd) {
-      setError("销售趋势开始日期不能晚于结束日期");
-      setLoading(false);
-      return;
-    }
     try {
-      const [productionResponse, trend, procurement, completed, inventory, consumables, orders, overview] = await Promise.all([
+      const [productionResponse, trend, procurement, completed, inventory, consumables, logistics, overview] = await Promise.all([
         authenticatedFetch("/api/v1/supply-chain/production-purchase-view?group=all&limit=500", { cache: "no-store" }),
-        dashboardApi.salesTrend(365, trendStart, trendEnd),
+        dashboardApi.salesTrend(30),
         procurementWorkbenchApi.summary(),
         procurementWorkbenchApi.orders({ status: "done", page: 1, pageSize: 100 }),
         dashboardApi.inventory(),
         consumablesApi.list(),
-        dashboardApi.orders(),
+        logisticsApi.workbench().catch(() => null),
         getOverview(),
       ]);
       if (!productionResponse.ok) throw new Error(`生产执行数据加载失败（${productionResponse.status}）`);
@@ -362,7 +256,7 @@ export default function OverviewPage() {
         completedPurchaseOrders: completed.total,
         inventory,
         consumables,
-        orders,
+        logistics,
         production: productionPayload.rows ?? [],
         integrations: overview.integrations,
       });
@@ -372,7 +266,7 @@ export default function OverviewPage() {
     } finally {
       if (requestId === loadRequest.current) setLoading(false);
     }
-  }, [trendEnd, trendStart]);
+  }, []);
 
   useEffect(() => {
     void load();
@@ -383,21 +277,11 @@ export default function OverviewPage() {
   const metrics = useMemo(() => {
     const sales = state.trend.reduce((sum, point) => sum + number(point.salesAmount), 0);
     const orders = state.trend.reduce((sum, point) => sum + point.orders, 0);
-    const transit = state.production.filter((order) => order.archiveGroup === "transit").length;
     const warnings = state.consumables.filter((row) => row.lowStock);
-    const activeProduction = state.production.filter((order) => order.archiveGroup === "production");
-    const producing = state.production.filter((order) => order.stage === "producing").length;
-    const pendingProduction = activeProduction.filter((order) => order.stage === "pending").length;
-    const waitingProduction = activeProduction.filter((order) => order.stage === "waiting").length;
     return {
       sales,
       orders,
-      transit,
       warnings,
-      activeProduction,
-      producing,
-      pendingProduction,
-      waitingProduction,
       latestDate: state.trend[state.trend.length - 1]?.date ?? null,
     };
   }, [state]);
@@ -433,34 +317,20 @@ export default function OverviewPage() {
             <h1 className="text-[22px] font-semibold tracking-tight text-[#14213a]">{greeting}，{displayName}</h1>
             <span className="text-lg" aria-hidden="true">👋</span>
           </div>
-          <p className="mt-1 text-[13px] text-slate-500">从采购到入库，全流程跟踪，让供应链更简单</p>
+          <p className="mt-1 text-[13px] text-slate-500">销售、采购、生产、库存、财务与物流的关键经营状态集中在这里</p>
         </div>
       </header>
 
       {error && <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">首页数据加载失败：{error}</div>}
 
-      <section className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-        <KpiCard label={`${dayLabel}销售额`} value={loading ? "…" : money(latestPoint?.salesAmount)} hint={`有效销售数据 · ${latestDataDate}`} href="/sales" tone="border-blue-100 bg-blue-50/70" mark="sales" iconTone="text-blue-600" />
-        <KpiCard label={`${dayLabel}订单数`} value={loading ? "…" : quantity(latestPoint?.orders)} hint={`有效销售订单 · ${latestDataDate}`} href="/sales" tone="border-emerald-100 bg-emerald-50/70" mark="orders" iconTone="text-emerald-600" />
-        <KpiCard label="在途订单" value={loading ? "…" : quantity(metrics.transit)} hint={`正品采购链路 · 待确认 ${metrics.pendingProduction} · 待生产 ${metrics.waitingProduction} · 生产中 ${metrics.producing}`} href="/supply-chain/production?group=transit" tone="border-orange-100 bg-orange-50/70" mark="transit" iconTone="text-orange-500" />
+      <section className="grid gap-3 md:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-6">
+        <KpiCard label={`${dayLabel}销售额`} value={loading ? "…" : money(latestPoint?.salesAmount)} hint={`近30天累计 ${money(metrics.sales)} · ${latestDataDate}`} href="/sales?tab=overview" tone="border-blue-100 bg-blue-50/70" mark="sales" iconTone="text-blue-600" />
+        <KpiCard label={`${dayLabel}订单数`} value={loading ? "…" : quantity(latestPoint?.orders)} hint={`近30天累计 ${quantity(metrics.orders)} 单 · ${latestDataDate}`} href="/sales?tab=overview" tone="border-emerald-100 bg-emerald-50/70" mark="orders" iconTone="text-emerald-600" />
+        <KpiCard label="待入库采购" value={loading ? "…" : quantity(state.procurement?.pendingInbound ?? 0)} hint="采购订单尚未完成真实入库" href="/purchase/workbench?view=orders&status=inbound" tone="border-cyan-100 bg-cyan-50/70" mark="purchase" iconTone="text-cyan-600" />
+        <KpiCard label="待开发票" value={loading ? "…" : quantity(state.procurement?.pendingInvoice ?? 0)} hint="采购金额仍有未开票余量" href="/purchase/workbench?view=orders&status=invoice" tone="border-amber-100 bg-amber-50/70" mark="report" iconTone="text-amber-600" />
+        <KpiCard label="本月预估物流费" value={loading ? "…" : money(state.logistics?.cards.monthEstimatedAmount)} hint={!state.logistics ? "物流数据暂不可用" : state.logistics.cards.estimateUnitPriceSource === "smart" ? "按历史智能单价预估" : "历史不足时按默认单价预估"} href="/logistics/workbench" tone="border-orange-100 bg-orange-50/70" mark="transit" iconTone="text-orange-500" />
         <KpiCard label="库存预警" value={loading ? "…" : quantity(metrics.warnings.length)} hint="耗材可用库存低于安全库存" href="/inventory?tab=consumables" tone="border-violet-100 bg-violet-50/70" mark="warning" iconTone="text-violet-600" />
       </section>
-
-      <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_330px]">
-        <Panel title="近30天销售趋势" subtitle="销售额来自有效销售订单，订单数与销售额使用同一时间范围。" href="/sales">
-          <TrendChart points={state.trend} loading={loading} rangeStart={trendStart} rangeEnd={trendEnd} onRangeStartChange={setTrendStart} onRangeEndChange={setTrendEnd} />
-        </Panel>
-
-        <Panel title="快捷操作" subtitle="直接进入下一步，不经过旧工作台中转。">
-          <div className="mt-4 grid grid-cols-2 gap-3">
-            <QuickAction href="/purchase/workbench?view=orders&action=new" mark="purchase" label="新建采购订单" tone="border-blue-100 bg-blue-50/60" iconTone="text-blue-600" />
-            <QuickAction href="/data-center-import?tab=alibaba1688" mark="import" label="导入1688订单" tone="border-indigo-100 bg-indigo-50/60" iconTone="text-indigo-600" />
-            <QuickAction href="/supply-chain/production/manual" mark="production" label="新建生产订单" tone="border-violet-100 bg-violet-50/60" iconTone="text-violet-600" />
-            <QuickAction href="/supply-chain/warehouses" mark="warehouse" label="仓库管理" tone="border-orange-100 bg-orange-50/60" iconTone="text-orange-500" />
-            <QuickAction href="/products" mark="product" label="货品档案" tone="border-slate-200 bg-slate-50" iconTone="text-slate-600" />
-          </div>
-        </Panel>
-      </div>
 
       <div className="grid gap-4 xl:grid-cols-3">
         <Panel title="采购订单状态" subtitle="点击状态进入采购订单对应筛选。" href="/purchase/workbench">
@@ -485,39 +355,42 @@ export default function OverviewPage() {
         </Panel>
       </div>
 
-      <div className="grid gap-4 xl:grid-cols-[minmax(0,1.55fr)_minmax(0,1fr)]">
-        <Panel title="最新销售订单" subtitle="订单号可直接穿透到销售明细，再继续查看 SKU、库存和货品档案。" href="/sales">
-          <div className="mt-4 overflow-x-auto">
-            <table className="w-full min-w-[820px] text-sm">
-              <thead className="bg-slate-50 text-left text-[11px] text-slate-500">
-                <tr><th className="px-3 py-2 font-medium">订单号</th><th className="px-3 py-2 font-medium">渠道 / 店铺</th><th className="px-3 py-2 font-medium">商品名称</th><th className="px-3 py-2 text-right font-medium">数量</th><th className="px-3 py-2 text-right font-medium">实付</th><th className="px-3 py-2 font-medium">状态</th><th className="px-3 py-2 text-right font-medium">下单时间</th></tr>
-              </thead>
-              <tbody className="divide-y divide-slate-100">
-                {state.orders.slice(0, 6).map((order) => (
-                  <tr key={order.id} className="hover:bg-slate-50/70">
-                    <td className="px-3 py-2.5"><Link href={`/sales?q=${encodeURIComponent(order.orderNo)}`} className="font-mono text-xs font-medium text-indigo-600 hover:underline">{order.orderNo}</Link></td>
-                    <td className="px-3 py-2.5 text-xs text-slate-600">{order.platform || "—"}<span className="ml-2 text-slate-400">{order.storeName || ""}</span></td>
-                    <td className="max-w-[230px] truncate px-3 py-2.5 text-xs text-slate-600" title={order.itemName || "暂无商品明细"}>{order.itemName || "暂无商品明细"}{order.itemCount > 1 && <span className="ml-1 text-[10px] text-slate-400">+{order.itemCount - 1}项</span>}</td>
-                    <td className="px-3 py-2.5 text-right font-mono text-xs text-slate-700">{quantity(order.quantity)}</td>
-                    <td className="px-3 py-2.5 text-right font-mono text-xs text-slate-700">{money(order.paidAmount)}</td>
-                    <td className="px-3 py-2.5"><span className={`rounded-full px-2 py-0.5 text-[10px] ${/^\d+$/.test((order.orderStatus || "").trim()) ? "bg-slate-100 text-slate-600" : "bg-emerald-50 text-emerald-700"}`}>{salesStatusLabel(order.orderStatus)}</span></td>
-                    <td className="px-3 py-2.5 text-right text-[11px] text-slate-400">{shortDate(order.orderedAt)}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-            {loading && <div className="py-10 text-center text-sm text-slate-400">正在加载销售订单…</div>}
-            {!loading && !state.orders.length && <div className="py-10 text-center text-sm text-slate-400">暂无销售订单</div>}
-          </div>
-        </Panel>
-
-        <Panel title="待办事项" subtitle="每一项都指向可以继续处理的业务模块。">
+      <div className="grid gap-4 xl:grid-cols-3">
+        <Panel title="待办事项" subtitle="优先处理会影响库存、成本和结账的数据缺口。">
           <div className="mt-4 divide-y divide-slate-100">
             <Link href="/purchase/workbench?view=orders&status=refine" className="flex items-center justify-between py-3 text-xs hover:bg-slate-50"><span>待完善采购内容</span><b className="rounded-full bg-amber-50 px-2 py-1 text-amber-700">{state.procurement?.pendingSku ?? 0}</b></Link>
             <Link href="/purchase/workbench?view=orders&status=inbound" className="flex items-center justify-between py-3 text-xs hover:bg-slate-50"><span>待入库采购订单</span><b className="rounded-full bg-cyan-50 px-2 py-1 text-cyan-700">{state.procurement?.pendingInbound ?? 0}</b></Link>
+            <Link href="/purchase/workbench?view=orders&status=invoice" className="flex items-center justify-between py-3 text-xs hover:bg-slate-50"><span>待开发票采购订单</span><b className="rounded-full bg-violet-50 px-2 py-1 text-violet-700">{state.procurement?.pendingInvoice ?? 0}</b></Link>
             <Link href="/inventory?tab=consumables" className="flex items-center justify-between py-3 text-xs hover:bg-slate-50"><span>耗材库存预警</span><b className="rounded-full bg-orange-50 px-2 py-1 text-orange-700">{metrics.warnings.length}</b></Link>
-            <Link href="/supply-chain/production" className="flex items-center justify-between py-3 text-xs hover:bg-slate-50"><span>生产链路待处理</span><b className="rounded-full bg-red-50 px-2 py-1 text-red-600">{state.production.filter((order) => order.hasException).length}</b></Link>
+            <Link href="/supply-chain/production" className="flex items-center justify-between py-3 text-xs hover:bg-slate-50"><span>生产链路异常</span><b className="rounded-full bg-red-50 px-2 py-1 text-red-600">{state.production.filter((order) => order.hasException).length}</b></Link>
             <Link href="/exceptions" className="flex items-center justify-between py-3 text-xs hover:bg-slate-50"><span>异常中心</span><b className="rounded-full bg-slate-100 px-2 py-1 text-slate-600">进入查看</b></Link>
+          </div>
+        </Panel>
+
+        <Panel title="物流成本" subtitle="未出账用智能预估，账单核销后自动替换为实际成本。" href="/logistics/workbench">
+          {loading ? <PanelLoading label="物流成本" /> : state.logistics ? (
+            <div className="mt-4 space-y-3">
+              <div className="flex items-end justify-between rounded-xl bg-orange-50/70 px-4 py-3">
+                <div><div className="text-[11px] text-slate-500">本月预估</div><div className="mt-1 text-xl font-semibold tabular-nums text-slate-900">{money(state.logistics.cards.monthEstimatedAmount)}</div></div>
+                <div className="text-right text-[11px] text-slate-500">{quantity(state.logistics.cards.monthShippedCount)} 单<br />{state.logistics.cards.estimateUnitPriceSource === "smart" ? "历史智能" : "默认兜底"}</div>
+              </div>
+              <div className="grid grid-cols-2 gap-2">
+                <div className="rounded-lg border border-slate-100 p-3"><div className="text-[10px] text-slate-400">待出账预估</div><div className="mt-1 text-sm font-semibold tabular-nums text-slate-700">{money(state.logistics.cards.pendingEstimatedAmount)}</div></div>
+                <div className="rounded-lg border border-slate-100 p-3"><div className="text-[10px] text-slate-400">最近实际单均</div><div className="mt-1 text-sm font-semibold tabular-nums text-slate-700">{state.logistics.cards.latestActualUnitPrice ? money(state.logistics.cards.latestActualUnitPrice) + "/单" : "—"}</div></div>
+                <div className="col-span-2 rounded-lg border border-slate-100 p-3"><div className="text-[10px] text-slate-400">本年度物流成本（实际 + 预估）</div><div className="mt-1 text-sm font-semibold tabular-nums text-slate-700">{money(state.logistics.cards.annualLogisticsCost)}</div></div>
+              </div>
+            </div>
+          ) : <div className="flex h-52 items-center justify-center text-sm text-slate-400">物流成本暂不可用</div>}
+        </Panel>
+
+        <Panel title="快捷操作" subtitle="常用经营动作直接进入对应业务页面。">
+          <div className="mt-4 grid grid-cols-2 gap-3">
+            <QuickAction href="/purchase/workbench?view=orders&action=new" mark="purchase" label="新建采购订单" tone="border-blue-100 bg-blue-50/60" iconTone="text-blue-600" />
+            <QuickAction href="/data-center-import?tab=alibaba1688" mark="import" label="拉取1688订单" tone="border-indigo-100 bg-indigo-50/60" iconTone="text-indigo-600" />
+            <QuickAction href="/supply-chain/production/manual" mark="production" label="新建生产订单" tone="border-violet-100 bg-violet-50/60" iconTone="text-violet-600" />
+            <QuickAction href="/logistics/bills" mark="report" label="导入物流账单" tone="border-orange-100 bg-orange-50/60" iconTone="text-orange-500" />
+            <QuickAction href="/inventory" mark="warehouse" label="查看库存" tone="border-emerald-100 bg-emerald-50/60" iconTone="text-emerald-600" />
+            <QuickAction href="/products" mark="product" label="基础货品" tone="border-slate-200 bg-slate-50" iconTone="text-slate-600" />
           </div>
         </Panel>
       </div>
