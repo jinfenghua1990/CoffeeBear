@@ -81,7 +81,7 @@ def invoice_reconciliation(
     supplier: str = Query("", description="只看该供应商（宽松匹配，供供应商画像用）"),
     db: Session = Depends(get_db),
 ) -> dict:
-    """发票维度对账：进项发票按供应商 FIFO 顺序配平采购订单（纯推导，不落库）。"""
+    """发票维度对账：按开票日期限制可用订单，再按订单日期 FIFO 多单配平（纯推导，不落库）。"""
     from app.services import invoice_reconciliation
 
     return invoice_reconciliation.reconcile(db, supplier=supplier or None)

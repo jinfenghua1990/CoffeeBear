@@ -3814,7 +3814,7 @@ function SupplierInvoiceMatchSection({ entry, loading, hasData, onReload }: {
           <NextLink href={`/purchase/workbench?view=tax`} className="text-[11px] text-indigo-500 hover:underline">全量对账 →</NextLink>
         )}
       </div>
-      <p className="mt-1 text-[10px] leading-4 text-slate-400">进项发票与该供应商的采购订单自动配平（按下单时间先进先出）；看到不对的点「调整匹配」手动指定，手工关联优先并落库。</p>
+      <p className="mt-1 text-[10px] leading-4 text-slate-400">按开票日期配平：每张发票只自动匹配开票日当天及之前的采购订单；符合日期条件的订单再按下单时间从早到晚累计，一张发票可覆盖多张订单。手工调整优先并落库。</p>
       {loading ? (
         <div className="flex items-center gap-2 py-4 text-[12px] text-slate-400"><span className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-slate-200 border-t-indigo-500" />正在匹配发票…</div>
       ) : !entry ? (
@@ -3849,10 +3849,25 @@ function SupplierInvoiceMatchSection({ entry, loading, hasData, onReload }: {
                       <div className="mt-0.5 text-[11px] text-slate-400">
                         开票 {fmtDate(inv.issueDate)} · 票面 {fmtMoney(inv.amount)}
                         {inv.coveredTotal > 0 && <> · 已配订单 {fmtMoney(inv.coveredTotal)}</>}
-                        {inv.status === "short" && <> · 差额 {fmtMoney(inv.diff)}</>}
+                        {inv.status === "short" && <> · 差额 {fmtMoney(Math.abs(inv.diff))}</>}
                       </div>
+                      {inv.status === "short" && inv.shortReason === "date_cutoff" && (
+                        <div className="mt-1 rounded bg-amber-50 px-2 py-1 text-[10px] leading-4 text-amber-700">
+                          截至 {fmtDate(inv.issueDate)} 的订单金额不足；后续订单不参与本票自动匹配
+                          {inv.futureOrderCount ? `（后续/日期待确认订单 ${inv.futureOrderCount} 单）` : ""}。
+                        </div>
+                      )}
+                      {inv.status === "short" && inv.shortReason === "insufficient_orders" && (
+                        <div className="mt-1 rounded bg-amber-50 px-2 py-1 text-[10px] leading-4 text-amber-700">
+                          截至开票日可用采购订单金额不足，请核对是否存在漏单、金额未同步或供应商名称不一致。
+                        </div>
+                      )}
                       {inv.covered.length === 0 ? (
-                        <div className="mt-1 text-[11px] text-amber-600">未匹配到采购订单（订单池为空或金额已耗尽）</div>
+                        <div className="mt-1 text-[11px] text-amber-600">
+                          {inv.shortReason === "date_cutoff"
+                            ? "截至开票日暂无可用采购订单；系统不会把之后下单的订单倒挂到此前发票"
+                            : "未匹配到可用采购订单（订单池为空或金额已耗尽）"}
+                        </div>
                       ) : inv.covered.map((order) => (
                         <div key={(order.linkId ?? "a") + "-" + order.orderId} className="mt-1 flex items-center justify-between gap-2 rounded bg-white px-2 py-1 text-[11px]">
                           <span className="flex min-w-0 items-center gap-1">
@@ -3875,7 +3890,7 @@ function SupplierInvoiceMatchSection({ entry, loading, hasData, onReload }: {
                       </div>
                       {adjustingId === inv.invoiceId && (
                         <div className="mt-1 rounded-md border border-indigo-100 bg-indigo-50/40 p-2">
-                          <div className="text-[10px] text-slate-500">点选要关联到本票的订单（只列有余量的；可多次添加，挂满票面金额即配平）</div>
+                          <div className="text-[10px] text-slate-500">手工调整可覆盖自动日期规则：点选有余量的订单，可连续添加多单，直到本票金额配平。</div>
                           <div className="mt-1 max-h-40 space-y-1 overflow-y-auto">
                             {matchCandidates.length === 0 ? (
                               <div className="py-2 text-center text-[11px] text-slate-400">该供应商没有可关联的订单余量</div>

@@ -2203,7 +2203,9 @@ export type WorkbenchSupplierDetail = WorkbenchSupplierSummary & {
 };
 
 export type InvoiceReconciliation = {
-  tolerance: number; skippedZeroOrders: number;
+  tolerance: number;
+  matchingRule: "invoice_issue_date_cutoff_then_order_date_fifo" | string;
+  skippedZeroOrders: number;
   suppliers: Array<{
     supplier: string; supplierNorm: string; hasOrders: boolean;
     orderCount: number; orderTotal: number; invoiceCount: number; invoiceTotal: number;
@@ -2215,6 +2217,8 @@ export type InvoiceReconciliation = {
     months: Array<{ month: string; invoices: Array<{
       invoiceId: number; invoiceNo: string; issueDate: string | null; seller: string;
       amount: number; coveredTotal: number; diff: number; status: "matched" | "short";
+      shortReason?: "date_cutoff" | "insufficient_orders" | null;
+      futureOrderCount?: number;
       manualLinked: boolean;
       covered: Array<{ orderId: number; orderNo: string; platform: string; date: string | null;
         orderAmount: number; consumed: number; partial: boolean;

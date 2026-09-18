@@ -7,7 +7,8 @@
 规则：
 - 按**归一化供应商名**分组（发票 seller_name ↔ 订单 supplier_name）；
 - 组内订单按下单时间升序、发票按开票日期升序；
-- 逐张发票从最早的未配平订单开始消耗金额，直到发票票面金额耗尽（容差 ±0.05 元）；
+- 发票按开票日期升序；每张发票只匹配“开票日当天及之前”的采购订单；
+- 符合日期条件的订单按下单日期升序消耗金额，直到发票票面金额耗尽（容差 ±0.05 元）；
 - 订单可被多张发票**渐进消耗**（部分覆盖，余量留给下一张发票），严格 FIFO；
 - 金额口径：订单 = COALESCE(paid_amount, order_amount) + adjustment_amount；
   发票 = total_amount（含税票面）；
@@ -138,6 +139,7 @@ def reconcile(db: Session, supplier: str | None = None) -> dict[str, Any]:
         order_entry = {
             "orderId": r.id, "orderNo": r.external_order_id, "platform": r.platform,
             "date": r.ordered_at.strftime("%Y-%m-%d") if r.ordered_at else None,
+            "_orderedAt": r.ordered_at,
             "orderAmount": float(amount), "remaining": amount,
         }
         po_all.setdefault(norm, []).append(order_entry)
@@ -195,11 +197,26 @@ def reconcile(db: Session, supplier: str | None = None) -> dict[str, Any]:
                         for p in po_pool.values():
                             p[:] = [o for o in p if o["orderId"] != order["orderId"]]
             else:
+                # 自动匹配受开票日期约束：发票只能覆盖开票日当天及之前已经发生的采购订单。
+                # 订单池本身按 ordered_at 升序，因此每次都取最早的“日期合格且仍有余量”订单。
                 while pool and remaining_need > TOLERANCE:
-                    order = pool[0]
+                    eligible_index = None
+                    for idx, candidate in enumerate(pool):
+                        ordered_at = candidate.get("_orderedAt")
+                        if candidate["remaining"] <= TOLERANCE:
+                            continue
+                        if inv.issue_date is None:
+                            eligible_index = idx
+                            break
+                        if ordered_at is not None and ordered_at.date() <= inv.issue_date.date():
+                            eligible_index = idx
+                            break
+                    if eligible_index is None:
+                        break
+                    order = pool[eligible_index]
                     take = min(order["remaining"], remaining_need)
-                    if take <= 0:  # 已被手工关联吃满但尚未出队的订单，跳过
-                        pool.pop(0)
+                    if take <= 0:
+                        pool.pop(eligible_index)
                         continue
                     covered.append({
                         "orderId": order["orderId"], "orderNo": order["orderNo"],
@@ -213,10 +230,20 @@ def reconcile(db: Session, supplier: str | None = None) -> dict[str, Any]:
                     remaining_need -= take
                     consumed_total += take
                     if order["remaining"] <= TOLERANCE:
-                        pool.pop(0)
-            diff = consumed_total - amount  # <0 仅当订单耗尽（short）
+                        pool.pop(eligible_index)
+            diff = consumed_total - amount  # <0 仅当截至开票日可用订单金额不足
             if diff >= -TOLERANCE:
                 matched_total += amount
+            future_order_count = 0
+            if not manual_links and inv.issue_date is not None and remaining_need > TOLERANCE:
+                future_order_count = sum(
+                    1 for order in pool
+                    if order["remaining"] > TOLERANCE
+                    and (
+                        order.get("_orderedAt") is None
+                        or order["_orderedAt"].date() > inv.issue_date.date()
+                    )
+                )
             month = inv.issue_date.strftime("%Y-%m") if inv.issue_date else "未知月份"
             month_buckets.setdefault(month, []).append({
                 "invoiceId": inv.id,
@@ -229,6 +256,14 @@ def reconcile(db: Session, supplier: str | None = None) -> dict[str, Any]:
                 "coveredTotal": float(consumed_total),
                 "diff": float(diff),
                 "status": "matched" if diff >= -TOLERANCE else "short",
+                "shortReason": (
+                    "date_cutoff"
+                    if diff < -TOLERANCE and future_order_count > 0
+                    else "insufficient_orders"
+                    if diff < -TOLERANCE
+                    else None
+                ),
+                "futureOrderCount": future_order_count,
             })
 
         entry = {
@@ -282,6 +317,7 @@ def reconcile(db: Session, supplier: str | None = None) -> dict[str, Any]:
 
     return {
         "tolerance": float(TOLERANCE),
+        "matchingRule": "invoice_issue_date_cutoff_then_order_date_fifo",
         "skippedZeroOrders": skipped_zero,
         "suppliers": suppliers_out,
         "expenseSellers": expense_sellers,
