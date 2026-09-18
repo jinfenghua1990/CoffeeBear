@@ -196,38 +196,95 @@ def auto_confirm_inbound_link(link: ProcurementChainLink) -> bool:
     return changed
 
 
-def _has_inbound_allocation_support(db: Session, link: ProcurementChainLink) -> bool:
-    """判断入库链是否有当前采购单的真实明细分配支撑。
+def _inbound_allocation_support_batch(
+    db: Session,
+    links: list[ProcurementChainLink],
+    source_orders_by_id: dict[int, Alibaba1688Order] | None = None,
+) -> set[int]:
+    """批量判断入库链是否有真实 SKU/入库明细分配支撑。
 
-    供应商、金额、时间只能生成候选，不能证明入库单属于当前订单。自动确认必须
-    能在当前外部采购主档下找到该入库单的明细来源（source_item_id）或历史来源标记。
+    支撑条件：当前采购单下存在该入库单的 source_item_id 分配，
+    或历史分配备注明确记录该入库单 ID。返回“有支撑”的 link.id 集合。
     """
-    if link.target_type != "inbound":
-        return True
+    inbound_links = [link for link in links if link.target_type == "inbound"]
+    if not inbound_links:
+        return set()
 
-    po_id = link.external_po_id
-    if po_id is None and link.order_id is not None:
-        source_order = db.get(Alibaba1688Order, link.order_id)
-        if source_order is None or not source_order.external_order_id:
-            return False
-        external = db.query(ExternalPurchaseOrder).filter(
-            ExternalPurchaseOrder.external_order_id == source_order.external_order_id,
-            ExternalPurchaseOrder.platform == "1688",
-        ).order_by(ExternalPurchaseOrder.id.desc()).first()
-        po_id = external.id if external is not None else None
-    if po_id is None:
-        return False
+    source_ids = {link.order_id for link in inbound_links if link.order_id is not None}
+    sources = source_orders_by_id or {}
+    missing_source_ids = source_ids - set(sources)
+    if missing_source_ids:
+        sources = {
+            **sources,
+            **{
+                row.id: row
+                for row in db.query(Alibaba1688Order)
+                .filter(Alibaba1688Order.id.in_(missing_source_ids))
+                .all()
+            },
+        }
 
-    item_ids = [item_id for (item_id,) in db.query(JackyunGoodsDocumentItem.id).filter(
-        JackyunGoodsDocumentItem.document_id == link.target_id
-    ).all()]
-    source_conditions = [PurchaseAllocationItem.note.like(f"%#{link.target_id}%")]
-    if item_ids:
-        source_conditions.append(PurchaseAllocationItem.source_item_id.in_(item_ids))
-    return db.query(PurchaseAllocationItem.id).filter(
-        PurchaseAllocationItem.po_id == po_id,
-        or_(*source_conditions),
-    ).first() is not None
+    source_order_nos = {
+        source.external_order_id
+        for source in sources.values()
+        if source.external_order_id
+    }
+    latest_external_by_no: dict[str, ExternalPurchaseOrder] = {}
+    if source_order_nos:
+        rows = (
+            db.query(ExternalPurchaseOrder)
+            .filter(
+                ExternalPurchaseOrder.external_order_id.in_(source_order_nos),
+                ExternalPurchaseOrder.platform == "1688",
+            )
+            .order_by(ExternalPurchaseOrder.id.desc())
+            .all()
+        )
+        for row in rows:
+            latest_external_by_no.setdefault(row.external_order_id, row)
+
+    po_id_by_link: dict[int, int] = {}
+    for link in inbound_links:
+        po_id = link.external_po_id
+        if po_id is None and link.order_id is not None:
+            source = sources.get(link.order_id)
+            if source is not None and source.external_order_id:
+                external = latest_external_by_no.get(source.external_order_id)
+                po_id = external.id if external is not None else None
+        if po_id is not None:
+            po_id_by_link[link.id] = po_id
+
+    document_ids = {link.target_id for link in inbound_links}
+    item_ids_by_document: dict[int, set[int]] = {}
+    if document_ids:
+        for item_id, document_id in db.query(
+            JackyunGoodsDocumentItem.id,
+            JackyunGoodsDocumentItem.document_id,
+        ).filter(JackyunGoodsDocumentItem.document_id.in_(document_ids)).all():
+            item_ids_by_document.setdefault(document_id, set()).add(item_id)
+
+    po_ids = set(po_id_by_link.values())
+    allocations_by_po: dict[int, list[PurchaseAllocationItem]] = {}
+    if po_ids:
+        for row in db.query(PurchaseAllocationItem).filter(
+            PurchaseAllocationItem.po_id.in_(po_ids)
+        ).all():
+            allocations_by_po.setdefault(row.po_id, []).append(row)
+
+    supported: set[int] = set()
+    for link in inbound_links:
+        po_id = po_id_by_link.get(link.id)
+        if po_id is None:
+            continue
+        item_ids = item_ids_by_document.get(link.target_id, set())
+        note_marker = f"#{link.target_id}"
+        for allocation in allocations_by_po.get(po_id, []):
+            if note_marker in (allocation.note or "") or (
+                allocation.source_item_id is not None and allocation.source_item_id in item_ids
+            ):
+                supported.add(link.id)
+                break
+    return supported
 
 
 def mark_invoice_linked(invoice: TaxInvoice, note: str = "采购链自动关联") -> None:
@@ -880,6 +937,15 @@ def auto_confirm_pending_links(db: Session, actor: str = "system") -> dict:
         {row.id: row for row in db.query(Alibaba1688FileImport).filter(Alibaba1688FileImport.id.in_(source_import_ids)).all()}
         if source_import_ids else {}
     )
+    auto_inbound_links = [
+        link for link in chain_links
+        if link.target_type == "inbound"
+        and link.match_method == "auto"
+        and not link.confirmed
+    ]
+    supported_auto_inbound_link_ids = _inbound_allocation_support_batch(
+        db, auto_inbound_links, sources_by_id
+    )
 
     for link in chain_links:
         if link.order_id is not None:
@@ -906,7 +972,11 @@ def auto_confirm_pending_links(db: Session, actor: str = "system") -> dict:
             if target is None or target.document_type != "inbound":
                 skipped_orphans += 1
                 continue
-            if link.match_method == "auto" and not link.confirmed and not _has_inbound_allocation_support(db, link):
+            if (
+                link.match_method == "auto"
+                and not link.confirmed
+                and link.id not in supported_auto_inbound_link_ids
+            ):
                 # 供应商+金额+时间只能是候选，不能自动确认入库事实。
                 continue
             was_confirmed = bool(link.confirmed)
