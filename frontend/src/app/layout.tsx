@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import "./globals.css";
 import AuthShell from "@/components/auth-shell";
+import GlobalResizableTables from "@/components/global-resizable-tables";
 
 export const metadata: Metadata = {
   title: "电商经营数据平台",
@@ -14,6 +15,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
         <script dangerouslySetInnerHTML={{ __html: `(function(){try{var s=localStorage.getItem("app-theme");var d=s?s==="dark":window.matchMedia("(prefers-color-scheme: dark)").matches;if(d)document.documentElement.classList.add("dark");}catch(e){}})();` }} />
       </head>
       <body>
+        <GlobalResizableTables />
         <AuthShell>{children}</AuthShell>
       </body>
     </html>

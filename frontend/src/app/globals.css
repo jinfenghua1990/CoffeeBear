@@ -116,6 +116,77 @@ body {
 .app-route-content table {
   max-width: none;
 }
+
+/*
+ * 全局可调列宽表格
+ * - 所有业务表格表头右侧可拖动改列宽；
+ * - 列宽由客户端记忆，刷新/切换工作区后保持；
+ * - 表格超出容器时在当前区域横向滚动，不再压缩全部字段；
+ * - 双击列分隔线恢复该列默认宽度。
+ */
+.global-table-scroll-host {
+  max-width: 100%;
+  overflow-x: auto !important;
+  overscroll-behavior-x: contain;
+  scrollbar-gutter: stable;
+}
+
+.global-resizable-table {
+  width: max-content !important;
+  min-width: 100% !important;
+  max-width: none !important;
+}
+
+.global-resizable-table thead th,
+.global-resizable-table tr > th {
+  position: relative;
+}
+
+.global-resizable-table .global-column-sized {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.global-column-resizer {
+  position: absolute;
+  top: 0;
+  right: -3px;
+  z-index: 30;
+  width: 7px;
+  height: 100%;
+  cursor: col-resize;
+  touch-action: none;
+  user-select: none;
+}
+
+.global-column-resizer::after {
+  content: "";
+  position: absolute;
+  top: 18%;
+  bottom: 18%;
+  left: 3px;
+  width: 1px;
+  background: transparent;
+  transition: background-color 120ms ease, width 120ms ease;
+}
+
+.global-column-resizer:hover::after,
+.global-column-resizer.is-active::after {
+  width: 2px;
+  background: #6366f1;
+}
+
+html.global-column-resizing,
+html.global-column-resizing * {
+  cursor: col-resize !important;
+  user-select: none !important;
+}
+
+.dark .global-column-resizer:hover::after,
+.dark .global-column-resizer.is-active::after {
+  background: #818cf8;
+}
+
 ::selection {
   background: #dbeafe;
   color: #17335f;
