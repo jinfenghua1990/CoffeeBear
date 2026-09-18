@@ -119,7 +119,7 @@ export default function SettingsPage() {
         </div>
       </div>
 
-      <div className="mt-6 max-w-3xl rounded-xl border border-gray-200 bg-white p-4">
+      <div id="account-security" className="mt-6 scroll-mt-24 max-w-3xl rounded-xl border border-gray-200 bg-white p-4">
         <div className="text-sm font-medium">账号安全 · 修改密码</div>
         <div className="mt-3 flex flex-wrap items-end gap-3">
           <div>

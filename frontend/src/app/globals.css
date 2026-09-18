@@ -262,18 +262,41 @@ html.global-column-resizing * {
 .dark .bg-rose-50\/60 { background-color: rgb(92 31 48 / 60%); }
 .dark .bg-emerald-50\/60 { background-color: rgb(16 61 46 / 60%); }
 
+/* 常见半透明状态面板：避免暗色下仍残留近白背景 */
+.dark .bg-blue-50\/50 { background-color: rgb(30 58 95 / 50%); }
+.dark .bg-blue-50\/60 { background-color: rgb(30 58 95 / 60%); }
+.dark .bg-blue-50\/70 { background-color: rgb(30 58 95 / 70%); }
+.dark .bg-amber-50\/60 { background-color: rgb(74 56 21 / 60%); }
+.dark .bg-amber-50\/70 { background-color: rgb(74 56 21 / 70%); }
+.dark .bg-emerald-50\/50 { background-color: rgb(16 61 46 / 50%); }
+.dark .bg-emerald-50\/70 { background-color: rgb(16 61 46 / 70%); }
+.dark .bg-violet-50\/60 { background-color: rgb(58 36 99 / 60%); }
+.dark .bg-violet-50\/70 { background-color: rgb(58 36 99 / 70%); }
+.dark .bg-orange-50\/60 { background-color: rgb(90 42 16 / 60%); }
+.dark .bg-orange-50\/70 { background-color: rgb(90 42 16 / 70%); }
+.dark .bg-gray-50\/50 { background-color: rgb(26 37 64 / 50%); }
+.dark .bg-gray-50\/60 { background-color: rgb(26 37 64 / 60%); }
+
 /* 彩色标签边框 */
+.dark .border-indigo-100 { border-color: #3730a3; }
 .dark .border-indigo-200 { border-color: #4338ca; }
+.dark .border-blue-100 { border-color: #1e40af; }
 .dark .border-indigo-300 { border-color: #4f46e5; }
 .dark .border-blue-200 { border-color: #1d4ed8; }
 .dark .border-blue-300 { border-color: #2563eb; }
+.dark .border-amber-100 { border-color: #92400e; }
 .dark .border-amber-200 { border-color: #b45309; }
 .dark .border-amber-300 { border-color: #d97706; }
+.dark .border-rose-100 { border-color: #9f1239; }
 .dark .border-rose-200 { border-color: #be123c; }
 .dark .border-rose-300 { border-color: #e11d48; }
+.dark .border-emerald-100 { border-color: #065f46; }
 .dark .border-emerald-200 { border-color: #047857; }
+.dark .border-violet-100 { border-color: #5b21b6; }
 .dark .border-violet-200 { border-color: #6d28d9; }
+.dark .border-sky-100 { border-color: #0369a1; }
 .dark .border-sky-200 { border-color: #0284c7; }
+.dark .border-orange-100 { border-color: #9a3412; }
 .dark .border-orange-200 { border-color: #c2410c; }
 .dark .border-slate-200 { border-color: #334155; }
 .dark .border-slate-300 { border-color: #3f4e6b; }
@@ -333,6 +356,83 @@ html.global-column-resizing * {
 .dark input::placeholder,
 .dark textarea::placeholder {
   color: #64748b;
+}
+
+/* ===== 暗色模式补全：历史页面仍大量使用 gray-* / ring-* / 半透明白 =====
+ * 统一在全局做语义映射，避免每个旧页面逐个补 dark:class 后再次漂移。
+ */
+.dark .bg-gray-50 { background-color: #1a2540; }
+.dark .bg-gray-100 { background-color: #223048; }
+.dark .bg-gray-200 { background-color: #2e3d5c; }
+.dark .bg-gray-300 { background-color: #3a4868; }
+.dark .bg-white\/95 { background-color: rgb(20 29 48 / 95%); }
+.dark .bg-white\/90 { background-color: rgb(20 29 48 / 90%); }
+.dark .bg-white\/80 { background-color: rgb(20 29 48 / 80%); }
+.dark .bg-white\/70 { background-color: rgb(20 29 48 / 70%); }
+.dark .bg-white\/50 { background-color: rgb(20 29 48 / 50%); }
+
+.dark .border-gray-100 { border-color: #2a3550; }
+.dark .border-gray-200 { border-color: #334155; }
+.dark .border-gray-300 { border-color: #3f4e6b; }
+.dark .border-gray-400 { border-color: #52617e; }
+
+.dark .divide-gray-100 > :not(:last-child) { border-color: #2a3550; }
+.dark .divide-gray-200 > :not(:last-child) { border-color: #3a4868; }
+
+.dark .text-gray-900 { color: #f1f5f9; }
+.dark .text-gray-800 { color: #e2e8f0; }
+.dark .text-gray-700 { color: #cbd5e1; }
+.dark .text-gray-600 { color: #a8b4c6; }
+.dark .text-gray-500 { color: #94a3b8; }
+.dark .text-gray-400 { color: #77869d; }
+.dark .text-gray-300 { color: #94a3b8; }
+
+.dark .ring-gray-100 { --tw-ring-color: #2a3550; }
+.dark .ring-gray-200 { --tw-ring-color: #334155; }
+.dark .ring-gray-300 { --tw-ring-color: #3f4e6b; }
+.dark .ring-slate-100 { --tw-ring-color: #2a3550; }
+.dark .ring-slate-200 { --tw-ring-color: #334155; }
+.dark .ring-slate-300 { --tw-ring-color: #3f4e6b; }
+
+.dark .hover\:bg-gray-50:hover { background-color: #223048; }
+.dark .hover\:bg-gray-100:hover { background-color: #2a3a58; }
+.dark .hover\:bg-gray-200:hover { background-color: #33435f; }
+.dark .hover\:text-gray-900:hover { color: #f8fafc; }
+.dark .hover\:text-slate-900:hover { color: #f8fafc; }
+
+/* 表头、弹层、按钮和原生控件在暗色下统一层级 */
+.dark thead.bg-gray-50,
+.dark thead .bg-gray-50,
+.dark thead.bg-slate-50,
+.dark thead .bg-slate-50 {
+  background-color: #18233b;
+}
+.dark [role="dialog"],
+.dark [role="menu"],
+.dark [data-radix-popper-content-wrapper] {
+  color: #e2e8f0;
+}
+.dark option {
+  background: #1a2540;
+  color: #e2e8f0;
+}
+.dark input[type="date"]::-webkit-calendar-picker-indicator,
+.dark input[type="datetime-local"]::-webkit-calendar-picker-indicator,
+.dark input[type="month"]::-webkit-calendar-picker-indicator {
+  filter: invert(0.82);
+}
+.dark input[type="checkbox"],
+.dark input[type="radio"] {
+  accent-color: #818cf8;
+}
+
+/* 阴影在暗色下避免出现发白边缘 */
+.dark .shadow,
+.dark .shadow-sm,
+.dark .shadow-md,
+.dark .shadow-lg,
+.dark [class*="shadow-["] {
+  --tw-shadow-color: rgb(0 0 0 / 35%);
 }
 
 /* 滚动条暗色 */

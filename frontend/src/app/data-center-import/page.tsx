@@ -127,7 +127,7 @@ export default function DataCenterImportPage() {
         {returnOrder && <div className="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-indigo-100 bg-indigo-50/60 px-4 py-3 text-sm text-indigo-800"><span>正在为采购订单 <b className="font-mono">{returnOrder}</b> 补充原始资料。确认导入后，回到订单完成关联。</span><Link href={`/purchase/workbench?view=orders&order=${encodeURIComponent(returnOrder)}`} className="rounded-md bg-white px-3 py-1.5 text-xs font-medium text-indigo-600 shadow-sm">返回当前订单</Link></div>}
       </header>
 
-      {/* 页签已上移为左侧「数据中台」二级菜单（lib/navigation.ts），此处仅按 ?tab= 渲染面板 */}
+      {/* 数据接入不再占顶部一级菜单；从各业务区进入后，由隐藏的数据接入侧栏切换来源。 */}
 
       <section id="data-tools" className="mt-5 grid gap-4 xl:grid-cols-[minmax(300px,0.8fr)_minmax(560px,1.5fr)]">
         <div className="rounded-xl border border-indigo-100 bg-indigo-50/45 p-4">

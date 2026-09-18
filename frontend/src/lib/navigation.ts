@@ -20,6 +20,8 @@ export type ModuleDef = {
   /** 点击一级菜单的默认落地页（= 第一项） */
   href: string;
   match: (pathname: string) => boolean;
+  /** 是否显示在顶部一级业务菜单；系统/数据辅助区可隐藏但保留路由与侧栏归属。 */
+  showInTop?: boolean;
   items?: SecondaryItem[];
   groups?: SecondaryGroup[];
 };
@@ -95,6 +97,7 @@ export const MODULES: ModuleDef[] = [
       { href: "/supply-chain", label: "供应链总览", icon: "home" },
       { href: "/suppliers", label: "供应商档案", icon: "box" },
       { href: "/data-center-import?tab=alibaba1688", label: "1688 采购拉取", icon: "import" },
+      { href: "/data-center-import?tab=external_orders", label: "其他渠道采购接入", icon: "import" },
       { href: `${WORKBENCH}?view=orders`, label: "采购订单", icon: "cart" },
       { href: `${WORKBENCH}?view=chain`, label: "采购链路", icon: "flow" },
       { href: "/supply-chain/production", label: "生产订单", icon: "factory" },
@@ -129,23 +132,34 @@ export const MODULES: ModuleDef[] = [
   {
     key: "data",
     label: "数据",
-    title: "数据中台",
+    title: "数据接入",
     href: "/data-center-import?tab=alibaba1688",
-    match: (p) =>
-      p.startsWith("/data-center-import") || p.startsWith("/exceptions") || p.startsWith("/automation"),
+    showInTop: false,
+    match: (p) => p.startsWith("/data-center-import") || p.startsWith("/exceptions"),
     items: [
-      { href: "/data-center-import?tab=alibaba1688", label: "1688 订单接入", icon: "import" },
-      { href: "/data-center-import?tab=external_orders", label: "其他渠道采购订单", icon: "cart" },
-      { href: "/data-center-import?tab=jackyun", label: "吉客云业务单据", icon: "box" },
-      { href: "/data-center-import?tab=tax", label: "税务发票清单", icon: "tax" },
+      { href: "/data-center-import?tab=alibaba1688", label: "1688 接入", icon: "import" },
+      { href: "/data-center-import?tab=external_orders", label: "其他渠道采购", icon: "cart" },
+      { href: "/data-center-import?tab=jackyun", label: "吉客云数据", icon: "box" },
       { href: "/exceptions", label: "异常中心", icon: "alert" },
-      { href: "/automation", label: "自动化", icon: "automation" },
+    ],
+  },
+  {
+    key: "system",
+    label: "设置",
+    title: "系统设置",
+    href: "/settings",
+    showInTop: false,
+    match: (p) => p.startsWith("/settings") || p.startsWith("/automation"),
+    items: [
+      { href: "/settings", label: "系统设置", icon: "settings" },
+      { href: "/settings/update", label: "系统更新", icon: "automation" },
+      { href: "/automation", label: "自动化任务", icon: "flow" },
     ],
   },
 ];
 
 /** 解析当前一级模块。顺序敏感：库存路由要先于 products / supply 判断。 */
-const RESOLVE_ORDER = ["home", "sales", "inventory", "products", "supply", "finance", "logistics", "data"];
+const RESOLVE_ORDER = ["home", "sales", "inventory", "products", "supply", "finance", "logistics", "system", "data"];
 
 export function resolveModule(pathname: string): ModuleDef {
   for (const key of RESOLVE_ORDER) {
