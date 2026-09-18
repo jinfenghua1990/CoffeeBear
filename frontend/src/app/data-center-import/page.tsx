@@ -149,6 +149,16 @@ export default function DataCenterImportPage() {
                 <span className="shrink-0 text-indigo-600">{item.key === "alibaba1688" ? "拉取 / 上传 →" : "上传 →"}</span>
               </Link>
             ))}
+            <Link
+              href="/logistics/bills?import=1"
+              className="flex items-center justify-between rounded-lg border border-indigo-100 bg-white px-3 py-2.5 text-xs transition hover:border-indigo-300 hover:bg-indigo-50"
+            >
+              <span>
+                <span className="font-medium text-slate-800">快递物流账单</span>
+                <span className="ml-2 text-[10px] text-slate-400">仓配账单 / 运单明细 / 增值服务 / 报价表</span>
+              </span>
+              <span className="shrink-0 text-indigo-600">前往物流导入 →</span>
+            </Link>
           </div>
         </div>
 

@@ -4,13 +4,14 @@ from __future__ import annotations
 from datetime import date, datetime
 from decimal import Decimal
 
-from fastapi import APIRouter, Body, Depends, HTTPException
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app.db import get_db
 from app.models.logistics import LogisticsBill
 from app.services import logistics_service as service
+from app.services import logistics_import_service as import_service
 
 router = APIRouter(prefix="/logistics", tags=["快递物流"])
 
@@ -45,6 +46,23 @@ def workbench(db: Session = Depends(get_db)) -> dict:
 @router.get("/bills")
 def list_bills(db: Session = Depends(get_db)) -> dict:
     return {"items": service.list_bills(db)}
+
+
+@router.post("/bills/import-xlsx")
+async def import_bill_xlsx(
+    file: UploadFile = File(...),
+    confirm: bool = Query(False),
+    db: Session = Depends(get_db),
+) -> dict:
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="请选择物流账单文件")
+    content = await file.read()
+    if not content:
+        raise HTTPException(status_code=400, detail="物流账单文件为空")
+    try:
+        return import_service.parse_bill_xlsx(db, content, file.filename, persist=confirm)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
 
 
 @router.get("/bills/{bill_id}")

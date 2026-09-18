@@ -7,8 +7,10 @@
 
 from __future__ import annotations
 
+from collections import defaultdict
 from datetime import datetime, time, timedelta
-from decimal import Decimal
+from decimal import Decimal, ROUND_HALF_UP
+import statistics
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import func, extract
@@ -149,16 +151,102 @@ def settings(db: Session) -> dict:
     return {"defaultUnitPrice": str(default_unit_price(db))}
 
 
+def historical_models(db: Session) -> dict:
+    """从已核销 Excel 账单学习月度/地区实际单均费用。"""
+    grouped: dict[tuple[str, str, str, str], list[Decimal]] = defaultdict(list)
+    all_fees: list[Decimal] = []
+
+    for bill in _settled_bills(db):
+        raw = bill.raw if isinstance(bill.raw, dict) else {}
+        if raw.get("format") != "warehouse_logistics_bill_v1":
+            continue
+        summary = raw.get("summary") if isinstance(raw.get("summary"), dict) else {}
+        try:
+            direct = Decimal(str(summary.get("directChargeAmount") or "0"))
+        except Exception:
+            direct = Decimal("0")
+        actual = bill.actual_amount or Decimal("0")
+        factor = (actual / direct) if direct > 0 else Decimal("1")
+        rows = list(raw.get("shipments") or []) + list(raw.get("pickup") or [])
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            province = str(row.get("province") or "").strip()
+            completed = str(row.get("completedAt") or "")
+            carrier = str(row.get("carrier") or "").strip()
+            weight_band = str(row.get("weightBand") or "").strip() or "未知"
+            if not province or len(completed) < 7:
+                continue
+            try:
+                fee = Decimal(str(row.get("fee") or "0")) * factor
+            except Exception:
+                continue
+            if fee <= 0:
+                continue
+            fee = fee.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+            grouped[(completed[:7], province, carrier, weight_band)].append(fee)
+            all_fees.append(fee)
+
+    models: list[dict] = []
+    for (month, province, carrier, weight_band), fees in grouped.items():
+        avg = sum(fees, Decimal("0")) / Decimal(len(fees))
+        med = Decimal(str(statistics.median([float(x) for x in fees])))
+        count = len(fees)
+        confidence = "high" if count >= 30 else "medium" if count >= 10 else "low"
+        models.append({
+            "month": month,
+            "province": province,
+            "carrier": carrier,
+            "weightBand": weight_band,
+            "sampleCount": count,
+            "avgFee": str(avg.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)),
+            "medianFee": str(med.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)),
+            "confidence": confidence,
+        })
+    models.sort(key=lambda row: (row["month"], row["sampleCount"]), reverse=True)
+
+    if all_fees:
+        average = sum(all_fees, Decimal("0")) / Decimal(len(all_fees))
+        suggested = (average * Decimal("1.05") * Decimal("10")).quantize(
+            Decimal("1"), rounding=ROUND_HALF_UP
+        ) / Decimal("10")
+        confidence = "high" if len(all_fees) >= 500 else "medium" if len(all_fees) >= 100 else "low"
+        smart = {
+            "available": True,
+            "sampleCount": len(all_fees),
+            "averageFee": str(average.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)),
+            "suggestedUnitPrice": str(suggested.quantize(Decimal("0.01"))),
+            "confidence": confidence,
+            "method": "历史实际账单（地区/月份/物流公司/重量段）+ 5% 波动余量",
+        }
+    else:
+        smart = {
+            "available": False,
+            "sampleCount": 0,
+            "averageFee": None,
+            "suggestedUnitPrice": None,
+            "confidence": "none",
+            "method": "暂无已核销运单级账单，使用默认预估单价",
+        }
+
+    return {"summary": smart, "models": models[:120]}
+
+
 def workbench(db: Session) -> dict:
     now = _now()
     year, month = now.year, now.month
     unit_price = default_unit_price(db)
+    learned = historical_models(db)
+    smart_summary = learned["summary"]
+    smart_price = Decimal(str(smart_summary["suggestedUnitPrice"])) if smart_summary.get("suggestedUnitPrice") else None
+    estimate_unit_price = smart_price if smart_price is not None and smart_price > 0 else unit_price
+    estimate_source = "smart" if smart_price is not None and smart_price > 0 else "default"
     shipped = _monthly_shipped(db, year)
     bills = db.query(LogisticsBill).order_by(LogisticsBill.period_start.desc()).all()
     settled = [b for b in bills if b.status in ("settled", "partial", "abnormal")]
 
     def _est(count: int) -> Decimal:
-        return Decimal(count) * unit_price
+        return Decimal(count) * estimate_unit_price
 
     # 1) 当年未出账（未被已核销账单覆盖）的月份 → 独立行
     rows: list[dict] = []
@@ -177,7 +265,8 @@ def workbench(db: Session) -> dict:
                 "carrier": "",
                 "billId": None,
                 "shippedCount": count,
-                "unitPrice": str(unit_price),
+                "unitPrice": str(estimate_unit_price),
+                "unitPriceSource": estimate_source,
                 "estimatedAmount": str(est),
                 "actualAmount": None,
                 "actualUnitPrice": None,
@@ -216,7 +305,7 @@ def workbench(db: Session) -> dict:
 
     cur_month_count = shipped.get(month, 0)
     open_est = sum(
-        (Decimal(r["shippedCount"]) * unit_price) if r["type"] == "month" else Decimal("0")
+        (Decimal(r["shippedCount"]) * estimate_unit_price) if r["type"] == "month" else Decimal("0")
         for r in rows
     )
     # 本年度物流成本 = 已核销账单在本年度覆盖部分的实际金额 + 未出账月份预估。
@@ -236,9 +325,17 @@ def workbench(db: Session) -> dict:
         "pendingEstimatedAmount": str(open_est),
         "latestActualUnitPrice": latest_actual,
         "annualLogisticsCost": str(annual),
+        "estimateUnitPrice": str(estimate_unit_price),
+        "estimateUnitPriceSource": estimate_source,
     }
 
-    return {"cards": cards, "months": rows, "settings": settings(db)}
+    return {
+        "cards": cards,
+        "months": rows,
+        "settings": settings(db),
+        "smartEstimate": smart_summary,
+        "regionalModels": learned["models"],
+    }
 
 
 def _range_label(b: LogisticsBill) -> str:
@@ -298,6 +395,9 @@ def _bill_dict(b: LogisticsBill) -> dict:
         "invoiceStatus": b.invoice_status,
         "invoiceStatusLabel": INVOICE_LABEL.get(b.invoice_status, b.invoice_status),
         "note": b.note,
+        "attachmentName": b.attachment_name,
+        "importSource": (b.raw or {}).get("source") if isinstance(b.raw, dict) else None,
+        "importSummary": (b.raw or {}).get("summary") if isinstance(b.raw, dict) else None,
         "matchedCount": b.matched_count,
         "unmatchedCount": b.unmatched_count,
         "duplicateCount": b.duplicate_count,
@@ -349,7 +449,9 @@ def settle_bill(db: Session, bill_id: int) -> LogisticsBill:
     end = bill.period_end or bill.period_start
     start_tz = start.tzinfo or _tz()
     inclusive_start = datetime.combine(start.date(), time.min, tzinfo=start_tz)
-    count = _shipped_count_range(db, inclusive_start, _exclusive_period_end(end))
+    system_count = _shipped_count_range(db, inclusive_start, _exclusive_period_end(end))
+    # Excel 账单有真实包裹/收费记录数时优先使用，避免“一张发货单拆多包裹”把实际单均算高。
+    count = int(bill.waybill_count or 0) or system_count
     unit = None
     if count > 0:
         unit = bill.actual_amount / Decimal(count)

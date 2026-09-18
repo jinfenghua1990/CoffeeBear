@@ -1,7 +1,7 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
-import { logisticsApi, type LogisticsBill } from "@/lib/api";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { logisticsApi, type LogisticsBill, type LogisticsBillImportPreview } from "@/lib/api";
 
 function fmtMoney(v: string | null | undefined): string {
   if (v == null || v === "" || v === "0" || v === "0.00") return "—";
@@ -40,6 +40,10 @@ export default function LogisticsBillsPage() {
   const [showCreate, setShowCreate] = useState(false);
   const [detail, setDetail] = useState<LogisticsBill | null>(null);
   const [saving, setSaving] = useState(false);
+  const [importFile, setImportFile] = useState<File | null>(null);
+  const [importPreview, setImportPreview] = useState<LogisticsBillImportPreview | null>(null);
+  const [importing, setImporting] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -57,6 +61,37 @@ export default function LogisticsBillsPage() {
   useEffect(() => {
     load();
   }, [load]);
+
+  const previewImport = async (file: File | undefined) => {
+    if (!file) return;
+    setImporting(true);
+    setError(null);
+    try {
+      const result = await logisticsApi.importBillXlsx(file, false);
+      setImportFile(file);
+      setImportPreview(result.preview);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "物流账单识别失败");
+    } finally {
+      setImporting(false);
+    }
+  };
+
+  const confirmImport = async () => {
+    if (!importFile || !importPreview) return;
+    setImporting(true);
+    setError(null);
+    try {
+      await logisticsApi.importBillXlsx(importFile, true);
+      setImportFile(null);
+      setImportPreview(null);
+      await load();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "物流账单导入失败");
+    } finally {
+      setImporting(false);
+    }
+  };
 
   const [form, setForm] = useState({
     periodLabel: "",
@@ -136,9 +171,28 @@ export default function LogisticsBillsPage() {
           <h1 className="text-lg font-semibold text-gray-800">物流账单</h1>
           <p className="mt-0.5 text-xs text-gray-400">通常半年出一次账单，导入并核销后替换预估物流成本</p>
         </div>
-        <button onClick={openCreate} className="rounded-lg bg-[#2574e8] px-3 py-2 text-sm font-medium text-white hover:bg-[#1f63c9]">
-          ＋ 导入物流账单
-        </button>
+        <div className="flex items-center gap-2">
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept=".xlsx,.xlsm"
+            className="hidden"
+            onChange={(event) => {
+              void previewImport(event.target.files?.[0]);
+              event.target.value = "";
+            }}
+          />
+          <button
+            onClick={() => fileInputRef.current?.click()}
+            disabled={importing}
+            className="rounded-lg bg-[#2574e8] px-3 py-2 text-sm font-medium text-white hover:bg-[#1f63c9] disabled:opacity-50"
+          >
+            {importing ? "识别中…" : "＋ 导入 Excel 账单"}
+          </button>
+          <button onClick={openCreate} className="rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-600 hover:bg-gray-50">
+            手工新增
+          </button>
+        </div>
       </div>
 
       {error && <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-600">{error}</div>}
@@ -191,6 +245,100 @@ export default function LogisticsBillsPage() {
                 ))}
               </tbody>
             </table>
+          </div>
+        </div>
+      )}
+
+      {importPreview && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 p-4" onClick={() => !importing && setImportPreview(null)}>
+          <div className="max-h-[88vh] w-[900px] overflow-y-auto rounded-2xl bg-white p-5 shadow-xl" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <h3 className="text-base font-semibold text-gray-900">物流账单识别预览</h3>
+                <p className="mt-1 text-xs text-gray-400">{importPreview.fileName} · 确认后才会写入物流账单</p>
+              </div>
+              <span className="rounded-full bg-indigo-50 px-2.5 py-1 text-[11px] font-medium text-indigo-700">
+                {importPreview.periodLabel}
+              </span>
+            </div>
+
+            {importPreview.warnings.length > 0 && (
+              <div className="mt-4 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-xs leading-5 text-amber-800">
+                {importPreview.warnings.map((warning) => <div key={warning}>⚠ {warning}</div>)}
+              </div>
+            )}
+
+            {importPreview.duplicateBillId && (
+              <div className="mt-3 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-xs text-red-700">
+                该文件已经导入过，账单编号 #{importPreview.duplicateBillId}，请不要重复入账。
+              </div>
+            )}
+
+            <div className="mt-4 grid grid-cols-2 gap-3 md:grid-cols-4">
+              {[
+                ["快递明细", importPreview.shipmentCount.toLocaleString("zh-CN") + " 条"],
+                ["自提/客户账号", importPreview.pickupCount.toLocaleString("zh-CN") + " 条"],
+                ["收费记录", importPreview.waybillCount.toLocaleString("zh-CN") + " 条"],
+                ["系统匹配", importPreview.matchedCount.toLocaleString("zh-CN") + " 条"],
+              ].map(([label, value]) => (
+                <div key={label} className="rounded-xl border border-slate-200 bg-slate-50/60 p-3">
+                  <div className="text-[11px] text-slate-400">{label}</div>
+                  <div className="mt-1 text-lg font-semibold text-slate-800">{value}</div>
+                </div>
+              ))}
+            </div>
+
+            <div className="mt-4 grid gap-3 md:grid-cols-5">
+              {[
+                ["快递费", importPreview.shippingAmount],
+                ["自提费用", importPreview.pickupAmount],
+                ["增值服务", importPreview.valueAddedAmount],
+                ["账单调整", importPreview.adjustmentAmount],
+                ["最终实际应付", importPreview.actualAmount],
+              ].map(([label, value], index) => (
+                <div key={label} className={`rounded-xl border p-3 ${index === 4 ? "border-emerald-200 bg-emerald-50" : "border-slate-200 bg-white"}`}>
+                  <div className="text-[11px] text-slate-400">{label}</div>
+                  <div className={`mt-1 text-base font-semibold tabular-nums ${index === 4 ? "text-emerald-700" : "text-slate-800"}`}>{fmtMoney(value)}</div>
+                </div>
+              ))}
+            </div>
+
+            <div className="mt-4 grid gap-4 md:grid-cols-2">
+              <div className="rounded-xl border border-slate-200 p-4">
+                <div className="text-sm font-medium text-slate-800">账单识别</div>
+                <div className="mt-3 space-y-2 text-xs">
+                  <Info k="汇总仓库" v={importPreview.summaryWarehouse || "—"} />
+                  <Info k="明细主要仓库" v={importPreview.detailWarehouse || "—"} />
+                  <Info k="物流渠道" v={importPreview.carrier || "—"} />
+                  <Info k="账单毛额" v={fmtMoney(importPreview.grossAmount)} />
+                  <Info k="未匹配运单" v={String(importPreview.unmatchedCount)} />
+                  <Info k="重复运单" v={String(importPreview.duplicateCount)} />
+                </div>
+              </div>
+              <div className="rounded-xl border border-slate-200 p-4">
+                <div className="text-sm font-medium text-slate-800">历史学习样本</div>
+                <p className="mt-1 text-[11px] leading-5 text-slate-400">系统会把实际费用按月份、地区、物流公司、重量段沉淀为下一期预估模型。</p>
+                <div className="mt-3 max-h-36 overflow-y-auto">
+                  {(importPreview.regionalModels ?? []).slice(0, 8).map((row) => (
+                    <div key={`${row.month}-${row.province}`} className="flex items-center justify-between border-b border-slate-100 py-1.5 text-xs last:border-b-0">
+                      <span className="text-slate-600">{row.month} · {row.province}</span>
+                      <span className="tabular-nums text-slate-800">{row.sampleCount} 单 · 均 {fmtMoney(row.avgFee)}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+
+            <div className="mt-5 flex justify-end gap-2">
+              <button disabled={importing} onClick={() => setImportPreview(null)} className="rounded-lg border border-gray-300 px-4 py-2 text-sm text-gray-600 hover:bg-gray-50 disabled:opacity-50">取消</button>
+              <button
+                disabled={importing || Boolean(importPreview.duplicateBillId)}
+                onClick={() => void confirmImport()}
+                className="rounded-lg bg-[#2574e8] px-4 py-2 text-sm font-medium text-white hover:bg-[#1f63c9] disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {importing ? "导入中…" : "确认导入 · 待核销"}
+              </button>
+            </div>
           </div>
         </div>
       )}
@@ -266,10 +414,27 @@ export default function LogisticsBillsPage() {
                 <Info k="核销情况" v={detail.statusLabel} />
                 <Info k="发票状态" v={INVOICE_LABEL[detail.invoiceStatus] ?? detail.invoiceStatus} />
               </div>
-              <div className="mt-3 border-t border-gray-200 pt-3 text-xs text-gray-400">
-                <p>上传原始账单：暂未支持附件上传（第一阶段按「账期 + 公司 + 总金额」整体核销）。</p>
+              <div className="mt-3 border-t border-gray-200 pt-3 text-xs text-gray-500">
+                <div className="flex items-center justify-between gap-3">
+                  <span>来源文件名</span>
+                  <span className="max-w-[320px] truncate font-medium text-slate-700" title={detail.attachmentName || ""}>{detail.attachmentName || "手工录入"}</span>
+                </div>
               </div>
             </div>
+            {detail.importSummary && (
+              <div className="mt-3 rounded-lg border border-gray-200 p-4">
+                <div className="text-sm font-medium text-gray-700">账单费用拆分</div>
+                <div className="mt-3 grid grid-cols-2 gap-x-5 gap-y-2 text-sm">
+                  <Info k="快递费" v={fmtMoney(detail.importSummary.shippingAmount)} />
+                  <Info k="自提/客户账号" v={fmtMoney(detail.importSummary.pickupAmount)} />
+                  <Info k="增值服务" v={fmtMoney(detail.importSummary.valueAddedAmount)} />
+                  <Info k="账单毛额" v={fmtMoney(detail.importSummary.grossAmount)} />
+                  <Info k="赔付/盘亏调整" v={fmtMoney(detail.importSummary.adjustmentAmount)} />
+                  <Info k="最终实际应付" v={fmtMoney(detail.importSummary.actualAmount)} />
+                </div>
+              </div>
+            )}
+
             <div className="mt-3 rounded-lg border border-gray-200 p-4">
               <div className="text-sm font-medium text-gray-700">账单匹配结果</div>
               <div className="mt-2 grid grid-cols-4 gap-3 text-center">
@@ -278,7 +443,7 @@ export default function LogisticsBillsPage() {
                 <Match k="重复运单" v={fmtCount(detail.duplicateCount)} />
                 <Match k="异常金额" v={fmtCount(detail.abnormalCount)} />
               </div>
-              <p className="mt-2 text-xs text-gray-400">第 1 阶段无运单级明细，匹配数据暂为空；后续上传含运单号的账单后可自动匹配。</p>
+              <p className="mt-2 text-xs text-gray-400">Excel 账单会按发货单号 → 物流单号 → 原始订单号依次匹配本地吉客云数据；未匹配项保留，便于后续补齐数据源后重新核对。</p>
             </div>
             <div className="mt-5 flex justify-end">
               <button onClick={() => setDetail(null)} className="rounded-lg border border-gray-300 px-4 py-2 text-sm text-gray-600 hover:bg-gray-50">关闭</button>

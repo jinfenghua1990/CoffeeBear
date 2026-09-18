@@ -76,12 +76,15 @@ export default function LogisticsWorkbenchPage() {
   const cards = useMemo(() => {
     if (!data) return [];
     const c = data.cards;
+    const smart = data.smartEstimate;
+    const source = c.estimateUnitPriceSource === "smart" ? "历史模型" : "默认单价";
     return [
-      { label: "本月发货单量", value: fmtCount(c.monthShippedCount), hint: `${fmtMoney(c.monthEstimatedAmount)} = 单量 × 预估单价` },
-      { label: "本月预估运费", value: fmtMoney(c.monthEstimatedAmount), hint: "未出账，按预估计入成本" },
+      { label: "本月发货单量", value: fmtCount(c.monthShippedCount), hint: `${fmtMoney(c.monthEstimatedAmount)} = 单量 × ${source}` },
+      { label: "本月预估运费", value: fmtMoney(c.monthEstimatedAmount), hint: `当前采用 ${fmtMoney(c.estimateUnitPrice ?? data.settings.defaultUnitPrice)}/单 · ${source}` },
+      { label: "智能建议单价", value: smart?.suggestedUnitPrice ? fmtMoney(smart.suggestedUnitPrice) + "/单" : "—", hint: smart?.available ? `${smart.sampleCount} 条历史样本 · ${smart.confidence === "high" ? "高" : smart.confidence === "medium" ? "中" : "低"}可信度` : "暂无已核销运单级账单" },
       { label: "待出账运费", value: fmtMoney(c.pendingEstimatedAmount), hint: "本年未核销月份的预估合计" },
       { label: "最近实际单均运费", value: c.latestActualUnitPrice ? fmtMoney(c.latestActualUnitPrice) + "/单" : "—", hint: "最近一张已核销账单" },
-      { label: "本年度物流成本", value: fmtMoney(c.annualLogisticsCost), hint: "已出账用实际、未出账用预估" },
+      { label: "本年度物流成本", value: fmtMoney(c.annualLogisticsCost), hint: "已出账用实际、未出账用智能预估" },
     ];
   }, [data]);
 
@@ -114,7 +117,7 @@ export default function LogisticsWorkbenchPage() {
       ) : data ? (
         <>
           {/* 顶部 5 张数据卡 */}
-          <div className="grid grid-cols-5 gap-3">
+          <div className="grid grid-cols-2 gap-3 lg:grid-cols-3 2xl:grid-cols-6">
             {cards.map((c) => (
               <div key={c.label} className="rounded-xl border border-gray-200 bg-white p-4">
                 <div className="text-xs text-gray-500">{c.label}</div>
@@ -131,7 +134,10 @@ export default function LogisticsWorkbenchPage() {
                 <span className="h-3.5 w-1 rounded bg-[#2574e8]" />
                 <span className="text-sm font-medium text-gray-800">月度物流成本</span>
               </div>
-              <span className="text-xs text-gray-400">预估单价 {fmtMoney(data.settings.defaultUnitPrice)}/单</span>
+              <span className="text-xs text-gray-400">
+                当前预估单价 {fmtMoney(data.cards.estimateUnitPrice ?? data.settings.defaultUnitPrice)}/单
+                {data.cards.estimateUnitPriceSource === "smart" ? " · 历史智能" : " · 默认兜底"}
+              </span>
             </div>
             <div className="overflow-x-auto">
               <table className="w-full text-sm">
@@ -177,6 +183,61 @@ export default function LogisticsWorkbenchPage() {
               </table>
             </div>
           </div>
+
+          <div className="rounded-xl border border-gray-200 bg-white">
+            <div className="flex flex-wrap items-start justify-between gap-3 border-b border-gray-100 px-4 py-3">
+              <div>
+                <div className="flex items-center gap-2">
+                  <span className="h-3.5 w-1 rounded bg-violet-500" />
+                  <span className="text-sm font-medium text-gray-800">历史地区运费模型</span>
+                </div>
+                <p className="mt-1 text-[11px] text-gray-400">按“月份 + 省份 + 物流公司 + 重量段”学习已核销实际账单；样本越多，下一期预估越稳定。</p>
+              </div>
+              {data.smartEstimate?.available && (
+                <div className="text-right text-xs text-slate-500">
+                  <div>历史综合均价 <b className="tabular-nums text-slate-800">{fmtMoney(data.smartEstimate.averageFee)}/单</b></div>
+                  <div className="mt-0.5 text-[10px] text-slate-400">{data.smartEstimate.method}</div>
+                </div>
+              )}
+            </div>
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="border-b border-gray-100 text-left text-xs text-gray-500">
+                    <th className="px-4 py-2.5 font-medium">月份</th>
+                    <th className="px-4 py-2.5 font-medium">地区</th>
+                    <th className="px-4 py-2.5 font-medium">物流公司</th>
+                    <th className="px-4 py-2.5 font-medium">重量段</th>
+                    <th className="px-4 py-2.5 font-medium">样本数</th>
+                    <th className="px-4 py-2.5 font-medium">历史均价</th>
+                    <th className="px-4 py-2.5 font-medium">中位数</th>
+                    <th className="px-4 py-2.5 font-medium">可信度</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {(data.regionalModels ?? []).slice(0, 40).map((row) => (
+                    <tr key={`${row.month}-${row.province}-${row.carrier}-${row.weightBand}`} className="border-b border-gray-50 last:border-b-0">
+                      <td className="px-4 py-2 text-slate-700">{row.month}</td>
+                      <td className="px-4 py-2 font-medium text-slate-800">{row.province}</td>
+                      <td className="max-w-[220px] truncate px-4 py-2 text-slate-600" title={row.carrier}>{row.carrier}</td>
+                      <td className="px-4 py-2 text-slate-600">{row.weightBand}</td>
+                      <td className="px-4 py-2 tabular-nums text-slate-700">{row.sampleCount}</td>
+                      <td className="px-4 py-2 tabular-nums text-slate-800">{fmtMoney(row.avgFee)}</td>
+                      <td className="px-4 py-2 tabular-nums text-slate-600">{fmtMoney(row.medianFee)}</td>
+                      <td className="px-4 py-2">
+                        <span className={`rounded-full px-2 py-0.5 text-[11px] ${row.confidence === "high" ? "bg-emerald-50 text-emerald-700" : row.confidence === "medium" ? "bg-amber-50 text-amber-700" : "bg-slate-100 text-slate-500"}`}>
+                          {row.confidence === "high" ? "高" : row.confidence === "medium" ? "中" : "低"}
+                        </span>
+                      </td>
+                    </tr>
+                  ))}
+                  {(data.regionalModels ?? []).length === 0 && (
+                    <tr><td colSpan={8} className="px-4 py-10 text-center text-sm text-gray-400">导入并核销第一份运单级物流账单后，这里会自动生成地区历史模型。</td></tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
         </>
       ) : null}
 
@@ -184,8 +245,8 @@ export default function LogisticsWorkbenchPage() {
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30" onClick={() => setShowSettings(false)}>
           <div className="w-[380px] rounded-xl bg-white p-5 shadow-xl" onClick={(e) => e.stopPropagation()}>
             <h3 className="text-base font-semibold text-gray-800">物流设置</h3>
-            <p className="mt-1 text-xs text-gray-400">系统按「预估运费 = 有效发货单量 × 默认预估单价」计算财务利润中的物流成本。账单核销后自动替换为实际成本。</p>
-            <label className="mt-4 block text-sm text-gray-600">默认预估单价（元/单）</label>
+            <p className="mt-1 text-xs text-gray-400">已核销运单级账单存在时，系统优先使用历史智能建议单价；历史样本不足时自动回退到这里的默认单价。实际账单核销后仍以实际成本替换预估。</p>
+            <label className="mt-4 block text-sm text-gray-600">兜底默认单价（元/单）</label>
             <input
               value={draftPrice}
               onChange={(e) => setDraftPrice(e.target.value)}
