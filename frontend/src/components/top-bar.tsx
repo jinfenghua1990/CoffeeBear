@@ -190,7 +190,7 @@ export default function TopBar() {
       </div>
 
       {/* 一级业务导航 */}
-      <nav className="ml-2 flex min-w-0 items-center gap-1" aria-label="一级业务模块">
+      <nav className="top-primary-nav ml-2 flex min-w-0 max-w-[660px] flex-1 items-center gap-1 overflow-x-auto" aria-label="一级业务模块">
         {MODULES.filter((module) => module.showInTop !== false).map((module) => {
           const isActive = module.key === active.key;
           return (
@@ -210,7 +210,7 @@ export default function TopBar() {
       </nav>
 
       {/* 全局搜索 */}
-      <div className="relative mx-2 hidden min-w-0 flex-1 max-w-[420px] lg:block">
+      <div className="relative mx-2 hidden min-w-[180px] flex-1 max-w-[280px] 2xl:max-w-[420px] xl:block">
         <form
           onSubmit={(event) => {
             event.preventDefault();
@@ -263,10 +263,10 @@ export default function TopBar() {
           <button
             type="button"
             onClick={() => setOpenMenu((menu) => (menu === "sync" ? null : "sync"))}
-            className="flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-[12px] text-slate-600 hover:bg-slate-100"
+            className="flex items-center gap-1.5 rounded-lg px-2 py-1.5 text-[12px] text-slate-600 hover:bg-slate-100"
           >
             <span className={`h-2 w-2 rounded-full ${syncDot}`} />
-            {syncText}
+            <span className="hidden 2xl:inline">{syncText}</span>
           </button>
           {openMenu === "sync" && (
             <div className="absolute right-0 top-full z-dropdown mt-1.5 w-64 rounded-xl border border-slate-200 bg-white p-2 shadow-lg">
@@ -372,7 +372,7 @@ export default function TopBar() {
             className="flex items-center gap-1.5 rounded-lg py-1.5 pl-1.5 pr-2 hover:bg-slate-100"
           >
             <span className="flex h-7 w-7 items-center justify-center rounded-full bg-[#112a49] text-[12px] font-semibold text-white">管</span>
-            <span className="text-[13px] font-medium text-slate-700">管理员</span>
+            <span className="hidden text-[13px] font-medium text-slate-700 2xl:inline">管理员</span>
             <ChevronDown />
           </button>
           {openMenu === "account" && (
