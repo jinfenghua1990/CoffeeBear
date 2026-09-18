@@ -2589,67 +2589,116 @@ def workspace(db: Session, limit: int = 500, offset: int = 0) -> dict:
     return {
         "overview": _overview_from_rows(rows),
         "orders": {"total": total, "items": rows[offset:offset + limit]},
-        "pending": list_pending(db),
+        "pending": list_pending(db, pairs=pairs, pf=pf),
     }
 
-def list_pending(db: Session) -> dict:
-    """待确认的关联建议，供人工确认或拒绝。"""
-    out: list[dict] = []
-    for link in db.query(ProcurementChainLink).filter_by(confirmed=False).filter(
-        ProcurementChainLink.match_method != "rejected"
-    ).all():
-        order = db.get(Alibaba1688Order, link.order_id) if link.order_id is not None else None
-        external = db.get(ExternalPurchaseOrder, link.external_po_id) if link.external_po_id is not None else None
-        if (order is None and external is None) or is_reference_only_external_po(external):
-            continue
-        if order is not None and order.row_status == "deleted":
-            continue
-        target = _chain_target(db, link.target_type, link.target_id)
-        if target is None:
-            continue
-        fields = _chain_target_fields(link.target_type, target)
-        out.append({
-            "kind": "chain" if link.target_type == "inbound" else "settlement",
-            "linkId": link.id,
-            "orderId": order.id if order is not None else -external.id,
-            "orderNo": order.external_order_id if order is not None else external.external_order_id,
-            "supplier": (order.seller_company_name if order is not None else external.supplier_name) or "",
-            "targetId": link.target_id,
-            "targetType": link.target_type,
-            **fields,
-            "confidence": float(link.confidence) if link.confidence is not None else None,
-            "note": link.note or "",
-        })
-    for link in db.query(TaxInvoiceLink).filter(
+def list_pending(
+    db: Session,
+    *,
+    pairs: list[tuple[Alibaba1688Order | None, ExternalPurchaseOrder | None]] | None = None,
+    pf: ChainPrefetch | None = None,
+) -> dict:
+    """待确认关联建议：批量解析对象，并统一使用正式 workbench orderId。"""
+    if pairs is None:
+        pairs = _source_pairs(db)
+
+    pair_by_file_id: dict[int, tuple[Alibaba1688Order | None, ExternalPurchaseOrder | None]] = {}
+    pair_by_external_id: dict[int, tuple[Alibaba1688Order | None, ExternalPurchaseOrder | None]] = {}
+    for order, external in pairs:
+        if order is not None:
+            pair_by_file_id[order.id] = (order, external)
+        if external is not None:
+            pair_by_external_id[external.id] = (order, external)
+
+    chain_links = db.query(ProcurementChainLink).filter(
+        ProcurementChainLink.confirmed.is_(False),
+        ProcurementChainLink.match_method != "rejected",
+    ).all()
+    invoice_links = db.query(TaxInvoiceLink).filter(
         TaxInvoiceLink.target_type.in_(("alibaba1688_order", "external_purchase_order")),
         TaxInvoiceLink.confirmed.is_(False),
         TaxInvoiceLink.match_method != "rejected",
-    ).all():
-        order = None
-        external = None
-        if link.target_type == "alibaba1688_order":
-            order = db.get(Alibaba1688Order, link.target_id)
-            if order is not None and order.row_status != "deleted":
-                external = db.query(ExternalPurchaseOrder).filter_by(
-                    external_order_id=order.external_order_id
-                ).first()
-        else:
-            external = db.get(ExternalPurchaseOrder, link.target_id)
-            if is_reference_only_external_po(external):
-                continue
-            if external is not None:
-                order = db.query(Alibaba1688Order).filter_by(
-                    external_order_id=external.external_order_id
-                ).first()
-        inv = db.get(TaxInvoice, link.invoice_id)
-        if (order is None and external is None) or inv is None:
+    ).all()
+
+    inbound_ids = {link.target_id for link in chain_links if link.target_type == "inbound"}
+    settlement_ids = {link.target_id for link in chain_links if link.target_type == "settlement"}
+    if pf is not None:
+        inbound_by_id = {target_id: pf.docs.get(target_id) for target_id in inbound_ids}
+        settlement_by_id = {target_id: pf.settlements.get(target_id) for target_id in settlement_ids}
+        invoice_by_id = {link.invoice_id: pf.invoices.get(link.invoice_id) for link in invoice_links}
+    else:
+        inbound_by_id = {
+            row.id: row for row in db.query(JackyunGoodsDocument).filter(
+                JackyunGoodsDocument.id.in_(inbound_ids)
+            ).all()
+        } if inbound_ids else {}
+        settlement_by_id = {
+            row.id: row for row in db.query(JackyunPurchaseSettlement).filter(
+                JackyunPurchaseSettlement.id.in_(settlement_ids)
+            ).all()
+        } if settlement_ids else {}
+        invoice_ids = {link.invoice_id for link in invoice_links}
+        invoice_by_id = {
+            row.id: row for row in filter_visible_invoices(
+                db.query(TaxInvoice).filter(TaxInvoice.id.in_(invoice_ids))
+            ).all()
+        } if invoice_ids else {}
+
+    out: list[dict] = []
+
+    def pair_fields(pair):
+        order, external = pair
+        workbench_id = order.id if order is not None else -external.id
+        order_no = order.external_order_id if order is not None else external.external_order_id
+        supplier = (order.seller_company_name if order is not None else external.supplier_name) or ""
+        return workbench_id, order_no, supplier
+
+    for link in chain_links:
+        pair = (
+            pair_by_file_id.get(link.order_id)
+            if link.order_id is not None
+            else pair_by_external_id.get(link.external_po_id)
+        )
+        if pair is None:
             continue
+        if link.target_type == "inbound":
+            target = inbound_by_id.get(link.target_id)
+        elif link.target_type == "settlement":
+            target = settlement_by_id.get(link.target_id)
+        else:
+            continue
+        if target is None:
+            continue
+        order_id, order_no, supplier = pair_fields(pair)
+        out.append({
+            "kind": "chain" if link.target_type == "inbound" else "settlement",
+            "linkId": link.id,
+            "orderId": order_id,
+            "orderNo": order_no,
+            "supplier": supplier,
+            "targetId": link.target_id,
+            "targetType": link.target_type,
+            **_chain_target_fields(link.target_type, target),
+            "confidence": float(link.confidence) if link.confidence is not None else None,
+            "note": link.note or "",
+        })
+
+    for link in invoice_links:
+        pair = (
+            pair_by_file_id.get(link.target_id)
+            if link.target_type == "alibaba1688_order"
+            else pair_by_external_id.get(link.target_id)
+        )
+        inv = invoice_by_id.get(link.invoice_id)
+        if pair is None or inv is None:
+            continue
+        order_id, order_no, supplier = pair_fields(pair)
         out.append({
             "kind": "invoice",
             "linkId": link.id,
-            "orderId": order.id if order is not None else external.id,
-            "orderNo": order.external_order_id if order is not None else external.external_order_id,
-            "supplier": (order.seller_company_name if order is not None else external.supplier_name) or "",
+            "orderId": order_id,
+            "orderNo": order_no,
+            "supplier": supplier,
             "targetId": inv.id,
             "targetType": "invoice",
             "targetNo": _invoice_no(inv),
@@ -2660,7 +2709,6 @@ def list_pending(db: Session) -> dict:
             "note": link.note or "",
         })
     return {"items": out}
-
 
 # ═══════════════════════════════════════════════════════════════
 # 采购执行中心：订单时间为主轴，供应商为聚合维度
