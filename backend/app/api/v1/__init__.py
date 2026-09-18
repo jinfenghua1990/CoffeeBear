@@ -36,10 +36,8 @@ from app.api.v1 import (
     tax_invoices,
     warehouses,
 )
-from app.services.platform_purchase_guard import install_platform_purchase_guards
 
-# 跨渠道同号隔离仍保留兼容守卫；采购状态/建单强校验已进入正式 service。
-install_platform_purchase_guards()
+# 采购与跨渠道一致性校验均已进入正式 service；API 初始化不再替换运行时函数。
 
 api_router = APIRouter(prefix="/api/v1")
 api_router.include_router(auth.router)

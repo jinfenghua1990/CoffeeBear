@@ -410,8 +410,9 @@ def _auto_link(db: Session, invoice: TaxInvoice, related_ref: str, direction: st
         return False
     candidates: list[tuple[str, int]] = []
     if direction in ("input", "unknown"):
-        external = db.query(ExternalPurchaseOrder).filter_by(external_order_id=ref).first()
-        if external:
+        # 税务清单只给订单号时，必须把所有渠道同号采购单都纳入候选。
+        # 不能用 .first() 猜一个，否则 1688 / 拼多多 / 淘宝同号时会错误自动关联。
+        for external in db.query(ExternalPurchaseOrder).filter_by(external_order_id=ref).all():
             candidates.append(("external_purchase_order", external.id))
         jpo = db.query(JackyunPurchaseOrder).filter_by(purch_no=ref).first()
         if jpo:
@@ -423,7 +424,7 @@ def _auto_link(db: Session, invoice: TaxInvoice, related_ref: str, direction: st
     if len(candidates) != 1:
         if candidates:
             invoice.match_status = "needs_review"
-            invoice.match_note = "同一关联单号命中多个业务对象，待人工确认"
+            invoice.match_note = "同一关联单号命中多个业务对象或多个采购渠道，待人工确认"
         return False
     target_type, target_id = candidates[0]
     exists = (

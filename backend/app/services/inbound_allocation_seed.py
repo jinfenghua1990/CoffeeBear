@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Iterable
 
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from app.core.audit import audit
@@ -110,23 +111,31 @@ def _po_from_link(db: Session, link: ProcurementChainLink) -> ExternalPurchaseOr
 def collect_linked_doc_ids_for_po(db: Session, po: ExternalPurchaseOrder) -> set[int]:
     """汇总该 PO 已确认关联的入库单 ID：含 procurement_chain_links 与旧 InboundLink。"""
     doc_ids: set[int] = set()
-    if (po.platform or "1688").lower() == "1688" and po.external_order_id:
+    if (po.platform or "").lower() == "1688" and po.external_order_id:
         order = db.query(Alibaba1688Order).filter_by(external_order_id=po.external_order_id).first()
         if order:
-            for l in (
-                db.query(ProcurementChainLink)
-                .filter_by(order_id=order.id, target_type="inbound", confirmed=True)
-                .all()
-            ):
+            for l in db.query(ProcurementChainLink).filter(
+                ProcurementChainLink.order_id == order.id,
+                ProcurementChainLink.target_type == "inbound",
+                ProcurementChainLink.confirmed.is_(True),
+                or_(
+                    ProcurementChainLink.match_method.is_(None),
+                    ProcurementChainLink.match_method != "rejected",
+                ),
+            ).all():
                 doc_ids.add(l.target_id)
     # 注意：此前 external_po_id 查询被误缩进在 if order 内，导致 PDD/淘宝临时采购单
     # （external_order_id 无 1688 原件）永远收集不到关联入库单、无法反填 SKU 明细。
     # external_po_id 是工作流 PO 主键，与是否存在 1688 原件无关，应无条件执行。
-    for l in (
-        db.query(ProcurementChainLink)
-        .filter_by(external_po_id=po.id, target_type="inbound", confirmed=True)
-        .all()
-    ):
+    for l in db.query(ProcurementChainLink).filter(
+        ProcurementChainLink.external_po_id == po.id,
+        ProcurementChainLink.target_type == "inbound",
+        ProcurementChainLink.confirmed.is_(True),
+        or_(
+            ProcurementChainLink.match_method.is_(None),
+            ProcurementChainLink.match_method != "rejected",
+        ),
+    ).all():
         doc_ids.add(l.target_id)
     # 兼容旧 InboundLink：模型真实字段是 goodsdoc_no，不是 document_id。
     # 优先按入库单号解析；少数历史写入把数字主键放进 raw，也一并兼容。

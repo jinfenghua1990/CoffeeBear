@@ -113,8 +113,10 @@ def _sync_purchase_workflow_order(
     from app.services.supplier_sync_service import ensure_supplier
     ensure_supplier(db, supplier, platform="1688")
 
+    # 1688 来源只能更新 1688 工作流副本；其他渠道可能存在相同订单号。
     row = db.query(ExternalPurchaseOrder).filter_by(
-        external_order_id=external_order_id
+        platform="1688",
+        external_order_id=external_order_id,
     ).first()
     if row is None:
         db.add(ExternalPurchaseOrder(

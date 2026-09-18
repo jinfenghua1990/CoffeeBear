@@ -319,32 +319,6 @@ def tax_auto_link_platform_safe(db: Session, invoice, related_ref: str, directio
     return True
 
 
-_INSTALLED = False
-
-
 def install_platform_purchase_guards() -> None:
-    """安装跨渠道同号隔离；API/服务继续沿用原函数签名。"""
-    global _INSTALLED
-    if _INSTALLED:
-        return
-
-    from app.api.v1 import purchase as purchase_api
-    from app.services import (
-        alibaba1688_import_service,
-        inbound_allocation_seed,
-        procurement_board_service,
-        procurement_chain_service,
-        procurement_workbench_service,
-        tax_invoice_service,
-    )
-
-    procurement_chain_service._source_pairs = platform_source_pairs
-    procurement_workbench_service._source_pairs = platform_source_pairs
-    procurement_board_service._source_pairs = platform_source_pairs
-    purchase_api._source_pairs = platform_source_pairs
-
-    alibaba1688_import_service._sync_purchase_workflow_order = sync_1688_purchase_workflow_order
-    inbound_allocation_seed._po_from_link = inbound_po_from_link
-    inbound_allocation_seed.collect_linked_doc_ids_for_po = collect_inbound_doc_ids_for_po
-    tax_invoice_service._auto_link = tax_auto_link_platform_safe
-    _INSTALLED = True
+    """兼容旧导入点：跨渠道保护已写回正式服务，不再运行时替换函数。"""
+    return None

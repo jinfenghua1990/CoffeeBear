@@ -1104,7 +1104,8 @@ def list_link_candidates(
     limit: int = 100,
 ) -> dict:
     """列出可由用户手工选择的单据，并把匹配线索作为排序说明展示。"""
-    source, external = next(((o, e) for o, e in _source_pairs(db) if (o.id if o else -e.id) == order_id), (None, None))
+    source_pairs = _source_pairs(db)
+    source, external = next(((o, e) for o, e in source_pairs if (o.id if o else -e.id) == order_id), (None, None))
     if source is None and external is None:
         raise ValueError("采购订单不存在或已删除")
     if target_type == "inbound":
@@ -1117,8 +1118,8 @@ def list_link_candidates(
     all_links = db.query(ProcurementChainLink).filter_by(target_type=target_type).all()
     current_ids = {order_id} | ({-external.id} if external else set())
     current_links = {link.target_id: link for link in all_links if link.workbench_order_id in current_ids}
-    order_nos = {o.id: o.external_order_id for o, _ in _source_pairs(db) if o}
-    order_nos.update({-e.id: e.external_order_id for _, e in _source_pairs(db) if e})
+    order_nos = {o.id: o.external_order_id for o, _ in source_pairs if o}
+    order_nos.update({-e.id: e.external_order_id for _, e in source_pairs if e})
     linked_nos: dict[int, list[str]] = {}
     for link in all_links:
         if link.confirmed and link.workbench_order_id in order_nos:
@@ -1300,18 +1301,18 @@ def _source_pairs(
         .order_by(Alibaba1688Order.id.desc())
         .all()
     )
-    # 被用户删除的订单号：同单号的工作流副本不再补位出现。
-    removed_nos = {
-        no for (no,) in db.query(Alibaba1688Order.external_order_id).filter(
-            Alibaba1688Order.row_status == "deleted"
-        ).all()
-    }
     # 存在文件来源但并非 active 的订单，等待该批次确认或重新导入后才可进入链路。
-    # 这避免“已删除批次 + 残留工作流”制造一条看似可处理、实则没有原始依据的订单。
+    # 历史批次里曾出现 deleted 的订单号，不能覆盖同订单号的最新 active 副本。
     source_nos = {
         no for (no,) in db.query(Alibaba1688Order.external_order_id).all()
     }
     active_source_nos = {order.external_order_id for order in file_orders}
+    deleted_source_nos = {
+        no for (no,) in db.query(Alibaba1688Order.external_order_id).filter(
+            Alibaba1688Order.row_status == "deleted"
+        ).all()
+    }
+    removed_nos = deleted_source_nos - active_source_nos
     workflow_by_no: dict[str, ExternalPurchaseOrder] = {}
     workflow_other: list[ExternalPurchaseOrder] = []
     if externals is None:
@@ -1319,9 +1320,11 @@ def _source_pairs(
     for po in sorted(externals, key=lambda item: item.id, reverse=True):
         if is_reference_only_external_po(po):
             continue
-        # 1688 文件副本只能与 1688 工作流副本合并；淘宝/拼多多/其他渠道
-        # 即使订单号相同也必须作为独立工作流行保留。
-        if (po.platform or "1688") != "1688":
+        # 1688 文件副本只能与 platform=1688 的工作流副本合并。
+        # 淘宝/拼多多/其他渠道同号必须独立；历史 platform=NULL 不再猜成 1688。
+        if po.platform is None:
+            continue
+        if po.platform != "1688":
             workflow_other.append(po)
             continue
         if po.external_order_id in removed_nos:
