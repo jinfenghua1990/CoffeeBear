@@ -2031,6 +2031,8 @@ export type WorkbenchSummary = {
   paidRate: number;
   paidAmount: number;
   totalAmount: number;
+  funnel: WorkbenchFunnel;
+  todos: WorkbenchTodo;
 };
 
 /** 采购工作台异常摘要：由异常中心记录压缩而来，message 为可直接展示的原因。 */

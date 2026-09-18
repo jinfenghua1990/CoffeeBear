@@ -40,9 +40,7 @@ import {
   type XrefPreview,
   type XrefApplyResult,
   type WorkbenchDetail,
-  type WorkbenchFunnel,
   type WorkbenchOrderItem,
-  type WorkbenchTodo,
   type WorkbenchStepState,
   type WorkbenchSupplierDetail,
   type WorkbenchSupplierSummary,
@@ -419,8 +417,6 @@ export default function PurchaseWorkbenchPage() {
   const [inboundMatch, setInboundMatch] = useState<InboundMatchSummary | null>(null);
   const [pendingAlloc, setPendingAlloc] = useState<PendingAllocation[]>([]);
   const [matchingBusy, setMatchingBusy] = useState(false);
-  const [funnel, setFunnel] = useState<WorkbenchFunnel | null>(null);
-  const [todos, setTodos] = useState<WorkbenchTodo | null>(null);
 
   // 新建采购单弹窗开着时视为「有未保存内容」，关闭 Tab 需要二次确认
   useTabDirty(newOrderOpen);
@@ -630,21 +626,6 @@ export default function PurchaseWorkbenchPage() {
     }
   }, []);
 
-  const loadFunnelTodos = useCallback(async () => {
-    try {
-      const [f, t] = await Promise.all([
-        procurementWorkbenchApi.funnel(),
-        procurementWorkbenchApi.todos(),
-      ]);
-      setFunnel(f);
-      setTodos(t);
-    } catch {
-      // 漏斗/待办为辅助指标，失败不阻塞主表。
-      setFunnel(null);
-      setTodos(null);
-    }
-  }, []);
-
   async function confirmChainLink(kind: string, linkId: number) {
     setChainBusy(true);
     try {
@@ -675,10 +656,9 @@ export default function PurchaseWorkbenchPage() {
 
   useEffect(() => {
     if (!pageActive) return;
+    // summary 同一份快照已经包含统计卡、付款率、漏斗和待办。
     void loadSummary();
-    // 漏斗和待办卡只在非订单视图显示；付款率已经合并进 summary，不再重复跑旧看板快照。
-    if (view !== "orders") void loadFunnelTodos();
-  }, [loadFunnelTodos, loadSummary, pageActive, view]);
+  }, [loadSummary, pageActive, view]);
 
   useEffect(() => {
     if (!pageActive) return;
@@ -1036,8 +1016,6 @@ export default function PurchaseWorkbenchPage() {
           {["orders", "suppliers", "chain", "matching"].includes(view) && (
             <KpiGrid
               summary={summary}
-              funnel={funnel}
-              todos={todos}
               onOpenChain={() => changeView("chain")}
             />
           )}
@@ -1171,10 +1149,8 @@ function HeaderButton({ icon, primary, busy, disabled, onClick, children }: {
   );
 }
 
-function KpiGrid({ summary, funnel, todos, onOpenChain }: {
+function KpiGrid({ summary, onOpenChain }: {
   summary: WorkbenchSummary | null;
-  funnel: WorkbenchFunnel | null;
-  todos: WorkbenchTodo | null;
   onOpenChain?: () => void;
 }) {
   const cards: Array<{ label: string; value: number | string; hint: string; icon: IconName; tone: string }> = [
@@ -1193,6 +1169,8 @@ function KpiGrid({ summary, funnel, todos, onOpenChain }: {
       tone: "teal",
     },
   ];
+  const funnel = summary?.funnel ?? null;
+  const todos = summary?.todos ?? null;
   const steps = funnel?.steps ?? [];
   const pending = todos?.pending ?? 0;
   const doneStages = steps.filter((step) => step.pct >= 100).length;

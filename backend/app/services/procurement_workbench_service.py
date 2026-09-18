@@ -485,10 +485,8 @@ def closeout_stage(row: dict, step_states: dict[str, dict] | None = None) -> str
 
 
 # ---------- 接口实现 ----------
-def funnel(db: Session) -> dict:
-    """5 步漏斗：每步 count = 已完成该步的订单数。"""
-    pairs, pf = chain_snapshot(db)
-    rows = [_order_row(db, o, ext, pf=pf) for o, ext in pairs]
+def _funnel_from_rows(rows: list[dict]) -> dict:
+    """基于已加载订单行计算漏斗，避免 summary/funnel 重复访问数据库。"""
     total = len(rows)
     done_count = {step["key"]: 0 for step in WORKBENCH_STEPS}
     for row in rows:
@@ -496,16 +494,18 @@ def funnel(db: Session) -> dict:
             if st["done"]:
                 done_count[key] += 1
     steps = [
-        {**step, "count": done_count[step["key"]], "pct": round(done_count[step["key"]] / total * 100) if total else 0}
+        {
+            **step,
+            "count": done_count[step["key"]],
+            "pct": round(done_count[step["key"]] / total * 100) if total else 0,
+        }
         for step in WORKBENCH_STEPS
     ]
     return {"total": total, "stepTotal": WORKBENCH_TOTAL, "steps": steps}
 
 
-def todos(db: Session) -> dict:
-    """5 个待办计数：按「最早未完成步骤」归类，加和 = 待处理订单数。"""
-    pairs, pf = chain_snapshot(db)
-    rows = [_order_row(db, o, ext, pf=pf) for o, ext in pairs]
+def _todos_from_rows(rows: list[dict]) -> dict:
+    """基于已加载订单行计算待办，避免同一请求重复 chain_snapshot。"""
     total = len(rows)
     counts = {step["key"]: 0 for step in WORKBENCH_STEPS}
     pending_total = 0
@@ -523,6 +523,20 @@ def todos(db: Session) -> dict:
             for step in WORKBENCH_STEPS
         ],
     }
+
+
+def funnel(db: Session) -> dict:
+    """兼容独立漏斗接口；新工作台主页面从 summary 内直接读取同一份结果。"""
+    pairs, pf = chain_snapshot(db)
+    rows = [_order_row(db, o, ext, pf=pf) for o, ext in pairs]
+    return _funnel_from_rows(rows)
+
+
+def todos(db: Session) -> dict:
+    """兼容独立待办接口；新工作台主页面从 summary 内直接读取同一份结果。"""
+    pairs, pf = chain_snapshot(db)
+    rows = [_order_row(db, o, ext, pf=pf) for o, ext in pairs]
+    return _todos_from_rows(rows)
 
 
 def _pending_queue(row: dict) -> str | None:
@@ -663,6 +677,8 @@ def summary(db: Session) -> dict:
         "paidRate": round(paid_amount / total_amount * 100) if total_amount else 0,
         "paidAmount": round(paid_amount, 2),
         "totalAmount": round(total_amount, 2),
+        "funnel": _funnel_from_rows(rows),
+        "todos": _todos_from_rows(rows),
     }
 
 
