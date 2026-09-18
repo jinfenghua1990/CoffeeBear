@@ -1,0 +1,350 @@
+#!/usr/bin/env python3
+"""Detached system update runner.
+
+This file is copied into DATA_DIR/system-update before execution so a git reset cannot
+replace the code that is currently performing the update.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+import urllib.request
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+
+
+def now_iso() -> str:
+    return datetime.now(timezone.utc).astimezone().isoformat()
+
+
+class Runner:
+    def __init__(self, args: argparse.Namespace):
+        self.args = args
+        self.root = Path(args.root).resolve()
+        self.data_dir = Path(args.data_dir).resolve()
+        self.state_dir = self.data_dir / "system-update"
+        self.status_file = self.state_dir / "status.json"
+        self.history_file = self.state_dir / "history.jsonl"
+        self.venv_python = self.root / "backend" / ".venv" / "bin" / "python"
+        self.pip = self.root / "backend" / ".venv" / "bin" / "pip"
+        self.previous_sha = ""
+        self.previous_db_revision = ""
+        self.changed_files: list[str] = []
+        self.git_switched = False
+        self.migration_started = False
+        self.state_dir.mkdir(parents=True, exist_ok=True)
+
+    def log(self, message: str) -> None:
+        print(f"[{now_iso()}] {message}", flush=True)
+
+    def read_status(self) -> dict[str, Any]:
+        try:
+            value = json.loads(self.status_file.read_text(encoding="utf-8"))
+            return value if isinstance(value, dict) else {}
+        except Exception:
+            return {}
+
+    def status(self, phase: str, progress: int, message: str, **extra: Any) -> None:
+        value = self.read_status()
+        value.update({
+            "phase": phase,
+            "progress": max(0, min(100, progress)),
+            "message": message,
+            "updatedAt": now_iso(),
+            **extra,
+        })
+        tmp = self.status_file.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(value, ensure_ascii=False, indent=2), encoding="utf-8")
+        os.replace(tmp, self.status_file)
+        self.log(f"{phase} {progress}% · {message}")
+
+    def history(self, result: str, message: str, **extra: Any) -> None:
+        row = {
+            "at": now_iso(),
+            "result": result,
+            "message": message,
+            "actor": self.args.actor,
+            "fromSha": self.previous_sha,
+            "toSha": self.args.target,
+            **extra,
+        }
+        with self.history_file.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+    def run(self, command: list[str], *, cwd: Path | None = None, timeout: int = 1800,
+            check: bool = True) -> subprocess.CompletedProcess[str]:
+        self.log("$ " + " ".join(command))
+        result = subprocess.run(
+            command,
+            cwd=str(cwd or self.root),
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            timeout=timeout,
+            check=False,
+            env=os.environ.copy(),
+        )
+        if result.stdout:
+            print(result.stdout.rstrip(), flush=True)
+        if check and result.returncode != 0:
+            tail = (result.stdout or "").strip()[-3000:]
+            raise RuntimeError(f"命令失败（{result.returncode}）：{' '.join(command)}\n{tail}")
+        return result
+
+    def git(self, *args: str, timeout: int = 180) -> str:
+        return self.run(["git", *args], timeout=timeout).stdout.strip()
+
+    def db_revision(self) -> str:
+        result = self.run(
+            [str(self.venv_python), "-m", "alembic", "current"],
+            cwd=self.root / "backend",
+            timeout=120,
+            check=False,
+        )
+        # Alembic may append "(head)" or other labels; first revision token is enough.
+        for line in result.stdout.splitlines():
+            match = re.match(r"^([0-9a-f]+)(?:\s|$)", line.strip())
+            if match:
+                return match.group(1)
+        return ""
+
+    def check_health(self, attempts: int = 45, delay: float = 2.0) -> bool:
+        urls = [self.args.health_url, "http://127.0.0.1:8000/healthz", "http://localhost:8000/healthz"]
+        bind_host = (os.environ.get("API_BIND_HOST") or "").strip()
+        if bind_host and bind_host not in {"0.0.0.0", "::"}:
+            urls.append(f"http://{bind_host}:8000/healthz")
+        urls = list(dict.fromkeys(urls))
+        last_error = ""
+        for i in range(attempts):
+            for url in urls:
+                try:
+                    with urllib.request.urlopen(url, timeout=3) as response:
+                        if response.status == 200:
+                            payload = response.read(2048).decode("utf-8", errors="replace")
+                            if '"ok":true' in payload.replace(" ", "").lower():
+                                self.log(f"健康检查通过（第 {i + 1} 次，{url}）")
+                                return True
+                except Exception as exc:
+                    last_error = f"{url}: {exc}"
+            self.log(f"健康检查等待中 {i + 1}/{attempts}: {last_error}")
+            time.sleep(delay)
+        return False
+
+    def preflight(self) -> None:
+        self.status("preflight", 5, "校验本地仓库和目标版本")
+        if not SHA_RE.fullmatch(self.args.target):
+            raise RuntimeError("目标 commit 格式无效")
+        if not self.venv_python.is_file():
+            raise RuntimeError("backend/.venv 不存在，无法安全执行更新")
+        current_branch = self.git("branch", "--show-current")
+        if current_branch != self.args.branch:
+            raise RuntimeError(
+                f"当前分支 {current_branch or '(detached)'} 与更新分支 {self.args.branch} 不一致"
+            )
+        dirty = self.git("status", "--porcelain")
+        if dirty:
+            raise RuntimeError("工作区存在未提交修改，自动更新已停止")
+        self.previous_sha = self.git("rev-parse", "HEAD")
+        self.git("fetch", "--quiet", self.args.remote, self.args.branch)
+        remote_sha = self.git("rev-parse", "FETCH_HEAD")
+        if remote_sha != self.args.target:
+            raise RuntimeError("远端分支已产生更新，本次目标版本过期，请重新检查后再更新")
+        ancestor = self.run(
+            ["git", "merge-base", "--is-ancestor", self.previous_sha, self.args.target],
+            timeout=30,
+            check=False,
+        )
+        if ancestor.returncode != 0:
+            raise RuntimeError("远端版本不是当前版本的快进后继，禁止自动覆盖")
+        self.changed_files = [
+            line.strip() for line in self.git(
+                "diff", "--name-only", self.previous_sha, self.args.target
+            ).splitlines() if line.strip()
+        ]
+        self.previous_db_revision = self.db_revision()
+        self.status(
+            "preflight", 10, "预检查通过",
+            previousSha=self.previous_sha,
+            targetSha=self.args.target,
+            previousDbRevision=self.previous_db_revision,
+            changedFileCount=len(self.changed_files),
+        )
+
+    def backup(self) -> None:
+        self.status("backup", 18, "更新前备份数据库和业务文件")
+        self.run([str(self.root / "scripts" / "backup.sh")], timeout=3600)
+        backups = self.root / "backups"
+        db_backups = sorted(backups.glob("db_*.dump"), key=lambda p: p.stat().st_mtime, reverse=True)
+        data_backups = sorted(backups.glob("data_*.tar.gz"), key=lambda p: p.stat().st_mtime, reverse=True)
+        self.status(
+            "backup", 25, "备份完成",
+            backupDb=str(db_backups[0]) if db_backups else "",
+            backupData=str(data_backups[0]) if data_backups else "",
+        )
+
+    def switch_code(self) -> None:
+        self.status("installing", 30, "切换到已下载的新版本")
+        self.git("reset", "--hard", self.args.target)
+        self.git_switched = True
+
+    def install_dependencies(self) -> None:
+        backend_dep_changed = "backend/requirements.txt" in self.changed_files
+        frontend_dep_changed = any(
+            path in self.changed_files
+            for path in ("frontend/package.json", "frontend/package-lock.json")
+        )
+        if backend_dep_changed:
+            self.status("installing", 38, "更新后端依赖")
+            self.run([str(self.pip), "install", "-r", "requirements.txt"], cwd=self.root / "backend", timeout=3600)
+        if frontend_dep_changed or not (self.root / "frontend" / "node_modules").is_dir():
+            self.status("installing", 44, "更新前端依赖")
+            command = ["npm", "ci"] if (self.root / "frontend" / "package-lock.json").is_file() else ["npm", "install"]
+            self.run(command, cwd=self.root / "frontend", timeout=3600)
+
+    def migrate(self) -> None:
+        self.status("migrating", 52, "执行数据库迁移")
+        self.migration_started = True
+        self.run(
+            [str(self.venv_python), "-m", "alembic", "upgrade", "head"],
+            cwd=self.root / "backend",
+            timeout=1800,
+        )
+
+    def build_frontend(self) -> None:
+        frontend_changed = any(path.startswith("frontend/") for path in self.changed_files)
+        if frontend_changed or not (self.root / "frontend" / "out" / "index.html").is_file():
+            self.status("building", 65, "构建新版前端")
+            self.run(["npm", "run", "build"], cwd=self.root / "frontend", timeout=3600)
+            if not (self.root / "frontend" / "out" / "index.html").is_file():
+                raise RuntimeError("前端构建完成但未生成 frontend/out/index.html")
+        else:
+            self.status("building", 65, "本次无前端改动，跳过前端构建")
+
+    def restart(self) -> None:
+        self.status("restarting", 78, "重新启动 API / worker / beat")
+        self.run(["make", "restart"], timeout=120)
+        self.status("healthcheck", 84, "等待新版本健康检查")
+        if not self.check_health():
+            raise RuntimeError("新版本重启后健康检查超时")
+
+    def rollback(self, cause: str) -> bool:
+        self.status("rollback", 88, "更新失败，正在自动回滚", rollbackCause=cause)
+        rollback_errors: list[str] = []
+        try:
+            if self.migration_started and self.previous_db_revision:
+                # 必须在 reset 回旧代码之前执行：新迁移脚本的 downgrade 逻辑仍在当前工作树中。
+                current_revision = self.db_revision()
+                if not current_revision or current_revision != self.previous_db_revision:
+                    self.run(
+                        [str(self.venv_python), "-m", "alembic", "downgrade", self.previous_db_revision],
+                        cwd=self.root / "backend",
+                        timeout=1800,
+                    )
+        except Exception as exc:
+            rollback_errors.append(f"数据库迁移回退失败：{exc}")
+
+        try:
+            if self.git_switched and self.previous_sha:
+                self.git("reset", "--hard", self.previous_sha)
+        except Exception as exc:
+            rollback_errors.append(f"代码回退失败：{exc}")
+
+        try:
+            if "backend/requirements.txt" in self.changed_files:
+                self.run([str(self.pip), "install", "-r", "requirements.txt"], cwd=self.root / "backend", timeout=3600)
+        except Exception as exc:
+            rollback_errors.append(f"后端依赖恢复失败：{exc}")
+
+        try:
+            if any(path in self.changed_files for path in ("frontend/package.json", "frontend/package-lock.json")):
+                command = ["npm", "ci"] if (self.root / "frontend" / "package-lock.json").is_file() else ["npm", "install"]
+                self.run(command, cwd=self.root / "frontend", timeout=3600)
+            if any(path.startswith("frontend/") for path in self.changed_files):
+                self.run(["npm", "run", "build"], cwd=self.root / "frontend", timeout=3600)
+        except Exception as exc:
+            rollback_errors.append(f"前端恢复失败：{exc}")
+
+        try:
+            self.run(["make", "restart"], timeout=120)
+            if not self.check_health(attempts=30):
+                rollback_errors.append("回滚版本健康检查未通过")
+        except Exception as exc:
+            rollback_errors.append(f"服务恢复失败：{exc}")
+
+        if rollback_errors:
+            self.status(
+                "failed", 100, "自动回滚未完全成功，需要人工处理",
+                error=cause,
+                rollbackErrors=rollback_errors,
+                finishedAt=now_iso(),
+            )
+            self.history("failed", "更新失败且自动回滚未完全成功", error=cause, rollbackErrors=rollback_errors)
+            return False
+
+        self.status(
+            "rolled_back", 100, "更新失败，已自动恢复上一版本",
+            error=cause,
+            rollbackErrors=[],
+            currentSha=self.previous_sha,
+            finishedAt=now_iso(),
+        )
+        self.history("rolled_back", "更新失败，已自动恢复上一版本", error=cause)
+        return True
+
+    def execute(self) -> int:
+        self.log(f"开始系统更新：{self.args.branch} -> {self.args.target}")
+        try:
+            self.preflight()
+            if self.previous_sha == self.args.target:
+                self.status("success", 100, "当前已经是目标版本", currentSha=self.previous_sha, finishedAt=now_iso())
+                self.history("success", "无需更新，当前已经是目标版本")
+                return 0
+            self.backup()
+            self.switch_code()
+            self.install_dependencies()
+            self.migrate()
+            self.build_frontend()
+            self.restart()
+            self.status(
+                "success", 100, "系统更新完成",
+                currentSha=self.args.target,
+                previousSha=self.previous_sha,
+                finishedAt=now_iso(),
+                rollbackErrors=[],
+            )
+            self.history("success", "系统更新完成")
+            return 0
+        except Exception as exc:
+            message = str(exc)
+            self.log("更新失败：" + message)
+            if self.git_switched:
+                self.rollback(message)
+            else:
+                self.status("failed", 100, "更新在切换代码前失败，未修改当前版本", error=message, finishedAt=now_iso())
+                self.history("failed", "更新在切换代码前失败", error=message)
+            return 1
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--root", required=True)
+    parser.add_argument("--data-dir", required=True)
+    parser.add_argument("--target", required=True)
+    parser.add_argument("--branch", required=True)
+    parser.add_argument("--remote", required=True)
+    parser.add_argument("--actor", default="system")
+    parser.add_argument("--health-url", default="http://127.0.0.1:8000/healthz")
+    return parser.parse_args()
+
+
+if __name__ == "__main__":
+    raise SystemExit(Runner(parse_args()).execute())

@@ -351,6 +351,14 @@ export default function TopBar() {
                 系统设置
               </Link>
               <Link
+                href="/settings/update"
+                prefetch={false}
+                onClick={() => setOpenMenu(null)}
+                className="block rounded-lg px-3 py-2 text-[13px] text-slate-700 hover:bg-slate-50"
+              >
+                系统更新
+              </Link>
+              <Link
                 href="/automation"
                 prefetch={false}
                 onClick={() => setOpenMenu(null)}

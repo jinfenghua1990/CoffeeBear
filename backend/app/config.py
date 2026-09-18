@@ -46,6 +46,13 @@ class Settings(BaseSettings):
     MAX_JACKYUN_IMPORT_ROWS: int = 20_000
     TZ: str = "Asia/Shanghai"
 
+    # 系统自更新：代码来源固定在受控 Git remote/branch，UI 只允许调整检查/安装模式。
+    SYSTEM_UPDATE_ENABLED: bool = True
+    SYSTEM_UPDATE_REMOTE: str = "origin"
+    SYSTEM_UPDATE_BRANCH: str = "codex/ui-coherence-v1.6.4"
+    SYSTEM_UPDATE_REPO_ROOT: str = ""
+    SYSTEM_UPDATE_HEALTH_URL: str = "http://127.0.0.1:8000/healthz"
+
     # 数据中心导入回收站保留天数：软删除的导入超过该天数后由 Celery 定时任务硬删除。
     RECYCLE_BIN_RETENTION_DAYS: int = 30
 

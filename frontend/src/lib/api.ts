@@ -179,6 +179,80 @@ export async function getSystemHealth(): Promise<SystemHealth> {
   return res.json();
 }
 
+export type SystemUpdateMode = "manual" | "auto_download" | "auto_update";
+
+export type SystemUpdateSettings = {
+  enabled: boolean;
+  mode: SystemUpdateMode;
+  checkIntervalMinutes: number;
+  autoUpdateHour: number;
+  autoUpdateWindowMinutes: number;
+  branch: string;
+  remote: string;
+};
+
+export type SystemUpdateCommit = {
+  sha: string;
+  shortSha: string;
+  subject: string;
+  committedAt: string;
+};
+
+export type SystemUpdateHistory = {
+  at: string;
+  result: "success" | "failed" | "rolled_back" | string;
+  message: string;
+  actor: string;
+  fromSha: string;
+  toSha: string;
+  error?: string;
+  rollbackErrors?: string[];
+};
+
+export type SystemUpdateStatus = {
+  phase?: string;
+  progress?: number;
+  message?: string;
+  currentSha?: string;
+  latestSha?: string;
+  downloadedSha?: string;
+  previousSha?: string;
+  targetSha?: string;
+  currentBranch?: string;
+  configuredBranch?: string;
+  dirty?: boolean;
+  updateAvailable?: boolean;
+  diverged?: boolean;
+  running?: boolean;
+  latestCommit?: SystemUpdateCommit | null;
+  currentCommit?: SystemUpdateCommit | null;
+  changes?: SystemUpdateCommit[];
+  lastCheckAt?: string;
+  lastCheckError?: string;
+  lastAutoError?: string;
+  startedAt?: string;
+  finishedAt?: string;
+  startedBy?: string;
+  backupDb?: string;
+  backupData?: string;
+  error?: string;
+  rollbackErrors?: string[];
+  logs?: string[];
+  history?: SystemUpdateHistory[];
+  settings: SystemUpdateSettings;
+};
+
+export const systemUpdateApi = {
+  status: () => jsonFetch<SystemUpdateStatus>("/api/v1/system/update/status"),
+  check: () => jsonFetch<SystemUpdateStatus>("/api/v1/system/update/check", { method: "POST" }),
+  saveSettings: (body: Partial<Pick<SystemUpdateSettings, "enabled" | "mode" | "checkIntervalMinutes" | "autoUpdateHour" | "autoUpdateWindowMinutes">>) =>
+    jsonFetch<{ ok: boolean; settings: SystemUpdateSettings }>("/api/v1/system/update/settings", {
+      method: "PATCH",
+      body: JSON.stringify(body),
+    }),
+  apply: () => jsonFetch<SystemUpdateStatus & { started: boolean; reason?: string }>("/api/v1/system/update/apply", { method: "POST" }),
+};
+
 export async function testJackyun(): Promise<{
   ok: boolean; status?: string; businessReady?: boolean; tools?: string[]; error?: string;
 }> {

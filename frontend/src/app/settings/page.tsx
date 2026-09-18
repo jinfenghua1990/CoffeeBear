@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useEffect, useState } from "react";
 import StatusBadge from "@/components/status-badge";
 import { authenticatedFetch, changePassword, getOverview, IntegrationStatus, openingApi, OpeningData, testJackyun } from "@/lib/api";
@@ -100,6 +101,23 @@ export default function SettingsPage() {
           这里只保留账号安全、数据连接和系统级参数。仓库、生产、货品等业务配置统一回到各自业务页面维护。
         </p>
       </header>
+
+      <div className="mt-6 max-w-3xl rounded-xl border border-indigo-200 bg-indigo-50/60 p-4">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <div className="text-sm font-medium text-slate-900">系统更新</div>
+            <p className="mt-1 text-xs leading-5 text-slate-500">
+              自动检测 GitHub 新版本，支持自动下载、凌晨自动更新、备份、健康检查和失败回滚。
+            </p>
+          </div>
+          <Link
+            href="/settings/update"
+            className="rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700"
+          >
+            打开更新中心
+          </Link>
+        </div>
+      </div>
 
       <div className="mt-6 max-w-3xl rounded-xl border border-gray-200 bg-white p-4">
         <div className="text-sm font-medium">账号安全 · 修改密码</div>

@@ -1,6 +1,7 @@
+import asyncio
 import os
 
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -22,7 +23,15 @@ _FRONTEND_OUT = os.environ.get(
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     configure_logging()
-    yield
+    from app.services import system_update_service
+
+    update_task = asyncio.create_task(system_update_service.poll_loop(), name="system-update-poller")
+    try:
+        yield
+    finally:
+        update_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await update_task
 
 
 app = FastAPI(title=settings.APP_NAME, version="0.1.0", lifespan=lifespan)

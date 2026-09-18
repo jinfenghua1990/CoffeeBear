@@ -82,7 +82,9 @@ trap - EXIT
 if [[ "$SKIP_FILES" == "0" ]]; then
   echo "==> [2/2] 归档 /data ..."
   if [[ -d "$ROOT/data" ]]; then
-    tar -czf "$BACKUP_DIR/data_$TS.tar.gz" -C "$ROOT" data
+    # system-update/ 是自更新执行日志与临时 runner，更新过程中会持续写入；
+    # 它不是业务原始数据，排除后避免 tar 读取同时变化的日志导致备份不稳定。
+    tar --exclude='data/system-update' -czf "$BACKUP_DIR/data_$TS.tar.gz" -C "$ROOT" data
   else
     echo "     (无 $ROOT/data，跳过)"
   fi

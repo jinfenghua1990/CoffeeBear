@@ -2,18 +2,28 @@ from datetime import datetime
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Request
 from sqlalchemy import func, text
 from sqlalchemy.orm import Session
+from pydantic import BaseModel, Field
 
 from app.core.logging import get_logger
 from app.db import get_db
+from app.api.deps import current_actor, require_roles
 from app.models.integration import SyncJob
 from app.models.ops import ExceptionRecord
 from app.services import integration_service
 
 router = APIRouter(prefix="/system", tags=["system"])
 _log = get_logger("system.health")
+
+class SystemUpdateSettingsBody(BaseModel):
+    enabled: bool | None = None
+    mode: str | None = None
+    checkIntervalMinutes: int | None = Field(None, ge=5, le=1440)
+    autoUpdateHour: int | None = Field(None, ge=0, le=23)
+    autoUpdateWindowMinutes: int | None = Field(None, ge=15, le=360)
+
 
 _PROVIDER_LABELS = {
     "jackyun": "吉客云",
@@ -26,6 +36,39 @@ _PROVIDER_LABELS = {
     "alibaba1688.browser": "1688 同步",
     "sales_outbound": "销售出库",
 }
+
+
+@router.get("/update/status", dependencies=[Depends(require_roles("admin"))])
+def system_update_status() -> dict[str, Any]:
+    from app.services import system_update_service
+    return system_update_service.status_payload(include_log=True)
+
+
+@router.post("/update/check", dependencies=[Depends(require_roles("admin"))])
+def system_update_check(request: Request) -> dict[str, Any]:
+    from app.services import system_update_service
+    return system_update_service.check_for_updates(actor=current_actor(request), automatic=False)
+
+
+@router.patch("/update/settings", dependencies=[Depends(require_roles("admin"))])
+def system_update_settings(body: SystemUpdateSettingsBody) -> dict[str, Any]:
+    from app.services import system_update_service
+    try:
+        saved = system_update_service.save_update_settings(body.model_dump(exclude_none=True))
+    except ValueError as exc:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"ok": True, "settings": saved}
+
+
+@router.post("/update/apply", dependencies=[Depends(require_roles("admin"))])
+def system_update_apply(request: Request) -> dict[str, Any]:
+    from app.services import system_update_service
+    try:
+        return system_update_service.start_update(actor=current_actor(request))
+    except ValueError as exc:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @router.get("/global-status")

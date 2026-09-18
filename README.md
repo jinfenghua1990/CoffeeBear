@@ -155,6 +155,41 @@ cd backend && .venv/bin/python -c "from app.tasks.sync import sync_jackyun; sync
 
 注：失败的每一次尝试都已同时落库（`SyncLog` + 异常中心 `ensure_exception`），死信队列是补充的 Redis 侧可重投副本。
 
+## 系统更新中心
+
+系统设置 → **系统更新** 提供应用内自更新，代码来源固定为 `SYSTEM_UPDATE_REMOTE/SYSTEM_UPDATE_BRANCH`，前端不能切换到任意仓库或分支。
+
+三种模式：
+
+- **手动更新**：只在管理员点击“检查更新”时执行 `git fetch`，确认后再安装。
+- **自动检测 + 下载（默认）**：API 常驻任务按 10 分钟默认间隔检查并下载 Git 对象，但不会改变当前工作区；管理员点击“立即更新”才部署。
+- **全自动更新**：定时检查，只有进入配置的凌晨维护窗口才执行安装。
+
+安装流程固定为：
+
+```text
+Git 快进校验
+→ 检查工作区无未提交修改
+→ PostgreSQL + data/ 全量备份
+→ 切换到远端目标 commit
+→ 按需更新 Python / Node 依赖
+→ alembic upgrade head
+→ 构建 frontend/out
+→ 重启 API / worker / beat
+→ /healthz 健康检查
+```
+
+任一步失败后会自动尝试：
+
+1. 使用新版本迁移脚本退回更新前 Alembic revision；
+2. Git reset 回更新前 commit；
+3. 恢复旧版本依赖与前端产物；
+4. 重启并再次健康检查。
+
+更新状态、执行日志与历史记录写在 `DATA_DIR/system-update/`，不会进入 Git，也不会进入业务 data 归档备份（它属于运行时运维日志）。更新前生成的数据库与其余 data 业务文件备份仍保留在 `backups/`，自动回滚异常时可用于人工灾备恢复。
+
+> “自动更新”只允许管理员配置和触发。系统发现 Git 历史分叉、本地存在未提交修改、目标 SHA 变化或健康检查失败时，会停止自动覆盖。
+
 ## 升级说明
 
 ```bash
