@@ -6,6 +6,7 @@ import mimetypes
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -17,6 +18,9 @@ from app.core.audit import audit
 from app.models.jackyun_import import JackyunFileImport, JackyunFileImportRecord
 from app.services.import_lifecycle import filter_lifecycle, transition_lifecycle, transition_row_status
 from app.services.warehouse_service import resolve_warehouse_reference
+
+if TYPE_CHECKING:
+    from app.models.jackyun import JackyunGoodsDocument
 
 
 def _root() -> Path:

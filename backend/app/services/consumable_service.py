@@ -719,7 +719,6 @@ def set_inbound_usage(
             assert material is not None
             # 优先使用唯一的启用耗材仓；只有仓库配置尚未形成唯一事实时，
             # 才回退到该耗材最近一次有仓库的实际收货。
-            from app.models.catalog import Warehouse
             from app.models.consumable_purchase import ConsumablePurchaseItem, ConsumableReceipt
             from app.services import warehouse_service
             usage_warehouse = warehouse_service.default_for_consumable(db)

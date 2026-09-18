@@ -229,7 +229,6 @@ def check_for_updates(*, actor: str = "system", automatic: bool = False) -> dict
         if automatic and not cfg["enabled"]:
             return status_payload(include_log=False)
 
-        root = _repo_root()
         current_sha = _git("rev-parse", "HEAD")
         current_branch = _git("branch", "--show-current")
         dirty = bool(_git("status", "--porcelain"))

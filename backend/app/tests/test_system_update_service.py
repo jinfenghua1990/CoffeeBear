@@ -164,3 +164,72 @@ def test_start_update_stops_when_readiness_is_blocked(monkeypatch):
     )
     with pytest.raises(ValueError, match="更新环境未就绪"):
         service.start_update(actor="pytest")
+
+def test_check_preserves_last_install_result(monkeypatch, tmp_path: Path):
+    current = "5" * 40
+    status_file = tmp_path / "status.json"
+    history_file = tmp_path / "history.jsonl"
+
+    monkeypatch.setattr(service, "_status_path", lambda: status_file)
+    monkeypatch.setattr(service, "_history_path", lambda: history_file)
+    monkeypatch.setattr(service, "_repo_root", lambda: tmp_path)
+    monkeypatch.setattr(
+        service,
+        "load_update_settings",
+        lambda: {
+            "enabled": True,
+            "mode": "auto_download",
+            "checkIntervalMinutes": 10,
+            "autoUpdateHour": 3,
+            "autoUpdateWindowMinutes": 60,
+            "branch": service.settings.SYSTEM_UPDATE_BRANCH,
+            "remote": service.settings.SYSTEM_UPDATE_REMOTE,
+        },
+    )
+    service._atomic_json(
+        status_file,
+        {
+            "lastInstallResult": "success",
+            "lastInstallAt": "2026-09-19T01:00:00+08:00",
+            "lastInstallFromSha": "a" * 40,
+            "lastInstallToSha": "b" * 40,
+        },
+    )
+
+    def fake_git(*args: str, timeout: int = 60) -> str:
+        if args == ("rev-parse", "HEAD"):
+            return current
+        if args == ("branch", "--show-current"):
+            return service.settings.SYSTEM_UPDATE_BRANCH
+        if args == ("status", "--porcelain"):
+            return ""
+        if args[:2] == ("fetch", "--quiet"):
+            return ""
+        if args == ("rev-parse", "FETCH_HEAD"):
+            return current
+        raise AssertionError(f"unexpected git call: {args}")
+
+    monkeypatch.setattr(service, "_git", fake_git)
+    monkeypatch.setattr(
+        service,
+        "_run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr=""),
+    )
+    monkeypatch.setattr(
+        service,
+        "_commit_info",
+        lambda sha: {
+            "sha": sha,
+            "shortSha": sha[:10],
+            "subject": "same",
+            "committedAt": "2026-09-19T01:00:00+08:00",
+        },
+    )
+
+    result = service.check_for_updates(actor="pytest")
+
+    assert result["lastInstallResult"] == "success"
+    assert result["lastInstallAt"] == "2026-09-19T01:00:00+08:00"
+    assert result["lastInstallFromSha"] == "a" * 40
+    assert result["lastInstallToSha"] == "b" * 40
+
