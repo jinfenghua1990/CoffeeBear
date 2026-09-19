@@ -18,6 +18,9 @@ export REDIS_URL="${REDIS_URL:-redis://localhost:6379/0}"
 export DATA_DIR
 export APP_ENV="${APP_ENV:-production}"
 export RELEASE_CHANNEL="${RELEASE_CHANNEL:-stable}"
+export DEPLOYMENT_MODE=native
+export GIT_SHA="${GIT_SHA:-$(git -C "$ROOT" rev-parse HEAD 2>/dev/null || true)}"
+export APP_IMAGE_REF=""
 
 VENV="${VENV:-$ROOT/backend/.venv}"
 export PATH="/Users/gino/.workbuddy/binaries/node/versions/22.22.2-2/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
