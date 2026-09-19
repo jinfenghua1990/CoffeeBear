@@ -5,6 +5,7 @@ import {
   applyThemeMode,
   getStoredThemeMode,
   setThemeMode,
+  watchStoredThemeMode,
   watchSystemTheme,
   type Theme,
   type ThemeMode,
@@ -69,13 +70,22 @@ export default function ThemeToggle() {
   const rootRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    const initialMode = getStoredThemeMode();
-    setMode(initialMode);
-    setResolved(applyThemeMode(initialMode));
-    return watchSystemTheme((next) => {
+    const sync = (nextMode: ThemeMode) => {
+      setMode(nextMode);
+      setResolved(applyThemeMode(nextMode));
+    };
+    sync(getStoredThemeMode());
+
+    const stopSystem = watchSystemTheme((next) => {
       setResolved(next);
       applyThemeMode("system");
     });
+    const stopStorage = watchStoredThemeMode(sync);
+
+    return () => {
+      stopSystem();
+      stopStorage();
+    };
   }, []);
 
   useEffect(() => {

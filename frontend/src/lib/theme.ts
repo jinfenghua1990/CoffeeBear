@@ -11,12 +11,16 @@ export function getSystemTheme(): Theme {
 
 export function getStoredThemeMode(): ThemeMode {
   if (typeof window === "undefined") return "system";
-  const stored = window.localStorage.getItem(STORAGE_KEY);
-  if (stored === "system" || stored === "light" || stored === "dark") return stored;
+  try {
+    const stored = window.localStorage.getItem(STORAGE_KEY);
+    if (stored === "system" || stored === "light" || stored === "dark") return stored;
 
-  // 兼容旧版只保存 light/dark 的 app-theme。
-  const legacy = window.localStorage.getItem(LEGACY_STORAGE_KEY);
-  if (legacy === "light" || legacy === "dark") return legacy;
+    // 兼容旧版只保存 light/dark 的 app-theme。
+    const legacy = window.localStorage.getItem(LEGACY_STORAGE_KEY);
+    if (legacy === "light" || legacy === "dark") return legacy;
+  } catch {
+    // 浏览器策略禁用 localStorage 时，当前标签页仍可正常使用主题。
+  }
   return "system";
 }
 
@@ -35,8 +39,12 @@ export function applyThemeMode(mode: ThemeMode): Theme {
 }
 
 export function setStoredThemeMode(mode: ThemeMode) {
-  window.localStorage.setItem(STORAGE_KEY, mode);
-  window.localStorage.removeItem(LEGACY_STORAGE_KEY);
+  try {
+    window.localStorage.setItem(STORAGE_KEY, mode);
+    window.localStorage.removeItem(LEGACY_STORAGE_KEY);
+  } catch {
+    // 持久化不可用时不阻断当前页面主题切换。
+  }
 }
 
 export function setThemeMode(mode: ThemeMode): Theme {
@@ -54,6 +62,16 @@ export function watchSystemTheme(onChange: (theme: Theme) => void): () => void {
   };
   mq.addEventListener("change", handler);
   return () => mq.removeEventListener("change", handler);
+}
+
+export function watchStoredThemeMode(onChange: (mode: ThemeMode) => void): () => void {
+  const handler = (event: StorageEvent) => {
+    if (event.key === STORAGE_KEY || event.key === LEGACY_STORAGE_KEY || event.key === null) {
+      onChange(getStoredThemeMode());
+    }
+  };
+  window.addEventListener("storage", handler);
+  return () => window.removeEventListener("storage", handler);
 }
 
 /** 兼容旧调用。 */
