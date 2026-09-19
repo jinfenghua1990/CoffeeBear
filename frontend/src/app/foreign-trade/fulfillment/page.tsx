@@ -1,2 +1,5 @@
-import ForeignTradeWorkbench from "../workbench";
-export default function Page(){return <ForeignTradeWorkbench mode="fulfillment" />;}
+import ShipmentWorkbench from "./shipment-workbench";
+
+export default function Page() {
+  return <ShipmentWorkbench />;
+}
