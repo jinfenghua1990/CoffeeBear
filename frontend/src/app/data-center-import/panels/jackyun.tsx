@@ -1,6 +1,7 @@
 "use client";
 
-import { JackyunFileImportRow, JackyunRecordPreview, jackyunFileApi } from "@/lib/api";
+import { useState } from "react";
+import { JackyunFileImportRow, JackyunRecordPreview, jackyunFileApi, testJackyun } from "@/lib/api";
 import { LifecyclePanel } from "./LifecyclePanel";
 
 /**
@@ -8,8 +9,57 @@ import { LifecyclePanel } from "./LifecyclePanel";
  * 开放平台在线同步已停用（JACKYUN_SYNC_MODE=manual），业务单据一律由客户端导出文件上传。
  */
 export function JackyunPanel() {
+  const [testing, setTesting] = useState(false);
+  const [testMessage, setTestMessage] = useState("");
+  const [testTone, setTestTone] = useState<"ok" | "warn" | "error">("warn");
+
+  async function runConnectionTest() {
+    setTesting(true);
+    setTestMessage("");
+    try {
+      const result = await testJackyun();
+      if (!result.ok) {
+        setTestTone("error");
+        setTestMessage("连接失败：" + (result.error ?? "未知错误"));
+      } else if (result.businessReady === false) {
+        setTestTone("warn");
+        setTestMessage("连接通道可用，但吉客云业务 API 权限尚未开通；业务单据继续使用文件导入。");
+      } else {
+        setTestTone("ok");
+        setTestMessage("连接与业务接口状态正常。");
+      }
+    } catch (error) {
+      setTestTone("error");
+      setTestMessage("连接测试异常：" + String(error));
+    } finally {
+      setTesting(false);
+    }
+  }
+
   return (
     <div>
+      <div className="mb-4 app-card rounded-xl p-4">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <div className="text-[13px] font-semibold text-slate-900">吉客云连接与导入</div>
+            <p className="mt-1 text-[11px] leading-5 text-slate-500">连接测试和业务导入都留在这里；当前业务单据以客户端文件导入为主。</p>
+          </div>
+          <button
+            type="button"
+            onClick={runConnectionTest}
+            disabled={testing}
+            className="app-button-secondary rounded-lg px-3 py-1.5 text-[11px] font-medium disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {testing ? "测试中…" : "测试吉客云连接"}
+          </button>
+        </div>
+        {testMessage && (
+          <div className={"mt-3 rounded-lg px-3 py-2 text-[11px] leading-5 " + (testTone === "ok" ? "bg-emerald-50 text-emerald-700" : testTone === "error" ? "bg-rose-50 text-rose-700" : "bg-amber-50 text-amber-700")}>
+            {testMessage}
+          </div>
+        )}
+      </div>
+
       <div className="mb-4 rounded-lg border border-emerald-100 bg-emerald-50/60 px-4 py-3 text-xs text-emerald-800">
         采购入库单就在这里导入：请从吉客云客户端导出「采购入库申请单货品」或「采购入库单」的 XLSX / CSV 后上传，系统会自动识别入库单、回填明细并执行采购链路关联。当前不支持直接在线拉取吉客云单据。
       </div>
