@@ -12,13 +12,14 @@ export default function Sidebar() {
   const pathname = usePathname();
   const searchParams = useSearchParams();
   const module = resolveModule(pathname);
+  const workspaceLabel = module.workspace === "foreign" ? "外贸工作台" : "内销工作台";
   const groups = module.groups ?? [{ label: "", items: module.items ?? [] }];
 
   return (
     <aside className="app-sidebar flex h-full w-[208px] shrink-0 flex-col overflow-hidden text-white shadow-[8px_0_28px_rgba(15,39,70,0.08)]">
       <div className="border-b border-white/10 px-4 pb-4 pt-5">
         <div className="truncate text-[17px] font-semibold tracking-wide text-white">{module.title}</div>
-        <div className="mt-1 text-[10px] font-medium tracking-wide text-slate-400">电商经营数据平台 · 内销工作台</div>
+        <div className="mt-1 text-[10px] font-medium tracking-wide text-slate-400">电商经营数据平台 · {workspaceLabel}</div>
       </div>
 
       <nav className="flex-1 overflow-y-auto px-3 py-4 [scrollbar-width:thin] [scrollbar-color:rgba(255,255,255,.18)_transparent]">
