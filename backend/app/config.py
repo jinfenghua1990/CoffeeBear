@@ -12,6 +12,13 @@ class Settings(BaseSettings):
 
     APP_NAME: str = "电商经营数据平台"
     APP_SECRET_KEY: str = ""
+
+    # 运行时版本/部署元数据：容器由 GitHub Actions + Compose 注入，原生模式保持兼容。
+    APP_ENV: Literal["production", "staging", "development"] = "development"
+    RELEASE_CHANNEL: str = "local"
+    DEPLOYMENT_MODE: Literal["native", "container"] = "native"
+    GIT_SHA: str = ""
+    APP_IMAGE_REF: str = ""
     # rbac = 账号密码 + 服务器端 RBAC；open = 仅适合受控局域网的直达模式。
     ACCESS_MODE: Literal["rbac", "open"] = "rbac"
 

@@ -227,6 +227,19 @@ export type SystemUpdateReadiness = {
   checkedAt: string;
 };
 
+export type SystemRuntimeRelease = {
+  appEnv: "production" | "staging" | "development" | string;
+  releaseChannel: string;
+  deploymentMode: "native" | "container" | string;
+  managedBy: "github_ghcr" | "git_native" | string;
+  gitSha: string;
+  imageRef: string;
+  imageTag: string;
+  version: string;
+  alembicRevision: string;
+  inAppUpdateEnabled: boolean;
+};
+
 export type SystemUpdateStatus = {
   phase?: string;
   progress?: number;
@@ -261,6 +274,7 @@ export type SystemUpdateStatus = {
   lastInstallToSha?: string;
   logs?: string[];
   history?: SystemUpdateHistory[];
+  runtime?: SystemRuntimeRelease;
   settings: SystemUpdateSettings;
 };
 
