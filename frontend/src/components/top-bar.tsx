@@ -4,7 +4,7 @@ import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { authenticatedFetch, logout } from "@/lib/api";
-import { MODULES, resolveModule } from "@/lib/navigation";
+import { MODULES, moduleWorkspace, resolveModule } from "@/lib/navigation";
 import { syncWorkspaceUrl } from "@/lib/workspace/url-sync";
 import ThemeToggle from "@/components/theme-toggle";
 
@@ -58,6 +58,13 @@ export default function TopBar() {
   const router = useRouter();
   const pathname = usePathname();
   const active = resolveModule(pathname);
+  const activeWorkspace = moduleWorkspace(active);
+  const isForeignWorkspace = activeWorkspace === "foreign";
+  const workspaceLabel = isForeignWorkspace ? "外贸工作台" : "内销工作台";
+  const workspaceHome = isForeignWorkspace ? "/foreign-trade" : "/";
+  const topModules = MODULES.filter(
+    (module) => module.showInTop !== false && moduleWorkspace(module) === activeWorkspace,
+  );
   const [openMenu, setOpenMenu] = useState<"workspace" | "sync" | "settings" | "account" | null>(null);
   const [keyword, setKeyword] = useState("");
   const [groups, setGroups] = useState<SearchGroups>(EMPTY_GROUPS);
@@ -156,7 +163,7 @@ export default function TopBar() {
   return (
     <header className="app-topbar relative z-40 flex h-14 shrink-0 items-center gap-3 border-b px-4 shadow-[0_1px_4px_rgba(15,39,70,0.04)]" ref={rootRef}>
       {/* 品牌 + 工作台切换 */}
-      <Link href="/" prefetch={false} className="flex shrink-0 items-center gap-2.5">
+      <Link href={workspaceHome} prefetch={false} className="flex shrink-0 items-center gap-2.5">
         <span className="flex h-9 w-9 items-center justify-center rounded-full app-brand-mark">
           <svg viewBox="0 0 24 24" className="h-5 w-5" fill="none" aria-hidden="true">
             <path d="M5 8h12v7a5 5 0 0 1-5 5h-2a5 5 0 0 1-5-5V8Z" fill="currentColor" />
@@ -175,23 +182,34 @@ export default function TopBar() {
           onClick={() => setOpenMenu((menu) => (menu === "workspace" ? null : "workspace"))}
           className="flex items-center gap-1 rounded-lg border border-slate-200 px-2 py-1.5 text-[12px] font-medium text-slate-700 hover:bg-slate-50"
         >
-          内销工作台
+          {workspaceLabel}
           <ChevronDown />
         </button>
         {openMenu === "workspace" && (
           <div className="absolute left-0 top-full z-dropdown mt-1.5 w-52 app-popover rounded-xl border p-1.5 shadow-lg">
-            <div className="flex items-center justify-between rounded-lg bg-slate-50 px-3 py-2 text-[13px] font-medium text-slate-800">
+            <button
+              type="button"
+              onClick={() => go("/")}
+              className={"flex w-full items-center justify-between rounded-lg px-3 py-2 text-left text-[13px] font-medium " + (!isForeignWorkspace ? "bg-slate-50 text-slate-800" : "text-slate-600 hover:bg-slate-50")}
+            >
               内销工作台
-              <span className="text-[10px] font-normal text-blue-600">当前</span>
-            </div>
-            <div className="rounded-lg px-3 py-2 text-[12px] text-slate-400">外贸工作台（规划中）</div>
+              {!isForeignWorkspace && <span className="text-[10px] font-normal text-blue-600">当前</span>}
+            </button>
+            <button
+              type="button"
+              onClick={() => go("/foreign-trade")}
+              className={"flex w-full items-center justify-between rounded-lg px-3 py-2 text-left text-[13px] font-medium " + (isForeignWorkspace ? "bg-slate-50 text-slate-800" : "text-slate-600 hover:bg-slate-50")}
+            >
+              外贸工作台
+              {isForeignWorkspace && <span className="text-[10px] font-normal text-blue-600">当前</span>}
+            </button>
           </div>
         )}
       </div>
 
       {/* 一级业务导航 */}
       <nav className="top-primary-nav ml-2 flex min-w-0 max-w-[660px] flex-1 items-center gap-1 overflow-x-auto" aria-label="一级业务模块">
-        {MODULES.filter((module) => module.showInTop !== false).map((module) => {
+        {topModules.map((module) => {
           const isActive = module.key === active.key;
           return (
             <Link
