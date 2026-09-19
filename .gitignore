@@ -57,3 +57,6 @@ backend/celerybeat-schedule
 
 # 业务数据快照（不进公开仓库）
 backend/backup_*.json
+
+# 部署运行时凭证
+deploy/**/runtime.env

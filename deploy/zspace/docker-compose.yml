@@ -1,0 +1,116 @@
+services:
+  postgres:
+    image: postgres:17.11-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:?set POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER:?set POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+    volumes:
+      - ${POSTGRES_DATA_DIR_HOST:?set POSTGRES_DATA_DIR_HOST}:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  redis:
+    image: redis:7.4-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - ${REDIS_DATA_DIR_HOST:?set REDIS_DATA_DIR_HOST}:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  migrate:
+    image: ${APP_IMAGE:?set APP_IMAGE}
+    profiles: ["ops"]
+    restart: "no"
+    env_file: .env
+    environment:
+      DATABASE_URL: ${DATABASE_URL:?set DATABASE_URL}
+      REDIS_URL: redis://redis:6379/0
+      DATA_DIR: /data
+      APP_ENV: ${APP_ENV:?set APP_ENV}
+      RELEASE_CHANNEL: ${RELEASE_CHANNEL:?set RELEASE_CHANNEL}
+    volumes:
+      - ${DATA_DIR_HOST:?set DATA_DIR_HOST}:/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: ["bash", "-lc", "alembic upgrade head && python -m app.seed"]
+
+  api:
+    image: ${APP_IMAGE:?set APP_IMAGE}
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATABASE_URL: ${DATABASE_URL:?set DATABASE_URL}
+      REDIS_URL: redis://redis:6379/0
+      DATA_DIR: /data
+      FRONTEND_OUT: /app/frontend/out
+      APP_ENV: ${APP_ENV:?set APP_ENV}
+      RELEASE_CHANNEL: ${RELEASE_CHANNEL:?set RELEASE_CHANNEL}
+      SYSTEM_UPDATE_ENABLED: "0"
+      HOME: /tmp
+    ports:
+      - "${WEB_PORT:?set WEB_PORT}:8000"
+    volumes:
+      - ${DATA_DIR_HOST:?set DATA_DIR_HOST}:/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8000/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  worker:
+    image: ${APP_IMAGE:?set APP_IMAGE}
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATABASE_URL: ${DATABASE_URL:?set DATABASE_URL}
+      REDIS_URL: redis://redis:6379/0
+      DATA_DIR: /data
+      APP_ENV: ${APP_ENV:?set APP_ENV}
+      RELEASE_CHANNEL: ${RELEASE_CHANNEL:?set RELEASE_CHANNEL}
+      SYSTEM_UPDATE_ENABLED: "0"
+      HOME: /tmp
+    volumes:
+      - ${DATA_DIR_HOST:?set DATA_DIR_HOST}:/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: ["celery", "-A", "app.celery_app", "worker", "-l", "info", "--concurrency", "2"]
+
+  beat:
+    image: ${APP_IMAGE:?set APP_IMAGE}
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATABASE_URL: ${DATABASE_URL:?set DATABASE_URL}
+      REDIS_URL: redis://redis:6379/0
+      DATA_DIR: /data
+      APP_ENV: ${APP_ENV:?set APP_ENV}
+      RELEASE_CHANNEL: ${RELEASE_CHANNEL:?set RELEASE_CHANNEL}
+      SYSTEM_UPDATE_ENABLED: "0"
+      HOME: /tmp
+    volumes:
+      - ${DATA_DIR_HOST:?set DATA_DIR_HOST}:/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: ["celery", "-A", "app.celery_app", "beat", "-l", "info", "--schedule", "/tmp/celerybeat-schedule"]

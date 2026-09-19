@@ -175,6 +175,9 @@ jobs:
         run: |
           cp .env.example .env
           docker compose config -q
+          cp deploy/zspace/staging.env.example deploy/zspace/.env
+          docker compose --env-file deploy/zspace/.env -f deploy/zspace/docker-compose.yml config -q
+          rm -f deploy/zspace/.env
       - name: Build unified production image
         run: |
           docker build -f Dockerfile -t ecommerce-dashboard:ci .
