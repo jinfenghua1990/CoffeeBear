@@ -17,11 +17,18 @@ TS="$(date +%Y%m%d_%H%M%S)"
 SKIP_FILES=0
 [[ "${1:-}" == "--no-files" ]] && SKIP_FILES=1
 
+# 调用方显式传入的运行时连接优先级高于仓库 .env，避免更新/恢复流程备份错数据库。
+RUNTIME_DATABASE_URL="${DATABASE_URL:-}"
+RUNTIME_DATA_DIR="${DATA_DIR:-}"
+
 if [[ -f "$ROOT/.env" ]]; then
   set -a
   source "$ROOT/.env"
   set +a
 fi
+
+[[ -n "$RUNTIME_DATABASE_URL" ]] && export DATABASE_URL="$RUNTIME_DATABASE_URL"
+[[ -n "$RUNTIME_DATA_DIR" ]] && export DATA_DIR="$RUNTIME_DATA_DIR"
 
 PERSIST_ROOT="${PERSIST_ROOT:-$ROOT}"
 DATA_DIR="${DATA_DIR:-$PERSIST_ROOT/data}"
@@ -66,9 +73,15 @@ check_local_pg_client() {
 echo "==> [1/2] pg_dump ..."
 TMP_DUMP="$BACKUP_DIR/.db_$TS.dump.tmp"
 trap 'rm -f "$TMP_DUMP"' EXIT
+COMPOSE_POSTGRES_RUNNING=0
 if command -v docker >/dev/null 2>&1 \
   && docker compose -f "$ROOT/docker-compose.yml" ps --status running postgres 2>/dev/null | grep -q postgres; then
-  # Compose 模式直接使用 PostgreSQL 容器自身的 pg_dump，版本天然与服务端一致。
+  COMPOSE_POSTGRES_RUNNING=1
+fi
+
+# 有 DATABASE_URL 时，以“当前正在运行的服务”连接为准，避免旁边恰好有 Docker Postgres 就备错库。
+DB_HINT="${DATABASE_URL:-}"
+if [[ "$COMPOSE_POSTGRES_RUNNING" == "1" && ( -z "$DB_HINT" || "$DB_HINT" == *"@postgres:"* || "$DB_HINT" == *"@postgres/"* ) ]]; then
   docker compose -f "$ROOT/docker-compose.yml" exec -T postgres \
     pg_dump -U "${POSTGRES_USER:-ecommerce}" -Fc "${POSTGRES_DB:-ecommerce}" \
     > "$TMP_DUMP"
@@ -84,11 +97,11 @@ trap - EXIT
 
 # 2) /data 归档文件（可选）
 if [[ "$SKIP_FILES" == "0" ]]; then
-  echo "==> [2/2] 归档 /data ..."
+  echo "==> [2/2] 归档 $DATA_DIR ..."
   if [[ -d "$DATA_DIR" ]]; then
     # system-update/ 是自更新执行日志与临时 runner，更新过程中会持续写入；
     # 它不是业务原始数据，排除后避免 tar 读取同时变化的日志导致备份不稳定。
-    DATA_PARENT="$(dirname "$DATA_DIR")"
+    DATA_PARENT="$(cd "$(dirname "$DATA_DIR")" && pwd)"
     DATA_NAME="$(basename "$DATA_DIR")"
     tar --exclude="$DATA_NAME/system-update" -czf "$BACKUP_DIR/data_$TS.tar.gz" -C "$DATA_PARENT" "$DATA_NAME"
   else
