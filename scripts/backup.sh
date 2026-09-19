@@ -23,6 +23,10 @@ if [[ -f "$ROOT/.env" ]]; then
   set +a
 fi
 
+PERSIST_ROOT="${PERSIST_ROOT:-$ROOT}"
+DATA_DIR="${DATA_DIR:-$PERSIST_ROOT/data}"
+BACKUP_DIR="${BACKUP_DIR:-$PERSIST_ROOT/backups}"
+
 mkdir -p "$BACKUP_DIR"
 
 echo "==> 备份到 $BACKUP_DIR (保留 $KEEP 份) @ $TS"
@@ -81,12 +85,14 @@ trap - EXIT
 # 2) /data 归档文件（可选）
 if [[ "$SKIP_FILES" == "0" ]]; then
   echo "==> [2/2] 归档 /data ..."
-  if [[ -d "$ROOT/data" ]]; then
+  if [[ -d "$DATA_DIR" ]]; then
     # system-update/ 是自更新执行日志与临时 runner，更新过程中会持续写入；
     # 它不是业务原始数据，排除后避免 tar 读取同时变化的日志导致备份不稳定。
-    tar --exclude='data/system-update' -czf "$BACKUP_DIR/data_$TS.tar.gz" -C "$ROOT" data
+    DATA_PARENT="$(dirname "$DATA_DIR")"
+    DATA_NAME="$(basename "$DATA_DIR")"
+    tar --exclude="$DATA_NAME/system-update" -czf "$BACKUP_DIR/data_$TS.tar.gz" -C "$DATA_PARENT" "$DATA_NAME"
   else
-    echo "     (无 $ROOT/data，跳过)"
+    echo "     (无 $DATA_DIR，跳过)"
   fi
 fi
 

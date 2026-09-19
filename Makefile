@@ -7,7 +7,7 @@ VENV := $(BACKEND)/.venv
 LAUNCH_LABEL := gui/$(shell id -u)/com.gino.ecommerce-dashboard
 NATIVE_ENV = set -a; . "$(ROOT)/.env"; set +a; export DATABASE_URL="postgresql+psycopg://$$POSTGRES_USER:$$POSTGRES_PASSWORD@localhost:5432/$$POSTGRES_DB"; export REDIS_URL="redis://localhost:6379/0"; export DATA_DIR="$(ROOT)/data";
 
-.PHONY: help up restart status logs logs-api rebuild rebuild-fe test test-db lint tsc verify secret-scan repo-hygiene smoke migrate migration-check exec-api backup restore-check orphan-audit backup-schedule-install backup-schedule-status backup-schedule-uninstall fresh
+.PHONY: help up restart status logs logs-api rebuild rebuild-fe test test-db lint tsc verify release-check secret-scan repo-hygiene smoke migrate migration-check exec-api backup restore-check orphan-audit backup-schedule-install backup-schedule-status backup-schedule-uninstall fresh
 
 help: ## 列出所有 target
 	@awk 'BEGIN {FS = ":.*##"} /^[a-zA-Z_-]+:.*?##/ {printf "  \033[36m%-16s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -61,6 +61,9 @@ verify: repo-hygiene secret-scan migration-check orphan-audit lint test tsc ## �
 	cd frontend && npm run build
 	@test -f frontend/out/index.html
 	@echo "本地验收通过：repo hygiene / secret scan / migration / orphan audit / backend tests / TypeScript / static build 均正常。"
+
+release-check: verify restore-check smoke ## 发布前门禁：完整回归 + 恢复演练 + 运行态 smoke
+	@echo "发布门禁通过：该提交可以进入 develop → main 发布流程。"
 
 smoke: ## 枚举公开 API 并做带鉴权 smoke test
 	./scripts/smoke.sh
