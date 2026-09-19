@@ -10,8 +10,12 @@ import { WORKBENCH_VIEWS, parseWorkbenchView, workbenchHref } from "@/lib/workbe
  * 页面内容由这里挂载；Next 的路由只负责把地址栏同步成「激活 Tab 的 URL」。
  * 新增业务页面时：这里加一条注册 + lib/navigation.ts 加菜单，即自动接入工作区 Tabs。
  */
+export type WorkspaceKey = "domestic" | "foreign";
+
 export type RouteEntry = {
   pathname: string;
+  /** 工作台归属；未填写默认内销。 */
+  workspace?: WorkspaceKey;
   /** 默认 Tab 标题（列表/母页面） */
   title: string;
   /** 业务类型：master 母页面 / 业务对象详情页 */
@@ -37,6 +41,7 @@ const ROUTES: RouteEntry[] = [
     load: () => import("@/app/page"),
   },
   {
+    workspace: "foreign",
     pathname: "/foreign-trade",
     title: "外贸总览",
     businessType: "master",
@@ -45,42 +50,49 @@ const ROUTES: RouteEntry[] = [
     load: () => import("@/app/foreign-trade/page"),
   },
   {
+    workspace: "foreign",
     pathname: "/foreign-trade/orders",
     title: "外贸订单",
     businessType: "master",
     load: () => import("@/app/foreign-trade/orders/page"),
   },
   {
+    workspace: "foreign",
     pathname: "/foreign-trade/dealers",
     title: "B2B 客户",
     businessType: "dealer",
     load: () => import("@/app/foreign-trade/dealers/page"),
   },
   {
+    workspace: "foreign",
     pathname: "/foreign-trade/channels",
     title: "渠道管理",
     businessType: "master",
     load: () => import("@/app/foreign-trade/channels/page"),
   },
   {
+    workspace: "foreign",
     pathname: "/foreign-trade/sku-mappings",
     title: "海外 SKU 映射",
     businessType: "master",
     load: () => import("@/app/foreign-trade/sku-mappings/page"),
   },
   {
+    workspace: "foreign",
     pathname: "/foreign-trade/fulfillment",
     title: "履约中心",
     businessType: "master",
     load: () => import("@/app/foreign-trade/fulfillment/page"),
   },
   {
+    workspace: "foreign",
     pathname: "/foreign-trade/finance",
     title: "收款与利润",
     businessType: "master",
     load: () => import("@/app/foreign-trade/finance/page"),
   },
   {
+    workspace: "foreign",
     pathname: "/foreign-trade/alsvid",
     title: "Alsvid",
     businessType: "master",
@@ -307,6 +319,10 @@ export function normalizeRoute(href: string): string {
 }
 
 export type ResolvedRoute = { pathname: string; search: string; entry: RouteEntry };
+
+export function routeWorkspace(pathname: string): WorkspaceKey {
+  return ENTRY_BY_PATH.get(pathname)?.workspace ?? "domestic";
+}
 
 /** 解析地址：返回注册表条目；未注册的地址返回 null（工作区渲染 404 视图）。 */
 export function resolveRoute(href: string): ResolvedRoute | null {

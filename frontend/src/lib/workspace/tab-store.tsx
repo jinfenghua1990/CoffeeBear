@@ -10,7 +10,7 @@ import {
   useState,
   type ReactNode,
 } from "react";
-import { normalizeRoute, resolveRoute, tabBusinessId, tabIdentity, tabTitle, type RouteEntry } from "./route-table";
+import { normalizeRoute, resolveRoute, routeWorkspace, tabBusinessId, tabIdentity, tabTitle, type RouteEntry, type WorkspaceKey } from "./route-table";
 
 /**
  * 工作区 Tab 状态：谁打开了、当前激活哪个、每个 Tab 的 URL / 标题 / 来源 / 固定状态。
@@ -22,6 +22,8 @@ export const MAX_TABS = 12;
 
 export type WorkspaceTab = {
   id: string;
+  /** 所属独立工作台：内销 / 外贸。 */
+  workspace: WorkspaceKey;
   /** 该 Tab 自己的路径（不含 query） */
   pathname: string;
   /** 该 Tab 自己的 query（不含 "?"） */
@@ -46,7 +48,7 @@ export type TabDisplayTitle = string;
 
 const STORAGE_KEY = "workspace.tabs.v1";
 
-type PersistedTab = Omit<WorkspaceTab, never>;
+type PersistedTab = Omit<WorkspaceTab, "workspace"> & { workspace?: WorkspaceKey };
 
 type PersistedState = {
   version: 1;
@@ -83,6 +85,8 @@ export type WorkspaceApi = {
   tabs: WorkspaceTab[];
   activeId: string | null;
   activeTab: WorkspaceTab | null;
+  activeWorkspace: WorkspaceKey;
+  tabsForWorkspace: (workspace: WorkspaceKey) => WorkspaceTab[];
   maxTabs: number;
   notice: string | null;
   setNotice: (message: string | null) => void;
@@ -140,7 +144,10 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     const persisted = readPersisted();
     if (persisted) {
       stateRef.current = {
-        tabs: persisted.tabs.slice(0, MAX_TABS),
+        tabs: persisted.tabs.slice(0, MAX_TABS * 2).map((tab) => ({
+          ...tab,
+          workspace: tab.workspace ?? routeWorkspace(tab.pathname),
+        })),
         activeId: null,
       };
       scrollRef.current = { ...persisted.scrollTops };
@@ -198,9 +205,10 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       const resolved = resolveRoute(href);
       if (!resolved) return null;
       const { pathname, search, entry } = resolved;
+      const workspace = entry.workspace ?? "domestic";
       const identity = tabIdentity(pathname, search, entry);
 
-      const existing = options?.forceNew ? undefined : stateRef.current.tabs.find((tab) => tab.identity === identity);
+      const existing = options?.forceNew ? undefined : stateRef.current.tabs.find((tab) => tab.workspace === workspace && tab.identity === identity);
       if (existing) {
         if (existing.pathname === pathname && existing.search !== search) {
           // 同一个业务对象：同步 query 的同时刷新标题/业务标识，避免“销售明细”仍显示旧 Tab 标题。
@@ -224,16 +232,20 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
         return existing.id;
       }
 
-      if (stateRef.current.tabs.length >= MAX_TABS) {
+      const workspaceTabs = stateRef.current.tabs.filter((tab) => tab.workspace === workspace);
+      if (workspaceTabs.length >= MAX_TABS) {
         if (!options?.silent) {
-          setNotice(`工作区最多同时打开 ${MAX_TABS} 个页面，请先关闭一些页面再打开新的。`);
+          setNotice(`${workspace === "foreign" ? "外贸" : "内销"}工作台最多同时打开 ${MAX_TABS} 个页面，请先关闭一些页面再打开新的。`);
         }
         return null;
       }
 
-      const sourceTabId = options?.sourceTabId === undefined ? stateRef.current.activeId : options.sourceTabId;
+      const requestedSourceId = options?.sourceTabId === undefined ? stateRef.current.activeId : options.sourceTabId;
+      const sourceTab = requestedSourceId ? stateRef.current.tabs.find((item) => item.id === requestedSourceId) : null;
+      const sourceTabId = sourceTab?.workspace === workspace ? sourceTab.id : null;
       const tab: WorkspaceTab = {
         id: nextTabId(),
+        workspace,
         pathname,
         search,
         title: null,
@@ -241,7 +253,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
         businessType: entry.businessType,
         businessId: tabBusinessId(entry, search),
         identity,
-        sourceTabId: sourceTabId && stateRef.current.tabs.some((item) => item.id === sourceTabId) ? sourceTabId : null,
+        sourceTabId,
         closable: entry.closable !== false,
         pinned: entry.pinned === true,
         createdAt: Date.now(),
@@ -289,7 +301,9 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     function closeOthers(id: string) {
       const keep = findById(id);
       if (!keep) return;
-      stateRef.current.tabs = stateRef.current.tabs.filter((tab) => tab.id === id || tab.pinned || !tab.closable);
+      stateRef.current.tabs = stateRef.current.tabs.filter(
+        (tab) => tab.workspace !== keep.workspace || tab.id === id || tab.pinned || !tab.closable,
+      );
       stateRef.current.activeId = id;
       const alive = new Set(stateRef.current.tabs.map((tab) => tab.id));
       for (const key of Object.keys(scrollRef.current)) if (!alive.has(key)) delete scrollRef.current[key];
@@ -301,10 +315,18 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
 
     function closeRight(id: string) {
       const tabs = stateRef.current.tabs;
-      const index = tabs.findIndex((tab) => tab.id === id);
+      const target = findById(id);
+      if (!target) return;
+      const sameWorkspace = tabs.filter((tab) => tab.workspace === target.workspace);
+      const index = sameWorkspace.findIndex((tab) => tab.id === id);
       if (index < 0) return;
-      // 保留：目标之前的 Tab + 固定/不可关闭的 Tab（固定 Tab 不被「关闭右侧」误关）
-      stateRef.current.tabs = tabs.filter((tab, tabIndex) => tabIndex <= index || tab.pinned || !tab.closable);
+      const rightIds = new Set(
+        sameWorkspace
+          .slice(index + 1)
+          .filter((tab) => tab.closable && !tab.pinned)
+          .map((tab) => tab.id),
+      );
+      stateRef.current.tabs = tabs.filter((tab) => !rightIds.has(tab.id));
       if (!stateRef.current.tabs.some((tab) => tab.id === stateRef.current.activeId)) {
         stateRef.current.activeId = id;
       }
@@ -337,10 +359,13 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       if (!resolved || !active) return resolved ? normalized : href;
 
       const { pathname, search, entry } = resolved;
+      const workspace = entry.workspace ?? "domestic";
       const identity = tabIdentity(pathname, search, entry);
 
-      // 新地址已被另一个 Tab 代表：本 Tab 退场并切回那个 Tab（详情关掉就回到来源列表）
-      const host = stateRef.current.tabs.find((tab) => tab.id !== active.id && tab.identity === identity);
+      // 新地址已被同一工作台的另一个 Tab 代表：本 Tab 退场并切回那个 Tab。
+      const host = stateRef.current.tabs.find(
+        (tab) => tab.id !== active.id && tab.workspace === workspace && tab.identity === identity,
+      );
       if (host && active.closable && !active.pinned) {
         stateRef.current.tabs = stateRef.current.tabs
           .filter((tab) => tab.id !== active.id)
@@ -360,6 +385,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
         tab.id === active.id
           ? {
               ...tab,
+              workspace,
               pathname,
               search,
               title: null,
@@ -435,6 +461,12 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       },
       get activeTab() {
         return findById(stateRef.current.activeId);
+      },
+      get activeWorkspace() {
+        return findById(stateRef.current.activeId)?.workspace ?? "domestic";
+      },
+      tabsForWorkspace(workspace: WorkspaceKey) {
+        return stateRef.current.tabs.filter((tab) => tab.workspace === workspace);
       },
       maxTabs: MAX_TABS,
       notice,
