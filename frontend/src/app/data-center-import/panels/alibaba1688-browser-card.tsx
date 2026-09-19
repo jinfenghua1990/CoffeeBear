@@ -7,6 +7,7 @@ import {
   Alibaba1688SyncMode,
   Alibaba1688TimeField,
   alibaba1688BrowserApi,
+  authenticatedFetch,
 } from "@/lib/api";
 
 const STATUS_LABELS: Record<string, string> = {
@@ -214,6 +215,22 @@ export function Alibaba1688BrowserCard({ onSynced, onClose }: { onSynced?: () =>
     }
   }, [pollJob]);
 
+
+  const connectOpenPlatform = useCallback(async () => {
+    setMessage(null);
+    try {
+      const res = await authenticatedFetch("/api/v1/integrations/alibaba1688/auth-url", { cache: "no-store" });
+      const data = await res.json();
+      if (res.ok && data.authorizationUrl) {
+        window.location.href = data.authorizationUrl;
+        return;
+      }
+      setMessage({ text: "1688 开放平台授权：" + (data.detail ?? "当前未配置"), tone: "warn" });
+    } catch (error) {
+      setMessage({ text: "1688 开放平台授权失败：" + String(error), tone: "error" });
+    }
+  }, []);
+
   const startSync = useCallback(async () => {
     if (status?.status === "needs_login" || status?.status === "unconfigured") {
       await startLogin();
@@ -315,7 +332,7 @@ export function Alibaba1688BrowserCard({ onSynced, onClose }: { onSynced?: () =>
           </label>
           <span className={`inline-flex items-center gap-1.5 self-start rounded-full px-2.5 py-1 text-[11px] font-medium lg:self-auto ${status?.status === "connected" ? "bg-emerald-50 text-emerald-700" : "bg-amber-50 text-amber-700"}`}><span className={`h-2 w-2 rounded-full ${status?.status === "connected" ? "bg-emerald-500" : "bg-amber-500"}`} />{connectionLabel}</span>
           <span className="text-[11px] text-slate-500">最近同步：{fmtTime(status?.lastSyncAt ?? null)}</span>
-          <button type="button" onClick={startLogin} disabled={running !== null || !status?.enabled} className="inline-flex h-8 items-center justify-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 text-[11px] font-medium text-slate-700 hover:border-indigo-300 hover:text-indigo-600 disabled:cursor-not-allowed disabled:opacity-50"><PullIcon name="refresh" size={14} />重新登录</button>
+          <button type="button" onClick={startLogin} disabled={running !== null || !status?.enabled} className="inline-flex h-8 items-center justify-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 text-[11px] font-medium text-slate-700 hover:border-indigo-300 hover:text-indigo-600 disabled:cursor-not-allowed disabled:opacity-50"><PullIcon name="refresh" size={14} />重新登录</button><button type="button" onClick={connectOpenPlatform} disabled={running !== null} className="inline-flex h-8 items-center justify-center rounded-lg border border-slate-200 bg-white px-3 text-[11px] font-medium text-slate-700 hover:border-indigo-300 hover:text-indigo-600 disabled:cursor-not-allowed disabled:opacity-50">开放平台授权</button>
         </div>
         {!status?.enabled && <p className="mt-2 text-[11px] text-slate-400">浏览器通道未启用（配置 ALIBABA_1688_BROWSER_ENABLED）</p>}
       </PullStep>
