@@ -15,6 +15,9 @@ if [[ -f "$ROOT/.env" ]]; then
   set +a
 fi
 
+PERSIST_ROOT="${PERSIST_ROOT:-$ROOT}"
+BACKUP_DIR="${BACKUP_DIR:-$PERSIST_ROOT/backups}"
+
 for cmd in pg_restore createdb dropdb psql; do
   command -v "$cmd" >/dev/null 2>&1 || {
     echo "缺少命令：$cmd"
