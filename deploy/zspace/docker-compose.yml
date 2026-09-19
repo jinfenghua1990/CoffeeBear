@@ -30,7 +30,7 @@ services:
     image: ${APP_IMAGE:?set APP_IMAGE}
     profiles: ["ops"]
     restart: "no"
-    env_file: runtime.env
+    env_file: .env
     environment:
       DATABASE_URL: ${DATABASE_URL:?set DATABASE_URL}
       REDIS_URL: redis://redis:6379/0
@@ -47,7 +47,7 @@ services:
   api:
     image: ${APP_IMAGE:?set APP_IMAGE}
     restart: unless-stopped
-    env_file: runtime.env
+    env_file: .env
     environment:
       DATABASE_URL: ${DATABASE_URL:?set DATABASE_URL}
       REDIS_URL: redis://redis:6379/0
@@ -76,7 +76,7 @@ services:
   worker:
     image: ${APP_IMAGE:?set APP_IMAGE}
     restart: unless-stopped
-    env_file: runtime.env
+    env_file: .env
     environment:
       DATABASE_URL: ${DATABASE_URL:?set DATABASE_URL}
       REDIS_URL: redis://redis:6379/0
@@ -97,7 +97,7 @@ services:
   beat:
     image: ${APP_IMAGE:?set APP_IMAGE}
     restart: unless-stopped
-    env_file: runtime.env
+    env_file: .env
     environment:
       DATABASE_URL: ${DATABASE_URL:?set DATABASE_URL}
       REDIS_URL: redis://redis:6379/0
