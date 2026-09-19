@@ -258,7 +258,7 @@ export default function SystemUpdatePage() {
               </span>
               {status.updateAvailable && <span className="rounded-full bg-blue-600 px-2 py-0.5 text-[10px] font-medium text-white">有新版本</span>}
             </div>
-            <div className="mt-1 text-[11px] opacity-75">最后检查 {fmtDate(status.lastCheckAt)} · {status.settings.remote}/{status.settings.branch}</div>
+            <div className="mt-1 text-[11px] opacity-75">最后检查 {fmtDate(status.lastCheckAt)} · 更新通道 {status.settings.branch}</div>
           </div>
           {status.phase === "success" && (
             <button
@@ -282,13 +282,13 @@ export default function SystemUpdatePage() {
             <div className="text-[10px] text-slate-400">当前版本</div>
             <div className="mt-1 font-mono text-sm font-semibold text-slate-800">{versionCode(status.currentCommit?.committedAt)}</div>
             <div className="mt-0.5 truncate text-[10px] text-slate-400">{status.currentCommit?.subject || "—"}</div>
-            <div className="mt-0.5 font-mono text-[9px] text-slate-400">SHA {shortSha(status.currentSha)}</div>
+            <div className="mt-0.5 text-[9px] text-slate-300" title={`SHA ${status.currentSha || "—"}`}>技术标识 {shortSha(status.currentSha)}</div>
           </div>
           <div className="px-4 py-3">
-            <div className="text-[10px] text-slate-400">GitHub 版本</div>
+            <div className="text-[10px] text-slate-400">最新版本</div>
             <div className={`mt-1 font-mono text-sm font-semibold ${status.updateAvailable ? "text-blue-700" : "text-slate-800"}`}>{versionCode(status.latestCommit?.committedAt)}</div>
             <div className="mt-0.5 truncate text-[10px] text-slate-400">{status.latestCommit?.subject || "点击“检查更新”获取"}</div>
-            <div className="mt-0.5 font-mono text-[9px] text-slate-400">SHA {shortSha(status.latestSha)}</div>
+            <div className="mt-0.5 text-[9px] text-slate-300" title={`SHA ${status.latestSha || "—"}`}>技术标识 {shortSha(status.latestSha)}</div>
           </div>
           <div className="px-4 py-3">
             <div className="text-[10px] text-slate-400">环境自检</div>
@@ -332,10 +332,9 @@ export default function SystemUpdatePage() {
           </div>
           <div className="max-h-72 overflow-y-auto px-4">
             {(status.changes ?? []).map((item) => (
-              <div key={item.sha} className="grid grid-cols-[76px_minmax(0,1fr)_auto] items-center gap-3 border-b border-slate-100 py-2.5 last:border-b-0">
-                <span className="font-mono text-[10px] text-slate-400">{item.shortSha}</span>
+              <div key={item.sha} className="grid grid-cols-[132px_minmax(0,1fr)] items-center gap-3 border-b border-slate-100 py-2.5 last:border-b-0" title={`SHA ${item.sha}`}>
+                <span className="font-mono text-[10px] font-medium text-slate-500">{versionCode(item.committedAt)}</span>
                 <span className="min-w-0 truncate text-xs text-slate-700">{item.subject}</span>
-                <span className="hidden font-mono text-[10px] text-slate-400 sm:block">{versionCode(item.committedAt)}</span>
               </div>
             ))}
             {(status.changes ?? []).length === 0 && (
@@ -345,7 +344,7 @@ export default function SystemUpdatePage() {
           {status.lastInstallResult && (
             <div className="flex flex-wrap items-center justify-between gap-2 border-t border-slate-100 px-4 py-2.5">
               <span className="text-[10px] text-slate-400">
-                上次安装 {versionCode(status.lastInstallAt)} · SHA {shortSha(status.lastInstallFromSha)} → {shortSha(status.lastInstallToSha)}
+                上次安装 {versionCode(status.lastInstallAt)} · {status.lastInstallResult === "success" ? "已切换到新版本" : "版本切换记录已保留"}
               </span>
               <span className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${
                 status.lastInstallResult === "success"
@@ -426,8 +425,8 @@ export default function SystemUpdatePage() {
               </label>
             ) : (
               <div className="text-[11px] text-slate-600">
-                代码来源
-                <div className="mt-1 truncate rounded-lg bg-slate-50 px-3 py-2 text-xs text-slate-500">{draft.remote}/{draft.branch}</div>
+                更新通道
+                <div className="mt-1 truncate rounded-lg bg-slate-50 px-3 py-2 text-xs text-slate-500">{draft.branch}</div>
               </div>
             )}
           </div>
