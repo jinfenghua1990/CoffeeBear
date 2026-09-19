@@ -8,6 +8,7 @@ export type IconName =
   | "factory" | "cart" | "wallet" | "finance" | "tax" | "mail" | "alert"
   | "settings" | "automation" | "flow" | "receive" | "import";
 
+export type WorkspaceKey = "domestic" | "foreign";
 export type SecondaryItem = { href: string; label: string; icon: IconName };
 export type SecondaryGroup = { label: string; items: SecondaryItem[] };
 
@@ -17,6 +18,8 @@ export type ModuleDef = {
   label: string;
   /** 左侧栏顶部显示的模块名 */
   title: string;
+  /** 所属业务工作台；未填写时默认内销。 */
+  workspace?: WorkspaceKey;
   /** 点击一级菜单的默认落地页（= 第一项） */
   href: string;
   match: (pathname: string) => boolean;
@@ -135,6 +138,24 @@ export const MODULES: ModuleDef[] = [
     ],
   },
   {
+    key: "foreign",
+    label: "总览",
+    title: "外贸中心",
+    workspace: "foreign",
+    href: "/foreign-trade",
+    match: (p) => p.startsWith("/foreign-trade"),
+    items: [
+      { href: "/foreign-trade", label: "外贸总览", icon: "home" },
+      { href: "/foreign-trade/orders", label: "外贸订单", icon: "cart" },
+      { href: "/foreign-trade/dealers", label: "B2B 客户", icon: "sales" },
+      { href: "/foreign-trade/channels", label: "渠道管理", icon: "sales" },
+      { href: "/foreign-trade/sku-mappings", label: "海外 SKU 映射", icon: "box" },
+      { href: "/foreign-trade/fulfillment", label: "履约中心", icon: "truck" },
+      { href: "/foreign-trade/finance", label: "收款与利润", icon: "wallet" },
+      { href: "/foreign-trade/alsvid", label: "Alsvid", icon: "factory" },
+    ],
+  },
+  {
     key: "data",
     label: "异常",
     title: "异常中心",
@@ -161,7 +182,7 @@ export const MODULES: ModuleDef[] = [
 ];
 
 /** 解析当前一级模块。顺序敏感：库存路由要先于 products / supply 判断。 */
-const RESOLVE_ORDER = ["home", "sales", "inventory", "products", "supply", "finance", "logistics", "system", "data"];
+const RESOLVE_ORDER = ["foreign", "home", "sales", "inventory", "products", "supply", "finance", "logistics", "system", "data"];
 
 export function resolveModule(pathname: string): ModuleDef {
   for (const key of RESOLVE_ORDER) {
@@ -169,6 +190,10 @@ export function resolveModule(pathname: string): ModuleDef {
     if (module?.match(pathname)) return module;
   }
   return MODULES[0];
+}
+
+export function moduleWorkspace(module: ModuleDef): WorkspaceKey {
+  return module.workspace ?? "domestic";
 }
 
 /** 左侧二级菜单激活态：路径一致，且 query 完全匹配（无参链接要求当前也不带相关参数）。 */
