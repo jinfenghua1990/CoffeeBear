@@ -157,7 +157,7 @@ export default function TopBar() {
     <header className="app-topbar relative z-40 flex h-14 shrink-0 items-center gap-3 border-b px-4 shadow-[0_1px_4px_rgba(15,39,70,0.04)]" ref={rootRef}>
       {/* 品牌 + 工作台切换 */}
       <Link href="/" prefetch={false} className="flex shrink-0 items-center gap-2.5">
-        <span className="flex h-9 w-9 items-center justify-center rounded-full bg-[#112a49] text-white">
+        <span className="flex h-9 w-9 items-center justify-center rounded-full app-brand-mark">
           <svg viewBox="0 0 24 24" className="h-5 w-5" fill="none" aria-hidden="true">
             <path d="M5 8h12v7a5 5 0 0 1-5 5h-2a5 5 0 0 1-5-5V8Z" fill="currentColor" />
             <path d="M17 10h1.4a2.6 2.6 0 1 1 0 5.2H17" stroke="currentColor" strokeWidth="1.8" />
@@ -200,7 +200,7 @@ export default function TopBar() {
               prefetch={false}
               aria-current={isActive ? "page" : undefined}
               className={`shrink-0 rounded-lg px-3.5 py-2 text-[13px] font-medium transition-colors ${
-                isActive ? "bg-blue-50 text-blue-600" : "text-slate-600 hover:bg-slate-50 hover:text-slate-900"
+                isActive ? "app-nav-active" : "text-slate-600 hover:bg-slate-50 hover:text-slate-900"
               }`}
             >
               {module.label}
@@ -339,7 +339,7 @@ export default function TopBar() {
                 className="block rounded-lg px-3 py-2 text-[13px] text-slate-700 hover:bg-slate-50"
               >
                 <span className="block font-medium">系统设置</span>
-                <span className="mt-0.5 block text-[10px] text-slate-400">账号、安全与数据连接</span>
+                <span className="mt-0.5 block text-[10px] text-slate-400">账号、安全与基础设施集成</span>
               </Link>
               <Link
                 href="/settings/update"
