@@ -18,6 +18,13 @@ type Channel = {
   note: string;
 };
 
+type DealerOption = {
+  id: number;
+  code: string;
+  companyName: string;
+  status: string;
+};
+
 type SkuMapping = {
   id: number;
   channelCode: string;
@@ -32,6 +39,9 @@ type Order = {
   id: number;
   channelCode: string;
   externalOrderNo: string;
+  businessMode: "b2c" | "b2b";
+  dealerId: number | null;
+  dealerName: string;
   brand: string;
   country: string;
   currency: string;
@@ -95,6 +105,8 @@ async function api<T>(url: string, init?: RequestInit): Promise<T> {
 const EMPTY_ORDER = {
   channel_code: "",
   external_order_no: "",
+  business_mode: "b2c" as "b2c" | "b2b",
+  dealer_id: null as number | null,
   brand: "",
   country: "",
   currency: "EUR",
@@ -129,6 +141,8 @@ function orderToDraft(row: Order): OrderDraft {
   return {
     channel_code: row.channelCode,
     external_order_no: row.externalOrderNo,
+    business_mode: row.businessMode,
+    dealer_id: row.dealerId,
     brand: row.brand,
     country: row.country,
     currency: row.currency,
@@ -179,10 +193,12 @@ function Empty({ text }: { text: string }) {
 export default function ForeignTradeWorkbench({ mode }: { mode: ForeignTradeMode }) {
   const [orders, setOrders] = useState<Order[]>([]);
   const [channels, setChannels] = useState<Channel[]>([]);
+  const [dealers, setDealers] = useState<DealerOption[]>([]);
   const [mappings, setMappings] = useState<SkuMapping[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [q, setQ] = useState("");
+  const [businessFilter, setBusinessFilter] = useState<"all" | "b2c" | "b2b">("all");
   const [editingOrder, setEditingOrder] = useState<Order | null>(null);
   const [orderDraft, setOrderDraft] = useState<OrderDraft>({ ...EMPTY_ORDER });
   const [orderFormOpen, setOrderFormOpen] = useState(false);
@@ -221,15 +237,20 @@ export default function ForeignTradeWorkbench({ mode }: { mode: ForeignTradeMode
         setMappings(data.items);
       } else {
         const brand = mode === "alsvid" ? "&brand=Alsvid" : "";
-        const data = await api<{ items: Order[] }>(`/api/v1/foreign-trade/orders?q=${encodeURIComponent(q)}${brand}`);
-        setOrders(data.items);
+        const business = businessFilter === "all" ? "" : "&business_mode=" + businessFilter;
+        const [orderData, dealerData] = await Promise.all([
+          api<{ items: Order[] }>(`/api/v1/foreign-trade/orders?q=${encodeURIComponent(q)}${brand}${business}`),
+          api<{ items: DealerOption[] }>("/api/v1/foreign-trade/b2b/dealers"),
+        ]);
+        setOrders(orderData.items);
+        setDealers(dealerData.items.filter((row) => row.status === "active"));
       }
     } catch (exc) {
       setError(exc instanceof Error ? exc.message : "加载失败");
     } finally {
       setLoading(false);
     }
-  }, [mode, q]);
+  }, [businessFilter, mode, q]);
 
   useEffect(() => {
     const timer = window.setTimeout(load, 120);
@@ -244,6 +265,10 @@ export default function ForeignTradeWorkbench({ mode }: { mode: ForeignTradeMode
   async function saveOrder() {
     if (!orderDraft.channel_code.trim() || !orderDraft.external_order_no.trim()) {
       setError("渠道编码和订单号必须填写");
+      return;
+    }
+    if (orderDraft.business_mode === "b2b" && orderDraft.dealer_id === null) {
+      setError("B2B 订单必须选择经销商");
       return;
     }
     setError("");
@@ -397,7 +422,21 @@ export default function ForeignTradeWorkbench({ mode }: { mode: ForeignTradeMode
   return (
     <PageShell title={title} subtitle={subtitle} error={error}>
       <div className="flex flex-wrap items-center justify-between gap-3">
-        <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="搜索订单号 / 客户 / 运单号" className="input w-72" />
+        <div className="flex flex-wrap items-center gap-2">
+          <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="搜索订单号 / 客户 / 运单号" className="input w-72" />
+          <div className="inline-flex rounded-lg border border-slate-200 bg-white p-0.5">
+            {(["all", "b2c", "b2b"] as const).map((value) => (
+              <button
+                key={value}
+                type="button"
+                onClick={() => setBusinessFilter(value)}
+                className={"rounded-md px-2.5 py-1.5 text-[11px] font-medium " + (businessFilter === value ? "bg-blue-50 text-blue-700" : "text-slate-500 hover:bg-slate-50")}
+              >
+                {value === "all" ? "全部" : value.toUpperCase()}
+              </button>
+            ))}
+          </div>
+        </div>
         <button onClick={() => openOrder()} className="rounded-lg bg-slate-900 px-4 py-2 text-sm font-medium text-white">+ 新增外贸订单</button>
       </div>
 
@@ -405,6 +444,41 @@ export default function ForeignTradeWorkbench({ mode }: { mode: ForeignTradeMode
         <section className="mt-4 rounded-xl border border-blue-200 bg-white p-4 shadow-sm">
           <div className="flex items-center justify-between"><h2 className="text-sm font-semibold text-slate-800">{editingOrder ? `编辑订单 · ${editingOrder.externalOrderNo}` : "新增外贸订单"}</h2><button onClick={() => setOrderFormOpen(false)} className="text-xs text-slate-400">关闭</button></div>
           <div className="mt-4 grid gap-3 md:grid-cols-4">
+            <Field label="业务类型">
+              <select
+                className="input"
+                value={orderDraft.business_mode}
+                onChange={(e) => {
+                  const next = e.target.value as "b2c" | "b2b";
+                  setOrderDraft({ ...orderDraft, business_mode: next, dealer_id: next === "b2c" ? null : orderDraft.dealer_id });
+                }}
+              >
+                <option value="b2c">B2C · 零售客户</option>
+                <option value="b2b">B2B · 经销商</option>
+              </select>
+            </Field>
+            {orderDraft.business_mode === "b2b" ? (
+              <Field label="经销商">
+                <select
+                  className="input"
+                  value={orderDraft.dealer_id ?? ""}
+                  onChange={(e) => {
+                    const dealerId = e.target.value ? Number(e.target.value) : null;
+                    const dealer = dealers.find((row) => row.id === dealerId);
+                    setOrderDraft({
+                      ...orderDraft,
+                      dealer_id: dealerId,
+                      customer_name: dealer?.companyName || orderDraft.customer_name,
+                    });
+                  }}
+                >
+                  <option value="">选择经销商</option>
+                  {dealers.map((row) => <option key={row.id} value={row.id}>{row.companyName} · {row.code}</option>)}
+                </select>
+              </Field>
+            ) : (
+              <Field label="客户"><input className="input" value={orderDraft.customer_name} onChange={(e) => setOrderDraft({ ...orderDraft, customer_name: e.target.value })} /></Field>
+            )}
             <Field label="渠道编码"><input className="input" value={orderDraft.channel_code} onChange={(e) => setOrderDraft({ ...orderDraft, channel_code: e.target.value })} /></Field>
             <Field label="渠道订单号"><input className="input" value={orderDraft.external_order_no} onChange={(e) => setOrderDraft({ ...orderDraft, external_order_no: e.target.value })} /></Field>
             <Field label="品牌"><input className="input" value={orderDraft.brand} onChange={(e) => setOrderDraft({ ...orderDraft, brand: e.target.value })} /></Field>
@@ -416,7 +490,6 @@ export default function ForeignTradeWorkbench({ mode }: { mode: ForeignTradeMode
             <Field label="支付手续费"><input className="input" inputMode="decimal" value={orderDraft.payment_fee} onChange={(e) => setOrderDraft({ ...orderDraft, payment_fee: e.target.value })} /></Field>
             <Field label="退款金额"><input className="input" inputMode="decimal" value={orderDraft.refund_amount} onChange={(e) => setOrderDraft({ ...orderDraft, refund_amount: e.target.value })} /></Field>
             <Field label="兑人民币汇率"><input className="input" inputMode="decimal" value={orderDraft.exchange_rate_to_cny} onChange={(e) => setOrderDraft({ ...orderDraft, exchange_rate_to_cny: e.target.value })} /></Field>
-            <Field label="客户"><input className="input" value={orderDraft.customer_name} onChange={(e) => setOrderDraft({ ...orderDraft, customer_name: e.target.value })} /></Field>
             <Field label="物流公司"><input className="input" value={orderDraft.carrier} onChange={(e) => setOrderDraft({ ...orderDraft, carrier: e.target.value })} /></Field>
             <Field label="运单号"><input className="input" value={orderDraft.tracking_no} onChange={(e) => setOrderDraft({ ...orderDraft, tracking_no: e.target.value })} /></Field>
             <Field label="收款状态"><select className="input" value={orderDraft.payment_status} onChange={(e) => setOrderDraft({ ...orderDraft, payment_status: e.target.value })}><option value="unpaid">未收款</option><option value="paid">已收款</option></select></Field>
@@ -431,7 +504,13 @@ export default function ForeignTradeWorkbench({ mode }: { mode: ForeignTradeMode
           <table className="min-w-[1180px] w-full text-left text-xs">
             <thead className="bg-slate-50 text-slate-500"><tr><th className="px-4 py-3">订单</th><th>渠道 / 品牌</th><th>国家</th><th>实收</th><th>采购</th><th>履约</th><th>收款</th><th>利润</th><th>物流</th><th className="pr-4 text-right">操作</th></tr></thead>
             <tbody>{visibleOrders.map((row) => <tr key={row.id} className="border-t border-slate-100 align-top">
-              <td className="px-4 py-3"><div className="font-semibold text-slate-800">{row.externalOrderNo}</div><div className="mt-1"><Pill value={row.status} /></div></td>
+              <td className="px-4 py-3">
+                <div className="flex items-center gap-2">
+                  <div className="font-semibold text-slate-800">{row.externalOrderNo}</div>
+                  <span className={"rounded px-1.5 py-0.5 text-[9px] font-semibold " + (row.businessMode === "b2b" ? "bg-violet-50 text-violet-700" : "bg-sky-50 text-sky-700")}>{row.businessMode.toUpperCase()}</span>
+                </div>
+                <div className="mt-1 flex items-center gap-2"><Pill value={row.status} />{row.businessMode === "b2b" && row.dealerName && <span className="max-w-36 truncate text-[10px] text-slate-400" title={row.dealerName}>{row.dealerName}</span>}</div>
+              </td>
               <td className="py-3"><div>{row.channelCode}</div><div className="text-slate-400">{row.brand || "—"}</div></td>
               <td>{row.country || "—"}</td><td>{money(row.paidAmount, row.currency)}</td><td><Pill value={row.procurementStatus} /></td><td><Pill value={row.fulfillmentStatus} /></td><td><Pill value={row.paymentStatus} /></td>
               <td><div className={Number(row.profit) >= 0 ? "font-semibold text-emerald-600" : "font-semibold text-rose-600"}>{money(row.profit, row.currency)}</div><div className="text-slate-400">≈ ¥{Number(row.profitCny || 0).toLocaleString("zh-CN", { maximumFractionDigits: 2 })}</div></td>
