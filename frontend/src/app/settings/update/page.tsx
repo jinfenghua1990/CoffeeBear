@@ -54,6 +54,23 @@ function shortSha(value?: string | null) {
   return value ? value.slice(0, 10) : "—";
 }
 
+function versionCode(value?: string | null) {
+  if (!value) return "—";
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return "—";
+  const parts = new Intl.DateTimeFormat("en-GB", {
+    timeZone: "Asia/Shanghai",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23",
+  }).formatToParts(d);
+  const part = (type: Intl.DateTimeFormatPartTypes) => parts.find((item) => item.type === type)?.value ?? "";
+  return `v${part("year")}.${part("month")}.${part("day")}.${part("hour")}${part("minute")}`;
+}
+
 function statusTone(status: SystemUpdateStatus) {
   if (status.phase === "success") return "border-emerald-200 bg-emerald-50 text-emerald-800";
   if (status.phase === "rolled_back") return "border-amber-200 bg-amber-50 text-amber-800";
@@ -263,13 +280,15 @@ export default function SystemUpdatePage() {
         <div className="grid divide-y divide-slate-100 sm:grid-cols-2 sm:divide-x sm:divide-y-0 xl:grid-cols-4">
           <div className="px-4 py-3">
             <div className="text-[10px] text-slate-400">当前版本</div>
-            <div className="mt-1 font-mono text-sm font-semibold text-slate-800">{shortSha(status.currentSha)}</div>
+            <div className="mt-1 font-mono text-sm font-semibold text-slate-800">{versionCode(status.currentCommit?.committedAt)}</div>
             <div className="mt-0.5 truncate text-[10px] text-slate-400">{status.currentCommit?.subject || "—"}</div>
+            <div className="mt-0.5 font-mono text-[9px] text-slate-400">SHA {shortSha(status.currentSha)}</div>
           </div>
           <div className="px-4 py-3">
             <div className="text-[10px] text-slate-400">GitHub 版本</div>
-            <div className={`mt-1 font-mono text-sm font-semibold ${status.updateAvailable ? "text-blue-700" : "text-slate-800"}`}>{shortSha(status.latestSha)}</div>
+            <div className={`mt-1 font-mono text-sm font-semibold ${status.updateAvailable ? "text-blue-700" : "text-slate-800"}`}>{versionCode(status.latestCommit?.committedAt)}</div>
             <div className="mt-0.5 truncate text-[10px] text-slate-400">{status.latestCommit?.subject || "点击“检查更新”获取"}</div>
+            <div className="mt-0.5 font-mono text-[9px] text-slate-400">SHA {shortSha(status.latestSha)}</div>
           </div>
           <div className="px-4 py-3">
             <div className="text-[10px] text-slate-400">环境自检</div>
@@ -316,7 +335,7 @@ export default function SystemUpdatePage() {
               <div key={item.sha} className="grid grid-cols-[76px_minmax(0,1fr)_auto] items-center gap-3 border-b border-slate-100 py-2.5 last:border-b-0">
                 <span className="font-mono text-[10px] text-slate-400">{item.shortSha}</span>
                 <span className="min-w-0 truncate text-xs text-slate-700">{item.subject}</span>
-                <span className="hidden text-[10px] text-slate-400 sm:block">{fmtDate(item.committedAt)}</span>
+                <span className="hidden font-mono text-[10px] text-slate-400 sm:block">{versionCode(item.committedAt)}</span>
               </div>
             ))}
             {(status.changes ?? []).length === 0 && (
@@ -326,7 +345,7 @@ export default function SystemUpdatePage() {
           {status.lastInstallResult && (
             <div className="flex flex-wrap items-center justify-between gap-2 border-t border-slate-100 px-4 py-2.5">
               <span className="text-[10px] text-slate-400">
-                上次安装 {fmtDate(status.lastInstallAt)} · {shortSha(status.lastInstallFromSha)} → {shortSha(status.lastInstallToSha)}
+                上次安装 {versionCode(status.lastInstallAt)} · SHA {shortSha(status.lastInstallFromSha)} → {shortSha(status.lastInstallToSha)}
               </span>
               <span className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${
                 status.lastInstallResult === "success"
