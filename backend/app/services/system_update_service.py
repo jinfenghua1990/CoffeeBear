@@ -92,7 +92,11 @@ def load_update_settings() -> dict[str, Any]:
             base[key] = stored[key]
     base["branch"] = settings.SYSTEM_UPDATE_BRANCH
     base["remote"] = settings.SYSTEM_UPDATE_REMOTE
-    return _validate_settings(base)
+    try:
+        return _validate_settings(base)
+    except (TypeError, ValueError):
+        # 更新设置损坏或来自旧格式时回退安全默认值，避免状态页/轮询器一起失效。
+        return _validate_settings(default_update_settings())
 
 
 def _validate_settings(value: dict[str, Any]) -> dict[str, Any]:
@@ -120,17 +124,24 @@ def _validate_settings(value: dict[str, Any]) -> dict[str, Any]:
 
 
 def save_update_settings(patch: dict[str, Any]) -> dict[str, Any]:
-    current = load_update_settings()
-    allowed = {"enabled", "mode", "checkIntervalMinutes", "autoUpdateHour", "autoUpdateWindowMinutes"}
-    for key, value in patch.items():
-        if key in allowed:
-            current[key] = value
-    current = _validate_settings(current)
-    _atomic_json(_settings_path(), {k: current[k] for k in allowed})
-    return current
+    with _LOCK:
+        runtime = _read_json(_status_path(), {})
+        if runtime.get("phase") in _ACTIVE_PHASES and _pid_running(runtime.get("pid")):
+            raise ValueError("系统更新正在执行，完成后再修改更新策略")
+        current = load_update_settings()
+        allowed = {"enabled", "mode", "checkIntervalMinutes", "autoUpdateHour", "autoUpdateWindowMinutes"}
+        for key, value in patch.items():
+            if key in allowed:
+                current[key] = value
+        current = _validate_settings(current)
+        _atomic_json(_settings_path(), {k: current[k] for k in allowed})
+        return current
 
 
 def _run(args: list[str], *, timeout: int = 60, cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
+    env = os.environ.copy()
+    if args and args[0] == "git":
+        env["GIT_TERMINAL_PROMPT"] = "0"
     return subprocess.run(
         args,
         cwd=str(cwd or _repo_root()),
@@ -138,6 +149,7 @@ def _run(args: list[str], *, timeout: int = 60, cwd: Path | None = None) -> subp
         capture_output=True,
         timeout=timeout,
         check=False,
+        env=env,
     )
 
 
@@ -152,7 +164,10 @@ def _git(*args: str, timeout: int = 60) -> str:
 def _commit_info(sha: str) -> dict[str, Any] | None:
     if not _SHA_RE.fullmatch(sha):
         return None
-    result = _run(["git", "show", "-s", "--format=%H%x1f%s%x1f%cI", sha], timeout=20)
+    try:
+        result = _run(["git", "show", "-s", "--format=%H%x1f%s%x1f%cI", sha], timeout=20)
+    except (OSError, subprocess.SubprocessError):
+        return None
     if result.returncode != 0 or "\x1f" not in result.stdout:
         return None
     commit_sha, subject, committed_at = result.stdout.strip().split("\x1f", 2)
@@ -160,10 +175,13 @@ def _commit_info(sha: str) -> dict[str, Any] | None:
 
 
 def _changes(current_sha: str, latest_sha: str) -> list[dict[str, Any]]:
-    result = _run(
-        ["git", "log", "--format=%H%x1f%s%x1f%cI", "-20", f"{current_sha}..{latest_sha}"],
-        timeout=20,
-    )
+    try:
+        result = _run(
+            ["git", "log", "--format=%H%x1f%s%x1f%cI", "-20", f"{current_sha}..{latest_sha}"],
+            timeout=20,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return []
     if result.returncode != 0:
         return []
     rows: list[dict[str, Any]] = []
@@ -249,7 +267,10 @@ def check_for_updates(*, actor: str = "system", automatic: bool = False) -> dict
                 raise RuntimeError("远端返回的 commit 无效")
 
             ancestor = _run(["git", "merge-base", "--is-ancestor", current_sha, latest_sha], timeout=20)
-            diverged = current_sha != latest_sha and ancestor.returncode != 0
+            if ancestor.returncode not in {0, 1}:
+                detail = (ancestor.stderr or ancestor.stdout or "git merge-base failed").strip()
+                raise RuntimeError(detail[-1200:])
+            diverged = current_sha != latest_sha and ancestor.returncode == 1
             available = current_sha != latest_sha and not diverged
             change_rows = _changes(current_sha, latest_sha) if available else []
             payload = {
@@ -280,6 +301,9 @@ def check_for_updates(*, actor: str = "system", automatic: bool = False) -> dict
                 "message": "检查更新失败",
                 "lastCheckAt": _now_iso(),
                 "lastCheckError": str(exc),
+                "updateAvailable": False,
+                "diverged": False,
+                "changes": [],
                 "automatic": automatic,
             })
             return status_payload(include_log=False)
@@ -358,14 +382,15 @@ def update_readiness() -> dict[str, Any]:
             add("remote", "Git 远端", "error", str(exc), blocking=True)
 
     python_path = root / "backend" / ".venv" / "bin" / "python"
+    python_ok = python_path.is_file() and os.access(python_path, os.X_OK)
     add(
         "python", "Python 虚拟环境",
-        "ok" if python_path.is_file() else "error",
-        str(python_path),
-        blocking=not python_path.is_file(),
+        "ok" if python_ok else "error",
+        str(python_path) if python_ok else f"{python_path} 不存在或不可执行",
+        blocking=not python_ok,
     )
 
-    for command, label in (("git", "Git 命令"), ("make", "make"), ("node", "Node.js"), ("npm", "npm"), ("pg_dump", "pg_dump"), ("psql", "psql")):
+    for command, label in (("git", "Git 命令"), ("make", "make"), ("node", "Node.js"), ("npm", "npm"), ("pg_dump", "pg_dump"), ("pg_restore", "pg_restore"), ("psql", "psql"), ("tar", "tar")):
         resolved = shutil.which(command)
         add(
             command, label,
@@ -375,11 +400,12 @@ def update_readiness() -> dict[str, Any]:
         )
 
     pip_path = root / "backend" / ".venv" / "bin" / "pip"
+    pip_ok = pip_path.is_file() and os.access(pip_path, os.X_OK)
     add(
         "pip", "Python pip",
-        "ok" if pip_path.is_file() else "error",
-        str(pip_path),
-        blocking=not pip_path.is_file(),
+        "ok" if pip_ok else "error",
+        str(pip_path) if pip_ok else f"{pip_path} 不存在或不可执行",
+        blocking=not pip_ok,
     )
 
     runner_path = root / "scripts" / "system_update_runner.py"
@@ -411,14 +437,17 @@ def update_readiness() -> dict[str, Any]:
     launch_label = getattr(settings, "SYSTEM_UPDATE_LAUNCH_LABEL", "com.gino.ecommerce-dashboard")
     if launchctl:
         service_ref = f"gui/{os.getuid()}/{launch_label}"
-        probe = _run([launchctl, "print", service_ref], timeout=10)
-        running_ok = probe.returncode == 0
-        add(
-            "launch_agent", "LaunchAgent",
-            "ok" if running_ok else "error",
-            service_ref if running_ok else f"{service_ref} 未加载，更新后无法自动重启",
-            blocking=not running_ok,
-        )
+        try:
+            probe = _run([launchctl, "print", service_ref], timeout=10)
+            running_ok = probe.returncode == 0
+            add(
+                "launch_agent", "LaunchAgent",
+                "ok" if running_ok else "error",
+                service_ref if running_ok else f"{service_ref} 未加载，更新后无法自动重启",
+                blocking=not running_ok,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            add("launch_agent", "LaunchAgent", "error", str(exc), blocking=True)
     else:
         add("launch_agent", "LaunchAgent", "error", "未找到 launchctl", blocking=True)
 
