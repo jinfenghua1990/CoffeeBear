@@ -41,6 +41,17 @@ def upgrade() -> None:
     op.create_index("ix_foreign_trade_dealers_company", "foreign_trade_dealers", ["company_name"])
     op.create_index("ix_foreign_trade_dealers_shopify_location", "foreign_trade_dealers", ["shopify_company_location_id"])
 
+    op.add_column("foreign_trade_orders", sa.Column("dealer_id", sa.BigInteger(), nullable=True))
+    op.create_foreign_key(
+        "fk_foreign_trade_orders_dealer_id",
+        "foreign_trade_orders",
+        "foreign_trade_dealers",
+        ["dealer_id"],
+        ["id"],
+        ondelete="SET NULL",
+    )
+    op.create_index("ix_foreign_trade_orders_dealer_id", "foreign_trade_orders", ["dealer_id"])
+
     op.create_table(
         "foreign_trade_inventory_reservations",
         sa.Column("id", sa.BigInteger(), autoincrement=True, nullable=False),
@@ -75,6 +86,9 @@ def downgrade() -> None:
     op.drop_index("ix_ft_inventory_reservation_sku", table_name="foreign_trade_inventory_reservations")
     op.drop_index("ix_ft_inventory_reservation_dealer", table_name="foreign_trade_inventory_reservations")
     op.drop_table("foreign_trade_inventory_reservations")
+    op.drop_index("ix_foreign_trade_orders_dealer_id", table_name="foreign_trade_orders")
+    op.drop_constraint("fk_foreign_trade_orders_dealer_id", "foreign_trade_orders", type_="foreignkey")
+    op.drop_column("foreign_trade_orders", "dealer_id")
     op.drop_index("ix_foreign_trade_dealers_shopify_location", table_name="foreign_trade_dealers")
     op.drop_index("ix_foreign_trade_dealers_company", table_name="foreign_trade_dealers")
     op.drop_table("foreign_trade_dealers")
