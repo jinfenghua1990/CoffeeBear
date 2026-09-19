@@ -10,6 +10,16 @@
 - 基础：本机 PostgreSQL / Redis / LaunchAgent / 本地 `data/` 归档
 - 金额：全链路 Decimal / Numeric(18,4)，禁止 float
 
+
+## 标准发布与持久化
+
+项目采用单仓库、多环境发布：功能分支先进入 `develop`，由 STAGING 验证后再通过 PR 晋级到 `main`；生产环境只跟踪 `main`。测试版与正式版不是两套代码，正常发布应保持同一提交/SHA 逐级晋级。
+
+业务数据与代码生命周期分离。PostgreSQL 使用独立数据目录/卷；原始文件、备份与日志可通过 `PERSIST_ROOT`、`DATA_DIR`、`BACKUP_DIR`、`LOG_DIR` 放到代码仓库之外。标准说明见：
+
+- `docs/RELEASE_STANDARD.md`
+- `docs/PERSISTENCE_STANDARD.md`
+
 ## 启动
 
 ```bash
