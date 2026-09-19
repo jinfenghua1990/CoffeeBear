@@ -233,3 +233,86 @@ def test_check_preserves_last_install_result(monkeypatch, tmp_path: Path):
     assert result["lastInstallFromSha"] == "a" * 40
     assert result["lastInstallToSha"] == "b" * 40
 
+
+
+def test_load_update_settings_falls_back_when_stored_file_is_invalid(monkeypatch, tmp_path: Path):
+    settings_file = tmp_path / "settings.json"
+    settings_file.write_text(
+        '{"mode":"broken","checkIntervalMinutes":1}',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(service, "_settings_path", lambda: settings_file)
+
+    result = service.load_update_settings()
+
+    assert result["mode"] == "auto_download"
+    assert result["checkIntervalMinutes"] == 10
+
+
+def test_save_update_settings_rejects_changes_during_active_update(monkeypatch, tmp_path: Path):
+    status_file = tmp_path / "status.json"
+    settings_file = tmp_path / "settings.json"
+    status_file.write_text('{"phase":"migrating","pid":12345}', encoding="utf-8")
+
+    monkeypatch.setattr(service, "_status_path", lambda: status_file)
+    monkeypatch.setattr(service, "_settings_path", lambda: settings_file)
+    monkeypatch.setattr(service, "_pid_running", lambda pid: pid == 12345)
+
+    with pytest.raises(ValueError, match="系统更新正在执行"):
+        service.save_update_settings({"mode": "manual"})
+
+
+def test_git_merge_base_operational_error_is_not_treated_as_divergence(monkeypatch, tmp_path: Path):
+    current = "6" * 40
+    latest = "7" * 40
+    status_file = tmp_path / "status.json"
+    history_file = tmp_path / "history.jsonl"
+
+    monkeypatch.setattr(service, "_status_path", lambda: status_file)
+    monkeypatch.setattr(service, "_history_path", lambda: history_file)
+    monkeypatch.setattr(service, "_repo_root", lambda: tmp_path)
+    monkeypatch.setattr(
+        service,
+        "load_update_settings",
+        lambda: {
+            "enabled": True,
+            "mode": "manual",
+            "checkIntervalMinutes": 10,
+            "autoUpdateHour": 3,
+            "autoUpdateWindowMinutes": 60,
+            "branch": service.settings.SYSTEM_UPDATE_BRANCH,
+            "remote": service.settings.SYSTEM_UPDATE_REMOTE,
+        },
+    )
+
+    def fake_git(*args: str, timeout: int = 60) -> str:
+        if args == ("rev-parse", "HEAD"):
+            return current
+        if args == ("branch", "--show-current"):
+            return service.settings.SYSTEM_UPDATE_BRANCH
+        if args == ("status", "--porcelain"):
+            return ""
+        if args[:2] == ("fetch", "--quiet"):
+            return ""
+        if args == ("rev-parse", "FETCH_HEAD"):
+            return latest
+        raise AssertionError(f"unexpected git call: {args}")
+
+    monkeypatch.setattr(service, "_git", fake_git)
+    monkeypatch.setattr(
+        service,
+        "_run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(
+            args=[],
+            returncode=128,
+            stdout="",
+            stderr="fatal: repository transport error",
+        ),
+    )
+
+    result = service.check_for_updates(actor="pytest")
+
+    assert result["updateAvailable"] is False
+    assert result["diverged"] is False
+    assert "repository transport error" in result["lastCheckError"]
+    assert result["changes"] == []
