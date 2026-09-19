@@ -34,13 +34,16 @@ def order_profit(order: ForeignTradeOrder) -> Decimal:
     )
 
 
-def order_dict(order: ForeignTradeOrder) -> dict:
+def order_dict(order: ForeignTradeOrder, dealer: ForeignTradeDealer | None = None) -> dict:
     profit = order_profit(order)
     rate = _decimal(order.exchange_rate_to_cny) or Decimal("1")
     return {
         "id": order.id,
         "channelCode": order.channel_code,
         "externalOrderNo": order.external_order_no,
+        "businessMode": order.business_mode,
+        "dealerId": order.dealer_id,
+        "dealerName": dealer.company_name if dealer else "",
         "brand": order.brand,
         "country": order.country,
         "currency": order.currency,
@@ -101,7 +104,14 @@ def sku_dict(row: ForeignTradeSkuMapping) -> dict:
     }
 
 
-def list_orders(db: Session, q: str = "", status: str = "", channel_code: str = "", brand: str = "") -> list[dict]:
+def list_orders(
+    db: Session,
+    q: str = "",
+    status: str = "",
+    channel_code: str = "",
+    brand: str = "",
+    business_mode: str = "",
+) -> list[dict]:
     stmt = select(ForeignTradeOrder).order_by(ForeignTradeOrder.id.desc()).limit(1000)
     if status:
         stmt = stmt.where(ForeignTradeOrder.status == status)
@@ -109,6 +119,8 @@ def list_orders(db: Session, q: str = "", status: str = "", channel_code: str = 
         stmt = stmt.where(ForeignTradeOrder.channel_code == channel_code)
     if brand:
         stmt = stmt.where(ForeignTradeOrder.brand == brand)
+    if business_mode:
+        stmt = stmt.where(ForeignTradeOrder.business_mode == business_mode)
     if q.strip():
         needle = f"%{q.strip()}%"
         stmt = stmt.where(or_(
@@ -116,7 +128,14 @@ def list_orders(db: Session, q: str = "", status: str = "", channel_code: str = 
             ForeignTradeOrder.customer_name.ilike(needle),
             ForeignTradeOrder.tracking_no.ilike(needle),
         ))
-    return [order_dict(row) for row in db.scalars(stmt).all()]
+
+    orders = db.scalars(stmt).all()
+    dealer_ids = {row.dealer_id for row in orders if row.dealer_id is not None}
+    dealers = {
+        row.id: row
+        for row in db.scalars(select(ForeignTradeDealer).where(ForeignTradeDealer.id.in_(dealer_ids))).all()
+    } if dealer_ids else {}
+    return [order_dict(row, dealers.get(row.dealer_id)) for row in orders]
 
 
 def overview(db: Session) -> dict:
@@ -130,6 +149,8 @@ def overview(db: Session) -> dict:
     profit = sum((order_profit(row) * (_decimal(row.exchange_rate_to_cny) or Decimal("1")) for row in orders), Decimal("0"))
     return {
         "orders": len(orders),
+        "b2bOrders": sum(1 for row in orders if row.business_mode == "b2b"),
+        "b2cOrders": sum(1 for row in orders if row.business_mode != "b2b"),
         "pendingProcurement": sum(1 for row in orders if row.procurement_status != "done" and row.status not in {"cancelled", "refunded"}),
         "pendingFulfillment": sum(1 for row in orders if row.fulfillment_status != "shipped" and row.status not in {"cancelled", "refunded"}),
         "channels": int(channels),
