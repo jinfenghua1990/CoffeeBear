@@ -127,7 +127,14 @@ v2026.09.18.221500
 SYSTEM_UPDATE_ENABLED=0
 ```
 
-版本发布由 GitHub + GHCR + Compose 管理。后续系统更新页面应展示“容器托管模式”的版本与可用 Release，而不是在容器内执行 git pull。
+版本发布由 GitHub + GHCR + Compose 管理。系统「版本中心」直接读取运行时身份，展示：
+- APP_ENV / RELEASE_CHANNEL
+- 实际 Git SHA
+- 当前 APP_IMAGE_REF
+- Alembic 数据库 Revision
+- 容器托管状态
+
+容器模式不会在应用内执行 git pull，也不会启动旧的 Git 更新轮询器。
 
 ## 安全边界
 
