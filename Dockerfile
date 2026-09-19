@@ -8,10 +8,13 @@ ENV NEXT_TELEMETRY_DISABLED=1
 RUN npm run build && test -f out/index.html
 
 FROM python:3.12-slim AS runtime
+ARG GIT_SHA=""
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     TZ=Asia/Shanghai \
-    FRONTEND_OUT=/app/frontend/out
+    FRONTEND_OUT=/app/frontend/out \
+    DEPLOYMENT_MODE=container \
+    GIT_SHA=$GIT_SHA
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends curl \
