@@ -52,6 +52,10 @@ class ForeignTradeOrder(Base, PkMixin, TimestampMixin):
 
     channel_code: Mapped[str] = mapped_column(String(64), nullable=False)
     external_order_no: Mapped[str] = mapped_column(String(128), nullable=False)
+    business_mode: Mapped[str] = mapped_column(String(16), default="b2c", index=True)
+    dealer_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("foreign_trade_dealers.id", ondelete="SET NULL"), nullable=True, index=True
+    )
     brand: Mapped[str] = mapped_column(String(128), default="")
     country: Mapped[str] = mapped_column(String(64), default="")
     currency: Mapped[str] = mapped_column(String(8), default="EUR")
