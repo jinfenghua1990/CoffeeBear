@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from decimal import Decimal
+from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
@@ -151,6 +152,8 @@ def delete_sku_mapping(mapping_id: int, db: Session = Depends(get_db)) -> dict:
 class OrderBody(BaseModel):
     channel_code: str = Field(min_length=1, max_length=64)
     external_order_no: str = Field(min_length=1, max_length=128)
+    business_mode: Literal["b2c", "b2b"] = "b2c"
+    dealer_id: int | None = None
     brand: str = Field(default="", max_length=128)
     country: str = Field(default="", max_length=64)
     currency: str = Field(default="EUR", max_length=8)
@@ -179,8 +182,20 @@ class OrderBody(BaseModel):
     note: str = ""
 
 
-def _apply_order(row: ForeignTradeOrder, body: OrderBody) -> None:
+def _apply_order(db: Session, row: ForeignTradeOrder, body: OrderBody) -> ForeignTradeDealer | None:
     values = body.model_dump()
+    dealer: ForeignTradeDealer | None = None
+    if body.business_mode == "b2b":
+        if body.dealer_id is None:
+            raise HTTPException(status_code=400, detail="B2B 订单必须绑定经销商")
+        dealer = db.get(ForeignTradeDealer, body.dealer_id)
+        if dealer is None:
+            raise HTTPException(status_code=404, detail="经销商不存在")
+        if dealer.status != "active":
+            raise HTTPException(status_code=400, detail="B2B 订单只能绑定启用中的经销商")
+    else:
+        values["dealer_id"] = None
+
     for key in (
         "gross_amount", "discount_amount", "shipping_income", "paid_amount", "refund_amount",
         "payment_fee", "purchase_cost", "logistics_cost", "exchange_rate_to_cny",
@@ -188,6 +203,7 @@ def _apply_order(row: ForeignTradeOrder, body: OrderBody) -> None:
         values[key] = _money(values[key])
     for key, value in values.items():
         setattr(row, key, value)
+    return dealer
 
 
 @router.get("/orders")
@@ -196,15 +212,25 @@ def orders(
     status: str = Query("", max_length=24),
     channel_code: str = Query("", max_length=64),
     brand: str = Query("", max_length=128),
+    business_mode: Literal["", "b2c", "b2b"] = Query(""),
     db: Session = Depends(get_db),
 ) -> dict:
-    return {"items": service.list_orders(db, q=q, status=status, channel_code=channel_code, brand=brand)}
+    return {
+        "items": service.list_orders(
+            db,
+            q=q,
+            status=status,
+            channel_code=channel_code,
+            brand=brand,
+            business_mode=business_mode,
+        )
+    }
 
 
 @router.post("/orders", status_code=201)
 def create_order(body: OrderBody, db: Session = Depends(get_db)) -> dict:
     row = ForeignTradeOrder(channel_code=body.channel_code, external_order_no=body.external_order_no)
-    _apply_order(row, body)
+    dealer = _apply_order(db, row, body)
     db.add(row)
     try:
         db.commit()
@@ -212,7 +238,7 @@ def create_order(body: OrderBody, db: Session = Depends(get_db)) -> dict:
         db.rollback()
         raise HTTPException(status_code=409, detail="该渠道订单号已存在") from exc
     db.refresh(row)
-    return service.order_dict(row)
+    return service.order_dict(row, dealer)
 
 
 @router.put("/orders/{order_id}")
@@ -220,14 +246,14 @@ def update_order(order_id: int, body: OrderBody, db: Session = Depends(get_db)) 
     row = db.get(ForeignTradeOrder, order_id)
     if not row:
         raise HTTPException(status_code=404, detail="外贸订单不存在")
-    _apply_order(row, body)
+    dealer = _apply_order(db, row, body)
     try:
         db.commit()
     except IntegrityError as exc:
         db.rollback()
         raise HTTPException(status_code=409, detail="该渠道订单号已存在") from exc
     db.refresh(row)
-    return service.order_dict(row)
+    return service.order_dict(row, dealer)
 
 
 @router.delete("/orders/{order_id}")
