@@ -5,9 +5,9 @@ ROOT := $(CURDIR)
 BACKEND := $(ROOT)/backend
 VENV := $(BACKEND)/.venv
 LAUNCH_LABEL := gui/$(shell id -u)/com.gino.ecommerce-dashboard
-NATIVE_ENV = set -a; . "$(ROOT)/.env"; set +a; export DATABASE_URL="postgresql+psycopg://$$POSTGRES_USER:$$POSTGRES_PASSWORD@localhost:5432/$$POSTGRES_DB"; export REDIS_URL="redis://localhost:6379/0"; export DATA_DIR="$(ROOT)/data";
+NATIVE_ENV = set -a; . "$(ROOT)/.env"; set +a; export DATABASE_URL="postgresql+psycopg://$POSTGRES_USER:$POSTGRES_PASSWORD@localhost:5432/$POSTGRES_DB"; export REDIS_URL="redis://localhost:6379/0"; export PERSIST_ROOT="${PERSIST_ROOT:-$(ROOT)}"; export DATA_DIR="${DATA_DIR:-${PERSIST_ROOT}/data}"; export BACKUP_DIR="${BACKUP_DIR:-${PERSIST_ROOT}/backups}"; export LOG_DIR="${LOG_DIR:-${PERSIST_ROOT}/logs}";
 
-.PHONY: help up restart status logs logs-api rebuild rebuild-fe test test-db lint tsc verify secret-scan repo-hygiene smoke migrate migration-check exec-api backup restore-check orphan-audit backup-schedule-install backup-schedule-status backup-schedule-uninstall fresh
+.PHONY: help up restart status logs logs-api rebuild rebuild-fe test test-db lint tsc verify release-check secret-scan repo-hygiene smoke migrate migration-check exec-api backup restore-check orphan-audit backup-schedule-install backup-schedule-status backup-schedule-uninstall fresh
 
 help: ## 列出所有 target
 	@awk 'BEGIN {FS = ":.*##"} /^[a-zA-Z_-]+:.*?##/ {printf "  \033[36m%-16s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -22,10 +22,10 @@ status: ## 显示本机健康状态
 	launchctl print "$(LAUNCH_LABEL)" | sed -n '1,45p'
 
 logs: ## 跟踪 API、worker、beat 日志
-	tail -n 100 -f /tmp/ecom_api.log /tmp/ecom_worker.log /tmp/ecom_beat.log
+	@set -a; . "$(ROOT)/.env"; set +a; PERSIST_ROOT="${PERSIST_ROOT:-$(ROOT)}"; LOG_DIR="${LOG_DIR:-${PERSIST_ROOT}/logs}"; mkdir -p "$LOG_DIR"; tail -n 100 -f "$LOG_DIR/api.log" "$LOG_DIR/worker.log" "$LOG_DIR/beat.log"
 
 logs-api: ## 跟踪 API 日志
-	tail -n 100 -f /tmp/ecom_api.log
+	@set -a; . "$(ROOT)/.env"; set +a; PERSIST_ROOT="${PERSIST_ROOT:-$(ROOT)}"; LOG_DIR="${LOG_DIR:-${PERSIST_ROOT}/logs}"; mkdir -p "$LOG_DIR"; tail -n 100 -f "$LOG_DIR/api.log"
 
 rebuild: restart ## 后端代码已直接由原生虚拟环境加载，重启即可
 
@@ -61,6 +61,9 @@ verify: repo-hygiene secret-scan migration-check orphan-audit lint test tsc ## �
 	cd frontend && npm run build
 	@test -f frontend/out/index.html
 	@echo "本地验收通过：repo hygiene / secret scan / migration / orphan audit / backend tests / TypeScript / static build 均正常。"
+
+release-check: verify restore-check smoke ## 发布前门禁：完整回归 + 恢复演练 + 运行态 smoke
+	@echo "发布门禁通过：该提交可以进入 develop → main 发布流程。"
 
 smoke: ## 枚举公开 API 并做带鉴权 smoke test
 	./scripts/smoke.sh
