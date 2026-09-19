@@ -292,7 +292,13 @@ def create_reservation(
     dealer = db.get(ForeignTradeDealer, dealer_id)
     if dealer is None:
         raise KeyError("经销商不存在")
-    sku = db.scalar(select(ProductSku).where(ProductSku.sku_code == sku_code.strip()))
+    # 同一 SKU 的预留创建必须串行化：否则两个报价并发读取到相同可售量时会一起超额锁库。
+    # 锁 ProductSku 主档作为“每 SKU 锁”，真实库存仍来自统一库存总账，不复制库存。
+    sku = db.scalar(
+        select(ProductSku)
+        .where(ProductSku.sku_code == sku_code.strip())
+        .with_for_update()
+    )
     if sku is None:
         raise KeyError("SKU 不存在")
     if expires_at is not None:
