@@ -58,6 +58,7 @@ def upgrade() -> None:
         sa.Column("id", sa.BigInteger(), autoincrement=True, nullable=False),
         sa.Column("channel_code", sa.String(64), nullable=False),
         sa.Column("external_order_no", sa.String(128), nullable=False),
+        sa.Column("business_mode", sa.String(16), nullable=False, server_default="b2c"),
         sa.Column("brand", sa.String(128), nullable=False, server_default=""),
         sa.Column("country", sa.String(64), nullable=False, server_default=""),
         sa.Column("currency", sa.String(8), nullable=False, server_default="EUR"),
@@ -91,6 +92,7 @@ def upgrade() -> None:
         sa.UniqueConstraint("channel_code", "external_order_no", name="uq_foreign_trade_order_channel_external"),
     )
     op.create_index("ix_foreign_trade_orders_status", "foreign_trade_orders", ["status"])
+    op.create_index("ix_foreign_trade_orders_business_mode", "foreign_trade_orders", ["business_mode"])
     op.create_index("ix_foreign_trade_orders_channel", "foreign_trade_orders", ["channel_code"])
     op.create_index("ix_foreign_trade_orders_fulfillment", "foreign_trade_orders", ["fulfillment_status"])
     op.create_index("ix_foreign_trade_orders_ordered_at", "foreign_trade_orders", ["ordered_at"])
@@ -98,6 +100,7 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     op.drop_index("ix_foreign_trade_orders_ordered_at", table_name="foreign_trade_orders")
+    op.drop_index("ix_foreign_trade_orders_business_mode", table_name="foreign_trade_orders")
     op.drop_index("ix_foreign_trade_orders_fulfillment", table_name="foreign_trade_orders")
     op.drop_index("ix_foreign_trade_orders_channel", table_name="foreign_trade_orders")
     op.drop_index("ix_foreign_trade_orders_status", table_name="foreign_trade_orders")
