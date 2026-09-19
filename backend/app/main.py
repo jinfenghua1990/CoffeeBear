@@ -23,15 +23,17 @@ _FRONTEND_OUT = os.environ.get(
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     configure_logging()
-    from app.services import system_update_service
-
-    update_task = asyncio.create_task(system_update_service.poll_loop(), name="system-update-poller")
+    update_task = None
+    if settings.DEPLOYMENT_MODE != "container":
+        from app.services import system_update_service
+        update_task = asyncio.create_task(system_update_service.poll_loop(), name="system-update-poller")
     try:
         yield
     finally:
-        update_task.cancel()
-        with suppress(asyncio.CancelledError):
-            await update_task
+        if update_task is not None:
+            update_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await update_task
 
 
 app = FastAPI(title=settings.APP_NAME, version="0.1.0", lifespan=lifespan)
@@ -100,7 +102,14 @@ app.include_router(api_router, dependencies=[Depends(require_auth)])
 
 @app.get("/healthz")
 def healthz() -> dict:
-    return {"ok": True, "accessMode": settings.ACCESS_MODE}
+    return {
+        "ok": True,
+        "accessMode": settings.ACCESS_MODE,
+        "appEnv": settings.APP_ENV,
+        "releaseChannel": settings.RELEASE_CHANNEL,
+        "deploymentMode": settings.DEPLOYMENT_MODE,
+        "gitSha": settings.GIT_SHA[:12] if settings.GIT_SHA else "",
+    }
 
 
 # ---------- 前端静态托管（next export 产物，单口 8000 同服 API + 前端） ----------
