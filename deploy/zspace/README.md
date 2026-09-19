@@ -48,13 +48,13 @@ ecommerce/
 - Username: GitHub 用户名
 - Token: 只授予读取 Packages 所需权限的 GitHub token
 
-不要把 Registry token 写进 runtime.env，也不要提交到 Git。
+不要把 Registry 凭证写进应用 .env，也不要提交到 Git。
 
 ## STAGING
 
 1. 创建独立 Compose 项目目录。
 2. 复制本目录的 docker-compose.yml。
-3. 将 staging.env.example 复制为 runtime.env。
+3. 将 staging.env.example 复制为 .env。
 4. 填写独立数据库密码、APP_SECRET_KEY、管理员密码和极空间真实目录。
 5. APP_IMAGE 默认可以先使用 candidate。
 6. 拉取镜像后执行数据库迁移：
@@ -134,6 +134,6 @@ SYSTEM_UPDATE_ENABLED=0
 - PostgreSQL 不映射到 NAS 局域网端口。
 - Redis 不映射到 NAS 局域网端口。
 - 只暴露 Web/API 端口。
-- runtime.env 不提交 Git。
+- .env 不提交 Git。
 - STAGING 永远不用 PRODUCTION 数据库密码和 DATA_DIR。
 - 生产数据至少保留 NAS 本机备份 + 第二份异地/异盘备份。
