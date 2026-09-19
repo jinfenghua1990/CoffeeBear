@@ -199,3 +199,62 @@ def test_b2b_reservation_rejects_overbooking(db_session, monkeypatch):
         assert "库存不足" in str(exc)
     else:
         raise AssertionError("超出公共可分配库存的预留必须被拒绝")
+
+
+
+def test_b2b_order_requires_active_dealer_and_b2c_clears_binding(client, db_session):
+    dealer = ForeignTradeDealer(
+        code="FT-ORDER-DEALER",
+        company_name="Order Dealer GmbH",
+        country="DE",
+        status="active",
+    )
+    db_session.add(dealer)
+    db_session.commit()
+    db_session.refresh(dealer)
+
+    base = {
+        "channel_code": "pytest-b2b",
+        "external_order_no": "FT-B2B-001",
+        "business_mode": "b2b",
+        "brand": "Alsvid",
+        "country": "DE",
+        "currency": "EUR",
+        "paid_amount": "1500",
+        "status": "confirmed",
+        "procurement_status": "pending",
+        "fulfillment_status": "pending",
+        "payment_status": "paid",
+    }
+
+    missing = client.post("/api/v1/foreign-trade/orders", json=base)
+    assert missing.status_code == 400
+    assert "必须绑定经销商" in missing.json()["detail"]
+
+    created = client.post(
+        "/api/v1/foreign-trade/orders",
+        json={**base, "dealer_id": dealer.id},
+    )
+    assert created.status_code == 201
+    payload = created.json()
+    assert payload["businessMode"] == "b2b"
+    assert payload["dealerId"] == dealer.id
+    assert payload["dealerName"] == "Order Dealer GmbH"
+
+    listed = client.get("/api/v1/foreign-trade/orders", params={"business_mode": "b2b"})
+    assert listed.status_code == 200
+    assert any(row["id"] == payload["id"] for row in listed.json()["items"])
+
+    changed = client.put(
+        f"/api/v1/foreign-trade/orders/{payload['id']}",
+        json={
+            **base,
+            "business_mode": "b2c",
+            "dealer_id": dealer.id,
+            "customer_name": "Retail Customer",
+        },
+    )
+    assert changed.status_code == 200
+    assert changed.json()["businessMode"] == "b2c"
+    assert changed.json()["dealerId"] is None
+    assert changed.json()["dealerName"] == ""
