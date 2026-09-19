@@ -1,0 +1,201 @@
+from datetime import datetime, timedelta, timezone
+from decimal import Decimal
+
+from app.models.catalog import ProductSku
+from app.models.foreign_trade import (
+    ForeignTradeChannel,
+    ForeignTradeDealer,
+    ForeignTradeInventoryReservation,
+    ForeignTradeOrder,
+    ForeignTradeSkuMapping,
+)
+from app.services import foreign_trade_service
+
+
+def test_foreign_trade_profit_and_overview(db_session):
+    db_session.add(ForeignTradeChannel(
+        code="pytest-shopify-de",
+        name="Pytest Shopify DE",
+        channel_type="shopify",
+        brand="Alsvid",
+        currency="EUR",
+        countries=["DE"],
+        connected=True,
+    ))
+    db_session.add(ForeignTradeSkuMapping(
+        channel_code="pytest-shopify-de",
+        external_sku="ALS-20-CF",
+        internal_sku="BIKE-20-CF",
+        product_name="Alsvid 20 Carbon",
+        status="matched",
+    ))
+    order = ForeignTradeOrder(
+        channel_code="pytest-shopify-de",
+        external_order_no="FT-PYTEST-001",
+        brand="Alsvid",
+        country="DE",
+        currency="EUR",
+        paid_amount=Decimal("1000"),
+        refund_amount=Decimal("50"),
+        payment_fee=Decimal("30"),
+        purchase_cost=Decimal("500"),
+        logistics_cost=Decimal("120"),
+        exchange_rate_to_cny=Decimal("8"),
+        procurement_status="done",
+        fulfillment_status="shipped",
+        payment_status="paid",
+        status="completed",
+    )
+    db_session.add(order)
+    db_session.flush()
+
+    row = foreign_trade_service.order_dict(order)
+    assert Decimal(row["profit"]) == Decimal("300")
+    assert Decimal(row["profitCny"]) == Decimal("2400")
+
+    summary = foreign_trade_service.overview(db_session)
+    assert summary["orders"] >= 1
+    assert summary["channels"] >= 1
+    assert summary["skuMappings"] >= 1
+
+
+def test_foreign_trade_order_api_crud(client):
+    payload = {
+        "channel_code": "pytest-manual",
+        "external_order_no": "FT-API-001",
+        "brand": "Alsvid",
+        "country": "AT",
+        "currency": "EUR",
+        "paid_amount": "1200",
+        "payment_fee": "36",
+        "purchase_cost": "600",
+        "logistics_cost": "140",
+        "exchange_rate_to_cny": "8",
+        "status": "pending",
+        "procurement_status": "pending",
+        "fulfillment_status": "pending",
+        "payment_status": "paid",
+    }
+    created = client.post("/api/v1/foreign-trade/orders", json=payload)
+    assert created.status_code == 201
+    order = created.json()
+    assert order["externalOrderNo"] == "FT-API-001"
+    assert Decimal(order["profit"]) == Decimal("424")
+    order_id = order["id"]
+
+    listed = client.get("/api/v1/foreign-trade/orders", params={"q": "FT-API-001"})
+    assert listed.status_code == 200
+    assert any(row["id"] == order_id for row in listed.json()["items"])
+
+    payload.update({
+        "status": "shipped",
+        "procurement_status": "done",
+        "fulfillment_status": "shipped",
+        "tracking_no": "TEST-TRACK-001",
+    })
+    updated = client.put(f"/api/v1/foreign-trade/orders/{order_id}", json=payload)
+    assert updated.status_code == 200
+    assert updated.json()["fulfillmentStatus"] == "shipped"
+
+    deleted = client.delete(f"/api/v1/foreign-trade/orders/{order_id}")
+    assert deleted.status_code == 200
+
+
+
+def test_b2b_dealer_reserved_inventory_is_private(db_session, monkeypatch):
+    sku = ProductSku(
+        jackyun_sku_id="FT-PRIVATE-SKU-JKY",
+        sku_code="FT-PRIVATE-SKU",
+        sku_name="Alsvid Test Bike",
+        status="active",
+    )
+    dealer_a = ForeignTradeDealer(code="FT-DEALER-A", company_name="Dealer A GmbH", country="DE")
+    dealer_b = ForeignTradeDealer(code="FT-DEALER-B", company_name="Dealer B GmbH", country="DE")
+    dealer_c = ForeignTradeDealer(code="FT-DEALER-C", company_name="Dealer C GmbH", country="AT")
+    db_session.add_all([sku, dealer_a, dealer_b, dealer_c])
+    db_session.flush()
+
+    expires = datetime.now(timezone.utc) + timedelta(hours=48)
+    db_session.add_all([
+        ForeignTradeInventoryReservation(
+            dealer_id=dealer_a.id,
+            sku_id=sku.id,
+            quantity=Decimal("30"),
+            reservation_kind="quote",
+            reference_no="Q-A",
+            expires_at=expires,
+            status="active",
+        ),
+        ForeignTradeInventoryReservation(
+            dealer_id=dealer_b.id,
+            sku_id=sku.id,
+            quantity=Decimal("20"),
+            reservation_kind="quote",
+            reference_no="Q-B",
+            expires_at=expires,
+            status="active",
+        ),
+        ForeignTradeInventoryReservation(
+            dealer_id=dealer_a.id,
+            sku_id=sku.id,
+            quantity=Decimal("10"),
+            reservation_kind="quote",
+            reference_no="Q-A-EXPIRED",
+            expires_at=datetime.now(timezone.utc) - timedelta(minutes=1),
+            status="active",
+        ),
+    ])
+    db_session.flush()
+
+    monkeypatch.setattr(
+        foreign_trade_service.inventory_position_service,
+        "current_positions",
+        lambda _db: {"by_sku": {sku.id: Decimal("100")}},
+    )
+
+    a = foreign_trade_service.dealer_inventory(db_session, dealer_a.id, sku_code=sku.sku_code)["items"][0]
+    b = foreign_trade_service.dealer_inventory(db_session, dealer_b.id, sku_code=sku.sku_code)["items"][0]
+    c_row = foreign_trade_service.dealer_inventory(db_session, dealer_c.id, sku_code=sku.sku_code)["items"][0]
+
+    assert Decimal(a["publicAvailable"]) == Decimal("50")
+    assert Decimal(a["dealerReserved"]) == Decimal("30")
+    assert Decimal(a["availableToDealer"]) == Decimal("80")
+
+    assert Decimal(b["publicAvailable"]) == Decimal("50")
+    assert Decimal(b["dealerReserved"]) == Decimal("20")
+    assert Decimal(b["availableToDealer"]) == Decimal("70")
+
+    assert Decimal(c_row["publicAvailable"]) == Decimal("50")
+    assert Decimal(c_row["dealerReserved"]) == Decimal("0")
+    assert Decimal(c_row["availableToDealer"]) == Decimal("50")
+
+
+def test_b2b_reservation_rejects_overbooking(db_session, monkeypatch):
+    sku = ProductSku(
+        jackyun_sku_id="FT-LOCK-SKU-JKY",
+        sku_code="FT-LOCK-SKU",
+        sku_name="Alsvid Lock Test",
+        status="active",
+    )
+    dealer = ForeignTradeDealer(code="FT-LOCK-DEALER", company_name="Lock Dealer GmbH", country="DE")
+    db_session.add_all([sku, dealer])
+    db_session.flush()
+
+    monkeypatch.setattr(
+        foreign_trade_service.inventory_position_service,
+        "current_positions",
+        lambda _db: {"by_sku": {sku.id: Decimal("10")}},
+    )
+
+    try:
+        foreign_trade_service.create_reservation(
+            db_session,
+            dealer_id=dealer.id,
+            sku_code=sku.sku_code,
+            quantity=Decimal("11"),
+            expires_at=datetime.now(timezone.utc) + timedelta(hours=24),
+        )
+    except ValueError as exc:
+        assert "库存不足" in str(exc)
+    else:
+        raise AssertionError("超出公共可分配库存的预留必须被拒绝")
