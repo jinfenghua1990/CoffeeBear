@@ -4,7 +4,8 @@
 ROOT := $(CURDIR)
 BACKEND := $(ROOT)/backend
 VENV := $(BACKEND)/.venv
-LAUNCH_LABEL := gui/$(shell id -u)/com.gino.ecommerce-dashboard
+SYSTEM_UPDATE_LAUNCH_LABEL ?= com.gino.ecommerce-dashboard
+LAUNCH_LABEL := gui/$(shell id -u)/$(SYSTEM_UPDATE_LAUNCH_LABEL)
 NATIVE_ENV = set -a; . "$(ROOT)/.env"; set +a; export DATABASE_URL="postgresql+psycopg://$$POSTGRES_USER:$$POSTGRES_PASSWORD@localhost:5432/$$POSTGRES_DB"; export REDIS_URL="redis://localhost:6379/0"; export DATA_DIR="$(ROOT)/data";
 
 .PHONY: help up restart status logs logs-api rebuild rebuild-fe test test-db lint tsc verify release-check secret-scan repo-hygiene smoke migrate migration-check exec-api backup restore-check orphan-audit backup-schedule-install backup-schedule-status backup-schedule-uninstall fresh
