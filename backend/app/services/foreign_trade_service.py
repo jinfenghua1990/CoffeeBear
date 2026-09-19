@@ -13,6 +13,7 @@ from app.models.foreign_trade import (
     ForeignTradeDealer,
     ForeignTradeInventoryReservation,
     ForeignTradeOrder,
+    ForeignTradeShipment,
     ForeignTradeSkuMapping,
 )
 from app.services import inventory_position_service
@@ -382,3 +383,146 @@ def extend_reservation(
     db.commit()
     db.refresh(row)
     return row
+
+
+
+def shipment_costs(row: ForeignTradeShipment) -> dict:
+    """Calculate estimated import cash requirement and export rebate.
+
+    Duties are calculated from the entered customs/CIF basis and editable rates.
+    The actual customs declaration remains authoritative; the system is a planning/reconciliation tool.
+    """
+    hundred = Decimal("100")
+    cif = _decimal(row.declared_value) + _decimal(row.freight_to_eu) + _decimal(row.insurance)
+    customs_duty = cif * _decimal(row.customs_rate) / hundred
+    anti_dumping_duty = cif * _decimal(row.anti_dumping_rate) / hundred
+    countervailing_duty = cif * _decimal(row.countervailing_rate) / hundred
+    vat_base = (
+        cif
+        + customs_duty
+        + anti_dumping_duty
+        + countervailing_duty
+        + _decimal(row.import_vat_additional_base)
+    )
+    import_vat = vat_base * _decimal(row.import_vat_rate) / hundred
+    ancillary = (
+        _decimal(row.clearance_fee)
+        + _decimal(row.port_fee)
+        + _decimal(row.last_mile_fee)
+        + _decimal(row.other_import_fee)
+    )
+    import_tax_total = customs_duty + anti_dumping_duty + countervailing_duty + import_vat
+    landed_cash = cif + import_tax_total + ancillary
+    landed_cost = landed_cash - (import_vat if row.import_vat_recoverable else Decimal("0"))
+
+    estimated_refund = _decimal(row.export_refund_base_cny) * _decimal(row.export_refund_rate) / hundred
+    china_net_estimated = (
+        _decimal(row.export_purchase_cost_cny)
+        + _decimal(row.domestic_export_cost_cny)
+        - estimated_refund
+    )
+    china_net_actual = (
+        _decimal(row.export_purchase_cost_cny)
+        + _decimal(row.domestic_export_cost_cny)
+        - _decimal(row.actual_export_refund_cny)
+    )
+    quantity = _decimal(row.quantity)
+    per_unit_landed = landed_cost / quantity if quantity > 0 else Decimal("0")
+
+    return {
+        "cifValue": str(cif),
+        "customsDuty": str(customs_duty),
+        "antiDumpingDuty": str(anti_dumping_duty),
+        "countervailingDuty": str(countervailing_duty),
+        "importVatBase": str(vat_base),
+        "importVat": str(import_vat),
+        "importTaxTotal": str(import_tax_total),
+        "importAncillaryFees": str(ancillary),
+        "landedCashRequirement": str(landed_cash),
+        "landedCostExRecoverableVat": str(landed_cost),
+        "perUnitLandedCostExRecoverableVat": str(per_unit_landed),
+        "estimatedExportRefundCny": str(estimated_refund),
+        "chinaNetCostEstimatedCny": str(china_net_estimated),
+        "chinaNetCostActualCny": str(china_net_actual),
+    }
+
+
+def shipment_dict(row: ForeignTradeShipment) -> dict:
+    return {
+        "id": row.id,
+        "shipmentNo": row.shipment_no,
+        "orderNos": row.order_nos or [],
+        "brand": row.brand,
+        "originCountry": row.origin_country,
+        "destinationCountry": row.destination_country,
+        "destinationCity": row.destination_city,
+        "transportMode": row.transport_mode,
+        "incoterm": row.incoterm,
+        "status": row.status,
+        "carrier": row.carrier,
+        "bookingNo": row.booking_no,
+        "billOfLadingNo": row.bill_of_lading_no,
+        "containerNo": row.container_no,
+        "trackingNo": row.tracking_no,
+        "exportCustomsNo": row.export_customs_no,
+        "importCustomsNo": row.import_customs_no,
+        "commercialInvoiceNo": row.commercial_invoice_no,
+        "eoriNo": row.eori_no,
+        "hsCode": row.hs_code,
+        "cnCode": row.cn_code,
+        "manufacturerName": row.manufacturer_name,
+        "taricAdditionalCode": row.taric_additional_code,
+        "taxRateSource": row.tax_rate_source,
+        "taxRateCheckedAt": row.tax_rate_checked_at.isoformat() if row.tax_rate_checked_at else None,
+        "currency": row.currency,
+        "quantity": str(row.quantity or 0),
+        "declaredValue": str(row.declared_value or 0),
+        "freightToEu": str(row.freight_to_eu or 0),
+        "insurance": str(row.insurance or 0),
+        "customsRate": str(row.customs_rate or 0),
+        "antiDumpingRate": str(row.anti_dumping_rate or 0),
+        "countervailingRate": str(row.countervailing_rate or 0),
+        "importVatRate": str(row.import_vat_rate or 0),
+        "importVatRecoverable": bool(row.import_vat_recoverable),
+        "importVatAdditionalBase": str(row.import_vat_additional_base or 0),
+        "clearanceFee": str(row.clearance_fee or 0),
+        "portFee": str(row.port_fee or 0),
+        "lastMileFee": str(row.last_mile_fee or 0),
+        "otherImportFee": str(row.other_import_fee or 0),
+        "exportPurchaseCostCny": str(row.export_purchase_cost_cny or 0),
+        "domesticExportCostCny": str(row.domestic_export_cost_cny or 0),
+        "exportRefundBaseCny": str(row.export_refund_base_cny or 0),
+        "exportRefundRate": str(row.export_refund_rate or 0),
+        "actualExportRefundCny": str(row.actual_export_refund_cny or 0),
+        "exportRefundStatus": row.export_refund_status,
+        "eurToCny": str(row.eur_to_cny or 1),
+        "etd": row.etd.isoformat() if row.etd else None,
+        "eta": row.eta.isoformat() if row.eta else None,
+        "departedAt": row.departed_at.isoformat() if row.departed_at else None,
+        "arrivedEuAt": row.arrived_eu_at.isoformat() if row.arrived_eu_at else None,
+        "customsClearedAt": row.customs_cleared_at.isoformat() if row.customs_cleared_at else None,
+        "deliveredAt": row.delivered_at.isoformat() if row.delivered_at else None,
+        "milestones": row.milestones or [],
+        "documents": row.documents or [],
+        "note": row.note,
+        "costs": shipment_costs(row),
+        "createdAt": row.created_at.isoformat() if row.created_at else None,
+        "updatedAt": row.updated_at.isoformat() if row.updated_at else None,
+    }
+
+
+def list_shipments(db: Session, q: str = "", status: str = "") -> list[dict]:
+    stmt = select(ForeignTradeShipment).order_by(ForeignTradeShipment.id.desc()).limit(1000)
+    if status:
+        stmt = stmt.where(ForeignTradeShipment.status == status)
+    if q.strip():
+        needle = f"%{q.strip()}%"
+        stmt = stmt.where(or_(
+            ForeignTradeShipment.shipment_no.ilike(needle),
+            ForeignTradeShipment.booking_no.ilike(needle),
+            ForeignTradeShipment.bill_of_lading_no.ilike(needle),
+            ForeignTradeShipment.container_no.ilike(needle),
+            ForeignTradeShipment.tracking_no.ilike(needle),
+            ForeignTradeShipment.manufacturer_name.ilike(needle),
+        ))
+    return [shipment_dict(row) for row in db.scalars(stmt).all()]

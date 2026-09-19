@@ -16,6 +16,7 @@ from app.models.foreign_trade import (
     ForeignTradeChannel,
     ForeignTradeDealer,
     ForeignTradeOrder,
+    ForeignTradeShipment,
     ForeignTradeSkuMapping,
 )
 from app.services import foreign_trade_service as service
@@ -401,3 +402,213 @@ def extend_reservation(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"ok": True, "id": row.id, "expiresAt": row.expires_at.isoformat() if row.expires_at else None}
+
+
+
+class ShipmentBody(BaseModel):
+    shipment_no: str = Field(min_length=1, max_length=64)
+    order_nos: list[str] = []
+    brand: str = Field(default="", max_length=128)
+    origin_country: str = Field(default="CN", max_length=64)
+    destination_country: str = Field(default="AT", max_length=64)
+    destination_city: str = Field(default="", max_length=128)
+    transport_mode: str = Field(default="sea", max_length=24)
+    incoterm: str = Field(default="FOB", max_length=16)
+    status: str = Field(default="preparing", max_length=32)
+
+    carrier: str = Field(default="", max_length=128)
+    booking_no: str = Field(default="", max_length=128)
+    bill_of_lading_no: str = Field(default="", max_length=128)
+    container_no: str = Field(default="", max_length=128)
+    tracking_no: str = Field(default="", max_length=128)
+
+    export_customs_no: str = Field(default="", max_length=128)
+    import_customs_no: str = Field(default="", max_length=128)
+    commercial_invoice_no: str = Field(default="", max_length=128)
+    eori_no: str = Field(default="", max_length=128)
+
+    hs_code: str = Field(default="", max_length=32)
+    cn_code: str = Field(default="", max_length=32)
+    manufacturer_name: str = Field(default="", max_length=256)
+    taric_additional_code: str = Field(default="", max_length=32)
+    tax_rate_source: str = ""
+    tax_rate_checked_at: datetime | None = None
+
+    currency: str = Field(default="EUR", max_length=8)
+    quantity: str = "0"
+    declared_value: str = "0"
+    freight_to_eu: str = "0"
+    insurance: str = "0"
+
+    customs_rate: str = "0"
+    anti_dumping_rate: str = "0"
+    countervailing_rate: str = "0"
+    import_vat_rate: str = "20"
+    import_vat_recoverable: bool = True
+    import_vat_additional_base: str = "0"
+
+    clearance_fee: str = "0"
+    port_fee: str = "0"
+    last_mile_fee: str = "0"
+    other_import_fee: str = "0"
+
+    export_purchase_cost_cny: str = "0"
+    domestic_export_cost_cny: str = "0"
+    export_refund_base_cny: str = "0"
+    export_refund_rate: str = "0"
+    actual_export_refund_cny: str = "0"
+    export_refund_status: str = Field(default="pending", max_length=24)
+    eur_to_cny: str = "1"
+
+    etd: datetime | None = None
+    eta: datetime | None = None
+    departed_at: datetime | None = None
+    arrived_eu_at: datetime | None = None
+    customs_cleared_at: datetime | None = None
+    delivered_at: datetime | None = None
+
+    milestones: list[dict] = []
+    documents: list[dict] = []
+    note: str = ""
+
+
+_SHIPMENT_DECIMAL_FIELDS = {
+    "quantity",
+    "declared_value",
+    "freight_to_eu",
+    "insurance",
+    "customs_rate",
+    "anti_dumping_rate",
+    "countervailing_rate",
+    "import_vat_rate",
+    "import_vat_additional_base",
+    "clearance_fee",
+    "port_fee",
+    "last_mile_fee",
+    "other_import_fee",
+    "export_purchase_cost_cny",
+    "domestic_export_cost_cny",
+    "export_refund_base_cny",
+    "export_refund_rate",
+    "actual_export_refund_cny",
+    "eur_to_cny",
+}
+
+
+def _apply_shipment(row: ForeignTradeShipment, body: ShipmentBody) -> None:
+    values = body.model_dump()
+    for key in _SHIPMENT_DECIMAL_FIELDS:
+        values[key] = _money(values[key])
+    if values["quantity"] < 0:
+        raise HTTPException(status_code=400, detail="出运数量不能为负数")
+    for rate_key in ("customs_rate", "anti_dumping_rate", "countervailing_rate", "import_vat_rate", "export_refund_rate"):
+        if values[rate_key] < 0:
+            raise HTTPException(status_code=400, detail="税率不能为负数")
+    values["order_nos"] = [str(value).strip() for value in values["order_nos"] if str(value).strip()]
+    for key, value in values.items():
+        setattr(row, key, value)
+
+
+@router.get("/shipments")
+def shipments(
+    q: str = Query("", max_length=200),
+    status: str = Query("", max_length=32),
+    db: Session = Depends(get_db),
+) -> dict:
+    return {"items": service.list_shipments(db, q=q, status=status)}
+
+
+@router.post("/shipments", status_code=201)
+def create_shipment(body: ShipmentBody, db: Session = Depends(get_db)) -> dict:
+    row = ForeignTradeShipment(shipment_no=body.shipment_no)
+    _apply_shipment(row, body)
+    db.add(row)
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="出运单号已存在") from exc
+    db.refresh(row)
+    return service.shipment_dict(row)
+
+
+@router.put("/shipments/{shipment_id}")
+def update_shipment(shipment_id: int, body: ShipmentBody, db: Session = Depends(get_db)) -> dict:
+    row = db.get(ForeignTradeShipment, shipment_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="出运单不存在")
+    _apply_shipment(row, body)
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="出运单号已存在") from exc
+    db.refresh(row)
+    return service.shipment_dict(row)
+
+
+@router.delete("/shipments/{shipment_id}")
+def delete_shipment(shipment_id: int, db: Session = Depends(get_db)) -> dict:
+    row = db.get(ForeignTradeShipment, shipment_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="出运单不存在")
+    db.delete(row)
+    db.commit()
+    return {"ok": True}
+
+
+class ShipmentMilestoneBody(BaseModel):
+    code: str = Field(min_length=1, max_length=32)
+    label: str = Field(default="", max_length=128)
+    location: str = Field(default="", max_length=256)
+    occurred_at: datetime | None = None
+    note: str = ""
+
+
+_MILESTONE_STATUS = {
+    "prepared": "preparing",
+    "picked_up": "picked_up",
+    "export_declared": "export_customs",
+    "export_released": "export_released",
+    "departed_china": "departed",
+    "in_transit": "in_transit",
+    "arrived_eu": "arrived_eu",
+    "import_declared": "import_customs",
+    "customs_cleared": "customs_cleared",
+    "last_mile": "last_mile",
+    "delivered": "delivered",
+}
+
+
+@router.post("/shipments/{shipment_id}/milestones")
+def add_shipment_milestone(
+    shipment_id: int,
+    body: ShipmentMilestoneBody,
+    db: Session = Depends(get_db),
+) -> dict:
+    row = db.get(ForeignTradeShipment, shipment_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="出运单不存在")
+    occurred = body.occurred_at or datetime.now().astimezone()
+    milestones = list(row.milestones or [])
+    milestones.append({
+        "code": body.code,
+        "label": body.label,
+        "location": body.location,
+        "occurredAt": occurred.isoformat(),
+        "note": body.note,
+    })
+    row.milestones = milestones
+    if body.code in _MILESTONE_STATUS:
+        row.status = _MILESTONE_STATUS[body.code]
+    if body.code == "departed_china":
+        row.departed_at = occurred
+    elif body.code == "arrived_eu":
+        row.arrived_eu_at = occurred
+    elif body.code == "customs_cleared":
+        row.customs_cleared_at = occurred
+    elif body.code == "delivered":
+        row.delivered_at = occurred
+    db.commit()
+    db.refresh(row)
+    return service.shipment_dict(row)
