@@ -11,6 +11,7 @@ from app.db import get_db
 from app.models.bank import BankTransaction
 from app.models.tax import TaxInvoice
 from app.services import finance_sales_report_service as sales_report_service
+from app.services import finance_center_service
 from app.services import finance_service
 from app.services import monthly_intake_service
 from app.services import payment_invoice_match_service as payment_match_service
@@ -480,3 +481,172 @@ def mail_status() -> dict[str, Any]:
 @router.get("/delivery-logs")
 def delivery_logs(db: Session = Depends(get_db)) -> list[dict[str, Any]]:
     return finance_service.delivery_logs(db)
+
+
+
+class LegalEntityInput(BaseModel):
+    code: str = Field(min_length=1, max_length=64)
+    name: str = Field(min_length=1, max_length=256)
+    country_code: str = Field(default="CN", max_length=8)
+    base_currency: str = Field(default="CNY", max_length=8)
+    tax_id: str = Field(default="", max_length=128)
+    status: str = Field(default="active", max_length=24)
+    is_default: bool = False
+    business_scopes: list[str] = Field(default_factory=lambda: ["domestic", "foreign_trade"])
+    note: str = ""
+
+
+class FinanceEntryInput(BaseModel):
+    legal_entity_id: int
+    business_scope: str = Field(default="domestic", max_length=24)
+    source_type: str = Field(default="manual", max_length=48)
+    source_id: str = Field(default="", max_length=128)
+    source_no: str = Field(default="", max_length=128)
+    category: str = Field(default="other", max_length=64)
+    direction: str = Field(default="expense", max_length=24)
+    currency: str = Field(default="CNY", max_length=8)
+    amount: str = "0"
+    tax_amount: str = "0"
+    value_type: str = Field(default="actual", max_length=16)
+    settlement_status: str = Field(default="pending", max_length=24)
+    invoice_status: str = Field(default="unknown", max_length=24)
+    accounting_year: int = Field(ge=1900, le=2999)
+    accounting_month: int = Field(ge=1, le=12)
+    occurred_at: Any | None = None
+    note: str = ""
+
+
+@router.get("/entities")
+def finance_entities(db: Session = Depends(get_db)) -> dict[str, Any]:
+    return {"items": finance_center_service.list_entities(db)}
+
+
+@router.post("/entities", status_code=201)
+def create_finance_entity(payload: LegalEntityInput, db: Session = Depends(get_db)) -> dict[str, Any]:
+    try:
+        row = finance_center_service.save_entity(
+            db,
+            entity_id=None,
+            code=payload.code,
+            name=payload.name,
+            country_code=payload.country_code,
+            base_currency=payload.base_currency,
+            tax_id=payload.tax_id,
+            status=payload.status,
+            is_default=payload.is_default,
+            business_scopes=payload.business_scopes,
+            note=payload.note,
+        )
+    except Exception as exc:
+        db.rollback()
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return finance_center_service.entity_dict(row)
+
+
+@router.put("/entities/{entity_id}")
+def update_finance_entity(
+    entity_id: int,
+    payload: LegalEntityInput,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    try:
+        row = finance_center_service.save_entity(
+            db,
+            entity_id=entity_id,
+            code=payload.code,
+            name=payload.name,
+            country_code=payload.country_code,
+            base_currency=payload.base_currency,
+            tax_id=payload.tax_id,
+            status=payload.status,
+            is_default=payload.is_default,
+            business_scopes=payload.business_scopes,
+            note=payload.note,
+        )
+    except ValueError as exc:
+        db.rollback()
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:
+        db.rollback()
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return finance_center_service.entity_dict(row)
+
+
+@router.get("/center")
+def finance_center(
+    legal_entity_id: int | None = None,
+    business_scope: str = Query("all", pattern="^(all|domestic|foreign_trade)$"),
+    year: int | None = Query(None, ge=1900, le=2999),
+    month: int | None = Query(None, ge=1, le=12),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    try:
+        return finance_center_service.center_overview(
+            db,
+            legal_entity_id=legal_entity_id,
+            business_scope=business_scope,
+            year=year,
+            month=month,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.get("/entries")
+def finance_entries(
+    legal_entity_id: int | None = None,
+    business_scope: str = Query("all", pattern="^(all|domestic|foreign_trade)$"),
+    year: int | None = Query(None, ge=1900, le=2999),
+    month: int | None = Query(None, ge=1, le=12),
+    status: str = Query("", max_length=24),
+    limit: int = Query(200, ge=1, le=1000),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    try:
+        return {
+            "items": finance_center_service.list_entries(
+                db,
+                legal_entity_id=legal_entity_id,
+                business_scope=business_scope,
+                year=year,
+                month=month,
+                status=status,
+                limit=limit,
+            )
+        }
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.post("/entries", status_code=201)
+def create_finance_entry(payload: FinanceEntryInput, db: Session = Depends(get_db)) -> dict[str, Any]:
+    try:
+        row = finance_center_service.save_entry(
+            db,
+            entry_id=None,
+            **payload.model_dump(),
+        )
+        entity = finance_center_service.resolve_entity(db, row.legal_entity_id)
+        return finance_center_service.entry_dict(row, entity)
+    except ValueError as exc:
+        db.rollback()
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.put("/entries/{entry_id}")
+def update_finance_entry(
+    entry_id: int,
+    payload: FinanceEntryInput,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    try:
+        row = finance_center_service.save_entry(
+            db,
+            entry_id=entry_id,
+            **payload.model_dump(),
+        )
+        entity = finance_center_service.resolve_entity(db, row.legal_entity_id)
+        return finance_center_service.entry_dict(row, entity)
+    except ValueError as exc:
+        db.rollback()
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
