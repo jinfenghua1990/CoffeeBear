@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { authenticatedFetch, reconApi, type ReconTxn } from "@/lib/api";
+import { authenticatedFetch, type ReconTxn } from "@/lib/api";
 import { useTabRuntime, useTabScopedState, useWorkspace } from "@/lib/workspace/tab-store";
 
 type DirectionFilter = "all" | "in" | "out";
@@ -61,13 +61,27 @@ export default function BankTransactionsPage() {
     setLoading(true);
     setError("");
     try {
-      setRows(await reconApi.transactions(500));
+      const [year, month] = period.split("-").map(Number);
+      const lastDay = year && month ? new Date(year, month, 0).getDate() : 31;
+      const startDate = year && month ? `${year}-${String(month).padStart(2, "0")}-01` : "";
+      const endDate = year && month ? `${year}-${String(month).padStart(2, "0")}-${String(lastDay).padStart(2, "0")}` : "";
+      const params = new URLSearchParams({ limit: "500" });
+      if (startDate && endDate) {
+        params.set("start_date", startDate);
+        params.set("end_date", endDate);
+      }
+      const response = await authenticatedFetch(`/api/v1/reconciliation/transactions?${params.toString()}`, { cache: "no-store" });
+      const payload = (await response.json().catch(() => [])) as ReconTxn[] | { detail?: string };
+      if (!response.ok) {
+        throw new Error(!Array.isArray(payload) && payload.detail ? payload.detail : `加载失败（${response.status}）`);
+      }
+      setRows(Array.isArray(payload) ? payload : []);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : String(caught));
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [period]);
 
   useEffect(() => {
     void load();
