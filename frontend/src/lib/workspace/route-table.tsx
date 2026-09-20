@@ -283,9 +283,15 @@ const ROUTES: RouteEntry[] = [
   },
   {
     pathname: "/settings",
-    title: "系统设置",
+    title: "基础设置",
     businessType: "master",
     load: () => import("@/app/settings/page"),
+  },
+  {
+    pathname: "/settings/update",
+    title: "系统更新",
+    businessType: "master",
+    load: () => import("@/app/settings/update/page"),
   },
 ];
 
