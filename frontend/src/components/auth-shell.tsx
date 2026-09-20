@@ -3,7 +3,6 @@
 import { useEffect, useRef, useState } from "react";
 import { usePathname, useRouter } from "next/navigation";
 import Sidebar from "@/components/sidebar";
-import SystemStatusBar from "@/components/system-status-bar";
 import TopBar from "@/components/top-bar";
 import WorkspaceHost from "@/components/workspace/workspace-host";
 import { fetchMe, getRuntimeAuthConfig, getToken, redirectToLogin } from "@/lib/api";
@@ -87,10 +86,7 @@ export default function AuthShell({ children }: { children: React.ReactNode }) {
     <div className="app-shell flex h-screen w-full min-w-0 flex-col overflow-hidden">
       <TopBar />
       <div className="flex min-h-0 w-full flex-1">
-        <div className="relative h-full w-[208px] shrink-0">
-          <Sidebar />
-          <SystemStatusBar />
-        </div>
+        <Sidebar />
         <main data-app-main className="flex h-full min-h-0 w-0 min-w-0 flex-1 flex-col overflow-hidden">
           <WorkspaceHost />
         </main>
