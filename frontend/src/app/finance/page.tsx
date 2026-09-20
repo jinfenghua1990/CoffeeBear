@@ -1,9 +1,11 @@
 "use client";
 
 import Link from "next/link";
+import { usePathname, useSearchParams } from "next/navigation";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { authenticatedFetch } from "@/lib/api";
 import { useTabTitle } from "@/lib/workspace/tab-store";
+import { syncWorkspaceUrl } from "@/lib/workspace/url-sync";
 
 type Scope = "all" | "domestic" | "foreign_trade";
 
@@ -144,11 +146,18 @@ function statusLabel(status: string) {
 }
 
 export default function FinanceCenterPage() {
-  useTabTitle("财务中心");
+  const pathname = usePathname();
+  const searchParams = useSearchParams();
+  const scopeParam = searchParams.get("scope");
+  const initialScope: Scope =
+    scopeParam === "domestic" || scopeParam === "foreign_trade" || scopeParam === "all"
+      ? scopeParam
+      : "all";
 
   const [entities, setEntities] = useState<LegalEntity[]>([]);
   const [entityId, setEntityId] = useState<number | null>(null);
-  const [scope, setScope] = useState<Scope>("all");
+  const [scope, setScope] = useState<Scope>(initialScope);
+  useTabTitle(scope === "foreign_trade" ? "外贸财务" : "财务中心");
   const [period, setPeriod] = useState(currentMonth());
   const [data, setData] = useState<CenterData | null>(null);
   const [loading, setLoading] = useState(true);
@@ -191,17 +200,17 @@ export default function FinanceCenterPage() {
   });
 
   useEffect(() => {
-    if (typeof window === "undefined") return;
-    const params = new URLSearchParams(window.location.search);
-    const value = params.get("scope");
-    if (value === "domestic" || value === "foreign_trade" || value === "all") {
-      setScope(value);
-      setEntryForm((current) => ({
-        ...current,
-        business_scope: value === "all" ? current.business_scope : value,
-      }));
+    const next: Scope =
+      scopeParam === "domestic" || scopeParam === "foreign_trade" || scopeParam === "all"
+        ? scopeParam
+        : "all";
+    setScope((current) => current === next ? current : next);
+    if (next !== "all") {
+      setEntryForm((current) => (
+        current.business_scope === next ? current : { ...current, business_scope: next }
+      ));
     }
-  }, []);
+  }, [scopeParam]);
 
   const loadEntities = useCallback(async () => {
     const res = await authenticatedFetch("/api/v1/finance/entities", { cache: "no-store" });
@@ -249,12 +258,11 @@ export default function FinanceCenterPage() {
       ...current,
       business_scope: next === "all" ? current.business_scope : next,
     }));
-    if (typeof window !== "undefined") {
-      const url = new URL(window.location.href);
-      if (next === "all") url.searchParams.delete("scope");
-      else url.searchParams.set("scope", next);
-      window.history.replaceState(null, "", url.pathname + url.search);
-    }
+    const params = new URLSearchParams(searchParams.toString());
+    if (next === "all") params.delete("scope");
+    else params.set("scope", next);
+    const query = params.toString();
+    syncWorkspaceUrl(query ? `${pathname}?${query}` : pathname, "replace");
   }
 
   async function syncBusiness() {

@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { authenticatedFetch } from "@/lib/api";
 
-export type ForeignTradeMode = "orders" | "channels" | "sku" | "fulfillment" | "finance" | "alsvid";
+export type ForeignTradeMode = "orders" | "channels" | "sku" | "fulfillment" | "alsvid";
 
 type Channel = {
   id: number;
@@ -212,7 +212,6 @@ export default function ForeignTradeWorkbench({ mode }: { mode: ForeignTradeMode
     channels: "渠道管理",
     sku: "海外 SKU 映射",
     fulfillment: "履约中心",
-    finance: "收款与利润",
     alsvid: "Alsvid",
   }[mode];
 
@@ -221,7 +220,6 @@ export default function ForeignTradeWorkbench({ mode }: { mode: ForeignTradeMode
     channels: "管理 Shopify、B2B、代发和手工渠道；后续 API 接入也挂在渠道上。",
     sku: "把海外渠道 SKU 映射到中台 SKU，避免采购和成本核算认错货。",
     fulfillment: "处理待采购、待发货、物流单号与完成状态。",
-    finance: "按订单记录实收、退款、支付手续费、采购成本、物流成本与利润。",
     alsvid: "Alsvid 德国 / 奥地利业务视图，订单仍使用同一外贸订单底座。",
   }[mode];
 

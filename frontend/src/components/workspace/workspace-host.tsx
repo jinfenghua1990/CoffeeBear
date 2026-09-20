@@ -89,7 +89,7 @@ function useWorkspaceRouting(): { unresolved: boolean } {
 
     const identity = tabIdentity(resolved.pathname, resolved.search, resolved.entry);
     const active = ws.activeTab;
-    if (active && active.identity === identity) {
+    if (active && active.workspace === resolved.workspace && active.identity === identity) {
       if (active.search !== resolved.search) ws.updateSearch(active.id, resolved.search);
       return;
     }

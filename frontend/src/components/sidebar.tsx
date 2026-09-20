@@ -11,7 +11,7 @@ import { isSecondaryActive, resolveModule, type IconName, type SecondaryItem } f
 export default function Sidebar() {
   const pathname = usePathname();
   const searchParams = useSearchParams();
-  const module = resolveModule(pathname);
+  const module = resolveModule(pathname, searchParams);
   const workspaceLabel = module.workspace === "foreign" ? "外贸工作台" : "内销工作台";
   const groups = module.groups ?? [{ label: "", items: module.items ?? [] }];
 

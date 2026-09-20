@@ -146,7 +146,9 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       stateRef.current = {
         tabs: persisted.tabs.slice(0, MAX_TABS * 2).map((tab) => ({
           ...tab,
-          workspace: tab.workspace ?? routeWorkspace(tab.pathname),
+          // 路由归属规则会迭代；恢复历史 Tab 时按当前 pathname + query 重新计算，
+          // 避免旧 sessionStorage 永久保留曾经错误的工作台归属。
+          workspace: routeWorkspace(tab.pathname, tab.search),
         })),
         activeId: null,
       };
@@ -204,8 +206,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     function openRoute(href: string, options?: { sourceTabId?: string | null; silent?: boolean; forceNew?: boolean }): string | null {
       const resolved = resolveRoute(href);
       if (!resolved) return null;
-      const { pathname, search, entry } = resolved;
-      const workspace = entry.workspace ?? "domestic";
+      const { pathname, search, entry, workspace } = resolved;
       const identity = tabIdentity(pathname, search, entry);
 
       const existing = options?.forceNew ? undefined : stateRef.current.tabs.find((tab) => tab.workspace === workspace && tab.identity === identity);

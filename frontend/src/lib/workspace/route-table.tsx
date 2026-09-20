@@ -2,6 +2,7 @@
 
 import { lazy, type ComponentType, type LazyExoticComponent } from "react";
 import { WORKBENCH_VIEWS, parseWorkbenchView, workbenchHref } from "@/lib/workbench-navigation";
+import { isForeignTradeFinanceRoute } from "@/lib/workspace-scope";
 
 /**
  * 工作区路由注册表：pathname → 页面组件 / Tab 标题 / Tab 身份。
@@ -14,8 +15,10 @@ export type WorkspaceKey = "domestic" | "foreign";
 
 export type RouteEntry = {
   pathname: string;
-  /** 工作台归属；未填写默认内销。 */
+  /** 固定工作台归属；未填写默认内销。 */
   workspace?: WorkspaceKey;
+  /** 同一页面按 query 进入不同工作台时使用；优先级高于 workspace。 */
+  workspaceFor?: (search: URLSearchParams) => WorkspaceKey;
   /** 默认 Tab 标题（列表/母页面） */
   title: string;
   /** 业务类型：master 母页面 / 业务对象详情页 */
@@ -236,6 +239,8 @@ const ROUTES: RouteEntry[] = [
     pathname: "/finance",
     title: "财务中心",
     businessType: "master",
+    workspaceFor: (search) => isForeignTradeFinanceRoute("/finance", search) ? "foreign" : "domestic",
+    titleFor: (search) => isForeignTradeFinanceRoute("/finance", search) ? "外贸财务" : null,
     load: () => import("@/app/finance/page"),
   },
   {
@@ -326,19 +331,21 @@ export function normalizeRoute(href: string): string {
   return search ? `${pathname}?${search}` : pathname;
 }
 
-export type ResolvedRoute = { pathname: string; search: string; entry: RouteEntry };
+export type ResolvedRoute = { pathname: string; search: string; entry: RouteEntry; workspace: WorkspaceKey };
 
-export function routeWorkspace(pathname: string): WorkspaceKey {
-  return ENTRY_BY_PATH.get(pathname)?.workspace ?? "domestic";
+export function routeWorkspace(pathname: string, search = ""): WorkspaceKey {
+  const entry = ENTRY_BY_PATH.get(pathname);
+  if (!entry) return "domestic";
+  return entry.workspaceFor?.(new URLSearchParams(search)) ?? entry.workspace ?? "domestic";
 }
 
-/** 解析地址：返回注册表条目；未注册的地址返回 null（工作区渲染 404 视图）。 */
+/** 解析地址：返回注册表条目与按 query 推导后的工作台归属；未注册地址返回 null。 */
 export function resolveRoute(href: string): ResolvedRoute | null {
   const normalized = normalizeRoute(href);
   const [pathname, search = ""] = normalized.split("?", 2);
   const entry = ENTRY_BY_PATH.get(pathname);
   if (!entry) return null;
-  return { pathname, search, entry };
+  return { pathname, search, entry, workspace: routeWorkspace(pathname, search) };
 }
 
 /** Tab 标题：优先用业务参数推导（采购单 · CG001），否则用默认标题。 */

@@ -1,3 +1,5 @@
+import { isForeignTradeFinanceRoute, type SearchParamReader } from "@/lib/workspace-scope";
+
 /**
  * 全站导航配置（顶部一级 + 左侧二级 + 页面内 TAB）。
  * 增删菜单只改这里，不要在各页面硬编码。
@@ -181,7 +183,11 @@ export const MODULES: ModuleDef[] = [
 /** 解析当前一级模块。顺序敏感：库存路由要先于 products / supply 判断。 */
 const RESOLVE_ORDER = ["foreign", "home", "sales", "inventory", "products", "supply", "finance", "logistics", "system", "data"];
 
-export function resolveModule(pathname: string): ModuleDef {
+export function resolveModule(pathname: string, search?: SearchParamReader | null): ModuleDef {
+  // /finance 是内外贸共用底层页面；scope=foreign_trade 时导航必须留在外贸工作台。
+  if (isForeignTradeFinanceRoute(pathname, search)) {
+    return MODULES.find((item) => item.key === "foreign") ?? MODULES[0];
+  }
   for (const key of RESOLVE_ORDER) {
     const module = MODULES.find((item) => item.key === key);
     if (module?.match(pathname)) return module;

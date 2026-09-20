@@ -58,12 +58,10 @@ export default function TopBar() {
   const router = useRouter();
   const pathname = usePathname();
   const searchParams = useSearchParams();
-  const active = resolveModule(pathname);
+  const active = resolveModule(pathname, searchParams);
   const activeWorkspace = moduleWorkspace(active);
-  // 财务是共享业务模块，不是第三个“工作台”。
-  // 外贸入口进入财务时用 scope 保留来源，工作台切换器只展示内销 / 外贸。
-  const financeFromForeign = active.key === "finance" && searchParams.get("scope") === "foreign_trade";
-  const isForeignWorkspace = activeWorkspace === "foreign" || financeFromForeign;
+  // 财务共享同一页面，但 scope=foreign_trade 的工作台归属由统一路由规则决定。
+  const isForeignWorkspace = activeWorkspace === "foreign";
   const workspaceLabel = isForeignWorkspace ? "外贸工作台" : "内销工作台";
   const workspaceHome = isForeignWorkspace ? "/foreign-trade" : "/";
   const topModules = MODULES.filter(
