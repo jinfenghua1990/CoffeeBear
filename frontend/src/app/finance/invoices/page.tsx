@@ -132,7 +132,7 @@ function outputCategoryLabel(value: string): string {
   return OUTPUT_CATEGORY_META[value]?.label ?? (value || "待判断");
 }
 
-/** 进项发票支付方式：对公账户支出 / 个人垫付；空=未设置。根据银行流水关联自动判断。 */
+/** 进项发票支付方式：已确认银行付款可推导为对公；无证据保持“未设置”，不自动猜个人垫付。 */
 const PAYMENT_METHOD_META: Record<string, { label: string; cls: string }> = {
   corporate: { label: "对公账户支出", cls: "border-blue-200 bg-blue-50 text-blue-700" },
   personal: { label: "个人垫付", cls: "border-amber-200 bg-amber-50 text-amber-700" },

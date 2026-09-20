@@ -504,7 +504,10 @@ export type ReconTxn = {
   voucherNo: string;
   matched: boolean;
   invoiceMatched?: boolean;
-  matchStatus?: "matched" | "unmatched" | "not_applicable" | string;
+  invoiceMatchStatus?: "matched" | "partial" | "unmatched" | string;
+  invoiceMatchedAmount?: string;
+  invoiceRemainingAmount?: string;
+  matchStatus?: "matched" | "partial" | "unmatched" | "not_applicable" | string;
   matchedAt?: string | null;
 };
 

@@ -4,8 +4,8 @@
 - 关联复用 tax_invoice_links（target_type="bank_transaction"），手工标记才落库；
   同名同金额只做"建议"展示（纯推导），不自动写库——遵循税务清单 _auto_link
   "只按明确依据关联"的先例。
-- match_status 是跨业务共用的单字段：银行视角的已配/未配一律从 TaxInvoiceLink
-  推导展示；写 match_status 仅在原值为 unmatched 时进行，且不清空已有 match_note。
+- 银行付款核对状态只从 target_type="bank_transaction" 的 TaxInvoiceLink 推导；
+  绝不读写 TaxInvoice.match_status / match_note，避免污染采购/销售业务匹配状态。
 """
 from __future__ import annotations
 
@@ -275,7 +275,6 @@ def overview(db: Session, year: int, month: int) -> dict[str, Any]:
             "bankLinkedAmount": str(_dec(linked_amount)),
             "remaining": str(_dec(remaining)),
             "bankMatchStatus": _status(remaining, total),
-            "matchStatus": invoice.match_status,
             "links": briefs,
             "suggested": False,
             "suggestedPaymentIds": [],
@@ -326,6 +325,113 @@ def overview(db: Session, year: int, month: int) -> dict[str, Any]:
             "invoiceUnmatchedCount": invoice_counts["unmatched"],
         },
     }
+
+
+def txn_reconciliation_statuses(db: Session, txn_ids: list[int]) -> dict[int, dict[str, Any]]:
+    """按确认分摊金额返回银行支出流水的核对状态。"""
+    if not txn_ids:
+        return {}
+    txns = db.query(BankTransaction).filter(BankTransaction.id.in_(txn_ids)).all()
+    txn_map = {row.id: row for row in txns if row.direction == "out"}
+    if not txn_map:
+        return {}
+
+    links = (
+        db.query(TaxInvoiceLink)
+        .filter(
+            TaxInvoiceLink.target_type == TARGET_TYPE,
+            TaxInvoiceLink.target_id.in_(list(txn_map)),
+            TaxInvoiceLink.confirmed.is_(True),
+            TaxInvoiceLink.match_method != "rejected",
+        )
+        .all()
+    )
+    invoice_ids = {row.invoice_id for row in links if row.allocated_amount is None}
+    invoice_map = {
+        row.id: row
+        for row in db.query(TaxInvoice).filter(TaxInvoice.id.in_(invoice_ids)).all()
+    } if invoice_ids else {}
+
+    allocated_by_txn: dict[int, Decimal] = {}
+    for link in links:
+        allocated_by_txn[link.target_id] = (
+            allocated_by_txn.get(link.target_id, Decimal("0"))
+            + _link_amount(link, invoice_map.get(link.invoice_id))
+        )
+
+    result: dict[int, dict[str, Any]] = {}
+    for txn_id, txn in txn_map.items():
+        total = _dec(txn.amount)
+        allocated = min(allocated_by_txn.get(txn_id, Decimal("0")), total)
+        remaining = total - allocated
+        result[txn_id] = {
+            "allocatedAmount": str(_dec(allocated)),
+            "remainingAmount": str(_dec(remaining)),
+            "status": _status(remaining, total),
+        }
+    return result
+
+
+def fully_reconciled_txn_ids(db: Session, txn_ids: list[int]) -> set[int]:
+    """返回银行付款金额已被确认发票分摊完整覆盖的支出流水 ID。"""
+    statuses = txn_reconciliation_statuses(db, txn_ids)
+    return {txn_id for txn_id, row in statuses.items() if row["status"] == "matched"}
+
+
+def pending_invoices(db: Session, limit: int = 500) -> list[dict[str, Any]]:
+    """跨账期返回仍有银行付款待核对余额的有效进项发票。
+
+    只使用 bank_transaction 链接计算已核对金额；采购/销售 match_status 与本列表完全无关。
+    """
+    limit = max(1, min(int(limit), 500))
+    rows = (
+        db.query(TaxInvoice)
+        .filter(
+            TaxInvoice.direction == "input",
+            TaxInvoice.status == "issued",
+        )
+        .order_by(TaxInvoice.issue_date.desc(), TaxInvoice.id.desc())
+        .all()
+    )
+    rows = [row for row in rows if tax_invoice_service.is_bank_payment_reconciliation_eligible(row)]
+    invoice_ids = [row.id for row in rows]
+    allocated_by_invoice: dict[int, Decimal] = {}
+    if invoice_ids:
+        links = (
+            db.query(TaxInvoiceLink)
+            .filter(
+                TaxInvoiceLink.target_type == TARGET_TYPE,
+                TaxInvoiceLink.invoice_id.in_(invoice_ids),
+                TaxInvoiceLink.confirmed.is_(True),
+                TaxInvoiceLink.match_method != "rejected",
+            )
+            .all()
+        )
+        for link in links:
+            allocated_by_invoice[link.invoice_id] = (
+                allocated_by_invoice.get(link.invoice_id, Decimal("0")) + _dec(link.allocated_amount)
+            )
+
+    result: list[dict[str, Any]] = []
+    for invoice in rows:
+        total = _dec(invoice.total_amount)
+        linked = allocated_by_invoice.get(invoice.id, Decimal("0"))
+        remaining = total - linked
+        if remaining <= TOLERANCE:
+            continue
+        result.append({
+            "id": invoice.id,
+            "invoiceNumber": invoice.invoice_number,
+            "sellerName": invoice.seller_name,
+            "issueDate": invoice.issue_date.isoformat()[:10] if invoice.issue_date else "",
+            "totalAmount": str(total),
+            "bankLinkedAmount": str(_dec(linked)),
+            "remaining": str(_dec(remaining)),
+            "bankMatchStatus": _status(remaining, total),
+        })
+        if len(result) >= limit:
+            break
+    return result
 
 
 def _split_match_invoice_to_txns(
@@ -389,8 +495,6 @@ def _split_match_invoice_to_txns(
         if allocated_by_txn is not None:
             allocated_by_txn[txn.id] = txn_used + portion
         count += 1
-    if invoice.match_status == "unmatched" and target - allocated <= TOLERANCE:
-        invoice.match_status = "matched"
     return count, allocated
 
 
@@ -425,8 +529,6 @@ def _split_match_txn_to_invoices(
         )
         inv_remaining = inv_amount - inv_used
         if inv_remaining <= TOLERANCE:
-            if invoice.match_status == "unmatched":
-                invoice.match_status = "matched"
             continue
         existing = (
             db.query(TaxInvoiceLink)
@@ -456,8 +558,6 @@ def _split_match_txn_to_invoices(
         if allocated_by_invoice is not None:
             allocated_by_invoice[invoice.id] = inv_used + portion
         count += 1
-        if invoice.match_status == "unmatched" and inv_amount - (inv_used + portion) <= TOLERANCE:
-            invoice.match_status = "matched"
     return count, allocated
 
 
@@ -465,8 +565,8 @@ def auto_match(db: Session, year: int, month: int, actor: str = "system") -> dic
     """自动匹配当月银行付款 ↔ 进项发票。
 
     规则（与 overview 建议规则一致）：对方户名 == 销方名 AND 剩余金额相等。
-    满足则直接落库（match_method=auto, confirmed=True），并把发票 match_status 推进为 matched。
-    已有 manual 链路的发票不会被覆盖（confirmed 行的 link 一律跳过）。
+    满足则只写 bank_transaction 关联（match_method=auto, confirmed=True）；
+    不改变发票台账的采购/销售 match_status。已有 manual 链路不会被覆盖。
     """
     start, end = _month_range(year, month)
 
@@ -566,10 +666,6 @@ def auto_match(db: Session, year: int, month: int, actor: str = "system") -> dic
                 db.flush()
                 allocated_by_txn[txn.id] = allocated_by_txn.get(txn.id, Decimal("0")) + portion
                 allocated_by_invoice[invoice.id] = allocated_by_invoice.get(invoice.id, Decimal("0")) + portion
-                if invoice.match_status == "unmatched" and invoice_total - allocated_by_invoice[invoice.id] <= TOLERANCE:
-                    invoice.match_status = "matched"
-                    msg = f"已匹配银行付款 {txn.txn_date.isoformat()} {portion}"
-                    invoice.match_note = f"{invoice.match_note}；{msg}" if invoice.match_note else msg
                 matched += 1
                 if txn_total - allocated_by_txn[txn.id] <= TOLERANCE:
                     existing_txn_ids.add(txn.id)
@@ -715,10 +811,6 @@ def auto_match(db: Session, year: int, month: int, actor: str = "system") -> dic
                         allocated_by_invoice[inv.id] = allocated_by_invoice.get(inv.id, Decimal("0")) + portion
                         allocated_by_txn[txn.id] = allocated_by_txn.get(txn.id, Decimal("0")) + portion
                         existing_invoice_txn.add((inv.id, txn.id))
-                        if inv.match_status == "unmatched" and inv_total - allocated_by_invoice[inv.id] <= TOLERANCE:
-                            inv.match_status = "matched"
-                            msg = f"已匹配（供应商银行账户强匹配）{txn.txn_date.isoformat()} ¥{portion}"
-                            inv.match_note = f"{inv.match_note}；{msg}" if inv.match_note else msg
                         supplier_matched += 1
                         if allocated_by_txn.get(txn.id, Decimal("0")) >= txn_total - TOLERANCE:
                             existing_txn_ids.add(txn.id)
@@ -806,11 +898,6 @@ def link(
     link.confirmed = True
     link.note = note or "付款发票匹配清单手工标记"
 
-    if invoice.match_status == "unmatched" and invoice_total - (invoice_used + amount) <= TOLERANCE:
-        invoice.match_status = "matched"
-        msg = f"已匹配银行付款 {txn.txn_date.isoformat()} {_dec(txn.amount)}"
-        invoice.match_note = f"{invoice.match_note}；{msg}" if invoice.match_note else msg
-
     db.commit()
     audit(
         db, actor, "payment_invoice_match.link", "tax_invoice_links", str(link.id),
@@ -828,21 +915,6 @@ def unlink(db: Session, link_id: int, actor: str = "system") -> dict[str, Any]:
     row.confirmed = False
     row.confidence = None
     row.note = "解除银行付款匹配"
-
-    invoice = db.get(TaxInvoice, row.invoice_id)
-    if invoice is not None:
-        others = (
-            db.query(TaxInvoiceLink)
-            .filter(
-                TaxInvoiceLink.invoice_id == row.invoice_id,
-                TaxInvoiceLink.target_type == TARGET_TYPE,
-                TaxInvoiceLink.match_method != "rejected",
-                TaxInvoiceLink.id != row.id,
-            )
-            .count()
-        )
-        if others == 0 and invoice.match_status == "matched" and "银行付款" in (invoice.match_note or ""):
-            invoice.match_status = "unmatched"
 
     db.commit()
     audit(

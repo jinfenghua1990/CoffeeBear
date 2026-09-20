@@ -381,6 +381,15 @@ def update_corporate_payment_adjustment(
         raise HTTPException(422, str(exc)) from exc
 
 
+@router.get("/payment-invoice-match/invoices")
+def payment_invoice_match_pending_invoices(
+    limit: int = Query(500, ge=1, le=500),
+    db: Session = Depends(get_db),
+) -> list[dict[str, Any]]:
+    """跨账期返回仍有银行付款待核对余额的有效进项发票。"""
+    return payment_match_service.pending_invoices(db, limit=limit)
+
+
 @router.get("/payment-invoice-match/{year}/{month}")
 def payment_invoice_match_overview(
     year: int,

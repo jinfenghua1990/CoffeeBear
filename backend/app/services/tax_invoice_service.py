@@ -548,8 +548,10 @@ def _serialize_invoice(row: TaxInvoice, context: dict | None = None, db: Session
                 TaxInvoiceLink.invoice_id == row.id,
                 TaxInvoiceLink.target_type == "bank_transaction",
                 TaxInvoiceLink.match_method != "rejected",
+                TaxInvoiceLink.confirmed.is_(True),
             ).first() is not None
-            payload["paymentMethod"] = "corporate" if has_bank_link else "personal"
+            # 没有银行付款证据只能表示“未确认”，不能反推成个人垫付。
+            payload["paymentMethod"] = "corporate" if has_bank_link else ""
         elif row.direction == "output":
             payload["paymentMethod"] = row.payment_method or ""
         else:
@@ -1028,6 +1030,7 @@ def list_invoices(
                 TaxInvoiceLink.invoice_id.in_(input_invoice_ids),
                 TaxInvoiceLink.target_type == "bank_transaction",
                 TaxInvoiceLink.match_method != "rejected",
+                TaxInvoiceLink.confirmed.is_(True),
             )
             .distinct()
             .all()
@@ -1042,7 +1045,8 @@ def list_invoices(
             **line_context.get(row.id, {"lineItems": [], "lineItemCount": 0}),
         }
         if row.direction == "input":
-            ctx["paymentMethod"] = "corporate" if row.id in bank_linked_invoice_ids else "personal"
+            # 无已确认银行付款链接 = 未确认支付方式，不等于个人垫付。
+            ctx["paymentMethod"] = "corporate" if row.id in bank_linked_invoice_ids else ""
         elif row.direction == "output":
             ctx["paymentMethod"] = row.payment_method or ""
         # 明细兜底识别只面向进项（6+1）；销项分类不按货物名推断，空即待判断。
@@ -1838,17 +1842,24 @@ def unlink_purchase(db: Session, link_id: int, actor: str = "system") -> dict:
     row.note = "解除销售订单关联" if is_sales else "解除采购单关联"
 
     invoice = db.get(TaxInvoice, row.invoice_id)
-    if invoice is not None:
-        others = (
-            db.query(TaxInvoiceLink)
-            .filter(
-                TaxInvoiceLink.invoice_id == row.invoice_id,
-                TaxInvoiceLink.match_method != "rejected",
-                TaxInvoiceLink.id != row.id,
-            )
-            .count()
+    if invoice is not None and invoice.match_status == "matched":
+        domain_types = (SALES_LINK_TARGET_TYPE,) if is_sales else PURCHASE_LINK_TARGET_TYPES
+        remaining_allocated = sum(
+            (
+                quantize(to_decimal(link.allocated_amount))
+                for link in db.query(TaxInvoiceLink).filter(
+                    TaxInvoiceLink.invoice_id == row.invoice_id,
+                    TaxInvoiceLink.target_type.in_(domain_types),
+                    TaxInvoiceLink.match_method != "rejected",
+                    TaxInvoiceLink.confirmed.is_(True),
+                    TaxInvoiceLink.id != row.id,
+                ).all()
+            ),
+            Decimal("0"),
         )
-        if others == 0 and invoice.match_status == "matched":
+        invoice_total = quantize(to_decimal(invoice.total_amount))
+        # 状态按业务域内的实际剩余覆盖金额重算；银行付款链接不参与采购/销售匹配状态。
+        if remaining_allocated <= 0 or invoice_total - remaining_allocated > Decimal("0.01"):
             invoice.match_status = "unmatched"
             msg = "已解除人工销售订单关联" if is_sales else "已解除人工采购关联"
             invoice.match_note = f"{invoice.match_note}；{msg}" if invoice.match_note else msg

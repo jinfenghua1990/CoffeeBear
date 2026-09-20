@@ -9,9 +9,8 @@ from app.api.deps import current_actor
 from app.db import get_db
 from app.models.bank import BankAccount, BankTransaction
 from app.models.payment import SettlementRecord
-from app.models.tax import TaxInvoiceLink
+from app.services import finance_service, payment_invoice_match_service
 from app.services import reconciliation as rc
-from app.services import finance_service
 from app.utils.uploads import UploadTooLargeError, read_upload_limited
 
 router = APIRouter(prefix="/reconciliation", tags=["reconciliation"])
@@ -100,17 +99,7 @@ def list_transactions(
     )
     matched_ids = rc.confirmed_txn_ids(db, [r.id for r in rows])
     row_ids = [r.id for r in rows]
-    invoice_matched_ids = {
-        int(target_id)
-        for (target_id,) in db.query(TaxInvoiceLink.target_id)
-        .filter(
-            TaxInvoiceLink.target_type == "bank_transaction",
-            TaxInvoiceLink.target_id.in_(row_ids),
-            TaxInvoiceLink.match_method != "rejected",
-        )
-        .distinct()
-        .all()
-    } if row_ids else set()
+    invoice_statuses = payment_invoice_match_service.txn_reconciliation_statuses(db, row_ids)
     account_ids = {r.account_id for r in rows if r.account_id is not None}
     accounts = {
         account.id: account
@@ -122,9 +111,15 @@ def list_transactions(
             "amount": str(r.amount), "counterpartyName": r.counterparty_name,
             "summary": r.summary, "voucherNo": r.voucher_no,
             "matched": r.id in matched_ids,
-            "invoiceMatched": r.id in invoice_matched_ids,
+            "invoiceMatched": invoice_statuses.get(r.id, {}).get("status") == "matched",
+            "invoiceMatchStatus": invoice_statuses.get(r.id, {}).get("status", "unmatched"),
+            "invoiceMatchedAmount": invoice_statuses.get(r.id, {}).get("allocatedAmount", "0.00"),
+            "invoiceRemainingAmount": invoice_statuses.get(r.id, {}).get("remainingAmount", str(r.amount)),
             "matchStatus": (
-                "matched" if (r.id in matched_ids if r.direction == "in" else r.id in invoice_matched_ids)
+                "matched"
+                if r.direction == "in" and r.id in matched_ids
+                else invoice_statuses.get(r.id, {}).get("status", "unmatched")
+                if r.direction == "out"
                 else "unmatched"
             ),
             "matchedAt": r.matched_at.isoformat() if r.matched_at else None,

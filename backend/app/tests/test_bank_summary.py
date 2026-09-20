@@ -112,3 +112,53 @@ def test_bank_summary_groups_accounts_and_reconciliation_status(db_session):
     assert row["pendingExpenseCount"] == 1
     assert row["lastTxnDate"] == "2026-08-12"
     assert row["balanceSource"] == "opening_plus_imported_transactions"
+
+
+def test_partial_expense_invoice_link_stays_pending(db_session):
+    token = uuid4().hex[:10]
+    account = BankAccount(
+        account_no=f"BS-PART-{token}",
+        account_name="部分核对测试账户",
+        bank_name="测试银行",
+        currency="CNY",
+        opening_balance=Decimal("0"),
+    )
+    db_session.add(account)
+    db_session.flush()
+
+    expense = BankTransaction(
+        account_id=account.id,
+        txn_date=date(2026, 8, 15),
+        direction="out",
+        amount=Decimal("5000.00"),
+        counterparty_name="部分核对供应商",
+        fingerprint=f"bs-partial-expense-{token}",
+        raw={},
+    )
+    invoice = TaxInvoice(
+        invoice_key=f"bs-partial-inv-{token}",
+        invoice_number=f"BS-PART-INV-{token}",
+        direction="input",
+        status="issued",
+        issue_date=datetime(2026, 8, 14, tzinfo=timezone.utc),
+        seller_name="部分核对供应商",
+        total_amount=Decimal("1000.00"),
+        source_system="pytest",
+        raw={},
+    )
+    db_session.add_all([expense, invoice])
+    db_session.flush()
+    db_session.add(TaxInvoiceLink(
+        invoice_id=invoice.id,
+        target_type="bank_transaction",
+        target_id=expense.id,
+        allocated_amount=Decimal("1000.00"),
+        match_method="manual",
+        confirmed=True,
+    ))
+    db_session.commit()
+
+    result = service.build_summary(db_session, year=2026, month=8)
+    assert result["summary"]["pendingExpenseCount"] == 1
+    assert result["summary"]["pendingCount"] == 1
+    assert result["accounts"][0]["pendingExpenseCount"] == 1

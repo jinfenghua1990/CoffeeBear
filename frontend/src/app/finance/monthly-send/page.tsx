@@ -152,7 +152,6 @@ type PaymentMatchPoolInvoice = {
   bankLinkedAmount: string;
   remaining: string;
   bankMatchStatus: "matched" | "partial" | "unmatched" | string;
-  matchStatus: string;
   links: PaymentMatchPoolInvoiceLink[];
   suggested: boolean;
   suggestedPaymentIds: number[];
@@ -614,11 +613,12 @@ export default function MonthlySendPage() {
   }, [domesticSupportedByEntity, entityId, financeTab, setFinanceTab]);
   useEffect(() => { loadFiles(); loadBusiness(); loadUnbilled(); loadCorporatePayment(); }, [loadFiles, loadBusiness, loadUnbilled, loadCorporatePayment]);
   useEffect(() => { if (financeTab === "match" && domesticSupportedByEntity) loadMatch(); }, [domesticSupportedByEntity, financeTab, loadMatch]);
-  // 弹层切"全部未配发票"时拉取全量未匹配进项票（端点上限 500，靠搜索缩小范围）
+  // 弹层切“全部待核对”时，只读取银行付款维度的待核对发票。
+  // 不能复用 tax_invoices.match_status：那个字段属于采购/销售业务关联状态。
   useEffect(() => {
     if (!pickerTxn || pickerScope !== "all") return;
     const seq = ++pickerRequestSeq.current;
-    authenticatedFetch("/api/v1/tax-invoices?direction=input&match_status=unmatched&limit=500", { cache: "no-store" })
+    authenticatedFetch("/api/v1/finance/payment-invoice-match/invoices?limit=500", { cache: "no-store" })
       .then((r) => (r.ok ? r.json() : []))
       .then((rows: Array<Record<string, unknown>>) => {
         if (seq !== pickerRequestSeq.current) return;
@@ -628,7 +628,7 @@ export default function MonthlySendPage() {
           sellerName: String(row.sellerName || ""),
           issueDate: String(row.issueDate || "").slice(0, 10),
           totalAmount: String(row.totalAmount || "0"),
-          remaining: String(row.totalAmount || "0"),
+          remaining: String(row.remaining || "0"),
           suggested: false,
         })));
       })

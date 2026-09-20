@@ -28,16 +28,28 @@ function dateText(value: string) {
   return value ? value.slice(0, 10) : "—";
 }
 
+function expenseMatchStatus(row: ReconTxn) {
+  return row.invoiceMatchStatus || (row.invoiceMatched ? "matched" : "unmatched");
+}
+
 function matchText(row: ReconTxn) {
   if (row.direction === "in") return row.matched ? "已回款对账" : "待回款对账";
-  return row.invoiceMatched ? "已关联发票" : "待关联发票";
+  const status = expenseMatchStatus(row);
+  if (status === "matched") return "银行付款已核对";
+  if (status === "partial") return "银行付款部分核对";
+  return "待核对银行付款";
 }
 
 function matchClass(row: ReconTxn) {
-  const matched = row.direction === "in" ? row.matched : row.invoiceMatched;
-  return matched
-    ? "bg-emerald-50 text-emerald-700 ring-emerald-200"
-    : "bg-amber-50 text-amber-700 ring-amber-200";
+  if (row.direction === "in") {
+    return row.matched
+      ? "bg-emerald-50 text-emerald-700 ring-emerald-200"
+      : "bg-amber-50 text-amber-700 ring-amber-200";
+  }
+  const status = expenseMatchStatus(row);
+  if (status === "matched") return "bg-emerald-50 text-emerald-700 ring-emerald-200";
+  if (status === "partial") return "bg-blue-50 text-blue-700 ring-blue-200";
+  return "bg-amber-50 text-amber-700 ring-amber-200";
 }
 
 export default function BankTransactionsPage() {
@@ -126,7 +138,7 @@ export default function BankTransactionsPage() {
     return periodRows.filter((row) => {
       if (accountFilter && row.accountNo !== accountFilter) return false;
       if (direction !== "all" && row.direction !== direction) return false;
-      const matched = row.direction === "in" ? row.matched : row.invoiceMatched;
+      const matched = row.direction === "in" ? row.matched : expenseMatchStatus(row) === "matched";
       if (matchFilter === "matched" && !matched) return false;
       if (matchFilter === "unmatched" && matched) return false;
       if (!needle) return true;
@@ -144,7 +156,7 @@ export default function BankTransactionsPage() {
         result.count += 1;
         if (row.direction === "in") result.income += amount;
         else result.expense += amount;
-        const matched = row.direction === "in" ? row.matched : row.invoiceMatched;
+        const matched = row.direction === "in" ? row.matched : expenseMatchStatus(row) === "matched";
         if (!matched) result.pending += 1;
         return result;
       },
@@ -281,9 +293,9 @@ export default function BankTransactionsPage() {
             {accountOptions.map(([accountNo, label]) => <option key={accountNo} value={accountNo}>{label} · {accountNo}</option>)}
           </select>
           <select value={matchFilter} onChange={(event) => setMatchFilter(event.target.value as MatchFilter)} className="rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs text-slate-600 outline-none">
-            <option value="all">全部匹配状态</option>
-            <option value="matched">已匹配</option>
-            <option value="unmatched">待匹配</option>
+            <option value="all">全部处理状态</option>
+            <option value="matched">已完成</option>
+            <option value="unmatched">待处理（含部分核对）</option>
           </select>
           <Link href={`/finance/monthly-send?tab=match&month=${encodeURIComponent(period)}`} className="ml-auto rounded-lg border border-blue-200 px-3 py-1.5 text-xs font-medium text-blue-600 hover:bg-blue-50">发起对账</Link>
         </div>
@@ -311,7 +323,7 @@ export default function BankTransactionsPage() {
                   <th className="px-4 py-3 font-medium">摘要</th>
                   <th className="px-4 py-3 font-medium">凭证号</th>
                   <th className="px-4 py-3 font-medium">账户</th>
-                  <th className="px-4 py-3 font-medium">匹配状态</th>
+                  <th className="px-4 py-3 font-medium">对账状态</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">

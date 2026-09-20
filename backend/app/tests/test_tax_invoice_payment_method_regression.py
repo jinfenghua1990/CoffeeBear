@@ -78,4 +78,34 @@ def test_input_invoice_payment_method_is_derived_from_bank_link(db_session):
         item["id"]: item
         for item in service.list_invoices(db_session, direction="input", limit=500)
     }
-    assert listed[invoice.id]["paymentMethod"] == "personal"
+    assert listed[invoice.id]["paymentMethod"] == ""
+
+
+def test_unconfirmed_bank_link_does_not_imply_corporate_payment(db_session):
+    invoice = _invoice(db_session, "input")
+    txn = BankTransaction(
+        txn_date=date(2026, 9, 2),
+        direction="out",
+        amount=Decimal("100"),
+        counterparty_name="未确认支付方式测试供应商",
+        fingerprint=f"payment-method-unconfirmed-{uuid4().hex}",
+    )
+    db_session.add(txn)
+    db_session.flush()
+    db_session.add(
+        TaxInvoiceLink(
+            invoice_id=invoice.id,
+            target_type="bank_transaction",
+            target_id=txn.id,
+            allocated_amount=Decimal("100"),
+            match_method="manual",
+            confirmed=False,
+        )
+    )
+    db_session.commit()
+
+    listed = {
+        item["id"]: item
+        for item in service.list_invoices(db_session, direction="input", limit=500)
+    }
+    assert listed[invoice.id]["paymentMethod"] == ""

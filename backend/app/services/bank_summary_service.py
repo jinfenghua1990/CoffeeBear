@@ -5,7 +5,7 @@
 - 账户系统余额 = 期初余额 + 已导入全部收入 - 已导入全部支出
 - 本期收入/支出/净流入按所选月份统计
 - 收入是否已对账复用 reconciliation_matches confirmed
-- 支出是否已对账复用 tax_invoice_links(bank_transaction) confirmed
+- 支出是否已对账按 tax_invoice_links(bank_transaction) 的确认分摊累计是否覆盖整笔付款判断
 
 这里不把“系统余额”包装成银行实时余额；只有已导入流水才能参与计算。
 """
@@ -20,8 +20,7 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from app.models.bank import BankAccount, BankTransaction
-from app.models.tax import TaxInvoiceLink
-from app.services import reconciliation
+from app.services import payment_invoice_match_service, reconciliation
 
 
 def _dec(value: Decimal | float | int | str | None) -> Decimal:
@@ -49,20 +48,8 @@ def build_summary(db: Session, *, year: int, month: int) -> dict[str, Any]:
     confirmed_income_ids = reconciliation.confirmed_txn_ids(
         db, [row.id for row in month_txns if row.direction == "in"]
     )
-    confirmed_expense_ids = {
-        int(target_id)
-        for (target_id,) in (
-            db.query(TaxInvoiceLink.target_id)
-            .filter(
-                TaxInvoiceLink.target_type == "bank_transaction",
-                TaxInvoiceLink.target_id.in_(month_ids),
-                TaxInvoiceLink.confirmed.is_(True),
-                TaxInvoiceLink.match_method != "rejected",
-            )
-            .distinct()
-            .all()
-        )
-    } if month_ids else set()
+    expense_ids = [row.id for row in month_txns if row.direction == "out"]
+    confirmed_expense_ids = payment_invoice_match_service.fully_reconciled_txn_ids(db, expense_ids)
 
     account_ids = {row.id for row in accounts}
     all_by_account: dict[int | None, list[BankTransaction]] = defaultdict(list)

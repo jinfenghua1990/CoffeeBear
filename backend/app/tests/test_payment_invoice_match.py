@@ -1,8 +1,8 @@
 """付款↔发票匹配标记清单（财务月度资料）服务层测试。
 
-覆盖：overview 按月/方向过滤、matched/partial/unmatched 状态推导、
-金额封顶、发票池统计、同名同金额建议、link 落库与状态推进、
-软删复活、方向校验、unlink 恢复状态与审计日志。
+覆盖：overview 按月/方向过滤、matched/partial/unmatched 银行状态推导、
+金额封顶、发票池统计、同名同金额建议、link 落库但不污染业务匹配状态、
+软删复活、方向校验、unlink 与审计日志。
 """
 from datetime import date, datetime, timezone
 from decimal import Decimal
@@ -218,6 +218,59 @@ def test_positive_red_invoice_also_stays_out_of_bank_reconciliation(db_session):
         pm.link(db_session, txn_id=txn.id, invoice_id=inv.id)
 
 
+def test_txn_reconciliation_statuses_require_confirmed_amount_coverage(db_session):
+    txn = _txn(db_session, amount="1000.00")
+    inv = _invoice(db_session, amount="1000.00")
+    link = TaxInvoiceLink(
+        invoice_id=inv.id,
+        target_type="bank_transaction",
+        target_id=txn.id,
+        allocated_amount=Decimal("1000.00"),
+        match_method="manual",
+        confirmed=False,
+    )
+    db_session.add(link)
+    db_session.flush()
+
+    status = pm.txn_reconciliation_statuses(db_session, [txn.id])[txn.id]
+    assert status["status"] == "unmatched"
+    assert status["allocatedAmount"] == "0.00"
+    assert status["remainingAmount"] == "1000.00"
+
+    link.confirmed = True
+    link.allocated_amount = Decimal("400.00")
+    db_session.flush()
+    status = pm.txn_reconciliation_statuses(db_session, [txn.id])[txn.id]
+    assert status["status"] == "partial"
+    assert status["allocatedAmount"] == "400.00"
+    assert status["remainingAmount"] == "600.00"
+
+    link.allocated_amount = Decimal("1000.00")
+    db_session.flush()
+    status = pm.txn_reconciliation_statuses(db_session, [txn.id])[txn.id]
+    assert status["status"] == "matched"
+    assert status["allocatedAmount"] == "1000.00"
+    assert status["remainingAmount"] == "0.00"
+
+
+def test_pending_invoice_pool_ignores_business_match_status_and_uses_bank_remaining(db_session):
+    txn = _txn(db_session, amount="400.00", month=7)
+    inv = _invoice(db_session, amount="1000.00", month=6)
+    inv.match_status = "matched"  # 已和采购单配平，也仍然需要独立做银行付款核对。
+    db_session.flush()
+
+    pm.link(db_session, txn_id=txn.id, invoice_id=inv.id, allocated_amount="400.00")
+
+    rows = pm.pending_invoices(db_session)
+    row = next(item for item in rows if item["id"] == inv.id)
+    assert row["bankLinkedAmount"] == "400.00"
+    assert row["remaining"] == "600.00"
+    assert row["bankMatchStatus"] == "partial"
+
+    db_session.refresh(inv)
+    assert inv.match_status == "matched"
+
+
 def test_suggestion_same_name_and_equal_remaining(db_session):
     txn = _txn(db_session, amount="500.00", name="杭州纸箱厂")
     hit = _invoice(db_session, seller="杭州纸箱厂", amount="500.00")
@@ -233,7 +286,7 @@ def test_suggestion_same_name_and_equal_remaining(db_session):
 
 # ---------- link / unlink ----------
 
-def test_link_sets_invoice_status_and_note(db_session):
+def test_bank_link_does_not_mutate_business_match_status_or_note(db_session):
     txn = _txn(db_session, amount="1000.00")
     inv = _invoice(db_session, amount="1000.00")
 
@@ -246,8 +299,8 @@ def test_link_sets_invoice_status_and_note(db_session):
     assert row.allocated_amount == Decimal("1000.0000")
 
     db_session.refresh(inv)
-    assert inv.match_status == "matched"
-    assert "银行付款" in inv.match_note
+    assert inv.match_status == "unmatched"
+    assert inv.match_note == ""
 
     log = db_session.scalar(
         select(AuditLog).where(AuditLog.action == "payment_invoice_match.link")
@@ -276,7 +329,7 @@ def test_link_revives_rejected_link_and_validates_direction(db_session):
         pm.link(db_session, txn_id=txn.id, invoice_id=output_inv.id)
 
 
-def test_unlink_restores_status_and_rejects_double_unlink(db_session):
+def test_unlink_keeps_business_status_untouched_and_rejects_double_unlink(db_session):
     txn = _txn(db_session, amount="1000.00")
     inv = _invoice(db_session, amount="1000.00")
     first = pm.link(db_session, txn_id=txn.id, invoice_id=inv.id)

@@ -135,7 +135,7 @@ def test_tax_invoice_cumulative_invoice_limit(db_session):
         )
 
 
-def test_big_payment_partial_invoice_stays_unmatched_until_fully_allocated(db_session):
+def test_bank_split_allocation_is_independent_of_business_match_status(db_session):
     txn1 = BankTransaction(
         txn_date=date(2026, 8, 1),
         direction="out",
@@ -176,10 +176,82 @@ def test_big_payment_partial_invoice_stays_unmatched_until_fully_allocated(db_se
     count, allocated = _split_match_txn_to_invoices(db_session, txn1, [inv1, inv2], "pytest")
     assert count == 2
     assert allocated == Decimal("5000.0000")
-    assert inv1.match_status == "matched"
+    assert inv1.match_status == "unmatched"
     assert inv2.match_status == "unmatched"
 
     count2, allocated2 = _split_match_invoice_to_txns(db_session, inv2, [txn2], "pytest")
     assert count2 == 1
     assert allocated2 == Decimal("3000.0000")
-    assert inv2.match_status == "matched"
+    assert inv2.match_status == "unmatched"
+
+
+def test_unlink_purchase_recalculates_only_business_domain(db_session):
+    po1 = ExternalPurchaseOrder(
+        external_order_id="AUDIT-UNLINK-PO-1",
+        platform="other",
+        paid_amount=Decimal("60"),
+        order_amount=Decimal("60"),
+    )
+    po2 = ExternalPurchaseOrder(
+        external_order_id="AUDIT-UNLINK-PO-2",
+        platform="other",
+        paid_amount=Decimal("40"),
+        order_amount=Decimal("40"),
+    )
+    invoice = TaxInvoice(
+        invoice_key="AUDIT-UNLINK-INV",
+        direction="input",
+        invoice_number="AUDIT-UNLINK-INV",
+        status="issued",
+        total_amount=Decimal("100"),
+        match_status="unmatched",
+    )
+    txn = BankTransaction(
+        txn_date=date(2026, 8, 3),
+        direction="out",
+        amount=Decimal("100"),
+        counterparty_name="测试供应商",
+        fingerprint="audit-unlink-bank",
+    )
+    db_session.add_all([po1, po2, invoice, txn])
+    db_session.flush()
+
+    first = tax_invoice_service.link_purchase_order(
+        db_session,
+        invoice_id=invoice.id,
+        target_type="external_purchase_order",
+        target_id=po1.id,
+        allocated_amount=Decimal("60"),
+    )
+    second = tax_invoice_service.link_purchase_order(
+        db_session,
+        invoice_id=invoice.id,
+        target_type="external_purchase_order",
+        target_id=po2.id,
+        allocated_amount=Decimal("40"),
+    )
+    db_session.refresh(invoice)
+    assert invoice.match_status == "matched"
+
+    # 银行链接存在也不能让采购匹配状态继续保持 matched。
+    db_session.add(TaxInvoiceLink(
+        invoice_id=invoice.id,
+        target_type="bank_transaction",
+        target_id=txn.id,
+        allocated_amount=Decimal("100"),
+        match_method="manual",
+        confirmed=True,
+    ))
+    db_session.commit()
+
+    tax_invoice_service.unlink_purchase(db_session, second["id"], actor="pytest")
+    db_session.refresh(invoice)
+    assert invoice.match_status == "unmatched"
+
+    active_purchase = db_session.query(TaxInvoiceLink).filter(
+        TaxInvoiceLink.invoice_id == invoice.id,
+        TaxInvoiceLink.target_type == "external_purchase_order",
+        TaxInvoiceLink.match_method != "rejected",
+    ).all()
+    assert sum((row.allocated_amount for row in active_purchase), Decimal("0")) == Decimal("60")
+    assert first["id"] == active_purchase[0].id
