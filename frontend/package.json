@@ -4,7 +4,7 @@
   "private": true,
   "scripts": {
     "dev": "next dev -p 3000",
-    "prebuild": "bash ../scripts/update-guard.sh check ..",
+    "prebuild": "if command -v bash >/dev/null 2>&1; then bash ../scripts/update-guard.sh check ..; fi",
     "build": "next build",
     "start": "next start -p 3000",
     "typecheck": "tsc --noEmit"
