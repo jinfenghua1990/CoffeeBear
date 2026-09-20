@@ -110,8 +110,14 @@ def list_transactions(
             "id": r.id, "txnDate": r.txn_date.isoformat(), "direction": r.direction,
             "amount": str(r.amount), "counterpartyName": r.counterparty_name,
             "summary": r.summary, "voucherNo": r.voucher_no,
-            # 兼容字段 matched / invoiceMatchStatus 暂保留；新代码必须使用下列显式域字段。
-            "matched": r.id in settlement_matched_ids,
+            # 兼容字段 matched 按流水方向映射到对应域；新代码仍应使用显式域字段。
+            "matched": (
+                r.id in settlement_matched_ids
+                if r.direction == "in"
+                else invoice_statuses.get(r.id, {}).get("status") == "matched"
+                if r.direction == "out"
+                else False
+            ),
             "settlementMatched": r.direction == "in" and r.id in settlement_matched_ids,
             "settlementMatchStatus": (
                 "matched"

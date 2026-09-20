@@ -388,3 +388,30 @@ def test_legacy_bank_link_without_allocated_amount_uses_same_full_amount_everywh
     other = _invoice(db_session, seller="另一供应商", amount="100.00")
     with pytest.raises(ValueError, match="分摊金额必须大于 0"):
         pm.link(db_session, txn_id=txn.id, invoice_id=other.id)
+
+
+
+def test_transaction_api_legacy_matched_follows_direction_specific_domain(client, db_session):
+    """旧 matched 字段也必须按方向映射，不能让已核对发票的支出继续显示未匹配。"""
+    txn = _txn(db_session, amount="321.00", name="兼容字段供应商")
+    inv = _invoice(db_session, seller="兼容字段供应商", amount="321.00")
+    pm.link(db_session, txn_id=txn.id, invoice_id=inv.id)
+    db_session.commit()
+
+    response = client.get(
+        "/api/v1/reconciliation/transactions",
+        params={
+            "direction": "out",
+            "start_date": "2026-08-05",
+            "end_date": "2026-08-05",
+            "q": "兼容字段供应商",
+        },
+    )
+    assert response.status_code == 200
+    row = next(item for item in response.json() if item["id"] == txn.id)
+    assert row["matched"] is True
+    assert row["settlementMatched"] is False
+    assert row["settlementMatchStatus"] == "not_applicable"
+    assert row["invoicePaymentMatched"] is True
+    assert row["invoicePaymentMatchStatus"] == "matched"
+    assert row["matchStatus"] == "matched"

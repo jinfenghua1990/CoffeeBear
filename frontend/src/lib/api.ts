@@ -502,7 +502,7 @@ export type ReconTxn = {
   counterpartyName: string;
   summary: string;
   voucherNo: string;
-  /** 兼容字段：当前等价于收入流水的 settlementMatched。 */
+  /** 兼容字段：收入=settlementMatched；支出=invoicePaymentMatched。新代码优先使用显式域字段。 */
   matched: boolean;
   settlementMatched?: boolean;
   settlementMatchStatus?: "matched" | "unmatched" | "not_applicable" | string;
