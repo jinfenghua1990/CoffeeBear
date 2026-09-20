@@ -379,8 +379,12 @@ def package_period(db: Session, company: str, year: int, month: int,
     corporate_payment_content: bytes | None = None
     if want_corporate_payment:
         from app.services import finance_corporate_payment_report_service as corporate_payment_service
+        selection = corporate_payment_service.latest_adjustment(
+            db, company=company, year=year, month=month
+        )
         corporate_payment_report = corporate_payment_service.build_report(
-            db, year, month, company=company
+            db, year, month, company=company,
+            selected_keys=(list(selection.selected_keys or []) if selection else None),
         )
         corporate_payment_content = corporate_payment_service.corporate_payment_xlsx(
             corporate_payment_report

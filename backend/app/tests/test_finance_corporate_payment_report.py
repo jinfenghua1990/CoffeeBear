@@ -4,6 +4,7 @@ from decimal import Decimal
 from io import BytesIO
 from uuid import uuid4
 
+import pytest
 from openpyxl import load_workbook
 
 from app.models.bank import BankAccount, BankTransaction
@@ -311,3 +312,78 @@ def test_small_positive_invoice_without_payment_stays_unpaid(db_session):
     assert Decimal(row["invoiceOutstandingAmount"]) == Decimal("0.03")
     assert report["summary"]["paidInvoiceCount"] == 0
     assert report["summary"]["unpaidInvoiceCount"] == 1
+
+
+def _add_adjustment_invoice(db_session, token: str, idx: int, company: str, total: str) -> TaxInvoice:
+    invoice = TaxInvoice(
+        invoice_key=f"pytest-corp-adj-{token}-{idx}",
+        invoice_number=f"INV-ADJ-{token}-{idx}",
+        direction="input",
+        status="issued",
+        issue_date=datetime(2026, 8, 10 + idx, tzinfo=timezone.utc),
+        seller_name=f"勾选供应商-{token}",
+        buyer_name=company,
+        total_amount=Decimal(total),
+        source_system="tax_export",
+        raw={},
+    )
+    db_session.add(invoice)
+    return invoice
+
+
+def test_adjustment_persists_selected_invoices_and_recomputes_summary(db_session):
+    """保存勾选版本后，报告只保留勾选发票并重算汇总；交付包与页面同口径。"""
+    token = uuid4().hex[:10]
+    company = f"测试公司-{token}"
+    invoice_a = _add_adjustment_invoice(db_session, token, 0, company, "100.00")
+    invoice_b = _add_adjustment_invoice(db_session, token, 1, company, "200.00")
+    db_session.commit()
+
+    base = service.build_report(db_session, 2026, 8, company=company)
+    assert base["summary"]["invoiceCount"] == 2
+    assert Decimal(base["summary"]["invoiceTotal"]) == Decimal("300.00")
+
+    saved = service.save_corporate_payment_adjustment(
+        db_session, company=company, year=2026, month=8,
+        selected_keys=[invoice_a.invoice_number], actor="pytest-adjuster",
+    )
+    assert saved["version"] == 1
+    assert saved["selectedCount"] == 1
+    assert saved["sourceCount"] == 2
+
+    current = service.build_report(
+        db_session, 2026, 8, company=company,
+        selected_keys=list(saved["selectedKeys"]),
+    )
+    assert [row["invoiceNumber"] for row in current["invoiceRows"]] == [invoice_a.invoice_number]
+    assert current["rows"] == []
+    assert current["summary"]["invoiceCount"] == 1
+    assert Decimal(current["summary"]["invoiceTotal"]) == Decimal("100.00")
+    assert Decimal(current["summary"]["outstandingTotal"]) == Decimal("100.00")
+    assert current["summary"]["unpaidInvoiceCount"] == 1
+    assert current["summary"]["productRowCount"] == 0
+
+    again = service.save_corporate_payment_adjustment(
+        db_session, company=company, year=2026, month=8,
+        selected_keys=[invoice_a.invoice_number, invoice_b.invoice_number],
+    )
+    assert again["version"] == 2
+    latest = service.latest_adjustment(db_session, company=company, year=2026, month=8)
+    assert latest is not None and latest.version == 2
+
+    full = service.build_report(
+        db_session, 2026, 8, company=company,
+        selected_keys=list(latest.selected_keys or []),
+    )
+    assert full["summary"]["invoiceCount"] == 2
+
+    with pytest.raises(ValueError):
+        service.save_corporate_payment_adjustment(
+            db_session, company=company, year=2026, month=8,
+            selected_keys=["不存在发票号"],
+        )
+    with pytest.raises(ValueError):
+        service.save_corporate_payment_adjustment(
+            db_session, company=company, year=2026, month=8,
+            selected_keys=[],
+        )

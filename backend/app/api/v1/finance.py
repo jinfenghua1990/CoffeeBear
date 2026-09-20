@@ -49,6 +49,11 @@ class UnbilledAdjustmentInput(BaseModel):
     note: str = Field(default="", max_length=500)
 
 
+class CorporatePaymentAdjustmentInput(BaseModel):
+    selected_keys: list[str] = Field(default_factory=list)
+    note: str = Field(default="", max_length=500)
+
+
 class PaymentMatchLinkBody(BaseModel):
     txn_id: int
     invoice_id: int
@@ -326,11 +331,54 @@ def corporate_payment_report(
     company: str = "",
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
-    """月度已收票且通过对公账户付款的发票/采购/商品清单。"""
+    """月度已收票且通过对公账户付款的发票/采购/商品清单（含当前勾选版本信息）。"""
     try:
-        return corporate_payment_report_service.build_report(db, year, month, company=company)
+        report = corporate_payment_report_service.build_report(db, year, month, company=company)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    adjustment = corporate_payment_report_service.latest_adjustment(
+        db, company=company or finance_service.DEFAULT_COMPANY, year=year, month=month
+    )
+    source_count = len(report.get("invoiceRows", []))
+    if adjustment is not None:
+        report["adjusted"] = True
+        report["version"] = adjustment.version
+        report["selectedKeys"] = list(adjustment.selected_keys or [])
+        report["updatedAt"] = adjustment.updated_at.isoformat() if adjustment.updated_at else None
+    else:
+        report["adjusted"] = False
+        report["version"] = None
+        report["selectedKeys"] = [
+            row.get("invoiceNumber") for row in report.get("invoiceRows", []) if row.get("invoiceNumber")
+        ]
+        report["updatedAt"] = None
+    report["selectedCount"] = len(report["selectedKeys"])
+    report["sourceCount"] = source_count
+    return report
+
+
+@router.put("/corporate-payment/adjustment")
+def update_corporate_payment_adjustment(
+    payload: CorporatePaymentAdjustmentInput,
+    request: Request,
+    year: int = Query(..., ge=2000, le=2100),
+    month: int = Query(..., ge=1, le=12),
+    company: str = "",
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    """保存本月已收票对公付款清单的发票勾选；新版本保留，历史版本不覆盖。"""
+    try:
+        return corporate_payment_report_service.save_corporate_payment_adjustment(
+            db,
+            company=company or finance_service.DEFAULT_COMPANY,
+            year=year,
+            month=month,
+            selected_keys=payload.selected_keys,
+            actor=current_actor(request),
+            note=payload.note,
+        )
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
 
 
 @router.get("/payment-invoice-match/{year}/{month}")

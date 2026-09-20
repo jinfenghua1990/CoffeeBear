@@ -132,6 +132,31 @@ class FinanceUnbilledAdjustment(Base, PkMixin, TimestampMixin):
     note: Mapped[str] = mapped_column(Text, default="")
 
 
+class FinanceCorporatePaymentAdjustment(Base, PkMixin, TimestampMixin):
+    """已收票对公付款发票的月度选择版本；每次保存都新增版本，不覆盖历史口径。"""
+
+    __tablename__ = "finance_corporate_payment_adjustments"
+    __table_args__ = (
+        UniqueConstraint(
+            "company", "period_year", "period_month", "version",
+            name="uq_finance_corporate_payment_adjustment_version",
+        ),
+        Index(
+            "ix_finance_corporate_payment_adjustments_period",
+            "company", "period_year", "period_month",
+        ),
+    )
+
+    company: Mapped[str] = mapped_column(String(256), nullable=False, index=True)
+    period_year: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    period_month: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    version: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    # 明细键为进项发票号码，保存的是本版本保留的发票。
+    selected_keys: Mapped[list] = mapped_column(JSONB, default=list)
+    actor: Mapped[str] = mapped_column(String(64), default="system")
+    note: Mapped[str] = mapped_column(Text, default="")
+
+
 class FinanceDeliveryPackage(Base, PkMixin, TimestampMixin):
     __tablename__ = "finance_delivery_packages"
     __table_args__ = (UniqueConstraint("period_id", "version", name="uq_finance_delivery_package_version"),)

@@ -15,9 +15,12 @@ from typing import Any
 from openpyxl import Workbook
 from openpyxl.styles import Font
 from openpyxl.utils import get_column_letter
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
+from app.core.audit import audit
 from app.models.bank import BankAccount, BankTransaction
+from app.models.finance import FinanceCorporatePaymentAdjustment
 from app.models.purchase import ExternalPurchaseOrder, PurchaseAllocationItem, Supplier
 from app.models.tax import TaxInvoice, TaxInvoiceLink
 from app.services import invoice_reconciliation, tax_invoice_service
@@ -110,14 +113,9 @@ def _invoice_purchase_map(db: Session, invoices: list[TaxInvoice]) -> dict[int, 
     return result
 
 
-def build_report(db: Session, year: int, month: int, company: str = "") -> dict[str, Any]:
-    """按“当月收到的进项发票”组织财务核对清单。
-
-    发票是月度交付的主维度；银行付款、采购订单和商品明细都挂在发票下面。
-    已收票但尚未匹配银行付款的发票也必须进入清单，不能因为未付款而被漏掉。
-    """
+def _period_invoices(db: Session, year: int, month: int, company: str) -> list[TaxInvoice]:
+    """当月收到的进项发票（按公司主体隔离）；保存选择与构建报告共用同一口径。"""
     start, end = _month_range(year, month)
-
     invoices = (
         db.query(TaxInvoice)
         .filter(
@@ -128,7 +126,24 @@ def build_report(db: Session, year: int, month: int, company: str = "") -> dict[
         .order_by(TaxInvoice.issue_date, TaxInvoice.id)
         .all()
     )
-    invoices = [inv for inv in invoices if _company_matches(inv, company)]
+    return [inv for inv in invoices if _company_matches(inv, company)]
+
+
+def build_report(
+    db: Session,
+    year: int,
+    month: int,
+    company: str = "",
+    *,
+    selected_keys: list[str] | None = None,
+) -> dict[str, Any]:
+    """按“当月收到的进项发票”组织财务核对清单。
+
+    发票是月度交付的主维度；银行付款、采购订单和商品明细都挂在发票下面。
+    已收票但尚未匹配银行付款的发票也必须进入清单，不能因为未付款而被漏掉。
+    selected_keys 传入发票号码列表时，只保留勾选的发票（交付包用）。
+    """
+    invoices = _period_invoices(db, year, month, company)
     invoice_map = {inv.id: inv for inv in invoices}
     invoice_ids = sorted(invoice_map)
 
@@ -305,7 +320,7 @@ def build_report(db: Session, year: int, month: int, company: str = "") -> dict[
     allocated_total = sum((_dec(row["invoiceCorporatePaidTotal"]) for row in invoice_rows), Decimal("0"))
     outstanding_total = sum((_dec(row["invoiceOutstandingAmount"]) for row in invoice_rows), Decimal("0"))
 
-    return {
+    report = {
         "year": year,
         "month": month,
         "company": company,
@@ -324,6 +339,115 @@ def build_report(db: Session, year: int, month: int, company: str = "") -> dict[
             ),
             "productRowCount": len(product_details),
         },
+        "invoiceRows": invoice_rows,
+        "rows": flat_rows,
+        "productDetails": product_details,
+    }
+    if selected_keys is not None:
+        return apply_invoice_selection(report, selected_keys)
+    return report
+
+
+def latest_adjustment(
+    db: Session, *, company: str, year: int, month: int
+) -> FinanceCorporatePaymentAdjustment | None:
+    return (
+        db.query(FinanceCorporatePaymentAdjustment)
+        .filter_by(company=company, period_year=year, period_month=month)
+        .order_by(FinanceCorporatePaymentAdjustment.version.desc())
+        .first()
+    )
+
+
+def save_corporate_payment_adjustment(
+    db: Session,
+    *,
+    company: str,
+    year: int,
+    month: int,
+    selected_keys: list[str],
+    actor: str = "system",
+    note: str = "",
+) -> dict[str, Any]:
+    """保存本月保留的进项发票选择，并以新版本记录调整；历史版本不改写。"""
+    if not 1 <= month <= 12:
+        raise ValueError("非法月份")
+    source_invoices = _period_invoices(db, year, month, company)
+    available = {(inv.invoice_number or "").strip() for inv in source_invoices}
+    normalized = list(dict.fromkeys(str(key).strip() for key in selected_keys if str(key).strip()))
+    unknown = [key for key in normalized if key not in available]
+    if unknown:
+        raise ValueError("发票清单已发生变化，请刷新后重新选择")
+    if source_invoices and not normalized:
+        raise ValueError("至少保留一张发票")
+
+    previous = (
+        db.query(func.max(FinanceCorporatePaymentAdjustment.version))
+        .filter_by(company=company, period_year=year, period_month=month)
+        .scalar()
+    )
+    version = int(previous or 0) + 1
+    row = FinanceCorporatePaymentAdjustment(
+        company=company,
+        period_year=year,
+        period_month=month,
+        version=version,
+        selected_keys=normalized,
+        actor=(actor or "system")[:64],
+        note=(note or "")[:500],
+    )
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    audit(
+        db,
+        actor,
+        "finance.corporate_payment.adjustment",
+        "finance_corporate_payment_adjustments",
+        row.id,
+        {"company": company, "year": year, "month": month, "version": version, "selectedCount": len(normalized)},
+    )
+    return {
+        "id": row.id,
+        "version": row.version,
+        "selectedKeys": normalized,
+        "selectedCount": len(normalized),
+        "sourceCount": len(source_invoices),
+        "updatedAt": row.updated_at.isoformat() if row.updated_at else None,
+    }
+
+
+def apply_invoice_selection(report: dict[str, Any], selected_keys: list[str]) -> dict[str, Any]:
+    """按勾选的发票号码过滤报告，并基于保留行重算汇总；不做任何补零或臆造。"""
+    selected = {str(key).strip() for key in selected_keys if str(key).strip()}
+    invoice_rows = [row for row in report.get("invoiceRows", []) if (row.get("invoiceNumber") or "").strip() in selected]
+    kept_ids = {row["invoiceId"] for row in invoice_rows}
+    flat_rows = [row for row in report.get("rows", []) if row.get("invoiceId") in kept_ids]
+    product_details = [row for row in report.get("productDetails", []) if row.get("invoiceId") in kept_ids]
+
+    unique_txns = {payment["paymentId"] for row in invoice_rows for payment in row.get("payments", [])}
+    payment_by_id = {
+        payment["paymentId"]: _dec(payment.get("paymentAmount"))
+        for row in report.get("invoiceRows", [])
+        for payment in row.get("payments", [])
+    }
+    status_of = lambda row: row.get("bankReconciliationStatus") or row.get("invoiceStatus")
+    summary = {
+        "paymentCount": len(unique_txns),
+        "invoiceCount": len(invoice_rows),
+        "paymentTotal": str(sum((payment_by_id[i] for i in unique_txns), Decimal("0"))),
+        "allocatedTotal": str(sum((_dec(row.get("invoiceCorporatePaidTotal")) for row in invoice_rows), Decimal("0"))),
+        "invoiceTotal": str(sum((_dec(row.get("invoiceTotalAmount")) for row in invoice_rows), Decimal("0"))),
+        "outstandingTotal": str(sum((_dec(row.get("invoiceOutstandingAmount")) for row in invoice_rows), Decimal("0"))),
+        "paidInvoiceCount": sum(1 for row in invoice_rows if status_of(row) == "paid"),
+        "partialInvoiceCount": sum(1 for row in invoice_rows if status_of(row) == "partial"),
+        "unpaidInvoiceCount": sum(1 for row in invoice_rows if status_of(row) == "unpaid"),
+        "notApplicableInvoiceCount": sum(1 for row in invoice_rows if status_of(row) == "not_applicable"),
+        "productRowCount": len(product_details),
+    }
+    return {
+        **report,
+        "summary": summary,
         "invoiceRows": invoice_rows,
         "rows": flat_rows,
         "productDetails": product_details,
