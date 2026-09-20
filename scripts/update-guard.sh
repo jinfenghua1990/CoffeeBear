@@ -12,7 +12,10 @@ resolve_root() {
 lock_dir_for_root() {
   local root="$1"
   local git_dir
-  git_dir="$(git -C "$root" rev-parse --absolute-git-dir 2>/dev/null)"
+  git_dir="$(git -C "$root" rev-parse --absolute-git-dir 2>/dev/null || true)"
+  if [[ -z "$git_dir" ]]; then
+    return 1
+  fi
   printf '%s/ecommerce-system-update.lock' "$git_dir"
 }
 
@@ -57,7 +60,8 @@ guard_check() {
   local root
   root="$(resolve_root "${1:-}")"
   local lock_dir
-  lock_dir="$(lock_dir_for_root "$root")"
+  lock_dir="$(lock_dir_for_root "$root" 2>/dev/null || true)"
+  [[ -n "$lock_dir" ]] || return 0
 
   [[ -d "$lock_dir" ]] || return 0
   if cleanup_stale_lock "$lock_dir"; then
@@ -90,7 +94,11 @@ install_hook() {
   local root
   root="$(resolve_root "${1:-}")"
   local git_dir
-  git_dir="$(git -C "$root" rev-parse --absolute-git-dir)"
+  git_dir="$(git -C "$root" rev-parse --absolute-git-dir 2>/dev/null || true)"
+  if [[ -z "$git_dir" ]]; then
+    echo "不是 Git 工作区，无法安装 update guard：$root" >&2
+    exit 2
+  fi
   local hooks_dir="$git_dir/ecommerce-hooks"
   local hook="$hooks_dir/reference-transaction"
 
@@ -122,8 +130,8 @@ case "$(basename "$0")" in
         ;;
       status)
         root="$(resolve_root "${2:-}")"
-        lock_dir="$(lock_dir_for_root "$root")"
-        if [[ -d "$lock_dir" ]] && ! cleanup_stale_lock "$lock_dir"; then
+        lock_dir="$(lock_dir_for_root "$root" 2>/dev/null || true)"
+        if [[ -n "$lock_dir" && -d "$lock_dir" ]] && ! cleanup_stale_lock "$lock_dir"; then
           echo "locked"
           cat "$lock_dir/owner.json" 2>/dev/null || true
           exit 1
