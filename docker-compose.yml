@@ -7,7 +7,7 @@ services:
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-ecommerce}
       POSTGRES_USER: ${POSTGRES_USER:-ecommerce}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-ecommerce}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
     ports:
       - "127.0.0.1:25432:5432"
     volumes:
@@ -40,7 +40,7 @@ services:
     user: "${RUNTIME_UID:-1000}:${RUNTIME_GID:-1000}"
     env_file: .env
     environment:
-      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-ecommerce}:${POSTGRES_PASSWORD:-ecommerce}@postgres:5432/${POSTGRES_DB:-ecommerce}
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-ecommerce}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-ecommerce}
       REDIS_URL: redis://redis:6379/0
       DATA_DIR: /data
       FRONTEND_OUT: /app/frontend/out
@@ -67,7 +67,7 @@ services:
     command: ["celery", "-A", "app.celery_app", "worker", "-l", "info", "--concurrency", "2"]
     env_file: .env
     environment:
-      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-ecommerce}:${POSTGRES_PASSWORD:-ecommerce}@postgres:5432/${POSTGRES_DB:-ecommerce}
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-ecommerce}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-ecommerce}
       REDIS_URL: redis://redis:6379/0
       DATA_DIR: /data
       HOME: /tmp
@@ -86,7 +86,7 @@ services:
     command: ["celery", "-A", "app.celery_app", "beat", "-l", "info", "--schedule", "/tmp/celerybeat-schedule"]
     env_file: .env
     environment:
-      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-ecommerce}:${POSTGRES_PASSWORD:-ecommerce}@postgres:5432/${POSTGRES_DB:-ecommerce}
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-ecommerce}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-ecommerce}
       REDIS_URL: redis://redis:6379/0
       HOME: /tmp
     depends_on:

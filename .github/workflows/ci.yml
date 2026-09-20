@@ -1,9 +1,17 @@
 name: CI
 
 on:
+  # Daily development changes are validated at PR boundaries instead of on every
+  # direct develop push. This avoids duplicate push + pull_request CI runs.
   push:
-    branches: [master, main, develop]
+    branches: [main]
   pull_request:
+    branches: [develop, main]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 jobs:
   backend:

@@ -42,7 +42,7 @@ class Settings(BaseSettings):
         r"|172\.(1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}):8888$"
     )
 
-    DATABASE_URL: str = "postgresql+psycopg://ecommerce:ecommerce@postgres:5432/ecommerce"
+    DATABASE_URL: str = "postgresql+psycopg://ecommerce:CHANGE_ME@postgres:5432/ecommerce"
     REDIS_URL: str = "redis://redis:6379/0"
 
     DATA_DIR: str = "/data"

@@ -1,11 +1,16 @@
 name: Container Candidate
 
 on:
+  # develop changes are frequent; build a candidate explicitly when it is
+  # actually needed for staging/release. Hotfix branches remain automatic.
   push:
     branches:
-      - develop
       - "hotfix/**"
   workflow_dispatch:
+
+concurrency:
+  group: container-candidate-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
