@@ -183,3 +183,40 @@ def test_r2_connection_test_maps_auth_failure_without_leaking_secret(db_session,
 
     assert "鉴权失败" in message
     assert "R2_SK_TEST_SUPER_SECRET" not in message
+
+
+
+def test_r2_restore_prepare_rejects_snapshot_outside_configured_prefix():
+    import pytest
+
+    with pytest.raises(ValueError, match="恢复点路径无效"):
+        r2_backup_service.start_restore_prepare(
+            "other-prefix/full/2026/09/20/snapshot.json",
+            prefix="ecommerce-workspace/backup",
+        )
+
+
+def test_r2_restore_prepare_passes_selected_snapshot_to_runner(tmp_path, monkeypatch):
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    captured = {}
+
+    class DummyProcess:
+        pass
+
+    def fake_popen(command, **kwargs):
+        captured["command"] = command
+        captured["kwargs"] = kwargs
+        return DummyProcess()
+
+    monkeypatch.setattr(r2_backup_service.subprocess, "Popen", fake_popen)
+
+    snapshot_key = "ecommerce-workspace/backup/full/2026/09/20/20260920_120000/snapshot.json"
+    result = r2_backup_service.start_restore_prepare(
+        snapshot_key,
+        prefix="ecommerce-workspace/backup",
+    )
+
+    assert result["started"] is True
+    assert result["snapshotObjectKey"] == snapshot_key
+    assert "--snapshot-key" in captured["command"]
+    assert snapshot_key in captured["command"]

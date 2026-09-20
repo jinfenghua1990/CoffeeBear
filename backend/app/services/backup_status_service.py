@@ -67,6 +67,8 @@ def _r2_records(directory: Path) -> list[dict[str, Any]]:
                 "target": "Cloudflare R2",
                 "status": "success",
                 "detail": "完整容灾" if kind == "full" else "模块化快照",
+                "snapshotObjectKey": str(payload.get("snapshotObjectKey") or ""),
+                "recoverable": kind == "full" and bool(payload.get("snapshotObjectKey")),
             }
         )
     return records

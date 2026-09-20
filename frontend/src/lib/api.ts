@@ -382,6 +382,8 @@ export type BackupRecord = {
   target: string;
   status: string;
   detail: string;
+  snapshotObjectKey?: string;
+  recoverable?: boolean;
 };
 
 export type BackupStatus = {
@@ -397,13 +399,17 @@ export function getBackupStatus(limit = 50): Promise<BackupStatus> {
   return jsonFetch<BackupStatus>(`/api/v1/integrations/backup-status?limit=${limit}`);
 }
 
-export function prepareR2Restore(): Promise<{
+export function prepareR2Restore(snapshotObjectKey = ""): Promise<{
   started: boolean;
   target: "r2";
   action: "prepare_restore";
+  snapshotObjectKey: string;
   log: string;
 }> {
-  return jsonFetch("/api/v1/integrations/r2-backup/prepare-restore", { method: "POST" });
+  return jsonFetch("/api/v1/integrations/r2-backup/prepare-restore", {
+    method: "POST",
+    body: JSON.stringify({ snapshotObjectKey }),
+  });
 }
 
 export type KodoColdBackupConfig = {

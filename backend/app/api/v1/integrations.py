@@ -71,6 +71,11 @@ class R2BackupRunIn(BaseModel):
     mode: str = "auto"
 
 
+class R2RestorePrepareIn(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+    snapshot_object_key: str = Field(default="", alias="snapshotObjectKey")
+
+
 @router.get("/r2-backup", dependencies=[Depends(require_roles("admin"))])
 def get_r2_backup_config(db: Session = Depends(get_db)) -> dict[str, Any]:
     """返回脱敏后的 Cloudflare R2 主备份配置。"""
@@ -128,14 +133,20 @@ def get_backup_status(limit: int = Query(default=50, ge=1, le=200)) -> dict[str,
 
 
 @router.post("/r2-backup/prepare-restore", dependencies=[Depends(require_roles("admin"))])
-def prepare_r2_restore(db: Session = Depends(get_db)) -> dict[str, Any]:
-    """下载并校验 R2 最新全量恢复点到 staging；绝不自动覆盖生产环境。"""
+def prepare_r2_restore(
+    body: R2RestorePrepareIn | None = None,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    """下载并校验指定或最新 R2 全量恢复点到 staging；绝不自动覆盖生产环境。"""
     config = r2_backup_service.get_config(db)
     if not config["configured"] or not config["enabled"]:
         raise HTTPException(400, "R2 尚未配置或当前未启用")
     try:
-        return r2_backup_service.start_restore_prepare()
-    except RuntimeError as exc:
+        return r2_backup_service.start_restore_prepare(
+            body.snapshot_object_key if body else "",
+            prefix=str(config.get("prefix") or r2_backup_service.DEFAULT_PREFIX),
+        )
+    except (ValueError, RuntimeError) as exc:
         raise HTTPException(400, str(exc)) from exc
 
 

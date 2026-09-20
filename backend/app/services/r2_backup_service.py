@@ -270,8 +270,20 @@ def start_backup(mode: str = "auto") -> dict[str, Any]:
         log_stream.close()
     return {"started": True, "target": "r2", "mode": mode, "log": str(log_path)}
 
-def start_restore_prepare() -> dict[str, Any]:
-    """后台准备并验证 R2 最新全量恢复点；不覆盖生产环境。"""
+def start_restore_prepare(snapshot_object_key: str = "", *, prefix: str = DEFAULT_PREFIX) -> dict[str, Any]:
+    """后台准备并验证 R2 全量恢复点；可指定历史 snapshot.json，不覆盖生产环境。"""
+    snapshot_object_key = snapshot_object_key.strip()
+    normalized_prefix = prefix.strip().strip("/") or DEFAULT_PREFIX
+    if snapshot_object_key:
+        expected_root = f"{normalized_prefix}/full/"
+        if (
+            snapshot_object_key.startswith("/")
+            or "\\" in snapshot_object_key
+            or ".." in snapshot_object_key.split("/")
+            or not snapshot_object_key.startswith(expected_root)
+            or not snapshot_object_key.endswith("/snapshot.json")
+        ):
+            raise ValueError("R2 恢复点路径无效或不属于当前备份前缀")
     root = Path(__file__).resolve().parents[3]
     script = root / "scripts" / "r2-restore.py"
     if not script.is_file():
@@ -283,8 +295,11 @@ def start_restore_prepare() -> dict[str, Any]:
     log_path = log_dir / "r2-restore.log"
     log_stream = log_path.open("ab")
     try:
+        command = [sys.executable, str(script)]
+        if snapshot_object_key:
+            command.extend(["--snapshot-key", snapshot_object_key])
         subprocess.Popen(
-            [sys.executable, str(script)],
+            command,
             cwd=str(root),
             stdout=log_stream,
             stderr=subprocess.STDOUT,
@@ -293,4 +308,10 @@ def start_restore_prepare() -> dict[str, Any]:
         )
     finally:
         log_stream.close()
-    return {"started": True, "target": "r2", "action": "prepare_restore", "log": str(log_path)}
+    return {
+        "started": True,
+        "target": "r2",
+        "action": "prepare_restore",
+        "snapshotObjectKey": snapshot_object_key,
+        "log": str(log_path),
+    }

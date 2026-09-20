@@ -385,6 +385,7 @@ export default function BackupSettingsPage() {
   const [r2Testing, setR2Testing] = useState(false);
   const [r2Running, setR2Running] = useState(false);
   const [restorePreparing, setRestorePreparing] = useState(false);
+  const [selectedRestoreKey, setSelectedRestoreKey] = useState("");
   const [backupStatus, setBackupStatus] = useState<BackupStatus | null>(null);
   const [r2Form, setR2Form] = useState({
     endpointUrl: "",
@@ -406,6 +407,13 @@ export default function BackupSettingsPage() {
     secretKey: "",
     enabled: true,
   });
+
+  const r2FullRestorePoints = useMemo(
+    () => (backupStatus?.records || []).filter(
+      (row) => row.type === "r2_full" && Boolean(row.snapshotObjectKey),
+    ),
+    [backupStatus],
+  );
 
   const tabs = useMemo(
     () =>
@@ -574,7 +582,7 @@ export default function BackupSettingsPage() {
     }
   }
 
-  async function prepareLatestR2Restore() {
+  async function prepareSelectedR2Restore() {
     if (!r2Config?.configured || !r2Config.enabled) {
       openStorage("r2");
       showNotice("请先配置并启用 Cloudflare R2。");
@@ -582,8 +590,12 @@ export default function BackupSettingsPage() {
     }
     setRestorePreparing(true);
     try {
-      await prepareR2Restore();
-      showNotice("已开始下载并校验 R2 最新全量恢复点；只写入 staging，不会覆盖生产环境。");
+      await prepareR2Restore(selectedRestoreKey);
+      showNotice(
+        selectedRestoreKey
+          ? "已开始下载并校验所选 R2 全量恢复点；只写入 staging，不会覆盖生产环境。"
+          : "已开始下载并校验 R2 最新全量恢复点；只写入 staging，不会覆盖生产环境。",
+      );
     } catch (error) {
       showNotice("恢复准备启动失败：" + (error instanceof Error ? error.message : String(error)));
     } finally {
@@ -958,11 +970,39 @@ export default function BackupSettingsPage() {
                 </div>
               ))}
             </div>
-            <div className="mt-5 flex flex-wrap items-center gap-3 border-t border-slate-100 pt-4">
-              <button type="button" disabled={restorePreparing || !r2Config?.configured || !r2Config.enabled} onClick={() => void prepareLatestR2Restore()} className="app-button-primary rounded-lg px-4 py-2 text-[11px] font-medium disabled:opacity-40">
-                {restorePreparing ? "启动中…" : "准备最新 R2 恢复点"}
-              </button>
-              <span className="text-[11px] text-slate-500">仅下载到 staging + Hash 校验 + 临时数据库恢复演练，不自动覆盖生产环境。</span>
+            <div className="mt-5 border-t border-slate-100 pt-4">
+              <div className="grid gap-3 lg:grid-cols-[1fr_auto] lg:items-end">
+                <label className="space-y-1.5">
+                  <span className="text-[10px] font-medium text-slate-600">R2 全量恢复点</span>
+                  <select
+                    value={selectedRestoreKey}
+                    onChange={(event) => setSelectedRestoreKey(event.target.value)}
+                    disabled={!r2Config?.configured || !r2Config.enabled}
+                    className="h-9 w-full rounded-lg border border-slate-200 bg-white px-3 text-[10px] text-slate-700 outline-none focus:border-blue-400 disabled:bg-slate-50 disabled:text-slate-400"
+                  >
+                    <option value="">最新 R2 全量恢复点（灾难恢复默认）</option>
+                    {r2FullRestorePoints.map((row) => (
+                      <option key={row.snapshotObjectKey} value={row.snapshotObjectKey}>
+                        {backupTime(row.time)} · {row.timestamp}
+                      </option>
+                    ))}
+                  </select>
+                  <div className="text-[9px] leading-4 text-slate-400">
+                    历史选项来自本机成功上传回执；新机器没有本地记录时仍可直接选择“最新 R2 全量恢复点”。
+                  </div>
+                </label>
+                <button
+                  type="button"
+                  disabled={restorePreparing || !r2Config?.configured || !r2Config.enabled}
+                  onClick={() => void prepareSelectedR2Restore()}
+                  className="app-button-primary h-9 rounded-lg px-4 text-[10px] font-medium disabled:opacity-40"
+                >
+                  {restorePreparing ? "准备中…" : "准备所选恢复点"}
+                </button>
+              </div>
+              <div className="mt-3 rounded-lg bg-slate-50 px-3 py-2 text-[9px] leading-5 text-slate-500">
+                安全流程：下载到 staging → SHA256 校验 → 临时数据库恢复演练。这里不会直接覆盖 PostgreSQL、data/、应用代码或 .env；Kodo 冷备不参与取回。
+              </div>
             </div>
           </section>
         </div>

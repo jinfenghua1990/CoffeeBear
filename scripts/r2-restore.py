@@ -193,6 +193,11 @@ def safe_name(name: str) -> str:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--skip-restore-check", action="store_true")
+    parser.add_argument(
+        "--snapshot-key",
+        default="",
+        help="指定 R2 full/.../snapshot.json；留空则使用 latest-full.json",
+    )
     args = parser.parse_args()
 
     load_simple_env(ROOT / ".env")
@@ -202,10 +207,24 @@ def main() -> int:
         return 2
 
     prefix = str(config.get("prefix") or "ecommerce-workspace/backup").strip().strip("/")
+    snapshot_key = str(args.snapshot_key or "").strip()
+    if snapshot_key:
+        expected_root = f"{prefix}/full/"
+        if (
+            snapshot_key.startswith("/")
+            or "\\" in snapshot_key
+            or ".." in snapshot_key.split("/")
+            or not snapshot_key.startswith(expected_root)
+            or not snapshot_key.endswith("/snapshot.json")
+        ):
+            print("R2 恢复点路径无效或不属于当前备份前缀", file=sys.stderr)
+            return 2
+    index_key = snapshot_key or f"{prefix}/latest-full.json"
     try:
-        index = get_json(config, f"{prefix}/latest-full.json")
+        index = get_json(config, index_key)
     except Exception as exc:
-        print(f"无法读取 R2 最新全量恢复点：{exc}", file=sys.stderr)
+        label = "指定全量恢复点" if snapshot_key else "最新全量恢复点"
+        print(f"无法读取 R2 {label}：{exc}", file=sys.stderr)
         return 2
 
     timestamp = str(index.get("timestamp") or "")
@@ -287,6 +306,7 @@ def main() -> int:
         ready = {
             "timestamp": timestamp,
             "source": "Cloudflare R2",
+            "snapshotObjectKey": snapshot_key,
             "validated": not args.skip_restore_check,
             "directory": str(target_dir),
             "modules": downloaded,
@@ -301,7 +321,7 @@ def main() -> int:
         print(f"R2 恢复准备失败：{exc}", file=sys.stderr)
         return 2
 
-    print(f"==> R2 最新完整恢复点已下载并校验：{target_dir}")
+    print(f"==> R2 完整恢复点已下载并校验：{target_dir}")
     print("==> 未覆盖生产环境；真正恢复需要后续明确确认。")
     return 0
 
