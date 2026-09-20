@@ -46,8 +46,8 @@ def _month_range(year: int, month: int) -> tuple[date, date]:
     return date(year, month, 1), date(year, month, last)
 
 
-def _dec(value: Decimal | None) -> Decimal:
-    return quantize(value, MONEY_QUANT) if value is not None else Decimal("0.0000")
+def _dec(value: Decimal | int | str | None) -> Decimal:
+    return quantize(to_decimal(value), MONEY_QUANT)
 
 
 def _link_amount(link: TaxInvoiceLink, invoice: TaxInvoice | None) -> Decimal:
