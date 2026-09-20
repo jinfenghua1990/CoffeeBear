@@ -59,6 +59,14 @@ def test_query_string_token_is_rejected(client):
     assert r.status_code == 401
 
 
+def test_auth_config_public(db_session):
+    """前端必须能在无 token 状态读取真实 access mode。"""
+    with TestClient(app) as anon:
+        r = anon.get("/api/v1/auth/config")
+        assert r.status_code == 200
+        assert r.json()["accessMode"] == settings.ACCESS_MODE
+
+
 def test_healthz_public(db_session):
     """健康检查保持公开（容器探针依赖）。"""
     with TestClient(app) as anon:

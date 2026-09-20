@@ -6,7 +6,7 @@ import Sidebar from "@/components/sidebar";
 import SystemStatusBar from "@/components/system-status-bar";
 import TopBar from "@/components/top-bar";
 import WorkspaceHost from "@/components/workspace/workspace-host";
-import { fetchMe, getToken, redirectToLogin } from "@/lib/api";
+import { fetchMe, getRuntimeAuthConfig, getToken, redirectToLogin } from "@/lib/api";
 
 /**
  * 路由守卫 + 全局外壳。
@@ -19,16 +19,38 @@ export default function AuthShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const router = useRouter();
   const [ready, setReady] = useState(false);
-  const openAccess = process.env.NEXT_PUBLIC_ACCESS_MODE === "open";
+  const [accessMode, setAccessMode] = useState<"checking" | "rbac" | "open">("checking");
   // 令牌只校验一次：工作区下切换 Tab 也会改地址栏，不能因此把整个工作区卸载重建
   const validatedRef = useRef(false);
 
   useEffect(() => {
+    let cancelled = false;
+    getRuntimeAuthConfig()
+      .then((config) => {
+        if (cancelled) return;
+        setAccessMode(config.accessMode);
+      })
+      .catch(() => {
+        if (cancelled) return;
+        // 读取失败时按更安全的 RBAC 处理，避免意外放开受保护页面。
+        setAccessMode("rbac");
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (accessMode === "checking") return;
     if (pathname === "/login") {
+      if (accessMode === "open") {
+        router.replace("/");
+        return;
+      }
       setReady(true);
       return;
     }
-    if (openAccess) {
+    if (accessMode === "open") {
       validatedRef.current = true;
       setReady(true);
       return;
@@ -37,7 +59,10 @@ export default function AuthShell({ children }: { children: React.ReactNode }) {
       router.replace("/login");
       return;
     }
-    if (validatedRef.current) return;
+    if (validatedRef.current) {
+      setReady(true);
+      return;
+    }
 
     let cancelled = false;
     fetchMe()
@@ -52,9 +77,10 @@ export default function AuthShell({ children }: { children: React.ReactNode }) {
     return () => {
       cancelled = true;
     };
-  }, [openAccess, pathname, router]);
+  }, [accessMode, pathname, router]);
 
-  if (pathname === "/login") return <>{children}</>;
+  if (accessMode === "checking") return null;
+  if (pathname === "/login" && accessMode === "rbac") return <>{children}</>;
   if (!ready) return null;
 
   return (

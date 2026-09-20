@@ -49,8 +49,8 @@ export default function LoginPage() {
       <div className="absolute right-5 top-5"><ThemeToggle /></div>
       <div className="w-full max-w-sm rounded-2xl border border-slate-200 bg-white p-8 shadow-sm">
         <div className="text-center">
-          <div className="text-xl font-semibold tracking-tight">电商经营数据平台</div>
-          <div className="mt-1 text-xs text-slate-400">吉客云 · 1688 采购 · 浙江农信</div>
+          <div className="text-xl font-semibold tracking-tight">电商工作平台</div>
+          <div className="mt-1 text-xs text-slate-400">内销 · 外贸 · 供应链 · 财务中心</div>
         </div>
 
         <form onSubmit={handleSubmit} className="mt-8 space-y-4">
