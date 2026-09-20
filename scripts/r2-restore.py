@@ -250,21 +250,26 @@ def main() -> int:
         if not db:
             raise RuntimeError("完整恢复点缺少数据库模块")
         data = downloaded.get("data")
-        local_manifest = target_dir / f"backup_{timestamp}.manifest"
-        local_manifest.write_text(
-            "\n".join(
-                [
-                    "version=1",
-                    f"timestamp={timestamp}",
-                    f"db={db['name']}",
-                    f"db_sha256={db['sha256']}",
-                    f"data={data['name'] if data else ''}",
-                    f"data_sha256={data['sha256'] if data else ''}",
-                    "",
-                ]
-            ),
-            encoding="utf-8",
-        )
+        base_manifest = downloaded.get("base_manifest")
+        if base_manifest:
+            local_manifest = target_dir / base_manifest["name"]
+        else:
+            # 兼容早期 R2 全量快照：当时未单独上传基础 manifest，则按索引重建。
+            local_manifest = target_dir / f"backup_{timestamp}.manifest"
+            local_manifest.write_text(
+                "\n".join(
+                    [
+                        "version=1",
+                        f"timestamp={timestamp}",
+                        f"db={db['name']}",
+                        f"db_sha256={db['sha256']}",
+                        f"data={data['name'] if data else ''}",
+                        f"data_sha256={data['sha256'] if data else ''}",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
 
         if not args.skip_restore_check:
             env = os.environ.copy()
