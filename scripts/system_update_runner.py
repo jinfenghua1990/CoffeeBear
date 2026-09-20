@@ -238,11 +238,67 @@ class Runner:
             changedFileCount=len(self.changed_files),
         )
 
+    def configured_backup_dir(self) -> Path:
+        """Resolve the same backup directory contract used by scripts/backup.sh."""
+        raw = (os.environ.get("BACKUP_DIR") or "").strip()
+        if raw:
+            path = Path(raw).expanduser()
+        else:
+            persist_raw = (os.environ.get("PERSIST_ROOT") or "").strip()
+            path = Path(persist_raw).expanduser() / "backups" if persist_raw else self.root / "backups"
+        if not path.is_absolute():
+            path = self.root / path
+        return path.resolve()
+
+    @staticmethod
+    def read_backup_manifest(path: Path) -> dict[str, str]:
+        values: dict[str, str] = {}
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            values[key.strip()] = value.strip()
+        return values
+
     def backup(self) -> None:
-        self.status("backup", 18, "更新前备份数据库和业务文件")
+        self.status("backup", 20, "更新前备份数据库和业务文件")
         started = time.time()
-        self.run([str(self.root / "scripts" / "backup.sh")], timeout=3600)
-        backups = self.root / "backups"
+        result = self.run([str(self.root / "scripts" / "backup.sh")], timeout=3600)
+
+        # 新版 backup.sh 会直接返回本次完整恢复点的 manifest。
+        # 更新器自身先于工作树切换，因此首次升级到新版时仍要兼容旧 backup.sh。
+        manifest_path: Path | None = None
+        for line in (result.stdout or "").splitlines():
+            if line.startswith("BACKUP_MANIFEST="):
+                raw = line.split("=", 1)[1].strip()
+                if raw:
+                    manifest_path = Path(raw).expanduser().resolve()
+                break
+
+        if manifest_path is not None and manifest_path.is_file():
+            values = self.read_backup_manifest(manifest_path)
+            backups = manifest_path.parent
+            db_name = values.get("db", "")
+            data_name = values.get("data", "")
+            if not db_name or Path(db_name).name != db_name:
+                raise RuntimeError("备份 manifest 缺少有效数据库文件名")
+            db_path = backups / db_name
+            data_path = backups / data_name if data_name else None
+            if not db_path.is_file() or db_path.stat().st_size <= 0:
+                raise RuntimeError("备份 manifest 指向的数据库备份不存在或为空")
+            if data_path is not None and (not data_path.is_file() or data_path.stat().st_size <= 0):
+                raise RuntimeError("备份 manifest 指向的 data 归档不存在或为空")
+            self.status(
+                "backup", 27, "备份完成",
+                backupManifest=str(manifest_path),
+                backupDb=str(db_path),
+                backupData=str(data_path) if data_path else "",
+            )
+            return
+
+        # 兼容旧版脚本：按 PERSIST_ROOT/BACKUP_DIR 找本次刚生成的文件，
+        # 不能再固定读取仓库 ./backups，否则数据/软件分离部署会误判备份失败。
+        backups = self.configured_backup_dir()
         db_backups = sorted(
             (p for p in backups.glob("db_*.dump") if p.stat().st_mtime >= started - 2 and p.stat().st_size > 0),
             key=lambda p: p.stat().st_mtime,
@@ -254,15 +310,17 @@ class Runner:
             reverse=True,
         )
         if not db_backups:
-            raise RuntimeError("备份脚本已结束，但未发现本次新生成的有效数据库备份")
+            raise RuntimeError(
+                f"备份脚本已结束，但未在 {backups} 发现本次新生成的有效数据库备份"
+            )
         self.status(
-            "backup", 25, "备份完成",
+            "backup", 27, "备份完成",
             backupDb=str(db_backups[0]),
             backupData=str(data_backups[0]) if data_backups else "",
         )
 
     def quiesce_workers(self) -> None:
-        self.status("quiescing", 28, "暂停 worker / beat，避免迁移期间后台继续写库")
+        self.status("quiescing", 16, "暂停 worker / beat，冻结后台写入后再生成恢复点")
         helper = self.root / "scripts" / "quiesce-update-workers.sh"
         self.run(["bash", str(helper)], timeout=120)
         self.workers_quiesced = True
@@ -421,8 +479,9 @@ class Runner:
                 self.history("success", "无需更新，当前已经是目标版本")
                 return 0
             self.set_maintenance(True, "系统正在安装更新，业务操作已暂时锁定")
-            self.backup()
+            # API 已进入维护模式后先暂停后台写入，再备份，避免数据库与 data/ 时间点漂移。
             self.quiesce_workers()
+            self.backup()
             self.switch_code()
             self.install_dependencies()
             self.migrate()

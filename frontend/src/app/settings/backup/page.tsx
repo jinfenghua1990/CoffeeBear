@@ -260,9 +260,9 @@ export default function BackupSettingsPage() {
         <div className="mt-4 max-w-7xl space-y-4">
           <section className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
             <SummaryCard
-              label="本地备份"
-              value="可用"
-              note="现有数据库 + data 备份脚本仍保留。"
+              label="本地基础备份"
+              value="数据可恢复"
+              note="现有脚本覆盖 PostgreSQL + data/，不是整机容灾。"
               tone="green"
             />
             <SummaryCard
@@ -279,8 +279,8 @@ export default function BackupSettingsPage() {
             />
             <SummaryCard
               label="当前恢复能力"
-              value="本地恢复"
-              note="云端恢复能力在 R2 接通后生效。"
+              value="业务数据恢复"
+              note="整机容灾恢复需等 R2 全量执行器接通后生效。"
               tone="blue"
             />
           </section>
@@ -397,13 +397,13 @@ export default function BackupSettingsPage() {
       {activeTab === "policy" && (
         <div className="mt-4 max-w-7xl space-y-4">
           <div className="rounded-xl border border-blue-100 bg-blue-50/60 px-4 py-3 text-[10px] leading-5 text-blue-800">
-            当前先固定一套默认策略，避免参数太多。后续真正接入执行器后，再开放时间、保留份数和目标位置的可编辑设置。
+            以下为计划策略，不代表当前已经在自动执行。真正接入执行器后，再开放时间、保留份数和目标位置的可编辑设置。
           </div>
 
           <div className="grid gap-4 xl:grid-cols-3">
             <StrategySummary
               title="① 日常模块化备份"
-              badge="每日 03:00"
+              badge="计划：每日 03:00"
               badgeTone="green"
               desc="检查数据库、data、配置是否变化。只有发生变化的模块才新增备份。"
               rows={[
@@ -417,7 +417,7 @@ export default function BackupSettingsPage() {
             />
             <StrategySummary
               title="② 全量容灾备份"
-              badge="每 10 天 03:00"
+              badge="计划：每 10 天 03:00"
               badgeTone="blue"
               desc="完整系统级恢复点，面向电脑 / NAS 损坏或更换设备。"
               rows={[
@@ -431,7 +431,7 @@ export default function BackupSettingsPage() {
             />
             <StrategySummary
               title="③ 冷备份"
-              badge="每日 04:00"
+              badge="计划：每日 04:00"
               badgeTone="amber"
               desc="每天一个完整恢复点；底层用去重增量方式，减少重复占用。"
               rows={[

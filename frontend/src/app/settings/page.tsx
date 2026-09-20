@@ -38,14 +38,6 @@ const INFRA: InfraItem[] = [
     state: "待配置",
     tone: "pending",
   },
-  {
-    key: "r2",
-    name: "Cloudflare R2",
-    desc: "云端异地副本；备份 Bucket 与公网资源 Bucket 分离。",
-    scope: "备份 / 公网资源",
-    state: "待配置",
-    tone: "pending",
-  },
 ];
 
 function InfraIcon({ name }: { name: string }) {
@@ -90,7 +82,7 @@ export default function SettingsPage() {
             <h2 className="text-sm font-semibold text-slate-900">集成设置 · 基础设施</h2>
             <p className="mt-1 text-[11px] text-slate-400">跨模块共用的发布、远程访问、部署与云存储统一放这里。</p>
           </div>
-          <span className="text-[10px] text-slate-400">业务集成不在此重复配置</span>
+          <span className="text-[10px] text-slate-400">备份与容灾已迁移到独立模块</span>
         </div>
 
         <div className="grid gap-3 md:grid-cols-2">
