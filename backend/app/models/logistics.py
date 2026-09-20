@@ -9,7 +9,7 @@
 from decimal import Decimal
 from datetime import datetime
 
-from sqlalchemy import BigInteger, DateTime, Numeric, String, Text, UniqueConstraint
+from sqlalchemy import BigInteger, DateTime, Index, Numeric, String, Text, UniqueConstraint
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -32,6 +32,10 @@ class LogisticsBill(Base, PkMixin, TimestampMixin):
     """物流账单：按账期 + 物流公司一粒。核销后写入实际金额，供财务利润替换预估。"""
 
     __tablename__ = "logistics_bills"
+    __table_args__ = (
+        Index("ix_logistics_bills_period_end", "period_end"),
+        Index("ix_logistics_bills_status", "status"),
+    )
 
     period_label: Mapped[str] = mapped_column(String(64), default="")  # 如 "2026 H1" / "2026-01 ~ 2026-06"
     period_start: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
