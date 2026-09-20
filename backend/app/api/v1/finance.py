@@ -1,3 +1,4 @@
+from datetime import datetime
 from typing import Any
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile
@@ -512,7 +513,7 @@ class FinanceEntryInput(BaseModel):
     invoice_status: str = Field(default="unknown", max_length=24)
     accounting_year: int = Field(ge=1900, le=2999)
     accounting_month: int = Field(ge=1, le=12)
-    occurred_at: Any | None = None
+    occurred_at: datetime | None = None
     note: str = ""
 
 
