@@ -343,14 +343,23 @@ def corporate_payment_report(
     if adjustment is not None:
         report["adjusted"] = True
         report["version"] = adjustment.version
-        report["selectedKeys"] = list(adjustment.selected_keys or [])
+        try:
+            report["selectedKeys"] = corporate_payment_report_service.canonical_report_selection_keys(
+                report, list(adjustment.selected_keys or [])
+            )
+            report["selectionError"] = ""
+        except ValueError as exc:
+            # 历史版本可能使用 invoice_number。唯一号码自动兼容；歧义号码必须人工重选。
+            report["selectedKeys"] = []
+            report["selectionError"] = str(exc)
         report["updatedAt"] = adjustment.updated_at.isoformat() if adjustment.updated_at else None
     else:
         report["adjusted"] = False
         report["version"] = None
         report["selectedKeys"] = [
-            row.get("invoiceNumber") for row in report.get("invoiceRows", []) if row.get("invoiceNumber")
+            row.get("invoiceKey") for row in report.get("invoiceRows", []) if row.get("invoiceKey")
         ]
+        report["selectionError"] = ""
         report["updatedAt"] = None
     report["selectedCount"] = len(report["selectedKeys"])
     report["sourceCount"] = source_count

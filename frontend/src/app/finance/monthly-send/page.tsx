@@ -222,6 +222,7 @@ type CorporateInvoicePayment = {
 };
 type CorporateInvoiceRow = {
   invoiceId: number;
+  invoiceKey: string;
   invoiceNumber: string;
   invoiceDate: string;
   invoiceType: string;
@@ -277,6 +278,7 @@ type CorporatePaymentReport = {
   adjusted?: boolean;
   version?: number | null;
   selectedKeys?: string[];
+  selectionError?: string;
   selectedCount?: number;
   sourceCount?: number;
   updatedAt?: string | null;
@@ -556,9 +558,13 @@ export default function MonthlySendPage() {
         if (seq !== corporateRequestSeq.current) return;
         setCorporatePayment(data);
         if (data) {
-          const available = (data.invoiceRows || []).map((row: CorporateInvoiceRow) => row.invoiceNumber).filter(Boolean);
-          const selected = data.selectedKeys?.length ? data.selectedKeys : available;
+          const available = (data.invoiceRows || []).map((row: CorporateInvoiceRow) => row.invoiceKey).filter(Boolean);
+          // selectedKeys=[] 可能表示历史号码存在歧义；不能把空数组误当成“默认全选”。
+          const selected = Array.isArray(data.selectedKeys) ? data.selectedKeys : available;
           setCorporateSelectedKeys(selected.filter((key: string) => available.includes(key)));
+          if (data.selectionError) {
+            setMsg(`历史发票选择需要重新确认：${data.selectionError}`);
+          }
         } else {
           setCorporateSelectedKeys([]);
         }
@@ -995,7 +1001,7 @@ export default function MonthlySendPage() {
     });
   }
 
-  const corporateAllKeys = corporateInvoices.map((row) => row.invoiceNumber).filter(Boolean);
+  const corporateAllKeys = corporateInvoices.map((row) => row.invoiceKey).filter(Boolean);
   const corporateAllSelected = corporateAllKeys.length > 0 && corporateAllKeys.every((key) => corporateSelectedKeys.includes(key));
 
   function toggleCorporateKey(key: string) {
@@ -1026,7 +1032,7 @@ export default function MonthlySendPage() {
       ? new Set((corporatePayment.selectedKeys || []).map((key) => key.trim()).filter(Boolean))
       : null;
     const viewInvoices = savedSelection
-      ? corporateInvoices.filter((row) => savedSelection.has(row.invoiceNumber))
+      ? corporateInvoices.filter((row) => savedSelection.has(row.invoiceKey))
       : corporateInvoices;
     const viewInvoiceIds = new Set(viewInvoices.map((row) => row.invoiceId));
     const viewProducts = savedSelection
@@ -1078,9 +1084,9 @@ export default function MonthlySendPage() {
                 <th className="px-3 py-2.5 font-medium">发票日期</th><th className="px-3 py-2.5 font-medium">供应商</th><th className="px-3 py-2.5 font-medium">发票号码</th><th className="px-3 py-2.5 text-right font-medium">价税合计</th><th className="px-3 py-2.5 text-right font-medium">银行已核对金额</th><th className="px-3 py-2.5 text-right font-medium">待核对银行金额</th><th className="px-3 py-2.5 font-medium">银行付款</th><th className="px-3 py-2.5 font-medium">采购订单</th><th className="px-3 py-2.5 font-medium">银行核对状态</th><th className="px-3 py-2.5 text-right font-medium">操作</th>
               </tr></thead>
               <tbody className="divide-y divide-slate-100">{viewInvoices.map((row) => {
-                const checked = selection ? selection.selected.includes(row.invoiceNumber) : true;
+                const checked = selection ? selection.selected.includes(row.invoiceKey) : true;
                 return <tr key={row.invoiceId} className={selection && !checked ? "bg-slate-50/70 text-slate-400" : corporateBankStatus(row) === "unpaid" ? "bg-amber-50/25" : ""}>
-                {selection && <td className="px-3 py-2.5"><input type="checkbox" checked={checked} onChange={() => selection.onToggle(row.invoiceNumber)} aria-label={`选择发票 ${row.invoiceNumber}`} className="h-4 w-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500" /></td>}
+                {selection && <td className="px-3 py-2.5"><input type="checkbox" checked={checked} onChange={() => selection.onToggle(row.invoiceKey)} aria-label={`选择发票 ${row.invoiceNumber}`} className="h-4 w-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500" /></td>}
                 <td className="whitespace-nowrap px-3 py-2.5 text-slate-600">{row.invoiceDate || "—"}</td>
                 <td className="max-w-[220px] px-3 py-2.5"><div className="truncate font-medium text-slate-800">{row.supplierName || "—"}</div><div className="mt-0.5 truncate font-mono text-[10px] text-slate-400">{row.supplierTaxId || ""}</div></td>
                 <td className="px-3 py-2.5 font-mono text-[11px] text-slate-600">{row.invoiceNumber || "—"}</td>

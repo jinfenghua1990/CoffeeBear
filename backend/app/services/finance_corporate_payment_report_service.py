@@ -141,7 +141,7 @@ def build_report(
 
     发票是月度交付的主维度；银行付款、采购订单和商品明细都挂在发票下面。
     已收票但尚未匹配银行付款的发票也必须进入清单，不能因为未付款而被漏掉。
-    selected_keys 传入发票号码列表时，只保留勾选的发票（交付包用）。
+    selected_keys 以 invoice_key 为规范键；兼容历史唯一的发票号码，歧义号码拒绝猜测。
     """
     invoices = _period_invoices(db, year, month, company)
     invoice_map = {inv.id: inv for inv in invoices}
@@ -249,6 +249,7 @@ def build_report(
                 ),
                 "paymentAllocatedAmount": str(allocated),
                 "invoiceId": inv.id,
+                "invoiceKey": inv.invoice_key,
                 "invoiceNumber": inv.invoice_number,
                 "invoiceDate": inv.issue_date.strftime("%Y-%m-%d") if inv.issue_date else "",
                 "invoiceType": inv.invoice_type,
@@ -266,6 +267,7 @@ def build_report(
 
         invoice_rows.append({
             "invoiceId": inv.id,
+            "invoiceKey": inv.invoice_key,
             "invoiceNumber": inv.invoice_number or "",
             "invoiceDate": inv.issue_date.strftime("%Y-%m-%d") if inv.issue_date else "",
             "invoiceType": inv.invoice_type or "",
@@ -300,6 +302,7 @@ def build_report(
             for item in item_rows:
                 product_details.append({
                     "invoiceId": inv.id,
+                    "invoiceKey": inv.invoice_key,
                     "invoiceNumber": inv.invoice_number,
                     "invoiceDate": inv.issue_date.strftime("%Y-%m-%d") if inv.issue_date else "",
                     "supplierName": inv.seller_name,
@@ -359,6 +362,58 @@ def latest_adjustment(
     )
 
 
+def _canonicalize_invoice_selection(
+    available_rows: list[tuple[str, str]],
+    selected_keys: list[str],
+) -> list[str]:
+    """把选择统一转换为 invoice_key；仅对唯一旧发票号码做兼容映射。"""
+    canonical_keys: set[str] = set()
+    keys_by_number: dict[str, list[str]] = defaultdict(list)
+    for invoice_key, invoice_number in available_rows:
+        canonical = str(invoice_key or "").strip()
+        number = str(invoice_number or "").strip()
+        if not canonical:
+            continue
+        canonical_keys.add(canonical)
+        if number and canonical not in keys_by_number[number]:
+            keys_by_number[number].append(canonical)
+
+    requested = list(dict.fromkeys(
+        str(key).strip() for key in selected_keys if str(key).strip()
+    ))
+    result: list[str] = []
+    for key in requested:
+        if key in canonical_keys:
+            canonical = key
+        else:
+            legacy_matches = keys_by_number.get(key, [])
+            if len(legacy_matches) == 1:
+                canonical = legacy_matches[0]
+            elif len(legacy_matches) > 1:
+                raise ValueError(
+                    f"历史选择使用的发票号码 {key} 当前对应多张发票，请刷新页面后重新选择"
+                )
+            else:
+                raise ValueError("发票清单已发生变化，请刷新后重新选择")
+        if canonical not in result:
+            result.append(canonical)
+    return result
+
+
+def canonical_report_selection_keys(
+    report: dict[str, Any], selected_keys: list[str]
+) -> list[str]:
+    """将报告选择转换为稳定 invoice_key，供页面、历史版本兼容与打包共同复用。"""
+    available_rows = [
+        (
+            str(row.get("invoiceKey") or "").strip(),
+            str(row.get("invoiceNumber") or "").strip(),
+        )
+        for row in report.get("invoiceRows", [])
+    ]
+    return _canonicalize_invoice_selection(available_rows, selected_keys)
+
+
 def save_corporate_payment_adjustment(
     db: Session,
     *,
@@ -373,11 +428,13 @@ def save_corporate_payment_adjustment(
     if not 1 <= month <= 12:
         raise ValueError("非法月份")
     source_invoices = _period_invoices(db, year, month, company)
-    available = {(inv.invoice_number or "").strip() for inv in source_invoices}
-    normalized = list(dict.fromkeys(str(key).strip() for key in selected_keys if str(key).strip()))
-    unknown = [key for key in normalized if key not in available]
-    if unknown:
-        raise ValueError("发票清单已发生变化，请刷新后重新选择")
+    normalized = _canonicalize_invoice_selection(
+        [
+            ((inv.invoice_key or "").strip(), (inv.invoice_number or "").strip())
+            for inv in source_invoices
+        ],
+        selected_keys,
+    )
     if source_invoices and not normalized:
         raise ValueError("至少保留一张发票")
 
@@ -418,9 +475,12 @@ def save_corporate_payment_adjustment(
 
 
 def apply_invoice_selection(report: dict[str, Any], selected_keys: list[str]) -> dict[str, Any]:
-    """按勾选的发票号码过滤报告，并基于保留行重算汇总；不做任何补零或臆造。"""
-    selected = {str(key).strip() for key in selected_keys if str(key).strip()}
-    invoice_rows = [row for row in report.get("invoiceRows", []) if (row.get("invoiceNumber") or "").strip() in selected]
+    """按稳定 invoice_key 过滤报告；兼容唯一旧发票号码，不对歧义号码做猜测。"""
+    selected = set(canonical_report_selection_keys(report, selected_keys))
+    invoice_rows = [
+        row for row in report.get("invoiceRows", [])
+        if (row.get("invoiceKey") or "").strip() in selected
+    ]
     kept_ids = {row["invoiceId"] for row in invoice_rows}
     flat_rows = [row for row in report.get("rows", []) if row.get("invoiceId") in kept_ids]
     product_details = [row for row in report.get("productDetails", []) if row.get("invoiceId") in kept_ids]

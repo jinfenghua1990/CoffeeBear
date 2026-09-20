@@ -109,6 +109,7 @@ def test_build_report_links_bank_invoice_purchase_and_product(db_session):
     assert report["summary"]["paymentCount"] == 1
     assert report["summary"]["invoiceCount"] == 1
     assert Decimal(report["summary"]["allocatedTotal"]) == Decimal("1000.00")
+    assert report["invoiceRows"][0]["invoiceKey"] == invoice.invoice_key
     assert report["invoiceRows"][0]["invoiceNumber"] == invoice.invoice_number
     assert report["invoiceRows"][0]["payments"][0]["voucherNo"] == txn.voucher_no
     assert po.external_order_id in report["invoiceRows"][0]["purchaseOrderNos"]
@@ -348,6 +349,7 @@ def test_adjustment_persists_selected_invoices_and_recomputes_summary(db_session
         selected_keys=[invoice_a.invoice_number], actor="pytest-adjuster",
     )
     assert saved["version"] == 1
+    assert saved["selectedKeys"] == [invoice_a.invoice_key]
     assert saved["selectedCount"] == 1
     assert saved["sourceCount"] == 2
 
@@ -355,6 +357,7 @@ def test_adjustment_persists_selected_invoices_and_recomputes_summary(db_session
         db_session, 2026, 8, company=company,
         selected_keys=list(saved["selectedKeys"]),
     )
+    assert [row["invoiceKey"] for row in current["invoiceRows"]] == [invoice_a.invoice_key]
     assert [row["invoiceNumber"] for row in current["invoiceRows"]] == [invoice_a.invoice_number]
     assert current["rows"] == []
     assert current["summary"]["invoiceCount"] == 1
@@ -370,6 +373,7 @@ def test_adjustment_persists_selected_invoices_and_recomputes_summary(db_session
     assert again["version"] == 2
     latest = service.latest_adjustment(db_session, company=company, year=2026, month=8)
     assert latest is not None and latest.version == 2
+    assert list(latest.selected_keys or []) == [invoice_a.invoice_key, invoice_b.invoice_key]
 
     full = service.build_report(
         db_session, 2026, 8, company=company,
@@ -387,3 +391,91 @@ def test_adjustment_persists_selected_invoices_and_recomputes_summary(db_session
             db_session, company=company, year=2026, month=8,
             selected_keys=[],
         )
+
+
+
+def test_duplicate_invoice_number_requires_stable_invoice_key_selection(db_session):
+    """同号码不同 invoice_key 时，旧号码选择必须报歧义；canonical key 可以精确选择一张。"""
+    token = uuid4().hex[:10]
+    company = f"同号测试公司-{token}"
+    shared_number = f"INV-SAME-{token}"
+    invoice_a = TaxInvoice(
+        invoice_key=f"CODE-A-{token}|{shared_number}",
+        invoice_code=f"CODE-A-{token}",
+        invoice_number=shared_number,
+        direction="input",
+        status="issued",
+        issue_date=datetime(2026, 8, 18, tzinfo=timezone.utc),
+        seller_name=f"同号供应商A-{token}",
+        buyer_name=company,
+        total_amount=Decimal("100.00"),
+        source_system="tax_export",
+        raw={},
+    )
+    invoice_b = TaxInvoice(
+        invoice_key=f"CODE-B-{token}|{shared_number}",
+        invoice_code=f"CODE-B-{token}",
+        invoice_number=shared_number,
+        direction="input",
+        status="issued",
+        issue_date=datetime(2026, 8, 19, tzinfo=timezone.utc),
+        seller_name=f"同号供应商B-{token}",
+        buyer_name=company,
+        total_amount=Decimal("200.00"),
+        source_system="tax_export",
+        raw={},
+    )
+    db_session.add_all([invoice_a, invoice_b])
+    db_session.commit()
+
+    report = service.build_report(db_session, 2026, 8, company=company)
+    assert {row["invoiceKey"] for row in report["invoiceRows"]} == {
+        invoice_a.invoice_key,
+        invoice_b.invoice_key,
+    }
+    assert {row["invoiceNumber"] for row in report["invoiceRows"]} == {shared_number}
+
+    with pytest.raises(ValueError, match="对应多张发票"):
+        service.save_corporate_payment_adjustment(
+            db_session,
+            company=company,
+            year=2026,
+            month=8,
+            selected_keys=[shared_number],
+            actor="pytest-adjuster",
+        )
+
+    saved = service.save_corporate_payment_adjustment(
+        db_session,
+        company=company,
+        year=2026,
+        month=8,
+        selected_keys=[invoice_a.invoice_key],
+        actor="pytest-adjuster",
+    )
+    assert saved["selectedKeys"] == [invoice_a.invoice_key]
+
+    selected_report = service.build_report(
+        db_session,
+        2026,
+        8,
+        company=company,
+        selected_keys=saved["selectedKeys"],
+    )
+    assert [row["invoiceId"] for row in selected_report["invoiceRows"]] == [invoice_a.id]
+    assert Decimal(selected_report["summary"]["invoiceTotal"]) == Decimal("100.00")
+
+
+def test_legacy_unique_invoice_number_selection_maps_to_invoice_key(db_session):
+    """旧版本若保存的是唯一发票号码，读取/打包仍能无损映射到 canonical invoice_key。"""
+    token = uuid4().hex[:10]
+    company = f"旧选择兼容公司-{token}"
+    invoice = _add_adjustment_invoice(db_session, token, 0, company, "123.00")
+    db_session.commit()
+
+    report = service.build_report(db_session, 2026, 8, company=company)
+    canonical = service.canonical_report_selection_keys(report, [invoice.invoice_number])
+
+    assert canonical == [invoice.invoice_key]
+    selected = service.apply_invoice_selection(report, [invoice.invoice_number])
+    assert [row["invoiceKey"] for row in selected["invoiceRows"]] == [invoice.invoice_key]
