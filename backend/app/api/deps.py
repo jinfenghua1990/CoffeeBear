@@ -15,7 +15,7 @@ from app.db import get_db
 from app.models.org import User
 
 # 无需登录即可访问（登录本身 + 1688 授权回调跳转）
-_PUBLIC_PATHS = {"/api/v1/auth/login"}
+_PUBLIC_PATHS = {"/api/v1/auth/login", "/api/v1/auth/config"}
 _PUBLIC_PREFIXES = ("/api/v1/integrations/alibaba1688/callback",)
 _SELF_SERVICE_WRITE_PATHS = {"/api/v1/auth/change-password", "/api/v1/auth/logout"}
 
