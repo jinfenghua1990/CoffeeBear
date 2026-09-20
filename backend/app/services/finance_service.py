@@ -310,8 +310,8 @@ def package_period(db: Session, company: str, year: int, month: int,
                    actor: str = "system", include: list[str] | None = None) -> FinanceDeliveryPackage:
     """打包账期交付 ZIP；每次生成新版本号，ZIP 落 output/V{n}，绝不覆盖。
 
-    include 为空（None）时打包全部 3 张表并要求资料齐全（自动发送路径）；
-    手动打包可传子集（交易明细/回单详情/无票收入），只校验所选表的文件。
+    include 控制银行/无票收入交付资料；如果该公司主体当月存在外贸 FinanceEntry，
+    系统会额外自动生成「外贸财务汇总.xlsx」，无需用户重复勾选。
     """
     validate_period(year, month)
     selective = include is not None
@@ -373,6 +373,19 @@ def package_period(db: Session, company: str, year: int, month: int,
         )
     unbilled_name = f"{month}月销售出库-无票收入.xlsx"
 
+    # 外贸财务汇总直接来自该公司主体的 FinanceEntry，不复制 Shipment/税费计算逻辑。
+    from app.services import finance_closing_service
+    foreign_summary_content: bytes | None = None
+    entity = finance_closing_service.resolve_entity_by_name(db, company)
+    if entity is not None:
+        foreign_summary_content = finance_closing_service.foreign_trade_xlsx(
+            db,
+            legal_entity_id=entity.id,
+            year=year,
+            month=month,
+        )
+    foreign_summary_name = f"{month}月-外贸财务汇总.xlsx"
+
     # 归档表的 stored_path 也属于不可信持久化数据：打包前再次做目录边界校验。
     source_files = [
         (f, arc_name, managed_data_file(f.stored_path, label="原始归档文件"))
@@ -406,6 +419,8 @@ def package_period(db: Session, company: str, year: int, month: int,
                 zf.write(source_path, arcname=arc_name)
             if unbilled_content is not None:
                 zf.writestr(unbilled_name, unbilled_content)
+            if foreign_summary_content is not None:
+                zf.writestr(foreign_summary_name, foreign_summary_content)
         break
 
     try:
@@ -426,7 +441,13 @@ def package_period(db: Session, company: str, year: int, month: int,
             zip_path.unlink(missing_ok=True)
         raise
     audit(db, actor, "finance.package.create", "finance_delivery_packages", pkg.id,
-          {"version": version, "files": len(source_files), "sha256": pkg.zip_sha256[:16]})
+          {
+              "version": version,
+              "files": len(source_files),
+              "generatedUnbilled": unbilled_content is not None,
+              "generatedForeignSummary": foreign_summary_content is not None,
+              "sha256": pkg.zip_sha256[:16],
+          })
     return pkg
 
 
