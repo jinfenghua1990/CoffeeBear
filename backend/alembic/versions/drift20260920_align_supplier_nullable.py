@@ -15,7 +15,7 @@ branch_labels = None
 depends_on = None
 
 
-def _ensure_fk(
+def _replace_fk(
     name: str,
     source_table: str,
     target_table: str,
@@ -24,45 +24,26 @@ def _ensure_fk(
     *,
     ondelete: str | None = None,
 ) -> None:
-    """Create FK idempotently inside PostgreSQL itself.
+    """Recreate the expected FK deterministically.
 
-    A previous production repair may already have created the constraint while
-    Alembic still considers this revision pending. SQLAlchemy reflection proved
-    unreliable on that live schema/search_path, so the existence check must run
-    in pg_catalog against the exact relation that ALTER TABLE would target.
+    Some production databases already contain these constraints even though
+    Alembic still considers this revision pending. Drop-by-name first, then
+    recreate the canonical definition. PostgreSQL transactional DDL keeps the
+    migration atomic if validation fails.
     """
-    if len(source_columns) != 1 or len(target_columns) != 1:
-        raise RuntimeError("this migration helper only supports single-column foreign keys")
-
-    delete_sql = f" ON DELETE {ondelete}" if ondelete else ""
-    source_column = source_columns[0]
-    target_column = target_columns[0]
-    op.execute(
-        sa.text(
-            f"""
-            DO $
-            BEGIN
-                IF NOT EXISTS (
-                    SELECT 1
-                    FROM pg_constraint
-                    WHERE conname = '{name}'
-                      AND conrelid = to_regclass('{source_table}')
-                ) THEN
-                    ALTER TABLE {source_table}
-                    ADD CONSTRAINT {name}
-                    FOREIGN KEY ({source_column})
-                    REFERENCES {target_table} ({target_column}){delete_sql};
-                END IF;
-            END
-            $;
-            """
-        )
+    op.execute(sa.text(f"ALTER TABLE {source_table} DROP CONSTRAINT IF EXISTS {name}"))
+    op.create_foreign_key(
+        name,
+        source_table,
+        target_table,
+        source_columns,
+        target_columns,
+        ondelete=ondelete,
     )
 
 
 def _drop_fk_if_exists(name: str, table: str) -> None:
     op.execute(sa.text(f"ALTER TABLE {table} DROP CONSTRAINT IF EXISTS {name}"))
-
 
 def upgrade() -> None:
     # 旧模型已提升到 10 位小数，但迁移仍停在 4 位；使用 24,10 保留原有
@@ -84,7 +65,7 @@ def upgrade() -> None:
 
     # FinanceDeliveryFile 模型声明了两个 FK，但 phase0 迁移只建了列与索引。
     # 正式补上约束；如果生产库存在孤儿行，迁移会明确失败而不是静默删除数据。
-    _ensure_fk(
+    _replace_fk(
         "fk_fdf_package",
         "finance_delivery_files",
         "finance_delivery_packages",
@@ -92,7 +73,7 @@ def upgrade() -> None:
         ["id"],
         ondelete="CASCADE",
     )
-    _ensure_fk(
+    _replace_fk(
         "fk_fdf_archive",
         "finance_delivery_files",
         "archive_files",
