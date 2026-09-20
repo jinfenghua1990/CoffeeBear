@@ -17,6 +17,8 @@ DEFAULT_ENTITY_NAME = "浙江柴本网络科技有限公司"
 CATEGORY_LABELS = {
     "sales_income": "销售收入",
     "purchase_cost": "采购成本",
+    "inventory_purchase": "库存采购 / 应付",
+    "sales_cost": "销售成本",
     "shipment_goods_cost": "出运货品成本",
     "cargo_insurance": "货运保险",
     "port_fee": "港杂 / 码头费",

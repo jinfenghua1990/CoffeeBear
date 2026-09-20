@@ -5,9 +5,11 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import select
 
 from app.config import settings
+from app.models.catalog import ProductSku
 from app.models.finance import FinanceEntry, FinanceLegalEntity
 from app.models.foreign_trade import ForeignTradeShipment
-from app.models.sales import SalesOrder
+from app.models.jackyun import JackyunGoodsDocument, JackyunGoodsDocumentItem
+from app.models.sales import SalesOrder, SalesOrderItem
 from app.services import finance_center_service
 from app.services import finance_projection_service as projection
 
@@ -185,3 +187,110 @@ def test_actual_value_supersedes_estimate_in_forecast_profit(db_session):
     assert cny["actualProfit"] == "90.0000"
     assert cny["estimatedProfit"] == "90.0000"
     assert cny["actualNetCash"] == "90.0000"
+
+
+
+def test_domestic_sales_projects_cost_from_inbound_when_complete(db_session):
+    sku = ProductSku(
+        jackyun_sku_id="PY-FIN-COST-SKU-ID",
+        sku_code="PY-FIN-COST-SKU",
+        sku_name="财务投影成本测试商品",
+        status="active",
+    )
+    db_session.add(sku)
+    db_session.flush()
+
+    inbound = JackyunGoodsDocument(
+        document_type="inbound",
+        goodsdoc_no="PY-FIN-INBOUND-COST-1",
+        document_at=_dt(day=1),
+        supplier_name="测试供应商",
+        total_amount=Decimal("1000"),
+    )
+    db_session.add(inbound)
+    db_session.flush()
+    db_session.add(
+        JackyunGoodsDocumentItem(
+            document_id=inbound.id,
+            line_no=1,
+            goods_no=sku.sku_code,
+            quantity=Decimal("100"),
+            unit_price_tax=Decimal("10"),
+            amount_tax=Decimal("1000"),
+            matched_sku_id=sku.id,
+        )
+    )
+
+    order = SalesOrder(
+        order_no="PY-FIN-SALE-COST-1",
+        source_provider="pytest",
+        platform="京东",
+        order_status="已完成",
+        pay_status="已支付",
+        paid_amount=Decimal("100"),
+        currency="CNY",
+        ordered_at=_dt(day=20),
+        paid_at=_dt(day=20),
+    )
+    db_session.add(order)
+    db_session.flush()
+    db_session.add(
+        SalesOrderItem(
+            order_id=order.id,
+            sku_id=sku.id,
+            sku_code=sku.sku_code,
+            goods_name=sku.sku_name,
+            quantity=Decimal("3"),
+            amount=Decimal("100"),
+        )
+    )
+    db_session.flush()
+
+    projection.project_domestic_sales_order(db_session, order)
+    db_session.flush()
+
+    rows = db_session.scalars(
+        select(FinanceEntry).where(
+            FinanceEntry.source_type == "domestic_sales_order",
+            FinanceEntry.source_id == str(order.id),
+        )
+    ).all()
+    by_category = {row.category: row for row in rows}
+    assert by_category["sales_income"].amount == Decimal("100.0000")
+    assert by_category["sales_cost"].amount == Decimal("30.0000")
+    assert by_category["sales_cost"].cash_effect is False
+    assert by_category["sales_cost"].profit_effect is True
+
+
+def test_inbound_projects_inventory_payable_without_profit_or_cash_effect(db_session):
+    entity = finance_center_service.resolve_entity(db_session)
+    inbound = JackyunGoodsDocument(
+        document_type="inbound",
+        goodsdoc_no="PY-FIN-INBOUND-PAYABLE-1",
+        document_at=_dt(),
+        supplier_name="财务投影供应商",
+        total_amount=Decimal("888.88"),
+        warehouse_name="测试仓",
+        raw={"source": "local_purchase_inbound"},
+    )
+    db_session.add(inbound)
+    db_session.flush()
+
+    result = projection.project_inbound_document(db_session, inbound)
+    db_session.flush()
+
+    entry = db_session.scalar(
+        select(FinanceEntry).where(
+            FinanceEntry.source_type == "domestic_inbound",
+            FinanceEntry.source_id == str(inbound.id),
+            FinanceEntry.category == "inventory_purchase",
+        )
+    )
+    assert result["created"] == 1
+    assert entry is not None
+    assert entry.legal_entity_id == entity.id
+    assert entry.amount == Decimal("888.8800")
+    assert entry.settlement_status == "pending"
+    assert entry.invoice_status == "pending"
+    assert entry.cash_effect is False
+    assert entry.profit_effect is False

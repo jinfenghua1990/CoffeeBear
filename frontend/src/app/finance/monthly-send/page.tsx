@@ -62,26 +62,25 @@ type FileRow = {
   uploader: string;
   uploadedAt: string | null;
 };
-type IntakeSource = {
-  sourceType: "purchase_inbound" | "sales_query";
-  label: string;
-  hint: string;
-  required: boolean;
-  status: "MISSING" | "UPLOADED" | "IMPORTING" | "IMPORTED" | "REVIEW" | "ERROR" | string;
-  reportType: string;
-  stats: Record<string, unknown>;
-  error: string;
-  importedAt: string | null;
-  archiveFile: FileRow | null;
-};
-type IntakeStatus = {
-  company: string;
-  year: number;
-  month: number;
-  sourceReady: boolean;
-  requiredCount: number;
-  readyCount: number;
-  sources: IntakeSource[];
+type BusinessStatus = {
+  ready: boolean;
+  source: string;
+  salesSource: string;
+  costSource: string;
+  salesOrderCount: number;
+  warehouseCount: number;
+  totalQuantity: string;
+  salesAmount: string;
+  costAmount: string;
+  costIncomplete: boolean;
+  costMissingCount: number;
+  costMissingDetail: Array<{ skuCode: string; skuName: string; quantity: string }>;
+  sync: {
+    created: number;
+    updated: number;
+    deleted: number;
+    sources: Record<string, number>;
+  };
 };
 type MailStatus = { configured: boolean; host: string; port: number; username: string; from: string };
 type PaymentMatchInvoice = {
@@ -214,7 +213,7 @@ export default function MonthlySendPage() {
   const [ccText, setCcText] = useState("");
   const [periods, setPeriods] = useState<Period[]>([]);
   const [files, setFiles] = useState<FileRow[]>([]);
-  const [intake, setIntake] = useState<IntakeStatus | null>(null);
+  const [businessStatus, setBusinessStatus] = useState<BusinessStatus | null>(null);
   const [unbilled, setUnbilled] = useState<Unbilled | null>(null);
   const [mailStatus, setMailStatus] = useState<MailStatus | null>(null);
   const [mailOpen, setMailOpen] = useState(false);
@@ -236,11 +235,11 @@ export default function MonthlySendPage() {
   const [busy, setBusy] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
   const filesRequestSeq = useRef(0);
-  const intakeRequestSeq = useRef(0);
+  const businessRequestSeq = useRef(0);
   const unbilledRequestSeq = useRef(0);
   const matchRequestSeq = useRef(0);
   const pickerRequestSeq = useRef(0);
-  const uploadKind = useRef<"交易明细" | "回单详情" | "purchase_inbound" | "sales_query">("交易明细");
+  const uploadKind = useRef<"交易明细" | "回单详情">("交易明细");
 
   const period = periods.find((p) => sel && p.year === sel.year && p.month === sel.month) || null;
   const latest = useCallback(
@@ -252,8 +251,6 @@ export default function MonthlySendPage() {
   const bankReceipt = latest("回单详情");
   const otherFiles = files.filter((f) => !f.originalName.includes("交易明细") && !f.originalName.includes("回单详情"));
   const salesFile = [...otherFiles].filter((f) => f.category === "sales_summary").sort((a, b) => b.version - a.version)[0] || null;
-  const inboundSource = intake?.sources.find((source) => source.sourceType === "purchase_inbound") || null;
-  const salesQuerySource = intake?.sources.find((source) => source.sourceType === "sales_query") || null;
 
   const loadTemplate = useCallback(async () => {
     const res = await authenticatedFetch("/api/v1/finance/sales-report/template", { cache: "no-store" });
@@ -280,13 +277,20 @@ export default function MonthlySendPage() {
       .catch(() => {});
   }, [sel]);
 
-  const loadIntake = useCallback(() => {
+  const loadBusiness = useCallback(() => {
     if (!sel) return;
-    const seq = ++intakeRequestSeq.current;
-    authenticatedFetch(`/api/v1/finance/${sel.year}/${sel.month}/intake`, { cache: "no-store" })
-      .then((r) => r.json())
-      .then((data) => { if (seq === intakeRequestSeq.current) setIntake(data); })
-      .catch(() => { if (seq === intakeRequestSeq.current) setIntake(null); });
+    const seq = ++businessRequestSeq.current;
+    authenticatedFetch(`/api/v1/finance/${sel.year}/${sel.month}/refresh-business`, {
+      method: "POST",
+      cache: "no-store",
+    })
+      .then(async (r) => {
+        const data = await r.json();
+        if (!r.ok) throw new Error(data.detail || "业务数据刷新失败");
+        return data;
+      })
+      .then((data) => { if (seq === businessRequestSeq.current) setBusinessStatus(data); })
+      .catch(() => { if (seq === businessRequestSeq.current) setBusinessStatus(null); });
   }, [sel]);
 
   const loadUnbilled = useCallback(() => {
@@ -321,7 +325,7 @@ export default function MonthlySendPage() {
     void loadPeriods();
     void loadMailStatus();
   }, [loadTemplate, loadPeriods, loadMailStatus]);
-  useEffect(() => { loadFiles(); loadIntake(); loadUnbilled(); }, [loadFiles, loadIntake, loadUnbilled]);
+  useEffect(() => { loadFiles(); loadBusiness(); loadUnbilled(); }, [loadFiles, loadBusiness, loadUnbilled]);
   useEffect(() => { if (financeTab === "match") loadMatch(); }, [financeTab, loadMatch]);
   // 弹层切"全部未配发票"时拉取全量未匹配进项票（端点上限 500，靠搜索缩小范围）
   useEffect(() => {
@@ -395,38 +399,8 @@ export default function MonthlySendPage() {
     } finally { setBusy(false); loadFiles(); loadPeriods(); if (uploadKind.current === "交易明细") loadMatch(); }
   }
 
-  /** 月度业务源文件：先归档原件，再由后端调用对应的真实导入器。 */
-  async function uploadMonthlySource(file: File, sourceType: "purchase_inbound" | "sales_query") {
-    if (!sel) { setMsg("请选择账期月份"); return; }
-    const fd = new FormData();
-    fd.append("file", file);
-    fd.append("source_type", sourceType);
-    setBusy(true); setMsg("");
-    try {
-      const res = await authenticatedFetch(`/api/v1/finance/${sel.year}/${sel.month}/intake`, { method: "POST", body: fd });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.detail || `上传失败（${res.status}）`);
-      if (data.ok) {
-        setMsg(`${sourceType === "purchase_inbound" ? "采购入库单" : "销售单查询"} 已归档并导入成功。`);
-      } else {
-        setMsg(`文件已归档，但${sourceType === "purchase_inbound" ? "采购入库单" : "销售单查询"}尚未完成：${data.error || "请核对文件内容"}`);
-      }
-      if (fileRef.current) fileRef.current.value = "";
-    } catch (error) {
-      setMsg(`月度资料处理失败：${error instanceof Error ? error.message : String(error)}`);
-    } finally {
-      setBusy(false);
-      loadFiles(); loadIntake(); loadPeriods(); loadUnbilled();
-    }
-  }
-
   function handleUploadSelection(file: File) {
-    const kind = uploadKind.current;
-    if (kind === "purchase_inbound" || kind === "sales_query") {
-      void uploadMonthlySource(file, kind);
-    } else {
-      void uploadBank(file);
-    }
+    void uploadBank(file);
   }
 
   /** 标记已开票：分配金额 = min(发票价税合计, 付款剩余)，多张票分次标记即可拆分。 */
@@ -472,7 +446,7 @@ export default function MonthlySendPage() {
   async function packageAndSend() {
     if (!sel) return;
     if (!ready) {
-      setMsg("请先完成本月采购入库单、销售单查询、银行资料和无票收入校验，再发送给财务。");
+      setMsg("请先补齐业务成本、银行资料和无票收入校验，再发送给财务。");
       return;
     }
     setBusy(true); setMsg("");
@@ -602,9 +576,9 @@ export default function MonthlySendPage() {
     });
   }
 
-  const sourceReady = Boolean(intake?.sourceReady);
-  const ready = Boolean(sourceReady && bankTx && bankReceipt && unbilled);
-  const readyCount = [inboundSource?.status === "IMPORTED", salesQuerySource?.status === "IMPORTED", bankTx, bankReceipt, unbilled].filter(Boolean).length;
+  const businessReady = Boolean(businessStatus?.ready);
+  const ready = Boolean(businessReady && bankTx && bankReceipt && unbilled);
+  const readyCount = [bankTx, bankReceipt, unbilled].filter(Boolean).length;
   const latestPkg = period?.packages.length ? period.packages[period.packages.length - 1] : null;
   const latestSentPkg = [...(period?.packages || [])].reverse().find((pkg) => pkg.status === "SENT") || null;
   const attachmentSize = (bankTx?.size || 0) + (bankReceipt?.size || 0);
@@ -729,7 +703,7 @@ export default function MonthlySendPage() {
           <label className="border-x border-slate-200 px-3 text-sm font-semibold text-slate-800"><span className="sr-only">账期</span><input type="month" value={sendMonth} onChange={(e) => setSendMonth(e.target.value)} className="w-[118px] border-0 bg-transparent p-0 text-sm font-semibold outline-none" /></label>
           <button type="button" aria-label="下一个账期" onClick={() => setSendMonth(shiftMonthValue(sendMonth, 1))} className="px-3 py-2 text-lg leading-none text-slate-500 hover:bg-slate-50 hover:text-blue-600">›</button>
         </div>
-        <div className="flex items-center gap-2 text-xs text-slate-500">月度状态：<span className={`inline-flex items-center gap-1 rounded-full px-2.5 py-1 font-medium ring-1 ring-inset ${ready ? "bg-emerald-50 text-emerald-700 ring-emerald-200" : "bg-amber-50 text-amber-700 ring-amber-200"}`}><span className={`h-1.5 w-1.5 rounded-full ${ready ? "bg-emerald-500" : "bg-amber-500"}`} />{ready ? "可发送" : sourceReady ? "待补财务资料" : "待完成业务入库"}</span></div>
+        <div className="flex items-center gap-2 text-xs text-slate-500">月度状态：<span className={`inline-flex items-center gap-1 rounded-full px-2.5 py-1 font-medium ring-1 ring-inset ${ready ? "bg-emerald-50 text-emerald-700 ring-emerald-200" : "bg-amber-50 text-amber-700 ring-amber-200"}`}><span className={`h-1.5 w-1.5 rounded-full ${ready ? "bg-emerald-500" : "bg-amber-500"}`} />{ready ? "可发送" : businessStatus && !businessReady ? "待补业务成本" : "待补财务资料"}</span></div>
         <div className="flex items-center gap-2 text-xs text-slate-500">发送状态：<span className={`inline-flex items-center gap-1 rounded-full px-2.5 py-1 font-medium ring-1 ring-inset ${period?.status === "SENT" ? "bg-blue-50 text-blue-700 ring-blue-200" : "bg-slate-50 text-slate-600 ring-slate-200"}`}><span className={`h-1.5 w-1.5 rounded-full ${period?.status === "SENT" ? "bg-blue-500" : "bg-slate-400"}`} />{period?.status === "SENT" ? "已发送" : period?.status === "PACKAGED" ? "已打包" : "未发送"}</span></div>
         <div className="text-xs text-slate-500">最后发送：<span className="text-slate-700">{latestSentPkg ? formatDate(latestSentPkg.createdAt) : "—"}</span></div>
         <button type="button" onClick={() => latestPkg ? void downloadPackage(latestPkg) : setMsg("该账期暂无可导出的发送包")} disabled={busy || !latestPkg} className="ml-auto inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-medium text-blue-600 hover:border-blue-300 disabled:cursor-not-allowed disabled:text-slate-300"><svg viewBox="0 0 24 24" className="h-3.5 w-3.5" fill="none"><path d="M12 4v11m0 0-4-4m4 4 4-4M5 20h14" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" /></svg>导出清单</button>
@@ -740,14 +714,35 @@ export default function MonthlySendPage() {
       {financeTab === "monthly" && <div className="grid items-start gap-4 xl:grid-cols-[minmax(0,1fr)_360px]">
         <section className={`${CARD} min-w-0 overflow-hidden`}>
           <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 px-4 py-4">
-            <div><h2 className="text-base font-semibold text-slate-900">本月处理清单 <span className="ml-1 text-slate-500">({readyCount}/5)</span></h2><p className="mt-1 text-xs text-slate-400">先完成两份业务资料入库，再整理银行资料和无票收入，最后统一发送给财务</p></div>
-            <div className="flex items-center gap-2"><button type="button" onClick={() => { uploadKind.current = "交易明细"; fileRef.current?.click(); }} disabled={busy} className="inline-flex items-center gap-1 rounded-lg border border-blue-200 bg-white px-3 py-2 text-xs font-medium text-blue-600 hover:bg-blue-50 disabled:opacity-50">＋ 新增资料</button><button type="button" onClick={() => { loadFiles(); loadPeriods(); loadUnbilled(); }} className="rounded-lg border border-slate-200 px-3 py-2 text-xs text-slate-600 hover:bg-slate-50">刷新</button></div>
+            <div><h2 className="text-base font-semibold text-slate-900">本月处理清单 <span className="ml-1 text-slate-500">({readyCount}/3)</span></h2><p className="mt-1 text-xs text-slate-400">业务数据从销售中心与采购入库自动读取；这里仅整理银行资料、无票收入并发送给财务</p></div>
+            <div className="flex items-center gap-2"><button type="button" onClick={() => { uploadKind.current = "交易明细"; fileRef.current?.click(); }} disabled={busy} className="inline-flex items-center gap-1 rounded-lg border border-blue-200 bg-white px-3 py-2 text-xs font-medium text-blue-600 hover:bg-blue-50 disabled:opacity-50">＋ 新增资料</button><button type="button" onClick={() => { loadFiles(); loadPeriods(); loadBusiness(); loadUnbilled(); }} className="rounded-lg border border-slate-200 px-3 py-2 text-xs text-slate-600 hover:bg-slate-50">刷新</button></div>
           </div>
           <div className="hidden items-center gap-3 bg-slate-50 px-4 py-2 text-[11px] font-medium text-slate-500 md:grid md:grid-cols-[28px_minmax(180px,1.2fr)_minmax(150px,1fr)_58px_112px_88px_minmax(150px,1fr)_auto]">
             <span /><span>资料名称</span><span>资料摘要</span><span>当前版本</span><span>更新时间</span><span>资料状态</span><span>参数摘要</span><span className="text-right">操作</span>
           </div>
-          <ItemRow kind="purchase_inbound" title={`${sel?.month || ""}月-采购入库单`} state={{ ok: inboundSource?.status === "IMPORTED", text: inboundSource?.status === "IMPORTED" ? "已入库" : inboundSource?.status === "REVIEW" ? "待复核" : inboundSource?.status === "ERROR" ? "处理失败" : inboundSource?.archiveFile ? "待导入" : "待上传" }} summary={inboundSource?.archiveFile ? <>{inboundSource.archiveFile.originalName}<br />{formatBytes(inboundSource.archiveFile.size)}{inboundSource.error && <><br /><span className="text-rose-600">{inboundSource.error}</span></>}</> : <>每月必传：采购入库明细<br /><span className="text-amber-600">用于库存、成本和采购链路计算</span></>} updatedAt={inboundSource?.archiveFile?.uploadedAt} version={inboundSource?.archiveFile?.version} parameter={inboundSource?.status === "IMPORTED" ? "已导入 · 自动处理采购链路" : "吉客云入库申请单货品"} selected={true} selectable={false} onToggle={() => {}} actions={<>{inboundSource?.archiveFile && <button type="button" onClick={() => void downloadFile(inboundSource.archiveFile!)} disabled={busy} className="rounded-md border border-slate-200 px-2.5 py-1.5 text-[11px] text-slate-600 hover:bg-slate-50 disabled:opacity-50">下载</button>}<button type="button" onClick={() => { uploadKind.current = "purchase_inbound"; fileRef.current?.click(); }} disabled={busy} className="rounded-md bg-blue-600 px-2.5 py-1.5 text-[11px] font-medium text-white hover:bg-blue-700 disabled:opacity-50">{inboundSource?.archiveFile ? "替换" : "上传"}</button></>} />
-          <ItemRow kind="sales_query" title={`${sel?.month || ""}月-销售单查询`} state={{ ok: salesQuerySource?.status === "IMPORTED", text: salesQuerySource?.status === "IMPORTED" ? "已入库" : salesQuerySource?.status === "REVIEW" ? "待复核" : salesQuerySource?.status === "ERROR" ? "处理失败" : salesQuerySource?.archiveFile ? "待导入" : "待上传" }} summary={salesQuerySource?.archiveFile ? <>{salesQuerySource.archiveFile.originalName}<br />{formatBytes(salesQuerySource.archiveFile.size)}{salesQuerySource.error && <><br /><span className="text-rose-600">{salesQuerySource.error}</span></>}</> : <>每月必传：销售单查询<br /><span className="text-amber-600">用于销售数量和收入维度计算</span></>} updatedAt={salesQuerySource?.archiveFile?.uploadedAt} version={salesQuerySource?.archiveFile?.version} parameter={salesQuerySource?.status === "IMPORTED" ? "销售单 + 销售单货品 · 已导入" : "吉客云销售单查询双 Sheet"} selected={true} selectable={false} onToggle={() => {}} actions={<>{salesQuerySource?.archiveFile && <button type="button" onClick={() => void downloadFile(salesQuerySource.archiveFile!)} disabled={busy} className="rounded-md border border-slate-200 px-2.5 py-1.5 text-[11px] text-slate-600 hover:bg-slate-50 disabled:opacity-50">下载</button>}<button type="button" onClick={() => { uploadKind.current = "sales_query"; fileRef.current?.click(); }} disabled={busy} className="rounded-md bg-blue-600 px-2.5 py-1.5 text-[11px] font-medium text-white hover:bg-blue-700 disabled:opacity-50">{salesQuerySource?.archiveFile ? "替换" : "上传"}</button></>} />
+          <div className={`border-t border-slate-100 px-4 py-3 ${businessReady ? "bg-emerald-50/45" : "bg-amber-50/55"}`}>
+            <div className="flex flex-wrap items-center gap-x-4 gap-y-2 text-[11px]">
+              <span className={`font-medium ${businessReady ? "text-emerald-700" : "text-amber-700"}`}>
+                {businessStatus ? (businessReady ? "✓ 业务数据已接通" : "⚠ 业务成本待补齐") : "正在读取业务数据…"}
+              </span>
+              <span className="text-slate-500">销售订单 {businessStatus?.salesOrderCount ?? "—"} 笔</span>
+              <span className="text-slate-500">销售额 {money(businessStatus?.salesAmount)}</span>
+              <span className="text-slate-500">销售成本 {money(businessStatus?.costAmount)}</span>
+              {businessStatus?.costIncomplete && (
+                <span className="text-amber-700">缺 {businessStatus.costMissingCount} 个 SKU 成本</span>
+              )}
+              <span className="ml-auto flex gap-3">
+                <Link href="/sales?tab=analytics" className="font-medium text-blue-600 hover:underline">销售中心</Link>
+                <Link href="/supply-chain/receiving" className="font-medium text-blue-600 hover:underline">采购入库</Link>
+              </span>
+            </div>
+            {businessStatus?.costIncomplete && businessStatus.costMissingDetail.length > 0 && (
+              <div className="mt-1 truncate text-[10px] text-amber-700">
+                待补：{businessStatus.costMissingDetail.slice(0, 8).map((item) => item.skuCode || item.skuName).join("、")}
+                {businessStatus.costMissingDetail.length > 8 ? "…" : ""}
+              </div>
+            )}
+          </div>
           <ItemRow kind="bank" title={`${sel?.month || ""}月-银行交易明细`} state={{ ok: Boolean(bankTx), text: bankTx ? "已核对" : "待上传" }} summary={bankTx ? <>全部账户 · 已导入<br />{formatBytes(bankTx.size)}</> : <>等待上传原始银行流水<br /><span className="text-amber-600">上传后自动归档</span></>} updatedAt={bankTx?.uploadedAt} version={bankTx?.version} parameter={bankTx ? "账期内 · 全部账户" : "待补充资料"} selected={includeSel.includes("交易明细")} onToggle={() => setIncludeSel((s) => s.includes("交易明细") ? s.filter((x) => x !== "交易明细") : [...s, "交易明细"])} actions={<>{bankTx && <button type="button" onClick={() => void downloadFile(bankTx)} disabled={busy} className="rounded-md border border-slate-200 px-2.5 py-1.5 text-[11px] text-slate-600 hover:bg-slate-50 disabled:opacity-50">下载</button>}<button type="button" onClick={() => { uploadKind.current = "交易明细"; fileRef.current?.click(); }} disabled={busy} className="rounded-md bg-blue-600 px-2.5 py-1.5 text-[11px] font-medium text-white hover:bg-blue-700 disabled:opacity-50">{bankTx ? "替换" : "上传"}</button></>} />
           <ItemRow kind="receipt" title={`${sel?.month || ""}月-银行回单详情`} state={{ ok: Boolean(bankReceipt), text: bankReceipt ? "已核对" : "待上传" }} summary={bankReceipt ? <>全部账户 · 已导入<br />{formatBytes(bankReceipt.size)}</> : <>等待上传银行回单<br /><span className="text-amber-600">上传后自动归档</span></>} updatedAt={bankReceipt?.uploadedAt} version={bankReceipt?.version} parameter={bankReceipt ? "账期内 · 全部账户" : "待补充资料"} selected={includeSel.includes("回单详情")} onToggle={() => setIncludeSel((s) => s.includes("回单详情") ? s.filter((x) => x !== "回单详情") : [...s, "回单详情"])} actions={<>{bankReceipt && <button type="button" onClick={() => void downloadFile(bankReceipt)} disabled={busy} className="rounded-md border border-slate-200 px-2.5 py-1.5 text-[11px] text-slate-600 hover:bg-slate-50 disabled:opacity-50">下载</button>}<button type="button" onClick={() => { uploadKind.current = "回单详情"; fileRef.current?.click(); }} disabled={busy} className="rounded-md bg-blue-600 px-2.5 py-1.5 text-[11px] font-medium text-white hover:bg-blue-700 disabled:opacity-50">{bankReceipt ? "替换" : "上传"}</button></>} />
           <ItemRow kind="sales" title={`${sel?.month || ""}月-销售出库-无票收入`} state={{ ok: Boolean(unbilled), text: unbilled ? (unbilled.adjusted ? "已调整" : "已生成") : "计算中" }} summary={unbilled ? <>销售总额 {money(unbilled.salesAmount)}<br />无票收入 {money(unbilled.unbilledAmount)}</> : <>正在读取销售出库数据<br /><span className="text-slate-400">按当前账期自动计算</span></>} updatedAt={unbilled?.updatedAt || salesFile?.uploadedAt} version={unbilled?.version || salesFile?.version} parameter={unbilled?.adjusted ? `已选择 ${unbilled.selectedCount || 0}/${unbilled.sourceCount || 0} 条` : "出库时间 · 全部渠道"} selected={includeSel.includes("无票收入")} onToggle={() => setIncludeSel((s) => s.includes("无票收入") ? s.filter((x) => x !== "无票收入") : [...s, "无票收入"])} actions={<><button type="button" onClick={() => setShowUnbilledDetail(true)} disabled={!unbilled} className="rounded-md border border-slate-200 px-2.5 py-1.5 text-[11px] text-slate-600 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-40">调整明细</button><button type="button" onClick={() => { setFinanceTab("ledger"); void previewSales(); }} disabled={busy} className="rounded-md border border-blue-200 px-2.5 py-1.5 text-[11px] text-blue-600 hover:bg-blue-50 disabled:opacity-50">预览</button></>} />
@@ -768,7 +763,7 @@ export default function MonthlySendPage() {
             <label className="block text-xs font-medium text-slate-600">收件人 <span className="text-rose-500">*</span><input value={toText} onChange={(e) => setToText(e.target.value)} placeholder="请输入财务邮箱" className="mt-1.5 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-100" /></label>
             <label className="block text-xs font-medium text-slate-600">抄送（可选）<input value={ccText} onChange={(e) => setCcText(e.target.value)} placeholder="可填写多个邮箱，用逗号分隔" className="mt-1.5 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-100" /></label>
             <div><div className="mb-1.5 text-xs font-medium text-slate-600">发送时间设置</div><div className="flex flex-wrap items-center gap-2 rounded-lg bg-slate-50 px-2.5 py-2"><label className="inline-flex items-center gap-1.5 text-xs text-slate-600"><input type="checkbox" checked={template?.autoSend ?? false} onChange={(e) => setTemplate((t) => t ? { ...t, autoSend: e.target.checked } : t)} className="h-4 w-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500" />自动发送</label><span className="text-xs text-slate-500">每月 <input type="number" min={1} max={28} value={template?.sendDay ?? 3} onChange={(e) => setTemplate((t) => t ? { ...t, sendDay: Number(e.target.value) } : t)} className="mx-1 w-10 rounded border border-slate-200 bg-white px-1.5 py-1 text-xs" /> 日</span><select value={template?.sendHour ?? 10} onChange={(e) => setTemplate((t) => t ? { ...t, sendHour: Number(e.target.value) } : t)} className="rounded border border-slate-200 bg-white px-1.5 py-1 text-xs">{Array.from({ length: 24 }, (_, i) => <option key={i} value={i}>{String(i).padStart(2, "0")}:00</option>)}</select><button type="button" onClick={saveTemplate} disabled={busy || !template} className="ml-auto rounded border border-slate-200 bg-white px-2 py-1 text-[11px] font-medium text-slate-600 hover:bg-white disabled:opacity-40">保存设置</button></div></div>
-            <div><div className="mb-1.5 text-xs font-medium text-slate-600">发送条件</div><div className="space-y-1.5 text-xs text-slate-500"><label className="flex items-center gap-2"><input type="checkbox" checked={sourceReady} disabled className="h-4 w-4 rounded border-slate-300 text-blue-600" />采购入库单、销售单查询已完成入库</label><label className="flex items-center gap-2"><input type="checkbox" checked={Boolean(bankTx && bankReceipt)} disabled className="h-4 w-4 rounded border-slate-300 text-blue-600" />银行交易明细和回单已齐全</label><label className="flex items-center gap-2"><input type="checkbox" checked={Boolean(unbilled)} disabled className="h-4 w-4 rounded border-slate-300 text-blue-600" />无票收入已生成</label><label className="flex items-center gap-2"><input type="checkbox" checked={!mailStatus || mailStatus.configured} disabled className="h-4 w-4 rounded border-slate-300 text-blue-600" />邮件通道可用</label></div></div>
+            <div><div className="mb-1.5 text-xs font-medium text-slate-600">发送条件</div><div className="space-y-1.5 text-xs text-slate-500"><label className="flex items-center gap-2"><input type="checkbox" checked={businessReady} disabled className="h-4 w-4 rounded border-slate-300 text-blue-600" />业务数据已从销售中心 / 采购入库读取，销售成本完整</label><label className="flex items-center gap-2"><input type="checkbox" checked={Boolean(bankTx && bankReceipt)} disabled className="h-4 w-4 rounded border-slate-300 text-blue-600" />银行交易明细和回单已齐全</label><label className="flex items-center gap-2"><input type="checkbox" checked={Boolean(unbilled)} disabled className="h-4 w-4 rounded border-slate-300 text-blue-600" />无票收入已生成</label><label className="flex items-center gap-2"><input type="checkbox" checked={!mailStatus || mailStatus.configured} disabled className="h-4 w-4 rounded border-slate-300 text-blue-600" />邮件通道可用</label></div></div>
             <button type="button" onClick={packageAndSend} disabled={busy || !sel || !ready || !emails(toText).length || !includeSel.length} className="flex w-full items-center justify-center gap-2 rounded-lg bg-emerald-600 px-4 py-3 text-sm font-semibold text-white shadow-sm hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-40">➤ 确认并发送给财务</button>
             <div className="text-[11px] leading-4 text-slate-400">{latestPkg ? <>最新包 V{latestPkg.version} · {latestPkg.status === "SENT" ? "已发送" : "已打包"} · {formatDate(latestPkg.createdAt)}</> : "该账期还没有打包记录"}{mailStatus && !mailStatus.configured && <span className="ml-1.5 rounded bg-rose-50 px-1.5 py-0.5 font-medium text-rose-600 ring-1 ring-inset ring-rose-200">SMTP 未配置</span>}</div>
           </div>

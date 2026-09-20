@@ -193,6 +193,8 @@ def create_purchase_inbound(
     )
     db.add(link)
     db.flush()
+    from app.services import finance_projection_service
+    finance_projection_service.project_inbound_document(db, document)
     db.commit()
     return document, link
 
@@ -269,6 +271,10 @@ def delete_local_purchase_inbound(
         JackyunGoodsDocumentItem.document_id == document.id,
     ).delete(synchronize_session=False)
     inbound_no = document.goodsdoc_no
+    from app.services import finance_projection_service
+    finance_projection_service.delete_projected_source(
+        db, "domestic_inbound", str(document.id)
+    )
     db.delete(document)
     if commit:
         db.commit()

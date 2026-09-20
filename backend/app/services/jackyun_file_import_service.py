@@ -1045,6 +1045,17 @@ def map_inbound_items(db: Session, import_id: int, actor: str = "system") -> dic
                 except Exception:
                     db.rollback()
                     automatic_usage["skipped"] += 1
+    # 吉客云/自动采集入库落库后直接同步库存采购/应付事项。
+    from app.services import finance_projection_service
+    finance_projected = 0
+    for document_id in docs_hit:
+        document = db.get(JackyunGoodsDocument, document_id)
+        if document is None:
+            continue
+        finance_projection_service.project_inbound_document(db, document)
+        finance_projected += 1
+    db.commit()
+
     audit(db, actor, "jackyun.file_import.map_inbound", "jackyun_file_imports", import_id,
           {"documents": len(docs_hit), "matched": matched,
            "matchedItems": len(matched_items), "filledFields": filled_fields,
@@ -1056,7 +1067,8 @@ def map_inbound_items(db: Session, import_id: int, actor: str = "system") -> dic
            "createdExternalOrders": len(created_external),
            "createdDocuments": created_documents, "createdDocumentItems": created_document_items,
            "matcher": matcher, "automaticUsage": automatic_usage,
-           "allocSeeded": alloc_seeded, "skipped": len(skipped)})
+           "allocSeeded": alloc_seeded, "financeProjected": finance_projected,
+           "skipped": len(skipped)})
     return {
         "ok": True,
         "importId": import_id,
@@ -1082,6 +1094,7 @@ def map_inbound_items(db: Session, import_id: int, actor: str = "system") -> dic
         "matcher": matcher,
         "automaticUsage": automatic_usage,
         "allocSeeded": alloc_seeded,
+        "financeProjected": finance_projected,
         "missingRk": sorted(set(missing_rk)),
         "skipped": skipped,
     }
