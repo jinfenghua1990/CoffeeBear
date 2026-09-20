@@ -224,6 +224,7 @@ def _run(args: list[str], *, timeout: int = 60, cwd: Path | None = None) -> subp
     env = os.environ.copy()
     if args and args[0] == "git":
         env["GIT_TERMINAL_PROMPT"] = "0"
+        env["ECOMMERCE_UPDATE_SERVICE_GIT"] = "1"
     return subprocess.run(
         args,
         cwd=str(cwd or _repo_root()),
