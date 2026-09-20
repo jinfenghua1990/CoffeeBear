@@ -115,6 +115,9 @@ export default function SystemUpdatePage() {
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [showAllChecks, setShowAllChecks] = useState(false);
+  const [showLogs, setShowLogs] = useState(false);
+  const [autoScrollLogs, setAutoScrollLogs] = useState(true);
+  const logRef = useRef<HTMLPreElement | null>(null);
   const firstCheckRef = useRef(false);
   const sawRunningRef = useRef(false);
   const reloadScheduledRef = useRef(false);
@@ -158,6 +161,21 @@ export default function SystemUpdatePage() {
     const timer = window.setInterval(() => void load(true), 1800);
     return () => window.clearInterval(timer);
   }, [load, status?.running]);
+
+
+  useEffect(() => {
+    if (!showLogs) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setShowLogs(false);
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [showLogs]);
+
+  useEffect(() => {
+    if (!showLogs || !autoScrollLogs || !logRef.current) return;
+    logRef.current.scrollTop = logRef.current.scrollHeight;
+  }, [autoScrollLogs, showLogs, status?.logs]);
 
   useEffect(() => {
     if (
@@ -380,7 +398,7 @@ export default function SystemUpdatePage() {
           <div>
             <h1 className="text-[22px] font-semibold tracking-tight text-slate-900 dark:text-slate-100">系统更新</h1>
             <p className="mt-1 text-[13px] leading-6 text-slate-500 dark:text-slate-300">
-              版本信息、更新内容、执行进度和日志分区展示；更新前自动备份，失败自动回滚。
+              版本信息、更新内容和执行进度集中展示；执行日志按需打开，更新前自动备份，失败自动回滚。
             </p>
           </div>
         </div>
@@ -536,17 +554,26 @@ export default function SystemUpdatePage() {
                 {status.running ? "正在执行更新任务，请勿关闭页面。" : status.updateAvailable ? "准备完成后点击“立即更新”开始执行。" : "当前没有正在执行的更新任务。"}
               </p>
             </div>
-            <div className="flex min-w-[280px] items-center gap-3">
-              <div className="h-2 flex-1 overflow-hidden rounded-full bg-slate-100 dark:bg-slate-700">
-                <div className="h-full rounded-full bg-blue-500 transition-all duration-500" style={{ width: `${status.running ? Math.max(progress, 4) : status.phase === "success" ? 100 : 0}%` }} />
+            <div className="flex flex-wrap items-center justify-end gap-3">
+              <div className="flex min-w-[280px] items-center gap-3">
+                <div className="h-2 flex-1 overflow-hidden rounded-full bg-slate-100 dark:bg-slate-700">
+                  <div className="h-full rounded-full bg-blue-500 transition-all duration-500" style={{ width: `${status.running ? Math.max(progress, 4) : status.phase === "success" ? 100 : 0}%` }} />
+                </div>
+                <span className="w-11 text-right font-mono text-[14px] font-semibold text-slate-700 dark:text-slate-100">
+                  {status.running ? `${progress}%` : status.phase === "success" ? "100%" : "0%"}
+                </span>
+                <div className="hidden border-l border-slate-200 pl-4 text-right sm:block dark:border-slate-700">
+                  <div className="text-[10px] text-slate-400">当前阶段</div>
+                  <div className="mt-0.5 text-[12px] font-semibold text-slate-700 dark:text-slate-100">{stageMessage}</div>
+                </div>
               </div>
-              <span className="w-11 text-right font-mono text-[14px] font-semibold text-slate-700 dark:text-slate-100">
-                {status.running ? `${progress}%` : status.phase === "success" ? "100%" : "0%"}
-              </span>
-              <div className="hidden border-l border-slate-200 pl-4 text-right sm:block dark:border-slate-700">
-                <div className="text-[10px] text-slate-400">当前阶段</div>
-                <div className="mt-0.5 text-[12px] font-semibold text-slate-700 dark:text-slate-100">{stageMessage}</div>
-              </div>
+              <button
+                type="button"
+                onClick={() => setShowLogs(true)}
+                className="app-button-secondary h-9 rounded-lg px-3 text-[11px] font-medium"
+              >
+                查看日志{status.logs?.length ? ` · ${status.logs.length}` : ""}
+              </button>
             </div>
           </div>
 
@@ -583,21 +610,6 @@ export default function SystemUpdatePage() {
               ))}
             </div>
           )}
-        </section>
-      )}
-
-      {!isContainer && (
-        <section className="mt-4 app-card overflow-hidden rounded-2xl">
-          <div className="flex items-center justify-between gap-3 border-b border-slate-100 px-5 py-4 dark:border-slate-700">
-            <div>
-              <h2 className="text-[15px] font-semibold text-slate-900 dark:text-slate-100">更新日志</h2>
-              <p className="mt-1 text-[11px] text-slate-400 dark:text-slate-400">只记录本次更新执行过程；更新时自动刷新。</p>
-            </div>
-            {status.backupDb && <span className="rounded-lg bg-emerald-50 px-2.5 py-1 text-[10px] font-medium text-emerald-700 dark:bg-emerald-500/10 dark:text-emerald-300">本次备份已生成</span>}
-          </div>
-          <pre className="min-h-[220px] max-h-[360px] overflow-auto whitespace-pre-wrap break-all bg-slate-950 px-5 py-4 font-mono text-[11px] leading-6 text-slate-300">
-            {(status.logs || []).join("\n") || "暂无执行日志。开始更新后，这里会实时显示环境检查、备份、安装、迁移、构建、重启和验证记录。"}
-          </pre>
         </section>
       )}
 
@@ -677,6 +689,96 @@ export default function SystemUpdatePage() {
           </section>
         </div>
       </details>
+
+      {showLogs && !isContainer && (
+        <div
+          className="fixed inset-0 z-modal bg-slate-950/35 backdrop-blur-[1px]"
+          role="dialog"
+          aria-modal="true"
+          aria-label="更新日志"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) setShowLogs(false);
+          }}
+        >
+          <aside className="absolute inset-y-0 right-0 flex w-[760px] max-w-[92vw] flex-col border-l border-slate-200 bg-white shadow-2xl dark:border-slate-700 dark:bg-slate-900">
+            <div className="flex shrink-0 items-start justify-between gap-4 border-b border-slate-200 px-5 py-4 dark:border-slate-700">
+              <div>
+                <div className="flex items-center gap-2">
+                  <h2 className="text-[15px] font-semibold text-slate-900 dark:text-slate-100">更新日志</h2>
+                  {status.running && (
+                    <span className="rounded-full bg-blue-50 px-2 py-0.5 text-[10px] font-medium text-blue-700 dark:bg-blue-500/10 dark:text-blue-200">
+                      实时更新
+                    </span>
+                  )}
+                  {status.backupDb && (
+                    <span className="rounded-full bg-emerald-50 px-2 py-0.5 text-[10px] font-medium text-emerald-700 dark:bg-emerald-500/10 dark:text-emerald-300">
+                      已生成备份
+                    </span>
+                  )}
+                </div>
+                <p className="mt-1 text-[11px] text-slate-400 dark:text-slate-400">
+                  只在排查更新过程时查看；关闭后不影响更新任务继续执行。
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowLogs(false)}
+                className="flex h-8 w-8 items-center justify-center rounded-lg border border-slate-200 text-lg leading-none text-slate-500 hover:bg-slate-50 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800"
+                aria-label="关闭更新日志"
+              >
+                ×
+              </button>
+            </div>
+
+            <div className="flex shrink-0 flex-wrap items-center justify-between gap-3 border-b border-slate-200 bg-slate-50/70 px-5 py-3 dark:border-slate-700 dark:bg-slate-800/50">
+              <div className="flex items-center gap-3 text-[11px] text-slate-500 dark:text-slate-300">
+                <span>{status.logs?.length || 0} 条记录</span>
+                <span>当前阶段：<strong className="font-medium text-slate-700 dark:text-slate-100">{stageMessage}</strong></span>
+              </div>
+              <div className="flex items-center gap-2">
+                <label className="flex cursor-pointer items-center gap-1.5 text-[11px] text-slate-500 dark:text-slate-300">
+                  <input
+                    type="checkbox"
+                    checked={autoScrollLogs}
+                    onChange={(event) => setAutoScrollLogs(event.target.checked)}
+                    className="h-3.5 w-3.5 rounded border-slate-300"
+                  />
+                  自动滚动
+                </label>
+                <button
+                  type="button"
+                  onClick={() => void load(true)}
+                  className="app-button-secondary h-8 rounded-lg px-2.5 text-[10px] font-medium"
+                >
+                  刷新
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    const text = (status.logs || []).join("\n");
+                    if (!text) return;
+                    void navigator.clipboard.writeText(text).then(
+                      () => setNotice("更新日志已复制。"),
+                      () => setNotice("复制失败，请手动选择日志内容。"),
+                    );
+                  }}
+                  disabled={!status.logs?.length}
+                  className="app-button-secondary h-8 rounded-lg px-2.5 text-[10px] font-medium disabled:opacity-40"
+                >
+                  复制日志
+                </button>
+              </div>
+            </div>
+
+            <pre
+              ref={logRef}
+              className="min-h-0 flex-1 overflow-auto whitespace-pre-wrap break-all bg-slate-950 px-5 py-4 font-mono text-[11px] leading-6 text-slate-300"
+            >
+              {(status.logs || []).join("\n") || "暂无执行日志。开始更新后，这里会实时显示环境检查、备份、安装、迁移、构建、重启和验证记录。"}
+            </pre>
+          </aside>
+        </div>
+      )}
     </div>
   );
 }
