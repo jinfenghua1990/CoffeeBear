@@ -439,7 +439,11 @@ def check_for_updates(*, actor: str = "system", automatic: bool = False) -> dict
                 "changedFileCount": 0,
                 "impactedModules": [],
                 "hasMigration": False,
+                "updateLevel": "patch",
+                "updateLevelLabel": "小版本",
+                "classificationReasons": [],
                 "autoInstallEligible": False,
+                "autoInstallBlockedReason": "",
                 "automatic": automatic,
             })
             return status_payload(include_log=False)
