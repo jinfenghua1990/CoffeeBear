@@ -425,6 +425,8 @@ export default function MonthlySendPage() {
   const [msg, setMsg] = useState("");
   const [busy, setBusy] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
+  const templateRequestSeq = useRef(0);
+  const periodsRequestSeq = useRef(0);
   const filesRequestSeq = useRef(0);
   const businessRequestSeq = useRef(0);
   const unbilledRequestSeq = useRef(0);
@@ -476,21 +478,31 @@ export default function MonthlySendPage() {
   }, [setEntityId]);
 
   const loadTemplate = useCallback(async () => {
-    if (!companyName) return;
+    if (!companyName) {
+      templateRequestSeq.current += 1;
+      return;
+    }
+    const seq = ++templateRequestSeq.current;
     const res = await authenticatedFetch(`/api/v1/finance/sales-report/template?company=${encodeURIComponent(companyName)}`, { cache: "no-store" });
     const data = await res.json();
     if (!res.ok) throw new Error(data.detail || "加载失败");
+    if (seq !== templateRequestSeq.current) return;
     setTemplate(data);
     setToText((data.toAddrs || []).join(", "));
     setCcText((data.ccAddrs || []).join(", "));
   }, [companyName]);
 
   const loadPeriods = useCallback(() => {
-    if (!companyName) return;
+    if (!companyName) {
+      periodsRequestSeq.current += 1;
+      setPeriods([]);
+      return;
+    }
+    const seq = ++periodsRequestSeq.current;
     authenticatedFetch(`/api/v1/finance/periods?company=${encodeURIComponent(companyName)}`, { cache: "no-store" })
       .then((r) => r.json())
-      .then(setPeriods)
-      .catch(() => {});
+      .then((rows) => { if (seq === periodsRequestSeq.current) setPeriods(rows); })
+      .catch(() => { if (seq === periodsRequestSeq.current) setPeriods([]); });
   }, [companyName]);
 
   const loadFiles = useCallback(() => {
