@@ -18,6 +18,7 @@ import hashlib
 import hmac
 import json
 import os
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -199,51 +200,81 @@ def main() -> int:
             else ROOT / "backups"
         )
     ).expanduser()
-    manifests = sorted(
-        backup_dir.glob("backup_*.manifest"),
-        key=lambda item: item.stat().st_mtime,
-        reverse=True,
-    )
-    if not manifests:
-        print(f"未找到本地完整恢复点：{backup_dir}/backup_*.manifest", file=sys.stderr)
+    backup_dir.mkdir(parents=True, exist_ok=True)
+
+    # 冷备要求“每日全量容灾”：先在本地生成并校验完整恢复点。
+    # 这里仍然只读取本地文件；后续对 Kodo 只发 POST 上传请求。
+    env = os.environ.copy()
+    env["BACKUP_DIR"] = str(backup_dir)
+    try:
+        result = subprocess.run(
+            ["bash", str(ROOT / "scripts" / "full-backup.sh")],
+            cwd=str(ROOT),
+            env=env,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except subprocess.CalledProcessError as exc:
+        sys.stderr.write(exc.stdout or "")
+        sys.stderr.write(exc.stderr or "")
+        print("Kodo 冷备前的本地全量恢复点生成失败。", file=sys.stderr)
+        return 2
+    sys.stdout.write(result.stdout)
+
+    manifest_path = ""
+    for line in result.stdout.splitlines():
+        if line.startswith("FULL_BACKUP_MANIFEST="):
+            manifest_path = line.split("=", 1)[1].strip()
+    if not manifest_path:
+        print("完整容灾脚本没有返回 FULL_BACKUP_MANIFEST", file=sys.stderr)
         return 2
 
-    manifest = manifests[0]
+    manifest = Path(manifest_path)
+    if not manifest.is_file():
+        print(f"完整容灾 manifest 不存在：{manifest}", file=sys.stderr)
+        return 2
     values = parse_manifest(manifest)
     timestamp = values.get("timestamp", "")
-    db_name = values.get("db", "")
-    db_hash = values.get("db_sha256", "")
-    data_name = values.get("data", "")
-    data_hash = values.get("data_sha256", "")
-
-    if not timestamp or not db_name or "/" in db_name or not db_hash:
-        print(f"manifest 无效：{manifest}", file=sys.stderr)
+    if not timestamp:
+        print(f"full manifest 无效：{manifest}", file=sys.stderr)
         return 2
 
-    db_file = backup_dir / db_name
-    if not db_file.is_file() or sha256_file(db_file) != db_hash:
-        print(f"数据库备份本地 SHA256 校验失败：{db_file}", file=sys.stderr)
-        return 2
-
-    upload_files: list[Path] = [db_file]
-    if data_name:
-        if "/" in data_name or not data_hash:
-            print(f"manifest 中 data 信息无效：{manifest}", file=sys.stderr)
+    specs = [
+        ("base_manifest", "base_manifest_sha256"),
+        ("db", "db_sha256"),
+        ("data", "data_sha256"),
+        ("app", "app_sha256"),
+        ("config", "config_sha256"),
+        ("docker_image", "docker_image_sha256"),
+    ]
+    upload_files: list[Path] = []
+    for name_key, hash_key in specs:
+        name = values.get(name_key, "")
+        expected = values.get(hash_key, "")
+        if not name:
+            continue
+        if "/" in name or "\\" in name:
+            print(f"manifest 文件名非法：{name}", file=sys.stderr)
             return 2
-        data_file = backup_dir / data_name
-        if not data_file.is_file() or sha256_file(data_file) != data_hash:
-            print(f"data 归档本地 SHA256 校验失败：{data_file}", file=sys.stderr)
+        source = backup_dir / name
+        if not source.is_file():
+            print(f"完整恢复点缺少文件：{source}", file=sys.stderr)
             return 2
-        upload_files.append(data_file)
+        actual = sha256_file(source)
+        if expected and actual != expected:
+            print(f"本地 SHA256 校验失败：{source}", file=sys.stderr)
+            return 2
+        upload_files.append(source)
 
-    # manifest 必须最后上传，作为“这一组本地校验已完成”的提交标记。
+    # full manifest 必须最后上传，作为“这一组本地校验已完成”的远端提交标记。
     upload_files.append(manifest)
 
     receipt_dir = backup_dir / ".kodo-uploaded"
     receipt_dir.mkdir(parents=True, exist_ok=True)
     receipt = receipt_dir / f"{timestamp}.json"
     if receipt.exists():
-        print(f"该恢复点已有本地上传成功记录，跳过重复上传：{receipt}")
+        print(f"该全量恢复点已有本地上传成功记录，跳过重复上传：{receipt}")
         return 0
 
     bucket = str(config["bucket"]).strip()
@@ -252,16 +283,16 @@ def main() -> int:
     secret_key = str(config["secret_key"]).strip()
     prefix = str(config.get("prefix") or "ecommerce-workspace/cold").strip().strip("/")
     date_path = f"{timestamp[0:4]}/{timestamp[4:6]}/{timestamp[6:8]}" if len(timestamp) >= 8 else "undated"
-    object_root = "/".join(part for part in [prefix, date_path, timestamp] if part)
+    object_root = "/".join(part for part in [prefix, "full", date_path, timestamp] if part)
 
-    print(f"==> Kodo upload-only 冷备：{manifest.name}")
+    print(f"==> Kodo upload-only 每日全量冷备：{manifest.name}")
     print(f"==> 配置来源：{config.get('source', 'database')}")
     print("==> 规则：只上传，不下载、不取回、不列目录、不做远端校验。")
 
     uploaded: list[dict[str, Any]] = []
     for source in upload_files:
         object_key = f"{object_root}/{source.name}"
-        result = upload_one(
+        result_payload = upload_one(
             upload_url=upload_url,
             access_key=access_key,
             secret_key=secret_key,
@@ -274,7 +305,8 @@ def main() -> int:
                 "local_file": source.name,
                 "object_key": object_key,
                 "size": source.stat().st_size,
-                "remote_hash": result.get("hash"),
+                "sha256": sha256_file(source),
+                "remote_hash": result_payload.get("hash"),
             }
         )
         print(f"上传完成：{source.name} -> {object_key}")
@@ -287,7 +319,7 @@ def main() -> int:
                 "upload_url": upload_url,
                 "object_root": object_root,
                 "files": uploaded,
-                "mode": "upload-only",
+                "mode": "upload-only-full",
                 "created_at": int(time.time()),
             },
             ensure_ascii=False,
