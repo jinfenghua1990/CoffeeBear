@@ -369,6 +369,76 @@ def _estimate_for_period(db: Session, start: datetime | None, end: datetime | No
     return Decimal(cnt) * unit_price
 
 
+def _actual_amount_for_month(
+    db: Session, bill: LogisticsBill, year: int, month: int
+) -> Decimal:
+    """把跨月/半年实际账单按真实发货单量分摊到单个月份。"""
+    if bill.actual_amount is None or bill.period_start is None or bill.period_end is None:
+        return Decimal("0")
+    bill_tz = bill.period_start.tzinfo or _tz()
+    bill_start = datetime.combine(bill.period_start.date(), time.min, tzinfo=bill_tz)
+    bill_end = _exclusive_period_end(bill.period_end)
+    month_start, month_end = _month_bounds(year, month)
+    overlap_start = max(bill_start, month_start)
+    overlap_end = min(bill_end, month_end)
+    if overlap_start >= overlap_end:
+        return Decimal("0")
+
+    total_count = _shipped_count_range(db, bill_start, bill_end)
+    month_count = _shipped_count_range(db, overlap_start, overlap_end)
+    if total_count > 0:
+        return bill.actual_amount * Decimal(month_count) / Decimal(total_count)
+
+    total_seconds = Decimal(str((bill_end - bill_start).total_seconds()))
+    overlap_seconds = Decimal(str((overlap_end - overlap_start).total_seconds()))
+    if total_seconds <= 0:
+        return Decimal("0")
+    return bill.actual_amount * overlap_seconds / total_seconds
+
+
+def monthly_finance_cost(db: Session, year: int, month: int) -> dict:
+    """财务统一口径：有已核销实际账单则用实际，否则用月度预估。"""
+    start, end = _month_bounds(year, month)
+    shipped_count = _shipped_count_range(db, start, end)
+    covering = [bill for bill in _settled_bills(db) if _cover_month(bill, year, month)]
+    if covering:
+        amount = sum(
+            (_actual_amount_for_month(db, bill, year, month) for bill in covering),
+            Decimal("0"),
+        ).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+        return {
+            "year": year,
+            "month": month,
+            "amount": str(amount),
+            "valueType": "actual",
+            "shippedCount": shipped_count,
+            "unitPrice": str((amount / Decimal(shipped_count)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
+            if shipped_count > 0 else None,
+            "source": "settled_bill",
+            "billIds": [bill.id for bill in covering],
+        }
+
+    learned = historical_models(db)["summary"]
+    smart_price = (
+        Decimal(str(learned["suggestedUnitPrice"]))
+        if learned.get("suggestedUnitPrice") else None
+    )
+    unit_price = smart_price if smart_price is not None and smart_price > 0 else default_unit_price(db)
+    amount = (Decimal(shipped_count) * unit_price).quantize(
+        Decimal("0.01"), rounding=ROUND_HALF_UP
+    )
+    return {
+        "year": year,
+        "month": month,
+        "amount": str(amount),
+        "valueType": "estimated",
+        "shippedCount": shipped_count,
+        "unitPrice": str(unit_price),
+        "source": "smart" if smart_price is not None and smart_price > 0 else "default",
+        "billIds": [],
+    }
+
+
 def list_bills(db: Session) -> list[dict]:
     rows = db.query(LogisticsBill).order_by(LogisticsBill.period_start.desc(), LogisticsBill.id.desc()).all()
     return [_bill_dict(b) for b in rows]
