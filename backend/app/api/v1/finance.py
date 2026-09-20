@@ -123,6 +123,43 @@ def generate_sales_report(
         raise HTTPException(400, str(exc)) from exc
 
 
+@router.post("/{year}/{month}/refresh-business")
+def refresh_monthly_business(
+    year: int,
+    month: int,
+    company: str = "",
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    """月结读取业务库：同步财务事项并返回销售/成本完整性，不接收业务源文件。"""
+    finance_service.validate_period(year, month)
+    company_name = company or finance_service.DEFAULT_COMPANY
+    sync_result = finance_projection_service.sync_business_period(
+        db,
+        year=year,
+        month=month,
+        business_scope="domestic",
+    )
+    template = sales_report_service.get_or_create_template(db, company_name)
+    report = sales_report_service.build_report(db, year, month, template)
+    summary = report.get("summary") or {}
+    missing = summary.get("costMissingDetail") or []
+    return {
+        "ready": not bool(summary.get("costIncomplete")),
+        "source": "business_database",
+        "salesSource": "sales_orders",
+        "costSource": "jackyun_goods_documents",
+        "salesOrderCount": int(summary.get("orderCount") or 0),
+        "warehouseCount": int(summary.get("warehouseCount") or 0),
+        "totalQuantity": str(summary.get("totalQuantity") or "0"),
+        "salesAmount": str(summary.get("salesAmount") or "0"),
+        "costAmount": str(summary.get("costAmount") or "0"),
+        "costIncomplete": bool(summary.get("costIncomplete")),
+        "costMissingCount": len(missing),
+        "costMissingDetail": missing,
+        "sync": sync_result,
+    }
+
+
 @router.get("/periods")
 def list_periods(company: str | None = None, db: Session = Depends(get_db)) -> list[dict[str, Any]]:
     return finance_service.period_overview(db, company)
