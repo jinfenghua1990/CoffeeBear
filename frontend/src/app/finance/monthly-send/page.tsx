@@ -232,7 +232,10 @@ type CorporateInvoiceRow = {
   invoiceTotalAmount: string;
   invoiceCorporatePaidTotal: string;
   invoiceOutstandingAmount: string;
-  invoiceStatus: "paid" | "partial" | "unpaid" | string;
+  invoiceStatus: "paid" | "partial" | "unpaid" | "not_applicable" | string;
+  bankReconciliationStatus?: "paid" | "partial" | "unpaid" | "not_applicable" | string;
+  bankReconciliationApplicable?: boolean;
+  bankReconciliationReason?: string;
   purchaseOrderNos: string[];
   payments: CorporateInvoicePayment[];
 };
@@ -266,12 +269,30 @@ type CorporatePaymentReport = {
     paidInvoiceCount?: number;
     partialInvoiceCount?: number;
     unpaidInvoiceCount?: number;
+    notApplicableInvoiceCount?: number;
   };
   invoiceRows: CorporateInvoiceRow[];
   rows: CorporatePaymentRow[];
   productDetails: CorporatePaymentProductDetail[];
 };
 type PickerInvoice = { id: number; invoiceNumber: string; sellerName: string; issueDate: string; totalAmount: string; remaining: string; suggested: boolean };
+
+function corporateBankStatus(row: CorporateInvoiceRow) {
+  return row.bankReconciliationStatus || row.invoiceStatus;
+}
+
+function corporateBankStatusLabel(status: string) {
+  if (status === "paid") return "银行付款已核对";
+  if (status === "partial") return "银行付款部分核对";
+  if (status === "not_applicable") return "无需核对银行付款";
+  return "待核对银行付款";
+}
+
+function bankMatchStatusLabel(status: string) {
+  if (status === "matched") return "银行付款已核对";
+  if (status === "partial") return "银行付款部分核对";
+  return "待核对银行付款";
+}
 
 function previousMonthValue() {
   const now = new Date();
@@ -1006,10 +1027,10 @@ export default function MonthlySendPage() {
               </div>
             )}
           </div>
-          <ItemRow kind="bank" title={`${sel?.month || ""}月-银行交易明细`} state={{ ok: Boolean(bankTx), text: bankTx ? "已核对" : "待上传" }} summary={bankTx ? <>全部账户 · 已导入<br />{formatBytes(bankTx.size)}</> : <>等待上传原始银行流水<br /><span className="text-amber-600">上传后自动归档</span></>} updatedAt={bankTx?.uploadedAt} version={bankTx?.version} parameter={bankTx ? "账期内 · 全部账户" : "待补充资料"} selected={includeSel.includes("交易明细")} onToggle={() => setIncludeSel((s) => s.includes("交易明细") ? s.filter((x) => x !== "交易明细") : [...s, "交易明细"])} actions={<>{bankTx && <button type="button" onClick={() => void downloadFile(bankTx)} disabled={busy} className="rounded-md border border-slate-200 px-2.5 py-1.5 text-[11px] text-slate-600 hover:bg-slate-50 disabled:opacity-50">下载</button>}<button type="button" onClick={() => { uploadKind.current = "交易明细"; fileRef.current?.click(); }} disabled={busy} className="rounded-md bg-blue-600 px-2.5 py-1.5 text-[11px] font-medium text-white hover:bg-blue-700 disabled:opacity-50">{bankTx ? "替换" : "上传"}</button></>} />
-          <ItemRow kind="receipt" title={`${sel?.month || ""}月-银行回单详情`} state={{ ok: Boolean(bankReceipt), text: bankReceipt ? "已核对" : "待上传" }} summary={bankReceipt ? <>全部账户 · 已导入<br />{formatBytes(bankReceipt.size)}</> : <>等待上传银行回单<br /><span className="text-amber-600">上传后自动归档</span></>} updatedAt={bankReceipt?.uploadedAt} version={bankReceipt?.version} parameter={bankReceipt ? "账期内 · 全部账户" : "待补充资料"} selected={includeSel.includes("回单详情")} onToggle={() => setIncludeSel((s) => s.includes("回单详情") ? s.filter((x) => x !== "回单详情") : [...s, "回单详情"])} actions={<>{bankReceipt && <button type="button" onClick={() => void downloadFile(bankReceipt)} disabled={busy} className="rounded-md border border-slate-200 px-2.5 py-1.5 text-[11px] text-slate-600 hover:bg-slate-50 disabled:opacity-50">下载</button>}<button type="button" onClick={() => { uploadKind.current = "回单详情"; fileRef.current?.click(); }} disabled={busy} className="rounded-md bg-blue-600 px-2.5 py-1.5 text-[11px] font-medium text-white hover:bg-blue-700 disabled:opacity-50">{bankReceipt ? "替换" : "上传"}</button></>} />
+          <ItemRow kind="bank" title={`${sel?.month || ""}月-银行交易明细`} state={{ ok: Boolean(bankTx), text: bankTx ? "已导入" : "待上传" }} summary={bankTx ? <>全部账户 · 已导入<br />{formatBytes(bankTx.size)}</> : <>等待上传原始银行流水<br /><span className="text-amber-600">上传后自动归档</span></>} updatedAt={bankTx?.uploadedAt} version={bankTx?.version} parameter={bankTx ? "账期内 · 全部账户" : "待补充资料"} selected={includeSel.includes("交易明细")} onToggle={() => setIncludeSel((s) => s.includes("交易明细") ? s.filter((x) => x !== "交易明细") : [...s, "交易明细"])} actions={<>{bankTx && <button type="button" onClick={() => void downloadFile(bankTx)} disabled={busy} className="rounded-md border border-slate-200 px-2.5 py-1.5 text-[11px] text-slate-600 hover:bg-slate-50 disabled:opacity-50">下载</button>}<button type="button" onClick={() => { uploadKind.current = "交易明细"; fileRef.current?.click(); }} disabled={busy} className="rounded-md bg-blue-600 px-2.5 py-1.5 text-[11px] font-medium text-white hover:bg-blue-700 disabled:opacity-50">{bankTx ? "替换" : "上传"}</button></>} />
+          <ItemRow kind="receipt" title={`${sel?.month || ""}月-银行回单详情`} state={{ ok: Boolean(bankReceipt), text: bankReceipt ? "已导入" : "待上传" }} summary={bankReceipt ? <>全部账户 · 已导入<br />{formatBytes(bankReceipt.size)}</> : <>等待上传银行回单<br /><span className="text-amber-600">上传后自动归档</span></>} updatedAt={bankReceipt?.uploadedAt} version={bankReceipt?.version} parameter={bankReceipt ? "账期内 · 全部账户" : "待补充资料"} selected={includeSel.includes("回单详情")} onToggle={() => setIncludeSel((s) => s.includes("回单详情") ? s.filter((x) => x !== "回单详情") : [...s, "回单详情"])} actions={<>{bankReceipt && <button type="button" onClick={() => void downloadFile(bankReceipt)} disabled={busy} className="rounded-md border border-slate-200 px-2.5 py-1.5 text-[11px] text-slate-600 hover:bg-slate-50 disabled:opacity-50">下载</button>}<button type="button" onClick={() => { uploadKind.current = "回单详情"; fileRef.current?.click(); }} disabled={busy} className="rounded-md bg-blue-600 px-2.5 py-1.5 text-[11px] font-medium text-white hover:bg-blue-700 disabled:opacity-50">{bankReceipt ? "替换" : "上传"}</button></>} />
           {needsUnbilled && (<ItemRow kind="sales" title={`${sel?.month || ""}月-销售出库-无票收入`} state={{ ok: Boolean(unbilled), text: unbilled ? (unbilled.adjusted ? "已调整" : "已生成") : "计算中" }} summary={unbilled ? <>销售总额 {money(unbilled.salesAmount)}<br />无票收入 {money(unbilled.unbilledAmount)}</> : <>正在读取销售出库数据<br /><span className="text-slate-400">按当前账期自动计算</span></>} updatedAt={unbilled?.updatedAt || salesFile?.uploadedAt} version={unbilled?.version || salesFile?.version} parameter={unbilled?.adjusted ? `已选择 ${unbilled.selectedCount || 0}/${unbilled.sourceCount || 0} 条` : "出库时间 · 全部渠道"} selected={includeSel.includes("无票收入")} onToggle={() => setIncludeSel((s) => s.includes("无票收入") ? s.filter((x) => x !== "无票收入") : [...s, "无票收入"])} actions={<><button type="button" onClick={() => setShowUnbilledDetail(true)} disabled={!unbilled} className="rounded-md border border-slate-200 px-2.5 py-1.5 text-[11px] text-slate-600 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-40">调整明细</button><button type="button" onClick={() => { setFinanceTab("ledger"); void previewSales(); }} disabled={busy} className="rounded-md border border-blue-200 px-2.5 py-1.5 text-[11px] text-blue-600 hover:bg-blue-50 disabled:opacity-50">预览</button></>} />)}
-          {needsUnbilled && (<ItemRow kind="purchase_inbound" title={`${sel?.month || ""}月-已收票对公付款明细`} state={{ ok: Boolean(corporatePayment), text: corporatePayment ? "已生成" : "计算中" }} summary={corporatePayment ? <>进项发票 {corporatePayment.summary.invoiceCount} 张 · 对公付款 {corporatePayment.summary.paymentCount} 笔<br />已关联 {money(corporatePayment.summary.allocatedTotal)}</> : <>正在关联银行付款、发票与采购商品<br /><span className="text-slate-400">只统计已确认的付款↔发票关联</span></>} parameter={corporatePayment ? `商品明细 ${corporatePayment.summary.productRowCount} 行 · 发票未付 ${money(corporatePayment.summary.outstandingTotal)}` : "发票号 · 商品采购价 · 对公流水"} selected={includeSel.includes("已收票对公付款明细")} onToggle={() => setIncludeSel((s) => s.includes("已收票对公付款明细") ? s.filter((x) => x !== "已收票对公付款明细") : [...s, "已收票对公付款明细"])} actions={<button type="button" onClick={() => { setFinanceTab("corporate"); void loadCorporatePayment(); }} disabled={!corporatePayment} className="rounded-md border border-violet-200 px-2.5 py-1.5 text-[11px] text-violet-600 hover:bg-violet-50 disabled:cursor-not-allowed disabled:opacity-40">查看清单</button>} />)}
+          {needsUnbilled && (<ItemRow kind="purchase_inbound" title={`${sel?.month || ""}月-已收票对公付款明细`} state={{ ok: Boolean(corporatePayment), text: corporatePayment ? "已生成" : "计算中" }} summary={corporatePayment ? <>进项发票 {corporatePayment.summary.invoiceCount} 张 · 对公付款 {corporatePayment.summary.paymentCount} 笔<br />已关联 {money(corporatePayment.summary.allocatedTotal)}</> : <>正在关联银行付款、发票与采购商品<br /><span className="text-slate-400">只统计已确认的付款↔发票关联</span></>} parameter={corporatePayment ? `商品明细 ${corporatePayment.summary.productRowCount} 行 · 待核对银行 ${money(corporatePayment.summary.outstandingTotal)}` : "发票号 · 商品采购价 · 对公流水"} selected={includeSel.includes("已收票对公付款明细")} onToggle={() => setIncludeSel((s) => s.includes("已收票对公付款明细") ? s.filter((x) => x !== "已收票对公付款明细") : [...s, "已收票对公付款明细"])} actions={<button type="button" onClick={() => { setFinanceTab("corporate"); void loadCorporatePayment(); }} disabled={!corporatePayment} className="rounded-md border border-violet-200 px-2.5 py-1.5 text-[11px] text-violet-600 hover:bg-violet-50 disabled:cursor-not-allowed disabled:opacity-40">查看清单</button>} />)}
           <input ref={fileRef} type="file" accept=".xlsx,.xls,.csv,.pdf" className="hidden" onChange={(e) => { const file = e.target.files?.[0]; if (file) handleUploadSelection(file); }} />
         </section>
 
@@ -1056,16 +1077,16 @@ export default function MonthlySendPage() {
             <p className="mt-1 text-xs text-slate-400">财务交付以进项发票为主：一张发票一行，再核对对应银行付款、采购订单和商品采购价；已收票但尚未付款的发票也会保留。</p>
           </div>
           <div className="flex gap-2">
-            <button type="button" onClick={() => { setFinanceTab("match"); void loadMatch(); }} className="rounded-lg border border-blue-200 px-3 py-2 text-xs font-medium text-blue-600 hover:bg-blue-50">核对银行</button>
+            <button type="button" onClick={() => { setFinanceTab("match"); void loadMatch(); }} className="rounded-lg border border-blue-200 px-3 py-2 text-xs font-medium text-blue-600 hover:bg-blue-50">核对银行付款</button>
             <button type="button" onClick={loadCorporatePayment} className="rounded-lg border border-slate-200 px-3 py-2 text-xs text-slate-600 hover:bg-slate-50">刷新</button>
           </div>
         </div>
         {corporatePayment && <div className="grid grid-cols-2 gap-px bg-slate-100 sm:grid-cols-5">
           {([
-            ["发票价税合计", money(corporatePayment.summary.invoiceTotal), `${corporatePayment.summary.invoiceCount} 张进项票`],
-            ["已核对银行", money(corporatePayment.summary.allocatedTotal), `${corporatePayment.summary.paymentCount} 笔付款`],
-            ["待核对 / 未付", money(corporatePayment.summary.outstandingTotal), `${corporatePayment.summary.unpaidInvoiceCount || 0} 张未核对`],
-            ["已完成核对", String(corporatePayment.summary.paidInvoiceCount || 0), "张发票"],
+            ["发票价税合计", money(corporatePayment.summary.invoiceTotal), `${corporatePayment.summary.invoiceCount} 张进项票 · ${corporatePayment.summary.notApplicableInvoiceCount || 0} 张无需银行核对`],
+            ["银行付款已核对", money(corporatePayment.summary.allocatedTotal), `${corporatePayment.summary.paymentCount} 笔付款`],
+            ["待核对银行付款", money(corporatePayment.summary.outstandingTotal), `${corporatePayment.summary.unpaidInvoiceCount || 0} 张待核对`],
+            ["银行付款核对完成", String(corporatePayment.summary.paidInvoiceCount || 0), "张发票"],
             ["商品明细", String(corporatePayment.summary.productRowCount), "行"],
           ] as const).map(([label, value, hint]) => <div key={label} className="bg-white px-4 py-3"><div className="text-[10px] text-slate-400">{label}</div><div className="mt-1 text-base font-semibold text-slate-800">{value}</div><div className="mt-0.5 text-[10px] text-slate-400">{hint}</div></div>)}
         </div>}
@@ -1073,19 +1094,19 @@ export default function MonthlySendPage() {
           <div className="overflow-x-auto border-b border-slate-200">
             <table className="w-full min-w-[1520px] text-xs">
               <thead className="bg-slate-50 text-left text-slate-500"><tr>
-                <th className="px-3 py-2.5 font-medium">发票日期</th><th className="px-3 py-2.5 font-medium">供应商</th><th className="px-3 py-2.5 font-medium">发票号码</th><th className="px-3 py-2.5 text-right font-medium">价税合计</th><th className="px-3 py-2.5 text-right font-medium">已核对银行</th><th className="px-3 py-2.5 text-right font-medium">待核对 / 未付</th><th className="px-3 py-2.5 font-medium">银行付款</th><th className="px-3 py-2.5 font-medium">采购订单</th><th className="px-3 py-2.5 font-medium">状态</th><th className="px-3 py-2.5 text-right font-medium">操作</th>
+                <th className="px-3 py-2.5 font-medium">发票日期</th><th className="px-3 py-2.5 font-medium">供应商</th><th className="px-3 py-2.5 font-medium">发票号码</th><th className="px-3 py-2.5 text-right font-medium">价税合计</th><th className="px-3 py-2.5 text-right font-medium">银行已核对金额</th><th className="px-3 py-2.5 text-right font-medium">待核对银行金额</th><th className="px-3 py-2.5 font-medium">银行付款</th><th className="px-3 py-2.5 font-medium">采购订单</th><th className="px-3 py-2.5 font-medium">银行核对状态</th><th className="px-3 py-2.5 text-right font-medium">操作</th>
               </tr></thead>
-              <tbody className="divide-y divide-slate-100">{corporateInvoices.map((row) => <tr key={row.invoiceId} className={row.invoiceStatus === "unpaid" ? "bg-amber-50/25" : ""}>
+              <tbody className="divide-y divide-slate-100">{corporateInvoices.map((row) => <tr key={row.invoiceId} className={corporateBankStatus(row) === "unpaid" ? "bg-amber-50/25" : ""}>
                 <td className="whitespace-nowrap px-3 py-2.5 text-slate-600">{row.invoiceDate || "—"}</td>
                 <td className="max-w-[220px] px-3 py-2.5"><div className="truncate font-medium text-slate-800">{row.supplierName || "—"}</div><div className="mt-0.5 truncate font-mono text-[10px] text-slate-400">{row.supplierTaxId || ""}</div></td>
                 <td className="px-3 py-2.5 font-mono text-[11px] text-slate-600">{row.invoiceNumber || "—"}</td>
                 <td className="px-3 py-2.5 text-right font-semibold tabular-nums text-slate-800">{money(row.invoiceTotalAmount)}</td>
-                <td className="px-3 py-2.5 text-right tabular-nums text-emerald-700">{money(row.invoiceCorporatePaidTotal)}</td>
-                <td className={`px-3 py-2.5 text-right font-medium tabular-nums ${Number(row.invoiceOutstandingAmount || 0) <= 0.05 ? "text-slate-400" : "text-amber-700"}`}>{money(row.invoiceOutstandingAmount)}</td>
-                <td className="px-3 py-2.5"><div className="space-y-1">{row.payments.length ? row.payments.map((payment) => <div key={payment.linkId} className="text-[11px] text-slate-600"><span>{payment.paymentDate}</span><span className="mx-1 text-slate-300">·</span><span>{money(payment.allocatedAmount)}</span><div className="text-[10px] text-slate-400">{payment.paymentAccount || payment.paymentAccountName || "未记录账户"}{payment.voucherNo ? ` · ${payment.voucherNo}` : ""}</div></div>) : <span className="text-slate-300">尚未核对银行付款</span>}</div></td>
+                <td className="px-3 py-2.5 text-right tabular-nums text-emerald-700">{corporateBankStatus(row) === "not_applicable" ? <span className="text-slate-300">—</span> : money(row.invoiceCorporatePaidTotal)}</td>
+                <td className={`px-3 py-2.5 text-right font-medium tabular-nums ${Number(row.invoiceOutstandingAmount || 0) <= 0.05 ? "text-slate-400" : "text-amber-700"}`}>{corporateBankStatus(row) === "not_applicable" ? "—" : money(row.invoiceOutstandingAmount)}</td>
+                <td className="px-3 py-2.5"><div className="space-y-1">{row.payments.length ? row.payments.map((payment) => <div key={payment.linkId} className="text-[11px] text-slate-600"><span>{payment.paymentDate}</span><span className="mx-1 text-slate-300">·</span><span>{money(payment.allocatedAmount)}</span><div className="text-[10px] text-slate-400">{payment.paymentAccount || payment.paymentAccountName || "未记录账户"}{payment.voucherNo ? ` · ${payment.voucherNo}` : ""}</div></div>) : corporateBankStatus(row) === "not_applicable" ? <span className="text-slate-400" title={row.bankReconciliationReason || "该发票不参与银行付款核对"}>无需核对银行付款</span> : <span className="text-slate-300">尚未核对银行付款</span>}</div></td>
                 <td className="max-w-[260px] px-3 py-2.5 text-slate-600">{row.purchaseOrderNos.join("、") || "—"}</td>
-                <td className="px-3 py-2.5"><span className={`rounded-full px-2 py-1 text-[10px] ${row.invoiceStatus === "paid" ? "bg-emerald-50 text-emerald-700" : row.invoiceStatus === "partial" ? "bg-amber-50 text-amber-700" : "bg-slate-100 text-slate-500"}`}>{row.invoiceStatus === "paid" ? "已核对" : row.invoiceStatus === "partial" ? "部分核对" : "待核对银行"}</span></td>
-                <td className="px-3 py-2.5 text-right"><button type="button" onClick={() => { setFinanceTab("match"); void loadMatch(); }} className="rounded-md border border-blue-200 px-2.5 py-1.5 text-[11px] font-medium text-blue-600 hover:bg-blue-50">{row.invoiceStatus === "paid" ? "查看核对" : "核对银行"}</button></td>
+                <td className="px-3 py-2.5"><span title={row.bankReconciliationReason || undefined} className={`rounded-full px-2 py-1 text-[10px] ${corporateBankStatus(row) === "paid" ? "bg-emerald-50 text-emerald-700" : corporateBankStatus(row) === "partial" ? "bg-amber-50 text-amber-700" : corporateBankStatus(row) === "not_applicable" ? "bg-rose-50 text-rose-700" : "bg-slate-100 text-slate-500"}`}>{corporateBankStatusLabel(corporateBankStatus(row))}</span></td>
+                <td className="px-3 py-2.5 text-right">{corporateBankStatus(row) === "not_applicable" ? <span className="text-[11px] text-slate-300">—</span> : <button type="button" onClick={() => { setFinanceTab("match"); void loadMatch(); }} className="rounded-md border border-blue-200 px-2.5 py-1.5 text-[11px] font-medium text-blue-600 hover:bg-blue-50">{corporateBankStatus(row) === "paid" ? "查看银行核对" : "核对银行付款"}</button>}</td>
               </tr>)}</tbody>
             </table>
           </div>
@@ -1097,7 +1118,7 @@ export default function MonthlySendPage() {
       {financeTab === "match" && <section className={`${CARD} overflow-hidden`}>
         <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 px-4 py-4">
           <div>
-            <h2 className="text-base font-semibold text-slate-900">发票核对银行</h2>
+            <h2 className="text-base font-semibold text-slate-900">发票 ↔ 银行付款核对</h2>
             <p className="mt-1 text-xs text-slate-400">财务按当月收到的进项发票逐张核对银行付款；银行流水只作为核对依据，不作为这张月度清单的主维度。</p>
           </div>
           <button type="button" onClick={loadMatch} disabled={matchLoading} className="rounded-lg border border-slate-200 px-3 py-2 text-xs text-slate-600 hover:bg-slate-50 disabled:opacity-50">刷新</button>
@@ -1106,9 +1127,9 @@ export default function MonthlySendPage() {
           <div className="grid grid-cols-2 gap-px bg-slate-100 sm:grid-cols-5">
             {([
               ["进项发票", money(matchData.summary.invoiceTotal), `${matchData.summary.invoiceCount} 张`],
-              ["已核对银行", money(matchData.summary.invoiceMatchedTotal), `${matchData.summary.invoiceMatchedCount} 张完成`],
-              ["待核对金额", money(matchData.summary.invoiceOutstandingTotal), `${matchData.summary.invoiceUnmatchedCount} 张未核对`],
-              ["部分核对", String(matchData.summary.invoicePartialCount), "张发票"],
+              ["银行付款已核对", money(matchData.summary.invoiceMatchedTotal), `${matchData.summary.invoiceMatchedCount} 张完成`],
+              ["待核对银行付款", money(matchData.summary.invoiceOutstandingTotal), `${matchData.summary.invoiceUnmatchedCount} 张待核对`],
+              ["银行付款部分核对", String(matchData.summary.invoicePartialCount), "张发票"],
               ["可用银行支出", money(matchData.summary.paymentTotal), `${matchData.summary.txnCount} 笔`],
             ] as const).map(([label, value, hint]) => (
               <div key={label} className="bg-white px-4 py-3">
@@ -1120,12 +1141,12 @@ export default function MonthlySendPage() {
           </div>
         )}
         {matchLoading && <div className="px-4 py-10 text-center text-sm text-slate-400">加载中…</div>}
-        {matchData && !matchData.invoicePool.length && <div className="px-4 py-12 text-center text-sm text-slate-400">当前账期没有进项发票；发票导入后会在这里逐张核对银行付款。</div>}
+        {matchData && !matchData.invoicePool.length && <div className="px-4 py-12 text-center text-sm text-slate-400">当前账期没有需要核对银行付款的进项发票；红冲、作废、待确认及非正数金额发票不会进入付款核对。</div>}
         {matchData && Boolean(matchData.invoicePool.length) && (
           <div className="overflow-x-auto">
             <table className="w-full min-w-[1260px] text-sm">
               <thead className="bg-slate-50 text-left text-xs text-slate-500">
-                <tr><th className="px-4 py-2.5 font-medium">发票日期</th><th className="px-4 py-2.5 font-medium">供应商</th><th className="px-4 py-2.5 font-medium">发票号码</th><th className="px-4 py-2.5 text-right font-medium">价税合计</th><th className="px-4 py-2.5 text-right font-medium">已核对银行</th><th className="px-4 py-2.5 text-right font-medium">待核对</th><th className="px-4 py-2.5 font-medium">已关联银行流水</th><th className="px-4 py-2.5 font-medium">状态</th><th className="px-4 py-2.5 text-right font-medium">操作</th></tr>
+                <tr><th className="px-4 py-2.5 font-medium">发票日期</th><th className="px-4 py-2.5 font-medium">供应商</th><th className="px-4 py-2.5 font-medium">发票号码</th><th className="px-4 py-2.5 text-right font-medium">价税合计</th><th className="px-4 py-2.5 text-right font-medium">银行已核对金额</th><th className="px-4 py-2.5 text-right font-medium">待核对银行金额</th><th className="px-4 py-2.5 font-medium">已关联银行流水</th><th className="px-4 py-2.5 font-medium">银行核对状态</th><th className="px-4 py-2.5 text-right font-medium">操作</th></tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
                 {matchData.invoicePool.map((row) => (
@@ -1139,8 +1160,8 @@ export default function MonthlySendPage() {
                     <td className="px-4 py-3">
                       {row.links.length ? <div className="space-y-1">{row.links.map((link) => <div key={link.linkId || `${row.id}-${link.txnId}`} className="text-xs"><div className="flex flex-wrap items-center gap-2"><span className="text-slate-600">{link.txnDate}</span><span className="font-medium text-slate-700">{money(link.allocatedAmount || 0)}</span>{link.linkId && <button type="button" onClick={() => void unlinkPayment(link.linkId!)} disabled={busy} className="text-[10px] text-rose-500 hover:underline disabled:opacity-40">解除</button>}</div><div className="text-[10px] text-slate-400">{link.accountNo || link.accountName || "未记录账户"}{link.voucherNo ? ` · ${link.voucherNo}` : ""}</div></div>)}</div> : <span className="text-xs text-slate-300">尚未关联银行付款</span>}
                     </td>
-                    <td className="px-4 py-3"><span className={`inline-flex rounded-full px-2 py-1 text-[10px] font-medium ${row.bankMatchStatus === "matched" ? "bg-emerald-50 text-emerald-700" : row.bankMatchStatus === "partial" ? "bg-amber-50 text-amber-700" : "bg-slate-100 text-slate-500"}`}>{row.bankMatchStatus === "matched" ? "已核对" : row.bankMatchStatus === "partial" ? "部分核对" : "待核对银行"}</span></td>
-                    <td className="px-4 py-3 text-right"><button type="button" onClick={() => { setPickerQuery(""); setPickerInvoice(row); }} disabled={busy || Number(row.remaining) <= 0.01} className="rounded-md border border-blue-200 px-2.5 py-1.5 text-[11px] font-medium text-blue-600 hover:bg-blue-50 disabled:opacity-40">{row.bankMatchStatus === "matched" ? "已完成" : "选择银行流水"}</button></td>
+                    <td className="px-4 py-3"><span className={`inline-flex rounded-full px-2 py-1 text-[10px] font-medium ${row.bankMatchStatus === "matched" ? "bg-emerald-50 text-emerald-700" : row.bankMatchStatus === "partial" ? "bg-amber-50 text-amber-700" : "bg-slate-100 text-slate-500"}`}>{bankMatchStatusLabel(row.bankMatchStatus)}</span></td>
+                    <td className="px-4 py-3 text-right"><button type="button" onClick={() => { setPickerQuery(""); setPickerInvoice(row); }} disabled={busy || Number(row.remaining) <= 0.01} className="rounded-md border border-blue-200 px-2.5 py-1.5 text-[11px] font-medium text-blue-600 hover:bg-blue-50 disabled:opacity-40">{row.bankMatchStatus === "matched" ? "银行核对完成" : "选择银行流水"}</button></td>
                   </tr>
                 ))}
               </tbody>

@@ -242,3 +242,72 @@ def test_corporate_payment_xlsx_keeps_one_row_per_invoice_with_multiple_payments
     assert ws["L2"].value == "2026-08-15、2026-08-20"
     assert ws["N2"].value == "V-001、V-002"
     assert ws["P2"].value == "PO-A、PO-B"
+
+
+def test_negative_red_invoice_is_not_misclassified_as_bank_reconciled(db_session):
+    """红字负数票保留在月度财务清单，但绝不能因为 outstanding 被截成 0 就显示已核对。"""
+    token = uuid4().hex[:10]
+    invoice = TaxInvoice(
+        invoice_key=f"pytest-corp-red-{token}",
+        invoice_number=f"INV-RED-{token}",
+        direction="input",
+        status="red",
+        issue_date=datetime(2026, 7, 8, tzinfo=timezone.utc),
+        seller_name=f"红冲供应商-{token}",
+        amount_excl_tax=Decimal("-1343.36"),
+        tax_amount=Decimal("-174.64"),
+        total_amount=Decimal("-1518.00"),
+        source_system="tax_export",
+        raw={},
+    )
+    db_session.add(invoice)
+    db_session.commit()
+
+    report = service.build_report(db_session, 2026, 7)
+    row = next(item for item in report["invoiceRows"] if item["invoiceId"] == invoice.id)
+
+    assert row["invoiceTotalAmount"] == "-1518.00"
+    assert row["invoiceCorporatePaidTotal"] == "0"
+    assert row["invoiceOutstandingAmount"] == "0"
+    assert row["invoiceStatus"] == "not_applicable"
+    assert row["bankReconciliationStatus"] == "not_applicable"
+    assert row["bankReconciliationApplicable"] is False
+    assert "不参与银行付款核对" in row["bankReconciliationReason"]
+    assert row["payments"] == []
+
+    assert report["summary"]["paidInvoiceCount"] == 0
+    assert report["summary"]["partialInvoiceCount"] == 0
+    assert report["summary"]["unpaidInvoiceCount"] == 0
+    assert report["summary"]["notApplicableInvoiceCount"] == 1
+    assert Decimal(report["summary"]["outstandingTotal"]) == Decimal("0")
+
+    wb = load_workbook(BytesIO(service.corporate_payment_xlsx(report)), read_only=True)
+    assert wb["已收票对公核对"]["K2"].value == "无需核对银行付款"
+
+
+def test_small_positive_invoice_without_payment_stays_unpaid(db_session):
+    """状态不能仅由“剩余金额落入容差”决定；没有银行付款就绝不能显示已核对。"""
+    token = uuid4().hex[:10]
+    invoice = TaxInvoice(
+        invoice_key=f"pytest-corp-small-{token}",
+        invoice_number=f"INV-SMALL-{token}",
+        direction="input",
+        status="issued",
+        issue_date=datetime(2026, 7, 9, tzinfo=timezone.utc),
+        seller_name=f"小额供应商-{token}",
+        total_amount=Decimal("0.03"),
+        source_system="tax_export",
+        raw={},
+    )
+    db_session.add(invoice)
+    db_session.commit()
+
+    report = service.build_report(db_session, 2026, 7)
+    row = next(item for item in report["invoiceRows"] if item["invoiceId"] == invoice.id)
+
+    assert row["bankReconciliationApplicable"] is True
+    assert row["bankReconciliationStatus"] == "unpaid"
+    assert row["invoiceCorporatePaidTotal"] == "0"
+    assert Decimal(row["invoiceOutstandingAmount"]) == Decimal("0.03")
+    assert report["summary"]["paidInvoiceCount"] == 0
+    assert report["summary"]["unpaidInvoiceCount"] == 1

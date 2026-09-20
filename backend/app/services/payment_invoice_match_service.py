@@ -20,6 +20,7 @@ from sqlalchemy.orm import Session
 from app.core.audit import audit
 from app.models.bank import BankAccount, BankTransaction
 from app.models.tax import TaxInvoice, TaxInvoiceLink
+from app.services import tax_invoice_service
 from app.utils.money import quantize, to_decimal
 
 TARGET_TYPE = "bank_transaction"
@@ -105,11 +106,15 @@ def _invoice_brief(invoice: TaxInvoice, link: TaxInvoiceLink | None = None) -> d
 
 
 def _status(remaining: Decimal, amount: Decimal) -> str:
+    """按实际已分摊金额判断，不能把“0 元已匹配”因容差误判为 matched。"""
+    amount = _dec(amount)
+    remaining = _dec(remaining)
+    matched_amount = amount - remaining
+    if matched_amount <= 0:
+        return "unmatched"
     if remaining <= TOLERANCE:
         return "matched"
-    if remaining < _dec(amount):
-        return "partial"
-    return "unmatched"
+    return "partial"
 
 
 def overview(db: Session, year: int, month: int) -> dict[str, Any]:
@@ -206,6 +211,9 @@ def overview(db: Session, year: int, month: int) -> dict[str, Any]:
         .order_by(TaxInvoice.issue_date, TaxInvoice.id)
         .all()
     )
+    # 红冲、作废、待确认和非正数金额发票仍保留在发票/会计模块，
+    # 但不能进入“银行付款核对”池，更不能因金额 <= 0 被推导成 matched。
+    pool_rows = [row for row in pool_rows if tax_invoice_service.is_bank_payment_reconciliation_eligible(row)]
     pool_ids = [row.id for row in pool_rows]
     pool_links: list[TaxInvoiceLink] = []
     if pool_ids:
@@ -337,6 +345,8 @@ def _split_match_invoice_to_txns(
         if allocated_by_invoice is not None
         else _invoice_bank_allocated(db, invoice.id)
     )
+    if not tax_invoice_service.is_bank_payment_reconciliation_eligible(invoice):
+        return 0, allocated
     count = 0
     for txn in txns:
         if target - allocated <= TOLERANCE:
@@ -405,6 +415,8 @@ def _split_match_txn_to_invoices(
     for invoice in invoices:
         if target - allocated <= TOLERANCE:
             break
+        if not tax_invoice_service.is_bank_payment_reconciliation_eligible(invoice):
+            continue
         inv_amount = _dec(invoice.total_amount)
         inv_used = (
             allocated_by_invoice.get(invoice.id, Decimal("0.0000"))
@@ -485,6 +497,7 @@ def auto_match(db: Session, year: int, month: int, actor: str = "system") -> dic
         )
         .all()
     )
+    invoices = [invoice for invoice in invoices if tax_invoice_service.is_bank_payment_reconciliation_eligible(invoice)]
     if not invoices:
         return {"year": year, "month": month, "matched": 0, "skipped": 0, "details": []}
 
@@ -757,6 +770,8 @@ def link(
         raise ValueError("发票不存在")
     if invoice.direction != "input":
         raise ValueError("只能挂进项发票")
+    if not tax_invoice_service.is_bank_payment_reconciliation_eligible(invoice):
+        raise ValueError(tax_invoice_service.bank_payment_reconciliation_ineligible_reason(invoice))
 
     db.refresh(txn, with_for_update=True)
     db.refresh(invoice, with_for_update=True)

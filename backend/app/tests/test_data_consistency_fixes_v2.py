@@ -157,6 +157,7 @@ def test_big_payment_partial_invoice_stays_unmatched_until_fully_allocated(db_se
         issue_date=datetime(2026, 8, 1),
         seller_name="测试供应商",
         total_amount=Decimal("3080"),
+        status="issued",
         match_status="unmatched",
     )
     inv2 = TaxInvoice(
@@ -166,6 +167,7 @@ def test_big_payment_partial_invoice_stays_unmatched_until_fully_allocated(db_se
         issue_date=datetime(2026, 8, 1),
         seller_name="测试供应商",
         total_amount=Decimal("3000"),
+        status="issued",
         match_status="unmatched",
     )
     db_session.add_all([txn1, txn2, inv1, inv2])

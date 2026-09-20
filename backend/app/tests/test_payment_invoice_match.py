@@ -93,6 +93,13 @@ def test_overview_filters_by_month_and_out_direction(db_session):
     assert data["summary"]["unmatchedCount"] == 1
 
 
+def test_status_never_calls_zero_allocation_matched():
+    assert pm._status(Decimal("0.01"), Decimal("0.01")) == "unmatched"
+    assert pm._status(Decimal("100.00"), Decimal("100.00")) == "unmatched"
+    assert pm._status(Decimal("0.00"), Decimal("100.00")) == "matched"
+    assert pm._status(Decimal("40.00"), Decimal("100.00")) == "partial"
+
+
 def test_overview_status_matched_after_link(db_session):
     txn = _txn(db_session, amount="1000.00")
     inv = _invoice(db_session, amount="1000.00")
@@ -164,6 +171,51 @@ def test_overview_invoice_pool_counts_bank_links_only(db_session):
     assert data["summary"]["invoiceMatchedTotal"] == "400.00"
     assert data["summary"]["invoiceOutstandingTotal"] == "0.00"
     assert data["summary"]["invoiceMatchedCount"] == 1
+
+
+
+
+def test_red_or_non_positive_invoice_never_enters_bank_reconciliation(db_session):
+    """负数/红冲票属于会计事实，不属于银行付款待核对项。"""
+    txn = _txn(db_session, amount="1518.00", name="龙港市丽峰包装有限公司")
+    inv = _invoice(
+        db_session,
+        seller="龙港市丽峰包装有限公司",
+        amount="-1518.00",
+        month=7,
+        day=8,
+    )
+    txn.txn_date = date(2026, 7, 9)
+    inv.status = "red"
+    db_session.commit()
+
+    data = pm.overview(db_session, 2026, 7)
+    assert inv.id not in {row["id"] for row in data["invoicePool"]}
+    assert data["summary"]["invoiceCount"] == 0
+    assert data["summary"]["invoiceTotal"] == "0.00"
+    assert data["summary"]["invoiceMatchedCount"] == 0
+
+    with pytest.raises(ValueError, match="不参与银行付款核对"):
+        pm.link(db_session, txn_id=txn.id, invoice_id=inv.id)
+
+    auto = pm.auto_match(db_session, 2026, 7)
+    assert auto["matched"] == 0
+    assert db_session.query(TaxInvoiceLink).filter_by(
+        invoice_id=inv.id, target_type="bank_transaction"
+    ).count() == 0
+
+
+def test_positive_red_invoice_also_stays_out_of_bank_reconciliation(db_session):
+    """已红冲的正数蓝字票也不能重新进入付款核对。"""
+    txn = _txn(db_session, amount="500.00", name="已红冲供应商")
+    inv = _invoice(db_session, seller="已红冲供应商", amount="500.00")
+    inv.status = "red"
+    db_session.commit()
+
+    data = pm.overview(db_session, 2026, 8)
+    assert inv.id not in {row["id"] for row in data["invoicePool"]}
+    with pytest.raises(ValueError, match="红冲相关发票不参与银行付款核对"):
+        pm.link(db_session, txn_id=txn.id, invoice_id=inv.id)
 
 
 def test_suggestion_same_name_and_equal_remaining(db_session):

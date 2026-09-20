@@ -1,7 +1,8 @@
 """月度「已收票 + 对公付款」清单。
 
 以已经落库的银行付款↔进项发票关联为唯一付款事实，再向采购订单与商品分配明细下钻。
-不复制付款匹配逻辑；未匹配的银行流水/发票不会进入本清单。
+当月进项发票全部保留用于财务交付，但只有有效、正数金额发票参与银行付款核对；
+红冲、作废、待确认或非正数金额发票明确标记为“无需核对银行付款”。
 """
 from __future__ import annotations
 
@@ -19,7 +20,7 @@ from sqlalchemy.orm import Session
 from app.models.bank import BankAccount, BankTransaction
 from app.models.purchase import ExternalPurchaseOrder, PurchaseAllocationItem, Supplier
 from app.models.tax import TaxInvoice, TaxInvoiceLink
-from app.services import invoice_reconciliation
+from app.services import invoice_reconciliation, tax_invoice_service
 
 TOLERANCE = Decimal("0.05")
 TARGET_TYPE = "bank_transaction"
@@ -63,6 +64,31 @@ def _company_matches(invoice: TaxInvoice, company: str) -> bool:
         invoice_reconciliation.normalize_supplier(invoice.buyer_name)
         == invoice_reconciliation.normalize_supplier(company)
     )
+
+
+def _bank_reconciliation_meta(
+    invoice: TaxInvoice, paid_total: Decimal
+) -> tuple[str, Decimal, bool, str]:
+    """银行付款核对只适用于“有效 + 正数金额”的进项发票。
+
+    会计上需要保留的红字/红冲发票不能因为金额 <= 0 被误判为“已付款/已核对”。
+    """
+    total = _dec(invoice.total_amount)
+    if not tax_invoice_service.is_bank_payment_reconciliation_eligible(invoice):
+        return (
+            "not_applicable",
+            Decimal("0"),
+            False,
+            tax_invoice_service.bank_payment_reconciliation_ineligible_reason(invoice),
+        )
+
+    # 不能只看 outstanding <= tolerance：没有任何银行付款时，哪怕票面金额很小也必须是“待核对”。
+    if paid_total <= 0:
+        return "unpaid", total, True, ""
+
+    outstanding = max(total - paid_total, Decimal("0"))
+    status = "paid" if outstanding <= TOLERANCE else "partial"
+    return status, outstanding, True, ""
 
 
 def _invoice_purchase_map(db: Session, invoices: list[TaxInvoice]) -> dict[int, list[dict[str, Any]]]:
@@ -170,8 +196,9 @@ def build_report(db: Session, year: int, month: int, company: str = "") -> dict[
     for inv in invoices:
         inv_total = _dec(inv.total_amount)
         paid_total = invoice_bank_total.get(inv.id, Decimal("0"))
-        outstanding = max(inv_total - paid_total, Decimal("0"))
-        status = "paid" if outstanding <= TOLERANCE else ("partial" if paid_total > TOLERANCE else "unpaid")
+        status, outstanding, reconciliation_applicable, reconciliation_reason = _bank_reconciliation_meta(
+            inv, paid_total
+        )
         covered = purchase_map.get(inv.id, [])
         order_nos = [str(x.get("orderNo") or "") for x in covered if x.get("orderNo")]
         payments: list[dict[str, Any]] = []
@@ -216,6 +243,9 @@ def build_report(db: Session, year: int, month: int, company: str = "") -> dict[
                 "invoiceCorporatePaidTotal": str(paid_total),
                 "invoiceOutstandingAmount": str(outstanding),
                 "invoiceStatus": status,
+                "bankReconciliationStatus": status,
+                "bankReconciliationApplicable": reconciliation_applicable,
+                "bankReconciliationReason": reconciliation_reason,
                 "purchaseOrderNos": order_nos,
             })
 
@@ -234,6 +264,9 @@ def build_report(db: Session, year: int, month: int, company: str = "") -> dict[
             "invoiceCorporatePaidTotal": str(paid_total),
             "invoiceOutstandingAmount": str(outstanding),
             "invoiceStatus": status,
+            "bankReconciliationStatus": status,
+            "bankReconciliationApplicable": reconciliation_applicable,
+            "bankReconciliationReason": reconciliation_reason,
             "purchaseOrderNos": order_nos,
             "payments": payments,
         })
@@ -283,9 +316,12 @@ def build_report(db: Session, year: int, month: int, company: str = "") -> dict[
             "allocatedTotal": str(allocated_total),
             "invoiceTotal": str(invoice_total),
             "outstandingTotal": str(outstanding_total),
-            "paidInvoiceCount": sum(1 for row in invoice_rows if row["invoiceStatus"] == "paid"),
-            "partialInvoiceCount": sum(1 for row in invoice_rows if row["invoiceStatus"] == "partial"),
-            "unpaidInvoiceCount": sum(1 for row in invoice_rows if row["invoiceStatus"] == "unpaid"),
+            "paidInvoiceCount": sum(1 for row in invoice_rows if row["bankReconciliationStatus"] == "paid"),
+            "partialInvoiceCount": sum(1 for row in invoice_rows if row["bankReconciliationStatus"] == "partial"),
+            "unpaidInvoiceCount": sum(1 for row in invoice_rows if row["bankReconciliationStatus"] == "unpaid"),
+            "notApplicableInvoiceCount": sum(
+                1 for row in invoice_rows if row["bankReconciliationStatus"] == "not_applicable"
+            ),
             "productRowCount": len(product_details),
         },
         "invoiceRows": invoice_rows,
@@ -312,7 +348,7 @@ def corporate_payment_xlsx(report: dict[str, Any]) -> bytes:
     ws.title = "已收票对公核对"
     headers = [
         "发票日期", "供应商", "供应商税号", "发票号码", "发票类型",
-        "不含税金额", "税额", "价税合计", "对公已核对金额", "未核对/未付金额", "状态",
+        "不含税金额", "税额", "价税合计", "银行付款已核对金额", "待核对银行付款金额", "银行核对状态",
         "付款日期", "我方付款账号", "银行流水/凭证号", "本次分摊金额", "关联采购订单",
     ]
     ws.append(headers)
@@ -330,7 +366,15 @@ def corporate_payment_xlsx(report: dict[str, Any]) -> bytes:
             float(_dec(row["invoiceTotalAmount"])),
             float(_dec(row["invoiceCorporatePaidTotal"])),
             float(_dec(row["invoiceOutstandingAmount"])),
-            "已核对" if row["invoiceStatus"] == "paid" else ("部分核对" if row["invoiceStatus"] == "partial" else "待核对银行"),
+            (
+                "银行付款已核对"
+                if (row.get("bankReconciliationStatus") or row.get("invoiceStatus")) == "paid"
+                else "银行付款部分核对"
+                if (row.get("bankReconciliationStatus") or row.get("invoiceStatus")) == "partial"
+                else "无需核对银行付款"
+                if (row.get("bankReconciliationStatus") or row.get("invoiceStatus")) == "not_applicable"
+                else "待核对银行付款"
+            ),
             "、".join(str(payment.get("paymentDate") or "") for payment in payments),
             "、".join(
                 str(payment.get("paymentAccount") or payment.get("paymentAccountName") or "")
@@ -363,11 +407,12 @@ def corporate_payment_xlsx(report: dict[str, Any]) -> bytes:
     summary.append(["指标", "数值"])
     summary.append(["进项发票张数", s.get("invoiceCount", 0)])
     summary.append(["发票价税合计", float(_dec(s.get("invoiceTotal")))])
-    summary.append(["已核对对公付款", float(_dec(s.get("allocatedTotal")))])
-    summary.append(["未核对/未付金额", float(_dec(s.get("outstandingTotal")))])
-    summary.append(["已核对发票张数", s.get("paidInvoiceCount", 0)])
-    summary.append(["部分核对发票张数", s.get("partialInvoiceCount", 0)])
-    summary.append(["待核对银行发票张数", s.get("unpaidInvoiceCount", 0)])
+    summary.append(["银行付款已核对金额", float(_dec(s.get("allocatedTotal")))])
+    summary.append(["待核对银行付款金额", float(_dec(s.get("outstandingTotal")))])
+    summary.append(["银行付款已核对发票张数", s.get("paidInvoiceCount", 0)])
+    summary.append(["银行付款部分核对发票张数", s.get("partialInvoiceCount", 0)])
+    summary.append(["待核对银行付款发票张数", s.get("unpaidInvoiceCount", 0)])
+    summary.append(["无需核对银行付款发票张数", s.get("notApplicableInvoiceCount", 0)])
     summary.append(["关联银行付款笔数", s.get("paymentCount", 0)])
     summary.append(["商品明细行数", s.get("productRowCount", 0)])
     _style_sheet(summary)

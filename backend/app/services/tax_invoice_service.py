@@ -302,6 +302,31 @@ def is_effective_for_accounting(invoice: TaxInvoice) -> bool:
     return invoice.status in {"issued", "red"}
 
 
+def is_bank_payment_reconciliation_eligible(invoice: TaxInvoice) -> bool:
+    """银行付款核对资格的单一事实源。
+
+    会计台账可以保留红字/红冲记录，但付款核对只允许“进项 + 有效 + 正数金额”发票。
+    """
+    total = Decimal(str(invoice.total_amount)) if invoice.total_amount is not None else Decimal("0")
+    return invoice.direction == "input" and invoice.status == "issued" and total > 0
+
+
+def bank_payment_reconciliation_ineligible_reason(invoice: TaxInvoice) -> str:
+    """返回不参与银行付款核对的明确业务原因。"""
+    total = Decimal(str(invoice.total_amount)) if invoice.total_amount is not None else Decimal("0")
+    if invoice.status == "red":
+        return "红冲相关发票不参与银行付款核对"
+    if invoice.status == "void":
+        return "作废发票不参与银行付款核对"
+    if invoice.status != "issued":
+        return "待确认或非有效发票不参与银行付款核对"
+    if total <= 0:
+        return "非正数金额发票不参与银行付款核对"
+    if invoice.direction != "input":
+        return "非进项发票不参与银行付款核对"
+    return "该发票不参与银行付款核对"
+
+
 def _invoice_number_text(row: TaxInvoice) -> str:
     return f"{row.invoice_code or ''}{row.invoice_number or ''}"
 
