@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session
 
 from app.db import get_db
 from app.api.deps import current_actor
-from app.services import integration_service, kodo_backup_service, r2_backup_service
+from app.services import backup_status_service, integration_service, kodo_backup_service, r2_backup_service
 
 router = APIRouter(prefix="/integrations", tags=["integrations"])
 
@@ -109,6 +109,24 @@ def run_r2_backup(body: R2BackupRunIn, db: Session = Depends(get_db)) -> dict[st
     try:
         return r2_backup_service.start_backup(body.mode)
     except (ValueError, RuntimeError) as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@router.get("/backup-status")
+def get_backup_status(limit: int = Query(default=50, ge=1, le=200)) -> dict[str, Any]:
+    """读取本地 manifest / R2 / Kodo 成功回执，作为备份中心真实执行记录。"""
+    return backup_status_service.get_status(limit=limit)
+
+
+@router.post("/r2-backup/prepare-restore")
+def prepare_r2_restore(db: Session = Depends(get_db)) -> dict[str, Any]:
+    """下载并校验 R2 最新全量恢复点到 staging；绝不自动覆盖生产环境。"""
+    config = r2_backup_service.get_config(db)
+    if not config["configured"] or not config["enabled"]:
+        raise HTTPException(400, "R2 尚未配置或当前未启用")
+    try:
+        return r2_backup_service.start_restore_prepare()
+    except RuntimeError as exc:
         raise HTTPException(400, str(exc)) from exc
 
 
