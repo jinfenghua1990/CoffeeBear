@@ -4,7 +4,7 @@ from __future__ import annotations
 from datetime import datetime
 from decimal import Decimal
 
-from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, Numeric, String, Text, UniqueConstraint
+from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, Index, Numeric, String, Text, UniqueConstraint
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -34,6 +34,8 @@ class ForeignTradeSkuMapping(Base, PkMixin, TimestampMixin):
     __tablename__ = "foreign_trade_sku_mappings"
     __table_args__ = (
         UniqueConstraint("channel_code", "external_sku", name="uq_foreign_trade_sku_channel_external"),
+        Index("ix_foreign_trade_sku_channel", "channel_code"),
+        Index("ix_foreign_trade_sku_internal", "internal_sku"),
     )
 
     channel_code: Mapped[str] = mapped_column(String(64), nullable=False)
@@ -48,13 +50,20 @@ class ForeignTradeOrder(Base, PkMixin, TimestampMixin):
     __tablename__ = "foreign_trade_orders"
     __table_args__ = (
         UniqueConstraint("channel_code", "external_order_no", name="uq_foreign_trade_order_channel_external"),
+        Index("ix_foreign_trade_orders_status", "status"),
+        Index("ix_foreign_trade_orders_business_mode", "business_mode"),
+        Index("ix_foreign_trade_orders_channel", "channel_code"),
+        Index("ix_foreign_trade_orders_fulfillment", "fulfillment_status"),
+        Index("ix_foreign_trade_orders_ordered_at", "ordered_at"),
+        Index("ix_foreign_trade_orders_dealer_id", "dealer_id"),
+        Index("ix_foreign_trade_orders_seller_legal_entity_id", "seller_legal_entity_id"),
     )
 
     channel_code: Mapped[str] = mapped_column(String(64), nullable=False)
     external_order_no: Mapped[str] = mapped_column(String(128), nullable=False)
-    business_mode: Mapped[str] = mapped_column(String(16), default="b2c", index=True)
+    business_mode: Mapped[str] = mapped_column(String(16), default="b2c")
     dealer_id: Mapped[int | None] = mapped_column(
-        BigInteger, ForeignKey("foreign_trade_dealers.id", ondelete="SET NULL"), nullable=True, index=True
+        BigInteger, ForeignKey("foreign_trade_dealers.id", ondelete="SET NULL"), nullable=True
     )
     brand: Mapped[str] = mapped_column(String(128), default="")
     country: Mapped[str] = mapped_column(String(64), default="")
@@ -73,7 +82,7 @@ class ForeignTradeOrder(Base, PkMixin, TimestampMixin):
     fulfillment_status: Mapped[str] = mapped_column(String(24), default="pending")
     payment_status: Mapped[str] = mapped_column(String(24), default="unpaid")
     seller_legal_entity_id: Mapped[int | None] = mapped_column(
-        BigInteger, ForeignKey("finance_legal_entities.id", ondelete="RESTRICT"), nullable=True, index=True
+        BigInteger, ForeignKey("finance_legal_entities.id", ondelete="RESTRICT"), nullable=True
     )
     customer_name: Mapped[str] = mapped_column(String(128), default="")
     customer_email: Mapped[str] = mapped_column(String(256), default="")
@@ -92,7 +101,11 @@ class ForeignTradeDealer(Base, PkMixin, TimestampMixin):
     """B2B 经销商客户主档。Shopify Company / Location 只是外部映射，不是主数据。"""
 
     __tablename__ = "foreign_trade_dealers"
-    __table_args__ = (UniqueConstraint("code", name="uq_foreign_trade_dealers_code"),)
+    __table_args__ = (
+        UniqueConstraint("code", name="uq_foreign_trade_dealers_code"),
+        Index("ix_foreign_trade_dealers_company", "company_name"),
+        Index("ix_foreign_trade_dealers_shopify_location", "shopify_company_location_id"),
+    )
 
     code: Mapped[str] = mapped_column(String(64), nullable=False)
     company_name: Mapped[str] = mapped_column(String(256), nullable=False)
@@ -115,21 +128,28 @@ class ForeignTradeInventoryReservation(Base, PkMixin, TimestampMixin):
     """B2B 专属库存预留。只影响可售量，不修改真实库存总账。"""
 
     __tablename__ = "foreign_trade_inventory_reservations"
+    __table_args__ = (
+        Index("ix_ft_inventory_reservation_dealer", "dealer_id"),
+        Index("ix_ft_inventory_reservation_sku", "sku_id"),
+        Index("ix_ft_inventory_reservation_expires", "expires_at"),
+        Index("ix_ft_inventory_reservation_status", "status"),
+        Index("ix_ft_inventory_reservation_reference", "reference_no"),
+    )
 
     dealer_id: Mapped[int] = mapped_column(
-        BigInteger, ForeignKey("foreign_trade_dealers.id", ondelete="CASCADE"), nullable=False, index=True
+        BigInteger, ForeignKey("foreign_trade_dealers.id", ondelete="CASCADE"), nullable=False
     )
     sku_id: Mapped[int] = mapped_column(
-        BigInteger, ForeignKey("product_skus.id", ondelete="RESTRICT"), nullable=False, index=True
+        BigInteger, ForeignKey("product_skus.id", ondelete="RESTRICT"), nullable=False
     )
     quantity: Mapped[Decimal] = mapped_column(Numeric(18, 4), nullable=False)
     reservation_kind: Mapped[str] = mapped_column(String(24), default="quote")
-    reference_no: Mapped[str] = mapped_column(String(128), default="", index=True)
+    reference_no: Mapped[str] = mapped_column(String(128), default="")
     source: Mapped[str] = mapped_column(String(32), default="manual")
     shopify_draft_order_id: Mapped[str] = mapped_column(String(128), default="")
     starts_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
-    status: Mapped[str] = mapped_column(String(24), default="active", index=True)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    status: Mapped[str] = mapped_column(String(24), default="active")
     note: Mapped[str] = mapped_column(Text, default="")
 
 
@@ -140,6 +160,14 @@ class ForeignTradeShipment(Base, PkMixin, TimestampMixin):
     __tablename__ = "foreign_trade_shipments"
     __table_args__ = (
         UniqueConstraint("shipment_no", name="uq_foreign_trade_shipments_no"),
+        Index("ix_foreign_trade_shipments_status", "status"),
+        Index("ix_foreign_trade_shipments_tracking_no", "tracking_no"),
+        Index("ix_foreign_trade_shipments_bl", "bill_of_lading_no"),
+        Index("ix_foreign_trade_shipments_container", "container_no"),
+        Index("ix_foreign_trade_shipments_eta", "eta"),
+        Index("ix_foreign_trade_shipments_exporter_legal_entity_id", "exporter_legal_entity_id"),
+        Index("ix_foreign_trade_shipments_importer_kind", "importer_kind"),
+        Index("ix_foreign_trade_shipments_importer_legal_entity_id", "importer_legal_entity_id"),
     )
 
     shipment_no: Mapped[str] = mapped_column(String(64), nullable=False)
@@ -151,13 +179,13 @@ class ForeignTradeShipment(Base, PkMixin, TimestampMixin):
     destination_city: Mapped[str] = mapped_column(String(128), default="")
     transport_mode: Mapped[str] = mapped_column(String(24), default="sea")
     incoterm: Mapped[str] = mapped_column(String(16), default="FOB")
-    status: Mapped[str] = mapped_column(String(32), default="preparing", index=True)
+    status: Mapped[str] = mapped_column(String(32), default="preparing")
     exporter_legal_entity_id: Mapped[int | None] = mapped_column(
-        BigInteger, ForeignKey("finance_legal_entities.id", ondelete="RESTRICT"), nullable=True, index=True
+        BigInteger, ForeignKey("finance_legal_entities.id", ondelete="RESTRICT"), nullable=True
     )
-    importer_kind: Mapped[str] = mapped_column(String(24), default="external_customer", index=True)
+    importer_kind: Mapped[str] = mapped_column(String(24), default="external_customer")
     importer_legal_entity_id: Mapped[int | None] = mapped_column(
-        BigInteger, ForeignKey("finance_legal_entities.id", ondelete="RESTRICT"), nullable=True, index=True
+        BigInteger, ForeignKey("finance_legal_entities.id", ondelete="RESTRICT"), nullable=True
     )
 
     carrier: Mapped[str] = mapped_column(String(128), default="")

@@ -10,6 +10,7 @@ from app.models.base import Base, PkMixin, TimestampMixin
 
 MONEY = Numeric(18, 4)
 QUANTITY = Numeric(18, 4)
+UNIT_COST = Numeric(24, 10)
 
 
 class Consumable(Base, PkMixin, TimestampMixin):
@@ -75,7 +76,7 @@ class ConsumableTransaction(Base, PkMixin, TimestampMixin):
     transaction_type: Mapped[str] = mapped_column(String(16), index=True, nullable=False)
     request_key: Mapped[str | None] = mapped_column(String(36), nullable=True)
     quantity: Mapped[Decimal] = mapped_column(QUANTITY, nullable=False)
-    unit_cost: Mapped[Decimal | None] = mapped_column(Numeric(18, 10), nullable=True)
+    unit_cost: Mapped[Decimal | None] = mapped_column(UNIT_COST, nullable=True)
     warehouse_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey("warehouses.id"), nullable=True, index=True)
     location: Mapped[str | None] = mapped_column(String(16), nullable=True, comment="发生位置：own=自有仓 / factory=工厂")
     source_type: Mapped[str] = mapped_column(String(32), default="manual")
