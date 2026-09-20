@@ -180,3 +180,28 @@ def start_backup(mode: str = "auto") -> dict[str, Any]:
     finally:
         log_stream.close()
     return {"started": True, "target": "r2", "mode": mode, "log": str(log_path)}
+
+def start_restore_prepare() -> dict[str, Any]:
+    """后台准备并验证 R2 最新全量恢复点；不覆盖生产环境。"""
+    root = Path(__file__).resolve().parents[3]
+    script = root / "scripts" / "r2-restore.py"
+    if not script.is_file():
+        raise RuntimeError("R2 恢复执行器不存在")
+
+    data_dir = Path(os.getenv("DATA_DIR") or (root / "data")).expanduser()
+    log_dir = data_dir / "backup-jobs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / "r2-restore.log"
+    log_stream = log_path.open("ab")
+    try:
+        subprocess.Popen(
+            [sys.executable, str(script)],
+            cwd=str(root),
+            stdout=log_stream,
+            stderr=subprocess.STDOUT,
+            env=os.environ.copy(),
+            start_new_session=True,
+        )
+    finally:
+        log_stream.close()
+    return {"started": True, "target": "r2", "action": "prepare_restore", "log": str(log_path)}
