@@ -373,7 +373,7 @@ def package_period(db: Session, company: str, year: int, month: int,
         unbilled_content = sales_report_service.unbilled_income_xlsx(
             sales_report_service.build_unbilled_income_report(db, year, month, company=company)
         )
-    unbilled_name = f"{month}月销售出库-无票收入.xlsx"
+    unbilled_name = f"{month}月-销售出库-无票收入.xlsx"
 
     # 已收票且通过对公账户付款：直接读取银行付款↔进项发票事实，并下钻采购订单/商品。
     corporate_payment_content: bytes | None = None
