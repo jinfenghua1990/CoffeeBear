@@ -328,15 +328,15 @@ def save_entry(
     currency: str,
     amount: str,
     tax_amount: str,
-    cash_effect: bool = True,
-    profit_effect: bool = True,
-    value_type: str = "actual",
+    value_type: str,
     settlement_status: str,
     invoice_status: str,
     accounting_year: int,
     accounting_month: int,
     occurred_at: datetime | None,
     note: str,
+    cash_effect: bool = True,
+    profit_effect: bool = True,
 ) -> FinanceEntry:
     if business_scope not in {"domestic", "foreign_trade"}:
         raise ValueError("业务范围必须是内销或外贸")
