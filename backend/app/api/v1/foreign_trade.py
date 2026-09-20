@@ -61,8 +61,6 @@ def create_channel(body: ChannelBody, db: Session = Depends(get_db)) -> dict:
     row = ForeignTradeChannel(**body.model_dump())
     db.add(row)
     try:
-        db.flush()
-        finance_projection_service.project_foreign_order(db, row)
         db.commit()
     except IntegrityError as exc:
         db.rollback()
@@ -244,6 +242,8 @@ def create_order(body: OrderBody, db: Session = Depends(get_db)) -> dict:
     dealer = _apply_order(db, row, body)
     db.add(row)
     try:
+        db.flush()
+        finance_projection_service.project_foreign_order(db, row)
         db.commit()
     except IntegrityError as exc:
         db.rollback()
