@@ -72,6 +72,9 @@ class ForeignTradeOrder(Base, PkMixin, TimestampMixin):
     procurement_status: Mapped[str] = mapped_column(String(24), default="pending")
     fulfillment_status: Mapped[str] = mapped_column(String(24), default="pending")
     payment_status: Mapped[str] = mapped_column(String(24), default="unpaid")
+    seller_legal_entity_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("finance_legal_entities.id", ondelete="RESTRICT"), nullable=True, index=True
+    )
     customer_name: Mapped[str] = mapped_column(String(128), default="")
     customer_email: Mapped[str] = mapped_column(String(256), default="")
     ship_to: Mapped[str] = mapped_column(Text, default="")
@@ -149,6 +152,13 @@ class ForeignTradeShipment(Base, PkMixin, TimestampMixin):
     transport_mode: Mapped[str] = mapped_column(String(24), default="sea")
     incoterm: Mapped[str] = mapped_column(String(16), default="FOB")
     status: Mapped[str] = mapped_column(String(32), default="preparing", index=True)
+    exporter_legal_entity_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("finance_legal_entities.id", ondelete="RESTRICT"), nullable=True, index=True
+    )
+    importer_kind: Mapped[str] = mapped_column(String(24), default="external_customer", index=True)
+    importer_legal_entity_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("finance_legal_entities.id", ondelete="RESTRICT"), nullable=True, index=True
+    )
 
     carrier: Mapped[str] = mapped_column(String(128), default="")
     booking_no: Mapped[str] = mapped_column(String(128), default="")
@@ -192,6 +202,7 @@ class ForeignTradeShipment(Base, PkMixin, TimestampMixin):
     export_refund_rate: Mapped[Decimal] = mapped_column(RATE, default=0)
     actual_export_refund_cny: Mapped[Decimal] = mapped_column(MONEY, default=0)
     export_refund_status: Mapped[str] = mapped_column(String(24), default="pending")
+    export_refund_received_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     eur_to_cny: Mapped[Decimal] = mapped_column(RATE, default=1)
 
