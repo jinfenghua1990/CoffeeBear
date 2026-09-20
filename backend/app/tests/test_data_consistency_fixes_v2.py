@@ -255,3 +255,120 @@ def test_unlink_purchase_recalculates_only_business_domain(db_session):
     ).all()
     assert sum((row.allocated_amount for row in active_purchase), Decimal("0")) == Decimal("60")
     assert first["id"] == active_purchase[0].id
+
+
+
+def test_invoice_business_match_and_bank_payment_status_are_independent(db_session):
+    """发票↔业务单据与发票↔银行付款必须是两个独立状态域。"""
+    business_po = ExternalPurchaseOrder(
+        external_order_id="DOMAIN-SPLIT-PO-1",
+        platform="other",
+        paid_amount=Decimal("100"),
+        order_amount=Decimal("100"),
+    )
+    business_invoice = TaxInvoice(
+        invoice_key="DOMAIN-SPLIT-INV-BUSINESS",
+        direction="input",
+        invoice_number="DOMAIN-SPLIT-INV-BUSINESS",
+        status="issued",
+        total_amount=Decimal("100"),
+        match_status="matched",
+    )
+    paid_invoice = TaxInvoice(
+        invoice_key="DOMAIN-SPLIT-INV-PAID",
+        direction="input",
+        invoice_number="DOMAIN-SPLIT-INV-PAID",
+        status="issued",
+        total_amount=Decimal("100"),
+        match_status="unmatched",
+    )
+    payment = BankTransaction(
+        txn_date=date(2026, 9, 20),
+        direction="out",
+        amount=Decimal("100"),
+        counterparty_name="状态隔离供应商",
+        fingerprint="domain-split-payment",
+    )
+    db_session.add_all([business_po, business_invoice, paid_invoice, payment])
+    db_session.flush()
+    db_session.add_all([
+        TaxInvoiceLink(
+            invoice_id=business_invoice.id,
+            target_type="external_purchase_order",
+            target_id=business_po.id,
+            allocated_amount=Decimal("100"),
+            match_method="manual",
+            confirmed=True,
+        ),
+        TaxInvoiceLink(
+            invoice_id=paid_invoice.id,
+            target_type="bank_transaction",
+            target_id=payment.id,
+            allocated_amount=Decimal("100"),
+            match_method="manual",
+            confirmed=True,
+        ),
+    ])
+    db_session.commit()
+
+    rows = {
+        row["id"]: row
+        for row in tax_invoice_service.list_invoices(db_session, direction="input", limit=500)
+    }
+
+    business = rows[business_invoice.id]
+    assert business["businessMatchStatus"] == "matched"
+    assert business["bankPaymentStatus"] == "unmatched"
+    assert business["paymentMethod"] == ""
+    assert [link["targetType"] for link in business["links"]] == ["external_purchase_order"]
+
+    paid = rows[paid_invoice.id]
+    assert paid["businessMatchStatus"] == "unmatched"
+    assert paid["bankPaymentStatus"] == "matched"
+    assert Decimal(paid["bankPaidAmount"]) == Decimal("100.00")
+    assert Decimal(paid["bankRemainingAmount"]) == Decimal("0.00")
+    assert paid["paymentMethod"] == "corporate"
+    # 银行付款链接绝不能混进发票详情的采购/销售业务 links。
+    assert paid["links"] == []
+
+    db_session.refresh(paid_invoice)
+    assert paid_invoice.match_status == "unmatched"
+
+
+def test_invoice_partial_bank_payment_does_not_change_business_match(db_session):
+    invoice = TaxInvoice(
+        invoice_key="DOMAIN-SPLIT-INV-PARTIAL",
+        direction="input",
+        invoice_number="DOMAIN-SPLIT-INV-PARTIAL",
+        status="issued",
+        total_amount=Decimal("100"),
+        match_status="unmatched",
+    )
+    payment = BankTransaction(
+        txn_date=date(2026, 9, 20),
+        direction="out",
+        amount=Decimal("40"),
+        counterparty_name="部分付款供应商",
+        fingerprint="domain-split-payment-partial",
+    )
+    db_session.add_all([invoice, payment])
+    db_session.flush()
+    db_session.add(TaxInvoiceLink(
+        invoice_id=invoice.id,
+        target_type="bank_transaction",
+        target_id=payment.id,
+        allocated_amount=Decimal("40"),
+        match_method="manual",
+        confirmed=True,
+    ))
+    db_session.commit()
+
+    row = next(
+        row for row in tax_invoice_service.list_invoices(db_session, direction="input", limit=500)
+        if row["id"] == invoice.id
+    )
+    assert row["businessMatchStatus"] == "unmatched"
+    assert row["bankPaymentStatus"] == "partial"
+    assert Decimal(row["bankPaidAmount"]) == Decimal("40.00")
+    assert Decimal(row["bankRemainingAmount"]) == Decimal("60.00")
+    assert row["paymentMethod"] == "corporate"

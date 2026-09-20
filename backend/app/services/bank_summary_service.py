@@ -45,7 +45,7 @@ def build_summary(db: Session, *, year: int, month: int) -> dict[str, Any]:
     month_txns = [row for row in transactions if start <= row.txn_date <= end]
     month_ids = [row.id for row in month_txns]
 
-    confirmed_income_ids = reconciliation.confirmed_txn_ids(
+    confirmed_income_ids = reconciliation.confirmed_settlement_txn_ids(
         db, [row.id for row in month_txns if row.direction == "in"]
     )
     expense_ids = [row.id for row in month_txns if row.direction == "out"]

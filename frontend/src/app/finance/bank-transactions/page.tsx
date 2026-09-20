@@ -28,12 +28,16 @@ function dateText(value: string) {
   return value ? value.slice(0, 10) : "—";
 }
 
+function settlementMatchStatus(row: ReconTxn) {
+  return row.settlementMatchStatus || (row.matched ? "matched" : "unmatched");
+}
+
 function expenseMatchStatus(row: ReconTxn) {
-  return row.invoiceMatchStatus || (row.invoiceMatched ? "matched" : "unmatched");
+  return row.invoicePaymentMatchStatus || row.invoiceMatchStatus || (row.invoiceMatched ? "matched" : "unmatched");
 }
 
 function matchText(row: ReconTxn) {
-  if (row.direction === "in") return row.matched ? "已回款对账" : "待回款对账";
+  if (row.direction === "in") return settlementMatchStatus(row) === "matched" ? "已回款对账" : "待回款对账";
   const status = expenseMatchStatus(row);
   if (status === "matched") return "银行付款已核对";
   if (status === "partial") return "银行付款部分核对";
@@ -42,7 +46,7 @@ function matchText(row: ReconTxn) {
 
 function matchClass(row: ReconTxn) {
   if (row.direction === "in") {
-    return row.matched
+    return settlementMatchStatus(row) === "matched"
       ? "bg-emerald-50 text-emerald-700 ring-emerald-200"
       : "bg-amber-50 text-amber-700 ring-amber-200";
   }
@@ -138,7 +142,7 @@ export default function BankTransactionsPage() {
     return periodRows.filter((row) => {
       if (accountFilter && row.accountNo !== accountFilter) return false;
       if (direction !== "all" && row.direction !== direction) return false;
-      const matched = row.direction === "in" ? row.matched : expenseMatchStatus(row) === "matched";
+      const matched = row.direction === "in" ? settlementMatchStatus(row) === "matched" : expenseMatchStatus(row) === "matched";
       if (matchFilter === "matched" && !matched) return false;
       if (matchFilter === "unmatched" && matched) return false;
       if (!needle) return true;
@@ -156,7 +160,7 @@ export default function BankTransactionsPage() {
         result.count += 1;
         if (row.direction === "in") result.income += amount;
         else result.expense += amount;
-        const matched = row.direction === "in" ? row.matched : expenseMatchStatus(row) === "matched";
+        const matched = row.direction === "in" ? settlementMatchStatus(row) === "matched" : expenseMatchStatus(row) === "matched";
         if (!matched) result.pending += 1;
         return result;
       },
@@ -246,7 +250,7 @@ export default function BankTransactionsPage() {
           <div>
             <div className="mb-1 text-[11px] font-medium tracking-wide text-blue-600">财务中心 / 银行</div>
             <h1 className="text-xl font-semibold tracking-tight text-slate-900">银行流水</h1>
-            <p className="mt-1 text-xs text-slate-500">查看账户收入与支出流水；收入用于回款对账，支出用于进项发票匹配。</p>
+            <p className="mt-1 text-xs text-slate-500">查看账户收入与支出流水；收入核对平台结算，支出核对进项发票。两套状态独立计算，不互相改写。</p>
           </div>
           <div className="flex flex-wrap items-center gap-2">
             <input ref={fileRef} type="file" accept=".xlsx" className="hidden" onChange={(event) => { const file = event.target.files?.[0]; if (file) void uploadBank(file); }} />
@@ -323,7 +327,7 @@ export default function BankTransactionsPage() {
                   <th className="px-4 py-3 font-medium">摘要</th>
                   <th className="px-4 py-3 font-medium">凭证号</th>
                   <th className="px-4 py-3 font-medium">账户</th>
-                  <th className="px-4 py-3 font-medium">对账状态</th>
+                  <th className="px-4 py-3 font-medium">银行核对状态</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">

@@ -97,7 +97,7 @@ def list_transactions(
         .limit(limit)
         .all()
     )
-    matched_ids = rc.confirmed_txn_ids(db, [r.id for r in rows])
+    settlement_matched_ids = rc.confirmed_settlement_txn_ids(db, [r.id for r in rows])
     row_ids = [r.id for r in rows]
     invoice_statuses = payment_invoice_match_service.txn_reconciliation_statuses(db, row_ids)
     account_ids = {r.account_id for r in rows if r.account_id is not None}
@@ -110,17 +110,62 @@ def list_transactions(
             "id": r.id, "txnDate": r.txn_date.isoformat(), "direction": r.direction,
             "amount": str(r.amount), "counterpartyName": r.counterparty_name,
             "summary": r.summary, "voucherNo": r.voucher_no,
-            "matched": r.id in matched_ids,
-            "invoiceMatched": invoice_statuses.get(r.id, {}).get("status") == "matched",
-            "invoiceMatchStatus": invoice_statuses.get(r.id, {}).get("status", "unmatched"),
-            "invoiceMatchedAmount": invoice_statuses.get(r.id, {}).get("allocatedAmount", "0.00"),
-            "invoiceRemainingAmount": invoice_statuses.get(r.id, {}).get("remainingAmount", str(r.amount)),
+            # 兼容字段 matched / invoiceMatchStatus 暂保留；新代码必须使用下列显式域字段。
+            "matched": r.id in settlement_matched_ids,
+            "settlementMatched": r.direction == "in" and r.id in settlement_matched_ids,
+            "settlementMatchStatus": (
+                "matched"
+                if r.direction == "in" and r.id in settlement_matched_ids
+                else "unmatched"
+                if r.direction == "in"
+                else "not_applicable"
+            ),
+            "invoiceMatched": (
+                r.direction == "out"
+                and invoice_statuses.get(r.id, {}).get("status") == "matched"
+            ),
+            "invoiceMatchStatus": (
+                invoice_statuses.get(r.id, {}).get("status", "unmatched")
+                if r.direction == "out"
+                else "not_applicable"
+            ),
+            "invoicePaymentMatched": (
+                r.direction == "out"
+                and invoice_statuses.get(r.id, {}).get("status") == "matched"
+            ),
+            "invoicePaymentMatchStatus": (
+                invoice_statuses.get(r.id, {}).get("status", "unmatched")
+                if r.direction == "out"
+                else "not_applicable"
+            ),
+            "invoiceMatchedAmount": (
+                invoice_statuses.get(r.id, {}).get("allocatedAmount", "0.00")
+                if r.direction == "out"
+                else "0.00"
+            ),
+            "invoiceRemainingAmount": (
+                invoice_statuses.get(r.id, {}).get("remainingAmount", str(r.amount))
+                if r.direction == "out"
+                else "0.00"
+            ),
+            "invoicePaymentMatchedAmount": (
+                invoice_statuses.get(r.id, {}).get("allocatedAmount", "0.00")
+                if r.direction == "out"
+                else "0.00"
+            ),
+            "invoicePaymentRemainingAmount": (
+                invoice_statuses.get(r.id, {}).get("remainingAmount", str(r.amount))
+                if r.direction == "out"
+                else "0.00"
+            ),
             "matchStatus": (
                 "matched"
-                if r.direction == "in" and r.id in matched_ids
+                if r.direction == "in" and r.id in settlement_matched_ids
+                else "unmatched"
+                if r.direction == "in"
                 else invoice_statuses.get(r.id, {}).get("status", "unmatched")
                 if r.direction == "out"
-                else "unmatched"
+                else "not_applicable"
             ),
             "matchedAt": r.matched_at.isoformat() if r.matched_at else None,
             "accountNo": accounts[r.account_id].account_no if r.account_id in accounts else "",

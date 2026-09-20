@@ -525,8 +525,11 @@ def _serialize_invoice(row: TaxInvoice, context: dict | None = None, db: Session
         "taxAmount": str(row.tax_amount) if row.tax_amount is not None else None,
         "totalAmount": str(row.total_amount) if row.total_amount is not None else None,
         "currency": row.currency,
+        # matchStatus 保留兼容；新代码必须使用 businessMatchStatus，明确这是发票↔业务单据状态。
         "matchStatus": row.match_status,
+        "businessMatchStatus": row.match_status,
         "matchNote": row.match_note,
+        "businessMatchNote": row.match_note,
         "processingStatus": _effective_processing_status(row),
         "category": row.category or "",
         "sourceImportId": row.source_import_id,
@@ -539,19 +542,27 @@ def _serialize_invoice(row: TaxInvoice, context: dict | None = None, db: Session
     # categoryLabel 跟随最终 category（含明细兜底识别），保证前后端文案一致；
     # 销项走独立 OUTPUT_CATEGORY 文案（空 = 待判断）。
     payload["categoryLabel"] = category_label_for_direction(row.direction, payload.get("category") or "")
+    # 银行付款核对与发票业务匹配是两个独立域。
+    if "bankPaymentStatus" not in payload:
+        if row.direction == "input" and db is not None:
+            payload.update(_invoice_bank_payment_context(db, [row]).get(row.id, {}))
+        else:
+            payload.update({
+                "bankPaymentStatus": "not_applicable",
+                "bankPaidAmount": "0.00",
+                "bankRemainingAmount": "0.00",
+            })
+
     # 支付方式：
-    # - 进项：由银行付款关联自动推导（列表批量场景可通过 context 预先注入，避免逐票查询）；
+    # - 进项：只有已确认且实际分摊金额 > 0 的银行付款证据才推导 corporate；
     # - 销项：直接回显用户维护的 payment_method，不能在序列化时抹掉。
     if "paymentMethod" not in payload:
-        if row.direction == "input" and db is not None:
-            has_bank_link = db.query(TaxInvoiceLink.id).filter(
-                TaxInvoiceLink.invoice_id == row.id,
-                TaxInvoiceLink.target_type == "bank_transaction",
-                TaxInvoiceLink.match_method != "rejected",
-                TaxInvoiceLink.confirmed.is_(True),
-            ).first() is not None
-            # 没有银行付款证据只能表示“未确认”，不能反推成个人垫付。
-            payload["paymentMethod"] = "corporate" if has_bank_link else ""
+        if row.direction == "input":
+            payload["paymentMethod"] = (
+                "corporate"
+                if payload.get("bankPaymentStatus") in {"partial", "matched"}
+                else ""
+            )
         elif row.direction == "output":
             payload["paymentMethod"] = row.payment_method or ""
         else:
@@ -563,15 +574,81 @@ def serialize_invoice(row: TaxInvoice, db: Session | None = None) -> dict:
     return _serialize_invoice(row, db=db)
 
 
-def _invoice_business_context(db: Session, rows: list[TaxInvoice]) -> dict[int, dict]:
-    """为发票池补充采购单与入库单摘要，保持发票与业务事实的可追溯关系。"""
-    invoice_ids = [row.id for row in rows]
-    if not invoice_ids:
+def _invoice_bank_payment_context(db: Session, rows: list[TaxInvoice]) -> dict[int, dict]:
+    """独立计算进项发票的银行付款核对状态；绝不读取/修改 match_status。"""
+    input_rows = [row for row in rows if row.direction == "input"]
+    if not input_rows:
         return {}
+
+    invoice_ids = [row.id for row in input_rows]
     links = (
         db.query(TaxInvoiceLink)
         .filter(
             TaxInvoiceLink.invoice_id.in_(invoice_ids),
+            TaxInvoiceLink.target_type == "bank_transaction",
+            TaxInvoiceLink.match_method != "rejected",
+            TaxInvoiceLink.confirmed.is_(True),
+        )
+        .all()
+    )
+    allocated_by_invoice: dict[int, Decimal] = {}
+    invoice_map = {row.id: row for row in input_rows}
+    for link in links:
+        invoice = invoice_map.get(link.invoice_id)
+        if invoice is None:
+            continue
+        amount = (
+            Decimal(str(link.allocated_amount))
+            if link.allocated_amount is not None
+            else Decimal(str(invoice.total_amount or 0))
+        )
+        allocated_by_invoice[link.invoice_id] = allocated_by_invoice.get(
+            link.invoice_id, Decimal("0")
+        ) + amount
+
+    result: dict[int, dict] = {}
+    tolerance = Decimal("0.01")
+    for row in input_rows:
+        if not is_bank_payment_reconciliation_eligible(row):
+            result[row.id] = {
+                "bankPaymentStatus": "not_applicable",
+                "bankPaidAmount": "0.00",
+                "bankRemainingAmount": "0.00",
+            }
+            continue
+        total = Decimal(str(row.total_amount or 0))
+        paid = min(max(allocated_by_invoice.get(row.id, Decimal("0")), Decimal("0")), total)
+        remaining = max(total - paid, Decimal("0"))
+        if paid <= 0:
+            status = "unmatched"
+        elif remaining <= tolerance:
+            status = "matched"
+        else:
+            status = "partial"
+        result[row.id] = {
+            "bankPaymentStatus": status,
+            "bankPaidAmount": str(paid.quantize(Decimal("0.01"))),
+            "bankRemainingAmount": str(remaining.quantize(Decimal("0.01"))),
+        }
+    return result
+
+
+def _invoice_business_context(db: Session, rows: list[TaxInvoice]) -> dict[int, dict]:
+    """只补充发票↔采购/销售业务关联；银行付款链接严禁混入业务 links。"""
+    invoice_ids = [row.id for row in rows]
+    if not invoice_ids:
+        return {}
+    business_target_types = (
+        "alibaba1688_order",
+        "external_purchase_order",
+        "jackyun_purchase_order",
+        "sales_order",
+    )
+    links = (
+        db.query(TaxInvoiceLink)
+        .filter(
+            TaxInvoiceLink.invoice_id.in_(invoice_ids),
+            TaxInvoiceLink.target_type.in_(business_target_types),
             TaxInvoiceLink.match_method != "rejected",
         )
         .order_by(TaxInvoiceLink.id)
@@ -1021,32 +1098,26 @@ def list_invoices(
     context = _invoice_business_context(db, rows)
     red_context = _red_trace_context(rows)
     line_context = invoice_line_summaries(db, rows)
-    input_invoice_ids = [row.id for row in rows if row.direction == "input"]
-    bank_linked_invoice_ids = {
-        invoice_id
-        for (invoice_id,) in (
-            db.query(TaxInvoiceLink.invoice_id)
-            .filter(
-                TaxInvoiceLink.invoice_id.in_(input_invoice_ids),
-                TaxInvoiceLink.target_type == "bank_transaction",
-                TaxInvoiceLink.match_method != "rejected",
-                TaxInvoiceLink.confirmed.is_(True),
-            )
-            .distinct()
-            .all()
-            if input_invoice_ids else []
-        )
-    }
+    bank_payment_context = _invoice_bank_payment_context(db, rows)
     result = []
     for row in rows:
         ctx = {
             **context.get(row.id, {"links": [], "purchaseOrderNos": [], "inboundNos": []}),
             **red_context.get(row.id, {}),
             **line_context.get(row.id, {"lineItems": [], "lineItemCount": 0}),
+            **bank_payment_context.get(row.id, {
+                "bankPaymentStatus": "not_applicable",
+                "bankPaidAmount": "0.00",
+                "bankRemainingAmount": "0.00",
+            }),
         }
         if row.direction == "input":
-            # 无已确认银行付款链接 = 未确认支付方式，不等于个人垫付。
-            ctx["paymentMethod"] = "corporate" if row.id in bank_linked_invoice_ids else ""
+            # 付款方式由独立的银行付款核对状态推导，不能由发票业务 match_status 推导。
+            ctx["paymentMethod"] = (
+                "corporate"
+                if ctx["bankPaymentStatus"] in {"partial", "matched"}
+                else ""
+            )
         elif row.direction == "output":
             ctx["paymentMethod"] = row.payment_method or ""
         # 明细兜底识别只面向进项（6+1）；销项分类不按货物名推断，空即待判断。

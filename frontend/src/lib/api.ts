@@ -502,11 +502,18 @@ export type ReconTxn = {
   counterpartyName: string;
   summary: string;
   voucherNo: string;
+  /** 兼容字段：当前等价于收入流水的 settlementMatched。 */
   matched: boolean;
+  settlementMatched?: boolean;
+  settlementMatchStatus?: "matched" | "unmatched" | "not_applicable" | string;
   invoiceMatched?: boolean;
-  invoiceMatchStatus?: "matched" | "partial" | "unmatched" | string;
+  invoiceMatchStatus?: "matched" | "partial" | "unmatched" | "not_applicable" | string;
+  invoicePaymentMatched?: boolean;
+  invoicePaymentMatchStatus?: "matched" | "partial" | "unmatched" | "not_applicable" | string;
   invoiceMatchedAmount?: string;
   invoiceRemainingAmount?: string;
+  invoicePaymentMatchedAmount?: string;
+  invoicePaymentRemainingAmount?: string;
   matchStatus?: "matched" | "partial" | "unmatched" | "not_applicable" | string;
   matchedAt?: string | null;
 };
@@ -1536,8 +1543,15 @@ export type TaxInvoiceRow = {
   taxAmount: string | null;
   totalAmount: string | null;
   currency: string;
+  /** 兼容字段；新页面使用 businessMatchStatus。 */
   matchStatus: "matched" | "unmatched" | "needs_review";
+  businessMatchStatus: "matched" | "unmatched" | "needs_review";
   matchNote: string;
+  businessMatchNote: string;
+  /** 进项发票独立的银行付款核对状态，与 businessMatchStatus 完全无关。 */
+  bankPaymentStatus: "matched" | "partial" | "unmatched" | "not_applicable";
+  bankPaidAmount: string;
+  bankRemainingAmount: string;
   processingStatus: TaxInvoiceProcessingStatus;
   /** 分类 key：进项 goods/platform_fee/operating_other/reimburse_advance/reimburse_operating/excluded；销项 buyer_sales/platform_service；空=待判断 */
   category: string;

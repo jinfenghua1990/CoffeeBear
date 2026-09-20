@@ -45,6 +45,24 @@ function matchLabel(value: string) {
   return value === "matched" ? "已匹配" : value === "needs_review" ? "待核对" : "未匹配";
 }
 
+function businessMatchStatus(row: TaxInvoiceRow) {
+  return row.businessMatchStatus || row.matchStatus;
+}
+
+function bankPaymentLabel(row: TaxInvoiceRow) {
+  if (row.direction !== "input" || row.bankPaymentStatus === "not_applicable") return "—";
+  if (row.bankPaymentStatus === "matched") return "已付清核对";
+  if (row.bankPaymentStatus === "partial") return "部分付款核对";
+  return "待付款核对";
+}
+
+function bankPaymentClass(row: TaxInvoiceRow) {
+  if (row.direction !== "input" || row.bankPaymentStatus === "not_applicable") return "text-slate-300";
+  if (row.bankPaymentStatus === "matched") return "bg-emerald-50 text-emerald-700";
+  if (row.bankPaymentStatus === "partial") return "bg-blue-50 text-blue-700";
+  return "bg-amber-50 text-amber-700";
+}
+
 function matchClass(value: string) {
   return value === "matched"
     ? "bg-emerald-50 text-emerald-700"
@@ -235,8 +253,8 @@ export default function InvoiceManagementPage() {
       if (row.direction !== direction) return false;
       if (invoiceStatus !== "all" && row.status !== invoiceStatus) return false;
       if (matchStatus === "pending") {
-        if (row.matchStatus !== "unmatched" && row.matchStatus !== "needs_review") return false;
-      } else if (matchStatus !== "all" && row.matchStatus !== matchStatus) return false;
+        if (businessMatchStatus(row) !== "unmatched" && businessMatchStatus(row) !== "needs_review") return false;
+      } else if (matchStatus !== "all" && businessMatchStatus(row) !== matchStatus) return false;
       if (typeFilter !== "all" && !matchCategoryFilter(rowCategoryValue(row), typeFilter)) return false;
       if (!needle) return true;
       // 多关键词空格分隔 = 全部命中才显示（AND），如「河北 咖啡」只留两者兼有的行
@@ -402,7 +420,7 @@ export default function InvoiceManagementPage() {
             <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="关键词即时筛选：发票号 / 开票方 / 税号 / 货物明细 / 采购单 / 入库单，可空格分隔多词" className="w-full rounded-lg border border-slate-200 bg-white py-1.5 pl-8 pr-8 text-xs outline-none focus:border-indigo-400" />
             {query && <button type="button" onClick={() => setQuery("")} title="清空关键词" className="absolute right-2 top-1/2 -translate-y-1/2 rounded px-1 text-slate-400 transition hover:text-slate-700">✕</button>}
           </div>
-          <select value={matchStatus} onChange={(event) => setMatchStatus(event.target.value as MatchFilter)} className="rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs text-slate-600 outline-none"><option value="all">全部匹配状态</option><option value="pending">待匹配（未匹配+待核对）</option><option value="matched">已匹配</option><option value="unmatched">未匹配</option><option value="needs_review">待核对</option></select>
+          <select value={matchStatus} onChange={(event) => setMatchStatus(event.target.value as MatchFilter)} className="rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs text-slate-600 outline-none"><option value="all">全部业务匹配</option><option value="pending">业务待匹配（未匹配+待核对）</option><option value="matched">已匹配</option><option value="unmatched">未匹配</option><option value="needs_review">待核对</option></select>
           <select value={invoiceStatus} onChange={(event) => setInvoiceStatus(event.target.value as InvoiceStatusFilter)} className="rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs text-slate-600 outline-none"><option value="all">全部票据状态</option><option value="issued">有效</option><option value="red">红冲相关</option><option value="void">作废</option><option value="unknown">待确认</option></select>
           {direction === "input" && !!summary?.byStatus?.red && (
             <button type="button" onClick={() => setInvoiceStatus(invoiceStatus === "red" ? "all" : "red")} title={`蓝字票和红字票都保留展示并按净额核算；未识别到对应红字票的已红冲蓝字金额 ${money(String(summary.excludedRedAmount ?? 0))} 暂不计入有效进项金额`} className={`rounded-full border px-2.5 py-1 text-[11px] transition ${invoiceStatus === "red" ? "border-rose-300 bg-rose-50 font-medium text-rose-700 ring-1 ring-rose-200" : "border-rose-200 bg-white text-rose-600 hover:bg-rose-50"}`}>红冲相关 <span className="tabular-nums">{summary.byStatus.red}</span></button>
@@ -467,7 +485,8 @@ export default function InvoiceManagementPage() {
                 <th className="px-3 py-2.5">支付方式</th>
                 <th className="px-3 py-2.5">采购关联</th>
                 <th className="px-3 py-2.5">入库关联</th>
-                <th className="px-3 py-2.5">匹配状态</th>
+                <th className="px-3 py-2.5">业务匹配</th>
+                <th className="px-3 py-2.5">付款核对</th>
                 <th className="px-4 py-2.5 text-right">操作</th>
               </tr>
             </thead>
@@ -511,13 +530,23 @@ export default function InvoiceManagementPage() {
                   </td>
                   <td className="max-w-[210px] px-3 py-2.5 text-slate-600">{row.purchaseOrderNos.length ? <span title={row.purchaseOrderNos.join("、")}>{row.purchaseOrderNos.slice(0, 2).join("、")}{row.purchaseOrderNos.length > 2 ? ` 等 ${row.purchaseOrderNos.length} 单` : ""}</span> : <span className="text-slate-400">未匹配</span>}</td>
                   <td className="max-w-[190px] px-3 py-2.5 text-slate-600">{row.inboundNos.length ? <span title={row.inboundNos.join("、")}>{row.inboundNos.slice(0, 2).join("、")}{row.inboundNos.length > 2 ? ` 等 ${row.inboundNos.length} 单` : ""}</span> : <span className="text-slate-400">—</span>}</td>
-                  <td className="px-3 py-2.5"><span className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${matchClass(row.matchStatus)}`}>{matchLabel(row.matchStatus)}</span></td>
+                  <td className="px-3 py-2.5"><span className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${matchClass(businessMatchStatus(row))}`}>{matchLabel(businessMatchStatus(row))}</span></td>
+                  <td className="px-3 py-2.5">
+                    {row.direction === "input" ? (
+                      <span
+                        title={row.bankPaymentStatus === "partial" || row.bankPaymentStatus === "matched" ? `已核对 ${money(row.bankPaidAmount)} / 剩余 ${money(row.bankRemainingAmount)}` : undefined}
+                        className={`whitespace-nowrap rounded-full px-2 py-0.5 text-[10px] font-medium ${bankPaymentClass(row)}`}
+                      >
+                        {bankPaymentLabel(row)}
+                      </span>
+                    ) : <span className="text-slate-300">—</span>}
+                  </td>
                   <td className="px-4 py-2.5 text-right"><button type="button" onClick={(event) => { event.stopPropagation(); setSelectedId(row.id); }} className="text-indigo-600 hover:text-indigo-800">查看详情</button></td>
                 </tr>
                 );
               })}
-              {!loading && !visibleRows.length && <tr><td colSpan={15} className="px-4 py-16 text-center text-sm text-slate-400">{rows.length ? "没有符合当前筛选条件的发票" : "暂时没有发票，请从右上角上传税务发票清单"}</td></tr>}
-              {loading && <tr><td colSpan={15} className="px-4 py-16 text-center text-sm text-slate-400">正在加载发票池…</td></tr>}
+              {!loading && !visibleRows.length && <tr><td colSpan={16} className="px-4 py-16 text-center text-sm text-slate-400">{rows.length ? "没有符合当前筛选条件的发票" : "暂时没有发票，请从右上角上传税务发票清单"}</td></tr>}
+              {loading && <tr><td colSpan={16} className="px-4 py-16 text-center text-sm text-slate-400">正在加载发票池…</td></tr>}
             </tbody>
           </table>
         </div>
@@ -562,9 +591,14 @@ function amountDiffLabel(candidate: TaxInvoicePurchaseCandidate) {
 
 function InvoiceDetailModal({ row, onRefresh, onClose }: { row: TaxInvoiceRow; onRefresh: () => Promise<void>; onClose: () => void }) {
   const isOutput = row.direction === "output";
+  const businessPurchaseTypes = new Set([
+    "alibaba1688_order",
+    "external_purchase_order",
+    "jackyun_purchase_order",
+  ]);
   const purchaseLinks = isOutput
     ? row.links.filter((link) => link.targetType === "sales_order")
-    : row.links.filter((link) => link.targetType !== "sales_order");
+    : row.links.filter((link) => businessPurchaseTypes.has(link.targetType));
   const [pickerOpen, setPickerOpen] = useState(false);
   const [keyword, setKeyword] = useState("");
   const [candidates, setCandidates] = useState<TaxInvoicePurchaseCandidate[]>([]);
@@ -679,7 +713,7 @@ function InvoiceDetailModal({ row, onRefresh, onClose }: { row: TaxInvoiceRow; o
       <div className="w-full max-w-4xl overflow-hidden rounded-xl bg-white shadow-xl" onClick={(event) => event.stopPropagation()}>
         <div className="flex items-start justify-between gap-4 border-b border-slate-100 px-5 py-4">
           <div>
-            <div className="flex flex-wrap items-center gap-2"><h2 className="font-mono text-sm font-semibold text-slate-900">{invoiceNo(row)}</h2><span className={`rounded-full border px-2 py-0.5 text-[10px] font-medium ${directionClass(row.direction)}`}>{directionLabel(row.direction)}</span><span className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${matchClass(row.matchStatus)}`}>{matchLabel(row.matchStatus)}</span><span className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${row.redStatus === "red_offset" ? "bg-rose-50 text-rose-700" : row.redStatus === "voided_blue" ? "bg-orange-50 text-orange-700" : "bg-emerald-50 text-emerald-700"}`}>{row.invoiceStatusLabel}</span>
+            <div className="flex flex-wrap items-center gap-2"><h2 className="font-mono text-sm font-semibold text-slate-900">{invoiceNo(row)}</h2><span className={`rounded-full border px-2 py-0.5 text-[10px] font-medium ${directionClass(row.direction)}`}>{directionLabel(row.direction)}</span><span className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${matchClass(businessMatchStatus(row))}`}>{matchLabel(businessMatchStatus(row))}</span><span className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${row.redStatus === "red_offset" ? "bg-rose-50 text-rose-700" : row.redStatus === "voided_blue" ? "bg-orange-50 text-orange-700" : "bg-emerald-50 text-emerald-700"}`}>{row.invoiceStatusLabel}</span>
             {row.direction === "input" && (
               <>
                 <span className="relative inline-flex items-center" onClick={(event) => event.stopPropagation()}>

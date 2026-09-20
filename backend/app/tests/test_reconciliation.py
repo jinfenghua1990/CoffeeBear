@@ -132,3 +132,31 @@ def test_one_bank_transaction_cannot_confirm_two_settlements(db_session):
         db_session.execute(delete(BankAccount).where(BankAccount.account_no == account_no))
         db_session.execute(delete(AuditLog).where(AuditLog.actor == actor))
         db_session.commit()
+
+
+
+def test_settlement_match_status_ignores_other_bank_reconciliation_domains(db_session):
+    """银行自己的其他核对类型不能冒充“平台回款已对账”状态。"""
+    txn = BankTransaction(
+        txn_date=date(2097, 7, 1),
+        direction="in",
+        amount=100,
+        counterparty_name="期初核对测试",
+        fingerprint="recon-domain-opening",
+    )
+    db_session.add(txn)
+    db_session.flush()
+    db_session.add(ReconciliationMatch(
+        txn_id=txn.id,
+        target_type="opening",
+        target_id=999,
+        score=100,
+        confidence="high",
+        status="confirmed",
+        matched_platform="",
+        matched_by="manual",
+    ))
+    db_session.commit()
+
+    assert txn.id in rc.confirmed_txn_ids(db_session, [txn.id])
+    assert txn.id not in rc.confirmed_settlement_txn_ids(db_session, [txn.id])

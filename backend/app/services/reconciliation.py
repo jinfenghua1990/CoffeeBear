@@ -365,6 +365,25 @@ def confirmed_txn_ids(db: Session, txn_ids: list[int]) -> set[int]:
     }
 
 
+def confirmed_settlement_txn_ids(db: Session, txn_ids: list[int]) -> set[int]:
+    """只返回银行收入↔平台结算已确认的流水；其他银行核对类型不能冒充回款对账。"""
+    if not txn_ids:
+        return set()
+    return {
+        int(txn_id)
+        for (txn_id,) in (
+            db.query(ReconciliationMatch.txn_id)
+            .filter(
+                ReconciliationMatch.status == "confirmed",
+                ReconciliationMatch.target_type == "settlement",
+                ReconciliationMatch.txn_id.in_(txn_ids),
+            )
+            .distinct()
+            .all()
+        )
+    }
+
+
 def suggest_for_txn(
     db: Session,
     txn: BankTransaction,
@@ -401,7 +420,7 @@ def suggestions(db: Session, limit: int = 50) -> list[dict[str, Any]]:
         .limit(200)
         .all()
     )
-    confirmed_ids = confirmed_txn_ids(db, [txn.id for txn in txns])
+    confirmed_ids = confirmed_settlement_txn_ids(db, [txn.id for txn in txns])
     rules = active_rule_tuples(db)
     open_settlements = db.query(SettlementRecord).filter(SettlementRecord.status != "settled").all()
     out = []
