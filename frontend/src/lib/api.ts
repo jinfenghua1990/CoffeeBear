@@ -321,6 +321,51 @@ export async function testJackyun(): Promise<{
   return res.json();
 }
 
+export type R2BackupConfig = {
+  configured: boolean;
+  enabled: boolean;
+  endpointUrl: string;
+  bucket: string;
+  prefix: string;
+  accessKeyHint: string;
+  fullIntervalDays: number;
+  mode: "backup" | string;
+  readEnabled: true;
+};
+
+export type R2BackupConfigInput = {
+  endpointUrl: string;
+  bucket: string;
+  prefix: string;
+  accessKey?: string;
+  secretKey?: string;
+  enabled: boolean;
+  fullIntervalDays: number;
+};
+
+export function getR2BackupConfig(): Promise<R2BackupConfig> {
+  return jsonFetch<R2BackupConfig>("/api/v1/integrations/r2-backup");
+}
+
+export function saveR2BackupConfig(body: R2BackupConfigInput): Promise<R2BackupConfig> {
+  return jsonFetch<R2BackupConfig>("/api/v1/integrations/r2-backup", {
+    method: "PUT",
+    body: JSON.stringify(body),
+  });
+}
+
+export function runR2Backup(mode: "auto" | "daily" | "full" = "auto"): Promise<{
+  started: boolean;
+  target: "r2";
+  mode: string;
+  log: string;
+}> {
+  return jsonFetch("/api/v1/integrations/r2-backup/run", {
+    method: "POST",
+    body: JSON.stringify({ mode }),
+  });
+}
+
 export type KodoColdBackupConfig = {
   configured: boolean;
   enabled: boolean;
