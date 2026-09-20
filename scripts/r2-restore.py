@@ -107,15 +107,15 @@ def signed_get(config: dict[str, Any], object_key: str) -> requests.Response:
     amz_date = now.strftime("%Y%m%dT%H%M%SZ")
     date_stamp = now.strftime("%Y%m%d")
     path_prefix = base.path.rstrip("/")
-    canonical_uri = quote(f"${path_prefix}/${config['bucket']}/${object_key}", safe="/-_.~")
+    canonical_uri = quote(f"{path_prefix}/{config['bucket']}/{object_key}", safe="/-_.~")
     canonical_headers = (
-        f"host:${base.netloc}\n"
-        f"x-amz-content-sha256:${EMPTY_HASH}\n"
-        f"x-amz-date:${amz_date}\n"
+        f"host:{base.netloc}\n"
+        f"x-amz-content-sha256:{EMPTY_HASH}\n"
+        f"x-amz-date:{amz_date}\n"
     )
     signed = "host;x-amz-content-sha256;x-amz-date"
     canonical_request = "\n".join(["GET", canonical_uri, "", canonical_headers, signed, EMPTY_HASH])
-    scope = f"${date_stamp}/auto/s3/aws4_request"
+    scope = f"{date_stamp}/auto/s3/aws4_request"
     string_to_sign = "\n".join(
         [
             "AWS4-HMAC-SHA256",
@@ -131,10 +131,10 @@ def signed_get(config: dict[str, Any], object_key: str) -> requests.Response:
     ).hexdigest()
     authorization = (
         "AWS4-HMAC-SHA256 "
-        f"Credential=${config['access_key']}/${scope}, "
-        f"SignedHeaders=${signed}, Signature=${signature}"
+        f"Credential={config['access_key']}/{scope}, "
+        f"SignedHeaders={signed}, Signature={signature}"
     )
-    url = f"${endpoint_url}/" + "/".join(
+    url = f"{endpoint_url}/" + "/".join(
         quote(part, safe="-_.~") for part in (str(config["bucket"]) + "/" + object_key).split("/")
     )
     return requests.get(
@@ -153,7 +153,7 @@ def get_json(config: dict[str, Any], object_key: str) -> dict[str, Any]:
     response = signed_get(config, object_key)
     try:
         if response.status_code < 200 or response.status_code >= 300:
-            raise RuntimeError(f"R2 读取失败 HTTP ${response.status_code}: ${response.text[:800]}")
+            raise RuntimeError(f"R2 读取失败 HTTP {response.status_code}: {response.text[:800]}")
         payload = response.json()
         if not isinstance(payload, dict):
             raise RuntimeError("R2 快照索引格式无效")
@@ -168,7 +168,7 @@ def download(config: dict[str, Any], object_key: str, target: Path, expected_has
     digest = hashlib.sha256()
     try:
         if response.status_code < 200 or response.status_code >= 300:
-            raise RuntimeError(f"R2 下载失败 HTTP ${response.status_code}: ${response.text[:800]}")
+            raise RuntimeError(f"R2 下载失败 HTTP {response.status_code}: {response.text[:800]}")
         with tmp.open("wb") as stream:
             for chunk in response.iter_content(chunk_size=1024 * 1024):
                 if not chunk:
@@ -180,13 +180,13 @@ def download(config: dict[str, Any], object_key: str, target: Path, expected_has
     actual = digest.hexdigest()
     if expected_hash and actual != expected_hash:
         tmp.unlink(missing_ok=True)
-        raise RuntimeError(f"SHA256 校验失败：${target.name}")
+        raise RuntimeError(f"SHA256 校验失败：{target.name}")
     tmp.replace(target)
 
 
 def safe_name(name: str) -> str:
     if not name or "/" in name or "\\" in name or name in {".", ".."}:
-        raise RuntimeError(f"恢复文件名非法：${name!r}")
+        raise RuntimeError(f"恢复文件名非法：{name!r}")
     return name
 
 
@@ -203,9 +203,9 @@ def main() -> int:
 
     prefix = str(config.get("prefix") or "ecommerce-workspace/backup").strip().strip("/")
     try:
-        index = get_json(config, f"${prefix}/latest-full.json")
+        index = get_json(config, f"{prefix}/latest-full.json")
     except Exception as exc:
-        print(f"无法读取 R2 最新全量恢复点：${exc}", file=sys.stderr)
+        print(f"无法读取 R2 最新全量恢复点：{exc}", file=sys.stderr)
         return 2
 
     timestamp = str(index.get("timestamp") or "")
@@ -223,7 +223,7 @@ def main() -> int:
 
     try:
         manifest_meta = index.get("manifest") or {}
-        manifest_name = safe_name(str(manifest_meta.get("name") or f"full_${timestamp}.manifest"))
+        manifest_name = safe_name(str(manifest_meta.get("name") or f"full_{timestamp}.manifest"))
         download(
             config,
             str(manifest_meta.get("objectKey") or ""),
@@ -242,7 +242,7 @@ def main() -> int:
             object_key = str(meta.get("objectKey") or "")
             expected = str(meta.get("sha256") or "")
             if not object_key or not expected:
-                raise RuntimeError(f"恢复模块信息不完整：${module}")
+                raise RuntimeError(f"恢复模块信息不完整：{module}")
             download(config, object_key, target_dir / name, expected)
             downloaded[str(module)] = {"name": name, "sha256": expected, "objectKey": object_key}
 
@@ -250,16 +250,16 @@ def main() -> int:
         if not db:
             raise RuntimeError("完整恢复点缺少数据库模块")
         data = downloaded.get("data")
-        local_manifest = target_dir / f"backup_${timestamp}.manifest"
+        local_manifest = target_dir / f"backup_{timestamp}.manifest"
         local_manifest.write_text(
             "\n".join(
                 [
                     "version=1",
-                    f"timestamp=${timestamp}",
-                    f"db=${db['name']}",
-                    f"db_sha256=${db['sha256']}",
-                    f"data=${data['name'] if data else ''}",
-                    f"data_sha256=${data['sha256'] if data else ''}",
+                    f"timestamp={timestamp}",
+                    f"db={db['name']}",
+                    f"db_sha256={db['sha256']}",
+                    f"data={data['name'] if data else ''}",
+                    f"data_sha256={data['sha256'] if data else ''}",
                     "",
                 ]
             ),
@@ -293,10 +293,10 @@ def main() -> int:
         print("R2 恢复点下载成功，但数据库恢复演练失败。", file=sys.stderr)
         return 2
     except Exception as exc:
-        print(f"R2 恢复准备失败：${exc}", file=sys.stderr)
+        print(f"R2 恢复准备失败：{exc}", file=sys.stderr)
         return 2
 
-    print(f"==> R2 最新完整恢复点已下载并校验：${target_dir}")
+    print(f"==> R2 最新完整恢复点已下载并校验：{target_dir}")
     print("==> 未覆盖生产环境；真正恢复需要后续明确确认。")
     return 0
 
