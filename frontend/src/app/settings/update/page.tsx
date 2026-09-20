@@ -358,9 +358,15 @@ export default function SystemUpdatePage() {
             </div>
 
             <div className="mt-4 grid gap-3 sm:grid-cols-2">
-              <VersionPanel label="当前版本" sha={currentSha} note={status.currentCommit?.subject || "当前正在运行的版本"} />
+              <VersionPanel
+                label="当前版本"
+                version={status.currentCommit?.version}
+                sha={currentSha}
+                note={status.currentCommit?.subject || "当前正在运行的版本"}
+              />
               <VersionPanel
                 label={status.updateAvailable ? "待更新版本" : "远端版本"}
+                version={status.latestCommit?.version}
                 sha={targetSha}
                 note={latestSubject || (status.updateAvailable ? "已检测到新版本" : "与当前版本一致")}
                 emphasis={Boolean(status.updateAvailable)}
@@ -748,11 +754,13 @@ export default function SystemUpdatePage() {
 
 function VersionPanel({
   label,
+  version,
   sha,
   note,
   emphasis = false,
 }: {
   label: string;
+  version?: string | null;
   sha?: string | null;
   note: string;
   emphasis?: boolean;
@@ -761,9 +769,12 @@ function VersionPanel({
     <div className={"rounded-xl border p-3 " + (emphasis ? "border-amber-200 bg-amber-50/50" : "border-slate-100 bg-slate-50/60")}>
       <div className="text-[10px] text-slate-400">{label}</div>
       <div className={"mt-1 font-mono text-[15px] font-semibold " + (emphasis ? "text-amber-800" : "text-slate-800")}>
-        {shortSha(sha)}
+        {version || shortSha(sha)}
       </div>
-      <div className="mt-1 truncate text-[10px] text-slate-500" title={note}>{note}</div>
+      <div className="mt-1 flex min-w-0 items-center gap-2 text-[10px] text-slate-500">
+        <span className="shrink-0 font-mono text-slate-400">{shortSha(sha)}</span>
+        <span className="truncate" title={note}>{note}</span>
+      </div>
     </div>
   );
 }
