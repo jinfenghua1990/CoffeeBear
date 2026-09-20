@@ -392,6 +392,7 @@ export default function MonthlySendPage() {
   const [unbilled, setUnbilled] = useState<Unbilled | null>(null);
   const [mailStatus, setMailStatus] = useState<MailStatus | null>(null);
   const [mailOpen, setMailOpen] = useState(false);
+  const sendSettingsSnapshot = useRef<{ toText: string; ccText: string; autoSend: boolean; sendDay: number; sendHour: number } | null>(null);
   const [financeTab, setFinanceTab] = useTabScopedState<"monthly" | "records" | "archive" | "ledger" | "corporate" | "match">("monthly.tab", "monthly");
   const [corporateView, setCorporateView] = useState<"adjust" | "preview">("adjust");
   useEffect(() => {
@@ -643,6 +644,34 @@ export default function MonthlySendPage() {
     const selected = unbilled.selectedKeys?.length ? unbilled.selectedKeys : available;
     setUnbilledSelectedKeys(selected.filter((key) => available.includes(key)));
   }, [unbilled]);
+
+  function openSendSettings() {
+    sendSettingsSnapshot.current = {
+      toText,
+      ccText,
+      autoSend: Boolean(template?.autoSend),
+      sendDay: template?.sendDay ?? 3,
+      sendHour: template?.sendHour ?? 10,
+    };
+    setMailOpen(true);
+    void loadMailStatus();
+  }
+
+  function closeSendSettings(revert = true) {
+    const snapshot = sendSettingsSnapshot.current;
+    if (revert && snapshot) {
+      setToText(snapshot.toText);
+      setCcText(snapshot.ccText);
+      setTemplate((current) => current ? {
+        ...current,
+        autoSend: snapshot.autoSend,
+        sendDay: snapshot.sendDay,
+        sendHour: snapshot.sendHour,
+      } : current);
+    }
+    sendSettingsSnapshot.current = null;
+    setMailOpen(false);
+  }
 
   async function saveTemplate() {
     if (!template) return;
@@ -1145,7 +1174,7 @@ export default function MonthlySendPage() {
 
       <header className="flex flex-wrap items-end justify-between gap-3 px-1">
         <div><h1 className="text-2xl font-bold tracking-tight text-slate-900">月结中心</h1><p className="mt-1 text-sm text-slate-500">按公司主体读取业务结果，核对交付资料，生成月度财务包并发送。</p></div>
-        <button type="button" onClick={() => { setMailOpen(true); void loadMailStatus(); }} className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3.5 py-2 text-sm font-medium text-slate-700 shadow-sm hover:border-blue-300 hover:text-blue-600">
+        <button type="button" onClick={openSendSettings} className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3.5 py-2 text-sm font-medium text-slate-700 shadow-sm hover:border-blue-300 hover:text-blue-600">
           <svg viewBox="0 0 24 24" className="h-4 w-4" fill="none" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="2" stroke="currentColor" strokeWidth="1.8" /><path d="m3 7 9 6 9-6" stroke="currentColor" strokeWidth="1.8" /></svg>
           发送设置{mailStatus && !mailStatus.configured && <span title="SMTP 未配置" className="h-1.5 w-1.5 rounded-full bg-rose-500" />}
         </button>
@@ -1269,7 +1298,7 @@ export default function MonthlySendPage() {
                   {emails(ccText).length > 0 && <div className="mt-1 break-all text-[11px] text-slate-500">抄送：{emails(ccText).join("、")}</div>}
                   <div className="mt-2 text-[11px] text-slate-500">{template?.autoSend ? `自动发送：每月 ${template.sendDay} 日 ${String(template.sendHour).padStart(2, "0")}:00` : "发送方式：仅手动发送"}</div>
                 </div>
-                <button type="button" onClick={() => { setMailOpen(true); void loadMailStatus(); }} className="shrink-0 rounded-md border border-slate-200 bg-white px-2.5 py-1.5 text-[11px] font-medium text-blue-600 hover:border-blue-300">修改设置</button>
+                <button type="button" onClick={openSendSettings} className="shrink-0 rounded-md border border-slate-200 bg-white px-2.5 py-1.5 text-[11px] font-medium text-blue-600 hover:border-blue-300">修改设置</button>
               </div>
             </div>
             <div>
@@ -1739,7 +1768,7 @@ export default function MonthlySendPage() {
         );
       })()}
 
-      {mailOpen && <div className="fixed inset-0 z-modal flex items-start justify-center overflow-y-auto bg-slate-950/40 p-4 sm:p-8" onMouseDown={(event) => { if (event.target === event.currentTarget) setMailOpen(false); }} role="dialog" aria-modal="true" aria-label="发送设置"><div className="my-auto w-full max-w-lg overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-2xl"><div className="flex items-center justify-between gap-3 border-b border-slate-200 px-5 py-4"><div><h2 className="text-base font-semibold text-slate-900">发送设置</h2><p className="mt-0.5 text-[11px] text-slate-500">收件人、抄送和自动发送时间统一在这里维护，手动发送与自动发送共用。</p></div><button type="button" onClick={() => setMailOpen(false)} className="rounded-md border border-slate-200 px-2.5 py-1 text-xs text-slate-600 hover:border-slate-300">关闭</button></div><div className="space-y-4 p-5"><div className="rounded-xl border border-slate-200 bg-slate-50/70 p-3"><div className="text-[11px] font-medium text-slate-500">发件邮箱（服务器 .env 配置，不支持在此修改）</div><div className="mt-1.5 text-sm text-slate-800">{mailStatus?.from || "未配置"}</div><div className="mt-1 text-[11px] text-slate-400">{mailStatus?.configured ? `SMTP：${mailStatus.host}:${mailStatus.port} · 账号 ${mailStatus.username}` : "SMTP 未配置，发送会失败"}</div></div><label className="block text-xs text-slate-500">财务收件人<input value={toText} onChange={(e) => setToText(e.target.value)} placeholder="finance@example.com" className="mt-1.5 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm" /></label><label className="block text-xs text-slate-500">抄送（可选）<input value={ccText} onChange={(e) => setCcText(e.target.value)} placeholder="多个邮箱用逗号分隔" className="mt-1.5 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm" /></label><div className="rounded-xl border border-slate-200 p-4"><label className="flex items-center gap-2 text-sm font-medium text-slate-700"><input type="checkbox" checked={Boolean(template?.autoSend)} onChange={(e) => setTemplate((t) => t ? { ...t, autoSend: e.target.checked } : t)} className="h-4 w-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500" />启用每月自动发送</label><div className="mt-3 flex flex-wrap items-center gap-2 text-xs text-slate-500"><span>每月</span><input type="number" min={1} max={28} value={template?.sendDay ?? 3} onChange={(e) => setTemplate((t) => t ? { ...t, sendDay: Number(e.target.value) } : t)} disabled={!template?.autoSend} className="w-16 rounded-lg border border-slate-200 bg-white px-2 py-1.5 text-xs disabled:bg-slate-50 disabled:text-slate-300" /><span>日</span><select value={template?.sendHour ?? 10} onChange={(e) => setTemplate((t) => t ? { ...t, sendHour: Number(e.target.value) } : t)} disabled={!template?.autoSend} className="rounded-lg border border-slate-200 bg-white px-2 py-1.5 text-xs disabled:bg-slate-50 disabled:text-slate-300">{Array.from({ length: 24 }, (_, i) => <option key={i} value={i}>{String(i).padStart(2, "0")}:00</option>)}</select></div></div></div><div className="flex items-center justify-end gap-2 border-t border-slate-200 bg-slate-50/60 px-5 py-3"><button type="button" onClick={() => setMailOpen(false)} className="rounded-lg border border-slate-200 bg-white px-3.5 py-2 text-sm text-slate-600">取消</button><button type="button" onClick={() => { void saveTemplate().then((saved) => { if (saved) setMailOpen(false); }); }} disabled={busy || !template} className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-40">保存发送设置</button></div></div></div>}
+      {mailOpen && <div className="fixed inset-0 z-modal flex items-start justify-center overflow-y-auto bg-slate-950/40 p-4 sm:p-8" onMouseDown={(event) => { if (event.target === event.currentTarget) closeSendSettings(); }} role="dialog" aria-modal="true" aria-label="发送设置"><div className="my-auto w-full max-w-lg overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-2xl"><div className="flex items-center justify-between gap-3 border-b border-slate-200 px-5 py-4"><div><h2 className="text-base font-semibold text-slate-900">发送设置</h2><p className="mt-0.5 text-[11px] text-slate-500">收件人、抄送和自动发送时间统一在这里维护，手动发送与自动发送共用。</p></div><button type="button" onClick={() => closeSendSettings()} className="rounded-md border border-slate-200 px-2.5 py-1 text-xs text-slate-600 hover:border-slate-300">关闭</button></div><div className="space-y-4 p-5"><div className="rounded-xl border border-slate-200 bg-slate-50/70 p-3"><div className="text-[11px] font-medium text-slate-500">发件邮箱（服务器 .env 配置，不支持在此修改）</div><div className="mt-1.5 text-sm text-slate-800">{mailStatus?.from || "未配置"}</div><div className="mt-1 text-[11px] text-slate-400">{mailStatus?.configured ? `SMTP：${mailStatus.host}:${mailStatus.port} · 账号 ${mailStatus.username}` : "SMTP 未配置，发送会失败"}</div></div><label className="block text-xs text-slate-500">财务收件人<input value={toText} onChange={(e) => setToText(e.target.value)} placeholder="finance@example.com" className="mt-1.5 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm" /></label><label className="block text-xs text-slate-500">抄送（可选）<input value={ccText} onChange={(e) => setCcText(e.target.value)} placeholder="多个邮箱用逗号分隔" className="mt-1.5 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm" /></label><div className="rounded-xl border border-slate-200 p-4"><label className="flex items-center gap-2 text-sm font-medium text-slate-700"><input type="checkbox" checked={Boolean(template?.autoSend)} onChange={(e) => setTemplate((t) => t ? { ...t, autoSend: e.target.checked } : t)} className="h-4 w-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500" />启用每月自动发送</label><div className="mt-3 flex flex-wrap items-center gap-2 text-xs text-slate-500"><span>每月</span><input type="number" min={1} max={28} value={template?.sendDay ?? 3} onChange={(e) => setTemplate((t) => t ? { ...t, sendDay: Number(e.target.value) } : t)} disabled={!template?.autoSend} className="w-16 rounded-lg border border-slate-200 bg-white px-2 py-1.5 text-xs disabled:bg-slate-50 disabled:text-slate-300" /><span>日</span><select value={template?.sendHour ?? 10} onChange={(e) => setTemplate((t) => t ? { ...t, sendHour: Number(e.target.value) } : t)} disabled={!template?.autoSend} className="rounded-lg border border-slate-200 bg-white px-2 py-1.5 text-xs disabled:bg-slate-50 disabled:text-slate-300">{Array.from({ length: 24 }, (_, i) => <option key={i} value={i}>{String(i).padStart(2, "0")}:00</option>)}</select></div></div></div><div className="flex items-center justify-end gap-2 border-t border-slate-200 bg-slate-50/60 px-5 py-3"><button type="button" onClick={() => closeSendSettings()} className="rounded-lg border border-slate-200 bg-white px-3.5 py-2 text-sm text-slate-600">取消</button><button type="button" onClick={() => { void saveTemplate().then((saved) => { if (saved) closeSendSettings(false); }); }} disabled={busy || !template} className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-40">保存发送设置</button></div></div></div>}
     </div>
   );
 }
