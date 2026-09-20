@@ -108,20 +108,20 @@ def test_build_report_links_bank_invoice_purchase_and_product(db_session):
     assert report["summary"]["paymentCount"] == 1
     assert report["summary"]["invoiceCount"] == 1
     assert Decimal(report["summary"]["allocatedTotal"]) == Decimal("1000.00")
-    assert report["rows"][0]["invoiceNumber"] == invoice.invoice_number
-    assert report["rows"][0]["voucherNo"] == txn.voucher_no
-    assert po.external_order_id in report["rows"][0]["purchaseOrderNos"]
+    assert report["invoiceRows"][0]["invoiceNumber"] == invoice.invoice_number
+    assert report["invoiceRows"][0]["payments"][0]["voucherNo"] == txn.voucher_no
+    assert po.external_order_id in report["invoiceRows"][0]["purchaseOrderNos"]
     assert report["productDetails"][0]["skuCode"] == item.sku_code
     assert Decimal(report["productDetails"][0]["unitPrice"]) == Decimal("100")
 
     blob = service.corporate_payment_xlsx(report)
     wb = load_workbook(BytesIO(blob), read_only=True)
-    assert wb.sheetnames == ["月度汇总", "对公付款汇总", "商品明细"]
-    assert wb["对公付款汇总"]["M2"].value == invoice.invoice_number
+    assert wb.sheetnames == ["月度汇总", "已收票对公核对", "商品明细"]
+    assert wb["已收票对公核对"]["D2"].value == invoice.invoice_number
     assert wb["商品明细"]["G2"].value == item.sku_code
 
 
-def test_report_excludes_unconfirmed_or_other_month(db_session):
+def test_report_keeps_received_invoice_even_when_bank_link_is_unconfirmed(db_session):
     token = uuid4().hex[:10]
     seller = f"未确认供应商-{token}"
 
@@ -158,68 +158,87 @@ def test_report_excludes_unconfirmed_or_other_month(db_session):
     db_session.commit()
 
     report = service.build_report(db_session, 2026, 8)
-    ids = {row["invoiceId"] for row in report["rows"]}
-    assert invoice.id not in ids
+
+    assert [row["invoiceId"] for row in report["invoiceRows"]] == [invoice.id]
+    assert report["invoiceRows"][0]["invoiceStatus"] == "unpaid"
+    assert report["invoiceRows"][0]["payments"] == []
+    assert Decimal(report["summary"]["invoiceTotal"]) == Decimal("300.00")
+    assert Decimal(report["summary"]["outstandingTotal"]) == Decimal("300.00")
 
 
-
-def test_corporate_payment_xlsx_groups_links_by_payment():
+def test_corporate_payment_xlsx_keeps_one_row_per_invoice_with_multiple_payments():
     report = {
         "summary": {
-            "paymentCount": 1,
-            "invoiceCount": 2,
+            "paymentCount": 2,
+            "invoiceCount": 1,
             "paymentTotal": "1000.00",
             "allocatedTotal": "1000.00",
             "invoiceTotal": "1000.00",
             "outstandingTotal": "0.00",
+            "paidInvoiceCount": 1,
+            "partialInvoiceCount": 0,
+            "unpaidInvoiceCount": 0,
             "productRowCount": 0,
         },
-        "rows": [
+        "invoiceRows": [
             {
-                "paymentId": 10,
-                "paymentDate": "2026-08-15",
+                "invoiceId": 1,
+                "invoiceDate": "2026-08-10",
                 "supplierName": "供应商甲",
                 "supplierTaxId": "TAX-A",
-                "paymentAccount": "ZJRC-001",
-                "paymentAccountName": "测试账户",
-                "counterpartyAccount": "CP-001",
-                "voucherNo": "V-001",
-                "summary": "货款",
-                "paymentAmount": "1000.00",
-                "paymentAllocatedAmount": "400.00",
-                "paymentMatchedTotal": "1000.00",
-                "paymentStatus": "matched",
                 "invoiceNumber": "INV-A",
-                "purchaseOrderNos": ["PO-A"],
-            },
-            {
-                "paymentId": 10,
-                "paymentDate": "2026-08-15",
-                "supplierName": "供应商甲",
-                "supplierTaxId": "TAX-A",
-                "paymentAccount": "ZJRC-001",
-                "paymentAccountName": "测试账户",
-                "counterpartyAccount": "CP-001",
-                "voucherNo": "V-001",
-                "summary": "货款",
-                "paymentAmount": "1000.00",
-                "paymentAllocatedAmount": "600.00",
-                "paymentMatchedTotal": "1000.00",
-                "paymentStatus": "matched",
-                "invoiceNumber": "INV-B",
-                "purchaseOrderNos": ["PO-B"],
-            },
+                "invoiceType": "增值税专用发票",
+                "invoiceAmountExclTax": "884.96",
+                "invoiceTaxAmount": "115.04",
+                "invoiceTotalAmount": "1000.00",
+                "invoiceCorporatePaidTotal": "1000.00",
+                "invoiceOutstandingAmount": "0.00",
+                "invoiceStatus": "paid",
+                "purchaseOrderNos": ["PO-A", "PO-B"],
+                "payments": [
+                    {
+                        "linkId": 10,
+                        "paymentId": 20,
+                        "paymentDate": "2026-08-15",
+                        "paymentAccount": "ZJRC-001",
+                        "paymentAccountName": "测试账户",
+                        "counterpartyAccount": "CP-001",
+                        "voucherNo": "V-001",
+                        "summary": "货款",
+                        "paymentAmount": "400.00",
+                        "allocatedAmount": "400.00",
+                        "paymentMatchedTotal": "400.00",
+                        "paymentStatus": "matched",
+                    },
+                    {
+                        "linkId": 11,
+                        "paymentId": 21,
+                        "paymentDate": "2026-08-20",
+                        "paymentAccount": "ZJRC-001",
+                        "paymentAccountName": "测试账户",
+                        "counterpartyAccount": "CP-001",
+                        "voucherNo": "V-002",
+                        "summary": "货款",
+                        "paymentAmount": "600.00",
+                        "allocatedAmount": "600.00",
+                        "paymentMatchedTotal": "600.00",
+                        "paymentStatus": "matched",
+                    },
+                ],
+            }
         ],
+        "rows": [],
         "productDetails": [],
     }
 
     wb = load_workbook(BytesIO(service.corporate_payment_xlsx(report)), read_only=True)
-    ws = wb["对公付款汇总"]
+    ws = wb["已收票对公核对"]
 
     assert ws.max_row == 2
+    assert ws["D2"].value == "INV-A"
+    assert ws["H2"].value == 1000
     assert ws["I2"].value == 1000
-    assert ws["J2"].value == 1000
-    assert ws["K2"].value == 0
-    assert ws["M2"].value == "INV-A、INV-B"
-    assert ws["N2"].value == 2
-    assert ws["O2"].value == "PO-A、PO-B"
+    assert ws["J2"].value == 0
+    assert ws["L2"].value == "2026-08-15、2026-08-20"
+    assert ws["N2"].value == "V-001、V-002"
+    assert ws["P2"].value == "PO-A、PO-B"
