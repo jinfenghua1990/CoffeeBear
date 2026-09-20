@@ -8,7 +8,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 RUNTIME_BACKUP_DIR="${BACKUP_DIR:-}"
 BACKUP_DIR="${BACKUP_DIR:-$ROOT/backups}"
-KEEP="${KEEP:-14}"
+KEEP="${KEEP:-30}"
 TS="$(date +%Y%m%d_%H%M%S)"
 SKIP_FILES=0
 [[ "${1:-}" == "--no-files" ]] && SKIP_FILES=1
