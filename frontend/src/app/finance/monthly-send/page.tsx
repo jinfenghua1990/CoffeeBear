@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { authenticatedFetch } from "@/lib/api";
-import { useTabScopedState, useTabTitle } from "@/lib/workspace/tab-store";
+import { useTabRuntime, useTabScopedState, useTabTitle, useWorkspace } from "@/lib/workspace/tab-store";
 
 type Pkg = { id: number; version: number; status: string; sha256: string; createdAt: string | null };
 type LegalEntity = {
@@ -282,6 +282,11 @@ function deliveryName(month: number, name: string) {
 const CARD = "rounded-xl border border-slate-200 bg-white shadow-sm";
 
 export default function MonthlySendPage() {
+  const runtime = useTabRuntime();
+  const workspace = useWorkspace();
+  const ownTab = runtime?.tabId ? workspace.tabs.find((tab) => tab.id === runtime.tabId) : null;
+  const ownSearch = ownTab?.search || "";
+
   // 全页唯一的账期选择器：选一次，下面所有卡片都跟着它走。
   const [sendMonth, setSendMonth] = useTabScopedState("monthly.month", previousMonthValue);
   const sel = useMemo(() => {
@@ -302,6 +307,16 @@ export default function MonthlySendPage() {
   const [mailStatus, setMailStatus] = useState<MailStatus | null>(null);
   const [mailOpen, setMailOpen] = useState(false);
   const [financeTab, setFinanceTab] = useTabScopedState<"monthly" | "records" | "archive" | "ledger" | "corporate" | "match">("monthly.tab", "monthly");
+  useEffect(() => {
+    const params = new URLSearchParams(ownSearch);
+    const requestedMonth = params.get("month") || "";
+    const requestedTab = params.get("tab") || "";
+    if (/^\d{4}-\d{2}$/.test(requestedMonth)) setSendMonth(requestedMonth);
+    if (["monthly", "records", "archive", "ledger", "corporate", "match"].includes(requestedTab)) {
+      setFinanceTab(requestedTab as "monthly" | "records" | "archive" | "ledger" | "corporate" | "match");
+    }
+  }, [ownSearch, setFinanceTab, setSendMonth]);
+
   const [matchData, setMatchData] = useState<PaymentMatchOverview | null>(null);
   const [corporatePayment, setCorporatePayment] = useState<CorporatePaymentReport | null>(null);
   const [matchLoading, setMatchLoading] = useState(false);
@@ -325,6 +340,53 @@ export default function MonthlySendPage() {
   const matchRequestSeq = useRef(0);
   const pickerRequestSeq = useRef(0);
   const uploadKind = useRef<"交易明细" | "回单详情">("交易明细");
+
+  const corporatePaymentGroups = useMemo(() => {
+    const grouped = new Map<number, {
+      paymentId: number;
+      paymentDate: string;
+      paymentAccount: string;
+      paymentAccountName: string;
+      counterpartyAccount: string;
+      voucherNo: string;
+      summary: string;
+      paymentAmount: string;
+      paymentMatchedTotal: string;
+      paymentStatus: string;
+      supplierNames: string[];
+      purchaseOrderNos: string[];
+      invoices: CorporatePaymentRow[];
+    }>();
+    for (const row of corporatePayment?.rows || []) {
+      let group = grouped.get(row.paymentId);
+      if (!group) {
+        group = {
+          paymentId: row.paymentId,
+          paymentDate: row.paymentDate,
+          paymentAccount: row.paymentAccount,
+          paymentAccountName: row.paymentAccountName,
+          counterpartyAccount: row.counterpartyAccount,
+          voucherNo: row.voucherNo,
+          summary: row.summary,
+          paymentAmount: row.paymentAmount,
+          paymentMatchedTotal: row.paymentMatchedTotal,
+          paymentStatus: row.paymentStatus,
+          supplierNames: [],
+          purchaseOrderNos: [],
+          invoices: [],
+        };
+        grouped.set(row.paymentId, group);
+      }
+      group.invoices.push(row);
+      if (row.supplierName && !group.supplierNames.includes(row.supplierName)) group.supplierNames.push(row.supplierName);
+      for (const orderNo of row.purchaseOrderNos) {
+        if (orderNo && !group.purchaseOrderNos.includes(orderNo)) group.purchaseOrderNos.push(orderNo);
+      }
+    }
+    return Array.from(grouped.values()).sort((a, b) =>
+      a.paymentDate.localeCompare(b.paymentDate) || a.paymentId - b.paymentId
+    );
+  }, [corporatePayment]);
 
   const selectedEntity = entities.find((row) => row.id === entityId) ?? null;
   const companyName = selectedEntity?.name ?? "";
@@ -817,7 +879,7 @@ export default function MonthlySendPage() {
         {([
           ["monthly", "本月月结与发送"],
           ["corporate", "已收票对公付款"],
-          ["match", "付款发票匹配"],
+          ["match", "付款对账"],
           ["records", "发送记录"],
           ["archive", "资料归档"],
           ["ledger", "销售汇总台账"],
@@ -951,27 +1013,39 @@ export default function MonthlySendPage() {
 
       {financeTab === "corporate" && <section className={`${CARD} overflow-hidden`}>
         <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 px-4 py-4">
-          <div><h2 className="text-base font-semibold text-slate-900">已收票对公付款明细</h2><p className="mt-1 text-xs text-slate-400">只展示已经确认“银行对公支出 ↔ 进项发票”的记录，并继续关联采购订单、商品数量和采购单价。</p></div>
-          <button type="button" onClick={loadCorporatePayment} className="rounded-lg border border-slate-200 px-3 py-2 text-xs text-slate-600 hover:bg-slate-50">刷新</button>
+          <div><h2 className="text-base font-semibold text-slate-900">已收票对公付款明细</h2><p className="mt-1 text-xs text-slate-400">主表按“银行付款流水”一笔一行；发票是付款下面的匹配对象，再继续下钻采购订单、商品数量和采购单价。</p></div>
+          <div className="flex gap-2"><button type="button" onClick={() => { setFinanceTab("match"); void loadMatch(); }} className="rounded-lg border border-blue-200 px-3 py-2 text-xs font-medium text-blue-600 hover:bg-blue-50">发起对账</button><button type="button" onClick={loadCorporatePayment} className="rounded-lg border border-slate-200 px-3 py-2 text-xs text-slate-600 hover:bg-slate-50">刷新</button></div>
         </div>
         {corporatePayment && <div className="grid grid-cols-2 gap-px bg-slate-100 sm:grid-cols-5">
           {([
             ["对公付款", money(corporatePayment.summary.paymentTotal), `${corporatePayment.summary.paymentCount} 笔`],
-            ["已关联发票", money(corporatePayment.summary.allocatedTotal), `${corporatePayment.summary.invoiceCount} 张`],
-            ["发票价税合计", money(corporatePayment.summary.invoiceTotal), "进项票"],
+            ["已匹配发票", money(corporatePayment.summary.allocatedTotal), `${corporatePayment.summary.invoiceCount} 张`],
+            ["发票价税合计", money(corporatePayment.summary.invoiceTotal), "作为付款匹配对象"],
             ["发票未付", money(corporatePayment.summary.outstandingTotal), "跨月付款也累计"],
             ["商品明细", String(corporatePayment.summary.productRowCount), "行"],
           ] as const).map(([label, value, hint]) => <div key={label} className="bg-white px-4 py-3"><div className="text-[10px] text-slate-400">{label}</div><div className="mt-1 text-base font-semibold text-slate-800">{value}</div><div className="mt-0.5 text-[10px] text-slate-400">{hint}</div></div>)}
         </div>}
-        {!corporatePayment ? <div className="px-4 py-12 text-center text-sm text-slate-400">正在生成清单…</div> : !corporatePayment.rows.length ? <div className="px-4 py-12 text-center text-sm text-slate-400">当前账期还没有已确认的“对公付款 ↔ 进项发票”关联。请先到「付款发票匹配」完成标记。</div> : <>
+        {!corporatePayment ? <div className="px-4 py-12 text-center text-sm text-slate-400">正在生成清单…</div> : !corporatePaymentGroups.length ? <div className="px-4 py-12 text-center text-sm text-slate-400">当前账期还没有已确认的付款对账记录。请先从银行付款流水发起对账，再匹配进项发票。</div> : <>
           <div className="overflow-x-auto border-b border-slate-200">
-            <table className="w-full min-w-[1320px] text-xs">
+            <table className="w-full min-w-[1480px] text-xs">
               <thead className="bg-slate-50 text-left text-slate-500"><tr>
-                <th className="px-3 py-2.5 font-medium">付款日期</th><th className="px-3 py-2.5 font-medium">供应商</th><th className="px-3 py-2.5 font-medium">发票号码</th><th className="px-3 py-2.5 text-right font-medium">价税合计</th><th className="px-3 py-2.5 text-right font-medium">本次对公分摊</th><th className="px-3 py-2.5 font-medium">我方付款账号</th><th className="px-3 py-2.5 font-medium">银行流水/凭证号</th><th className="px-3 py-2.5 font-medium">采购订单</th><th className="px-3 py-2.5 font-medium">状态</th>
+                <th className="px-3 py-2.5 font-medium">付款日期</th><th className="px-3 py-2.5 font-medium">供应商 / 对方</th><th className="px-3 py-2.5 text-right font-medium">付款金额</th><th className="px-3 py-2.5 font-medium">已匹配发票</th><th className="px-3 py-2.5 font-medium">采购订单</th><th className="px-3 py-2.5 font-medium">我方付款账号</th><th className="px-3 py-2.5 font-medium">银行流水/凭证号</th><th className="px-3 py-2.5 text-right font-medium">未对账差额</th><th className="px-3 py-2.5 font-medium">状态</th><th className="px-3 py-2.5 text-right font-medium">操作</th>
               </tr></thead>
-              <tbody className="divide-y divide-slate-100">{corporatePayment.rows.map((row) => <tr key={row.linkId}>
-                <td className="whitespace-nowrap px-3 py-2.5 text-slate-600">{row.paymentDate}</td><td className="max-w-[220px] truncate px-3 py-2.5">{row.supplierName || "—"}</td><td className="px-3 py-2.5 font-mono text-slate-600">{row.invoiceNumber || "—"}</td><td className="px-3 py-2.5 text-right tabular-nums">{money(row.invoiceTotalAmount)}</td><td className="px-3 py-2.5 text-right font-medium tabular-nums text-emerald-700">{money(row.paymentAllocatedAmount)}</td><td className="px-3 py-2.5 font-mono text-[11px] text-slate-500">{row.paymentAccount || "—"}</td><td className="px-3 py-2.5 font-mono text-[11px] text-slate-500">{row.voucherNo || "—"}</td><td className="max-w-[260px] truncate px-3 py-2.5 text-slate-600">{row.purchaseOrderNos.join("、") || "—"}</td><td className="px-3 py-2.5"><span className={`rounded-full px-2 py-1 text-[10px] ${row.invoiceStatus === "paid" ? "bg-emerald-50 text-emerald-700" : "bg-amber-50 text-amber-700"}`}>{row.invoiceStatus === "paid" ? "发票已付清" : `待付 ${money(row.invoiceOutstandingAmount)}`}</span></td>
-              </tr>)}</tbody>
+              <tbody className="divide-y divide-slate-100">{corporatePaymentGroups.map((row) => {
+                const remaining = Math.max(Number(row.paymentAmount || 0) - Number(row.paymentMatchedTotal || 0), 0);
+                return <tr key={row.paymentId}>
+                  <td className="whitespace-nowrap px-3 py-2.5 text-slate-600">{row.paymentDate}</td>
+                  <td className="max-w-[230px] px-3 py-2.5"><div className="truncate font-medium text-slate-800">{row.supplierNames.join("、") || "—"}</div>{row.counterpartyAccount && <div className="mt-0.5 truncate font-mono text-[10px] text-slate-400">{row.counterpartyAccount}</div>}</td>
+                  <td className="px-3 py-2.5 text-right font-semibold tabular-nums text-slate-800">{money(row.paymentAmount)}</td>
+                  <td className="px-3 py-2.5"><div className="space-y-1">{row.invoices.map((invoice) => <div key={invoice.linkId} className="flex items-center gap-2"><span className="font-mono text-[11px] text-slate-600">{invoice.invoiceNumber || "—"}</span><span className="text-[10px] text-slate-400">{money(invoice.paymentAllocatedAmount)}</span></div>)}</div></td>
+                  <td className="max-w-[260px] px-3 py-2.5 text-slate-600">{row.purchaseOrderNos.join("、") || "—"}</td>
+                  <td className="px-3 py-2.5"><div className="font-mono text-[11px] text-slate-600">{row.paymentAccount || "—"}</div><div className="mt-0.5 text-[10px] text-slate-400">{row.paymentAccountName || ""}</div></td>
+                  <td className="px-3 py-2.5 font-mono text-[11px] text-slate-500">{row.voucherNo || "—"}</td>
+                  <td className={`px-3 py-2.5 text-right font-medium tabular-nums ${remaining <= 0.05 ? "text-emerald-700" : "text-amber-700"}`}>{money(remaining)}</td>
+                  <td className="px-3 py-2.5"><span className={`rounded-full px-2 py-1 text-[10px] ${row.paymentStatus === "matched" ? "bg-emerald-50 text-emerald-700" : "bg-amber-50 text-amber-700"}`}>{row.paymentStatus === "matched" ? "付款已对清" : "部分对账"}</span></td>
+                  <td className="px-3 py-2.5 text-right"><button type="button" onClick={() => { setFinanceTab("match"); void loadMatch(); }} className="rounded-md border border-blue-200 px-2.5 py-1.5 text-[11px] font-medium text-blue-600 hover:bg-blue-50">{row.paymentStatus === "matched" ? "查看对账" : "继续对账"}</button></td>
+                </tr>;
+              })}</tbody>
             </table>
           </div>
           <div className="border-b border-slate-100 bg-slate-50/60 px-4 py-3"><h3 className="text-sm font-semibold text-slate-800">商品采购价格明细</h3><p className="mt-0.5 text-[11px] text-slate-400">商品价格来自采购分配明细；发票可覆盖多订单，一张票/一笔付款都允许拆分。</p></div>
@@ -982,8 +1056,8 @@ export default function MonthlySendPage() {
       {financeTab === "match" && <section className={`${CARD} overflow-hidden`}>
         <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 px-4 py-4">
           <div>
-            <h2 className="text-base font-semibold text-slate-900">付款发票匹配</h2>
-            <p className="mt-1 text-xs text-slate-400">当月银行支出的每笔付款，对方把发票开过来后在这里标记；选择发票时同名同金额的排最前。手工标记才落库，可随时解除。</p>
+            <h2 className="text-base font-semibold text-slate-900">付款对账</h2>
+            <p className="mt-1 text-xs text-slate-400">以当月银行支出流水为主，一笔付款可匹配多张发票，一张发票也可由多笔付款分摊；确认后再向采购订单和商品明细下钻。</p>
           </div>
           <button type="button" onClick={loadMatch} disabled={matchLoading} className="rounded-lg border border-slate-200 px-3 py-2 text-xs text-slate-600 hover:bg-slate-50 disabled:opacity-50">刷新</button>
         </div>

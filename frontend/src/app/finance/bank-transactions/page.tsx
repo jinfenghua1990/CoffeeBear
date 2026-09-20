@@ -2,8 +2,8 @@
 
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { authenticatedFetch, reconApi, type ReconTxn } from "@/lib/api";
-import { useTabScopedState } from "@/lib/workspace/tab-store";
+import { authenticatedFetch, type ReconTxn } from "@/lib/api";
+import { useTabRuntime, useTabScopedState, useWorkspace } from "@/lib/workspace/tab-store";
 
 type DirectionFilter = "all" | "in" | "out";
 type MatchFilter = "all" | "matched" | "unmatched";
@@ -40,11 +40,17 @@ function matchClass(row: ReconTxn) {
 }
 
 export default function BankTransactionsPage() {
+  const runtime = useTabRuntime();
+  const workspace = useWorkspace();
+  const ownTab = runtime?.tabId ? workspace.tabs.find((tab) => tab.id === runtime.tabId) : null;
+  const ownSearch = ownTab?.search || "";
+
   const [rows, setRows] = useState<ReconTxn[]>([]);
   const [direction, setDirection] = useTabScopedState<DirectionFilter>("bank.direction", "all");
   const [matchFilter, setMatchFilter] = useTabScopedState<MatchFilter>("bank.match", "all");
   const [query, setQuery] = useTabScopedState("bank.search", "");
   const [period, setPeriod] = useTabScopedState("bank.period", previousMonth);
+  const [accountFilter, setAccountFilter] = useTabScopedState("bank.account", "");
   const [loading, setLoading] = useState(true);
   const [uploading, setUploading] = useState(false);
   const [error, setError] = useState("");
@@ -55,21 +61,58 @@ export default function BankTransactionsPage() {
     setLoading(true);
     setError("");
     try {
-      setRows(await reconApi.transactions(500));
+      const [year, month] = period.split("-").map(Number);
+      const lastDay = year && month ? new Date(year, month, 0).getDate() : 31;
+      const startDate = year && month ? `${year}-${String(month).padStart(2, "0")}-01` : "";
+      const endDate = year && month ? `${year}-${String(month).padStart(2, "0")}-${String(lastDay).padStart(2, "0")}` : "";
+      const params = new URLSearchParams({ limit: "500" });
+      if (startDate && endDate) {
+        params.set("start_date", startDate);
+        params.set("end_date", endDate);
+      }
+      const response = await authenticatedFetch(`/api/v1/reconciliation/transactions?${params.toString()}`, { cache: "no-store" });
+      const payload = (await response.json().catch(() => [])) as ReconTxn[] | { detail?: string };
+      if (!response.ok) {
+        throw new Error(!Array.isArray(payload) && payload.detail ? payload.detail : `加载失败（${response.status}）`);
+      }
+      setRows(Array.isArray(payload) ? payload : []);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : String(caught));
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [period]);
 
   useEffect(() => {
     void load();
   }, [load]);
 
+  useEffect(() => {
+    const params = new URLSearchParams(ownSearch);
+    const requestedPeriod = params.get("period") || "";
+    if (/^\d{4}-\d{2}$/.test(requestedPeriod)) setPeriod(requestedPeriod);
+    setAccountFilter(params.get("account") || "");
+  }, [ownSearch, setAccountFilter, setPeriod]);
+
+  const periodRows = useMemo(
+    () => rows.filter((row) => !period || row.txnDate.slice(0, 7) === period),
+    [period, rows],
+  );
+
+  const accountOptions = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const row of periodRows) {
+      const key = row.accountNo || "";
+      if (!key) continue;
+      map.set(key, row.accountName || row.bankName || key);
+    }
+    return Array.from(map.entries());
+  }, [periodRows]);
+
   const visibleRows = useMemo(() => {
     const needle = query.trim().toLowerCase();
-    return rows.filter((row) => {
+    return periodRows.filter((row) => {
+      if (accountFilter && row.accountNo !== accountFilter) return false;
       if (direction !== "all" && row.direction !== direction) return false;
       const matched = row.direction === "in" ? row.matched : row.invoiceMatched;
       if (matchFilter === "matched" && !matched) return false;
@@ -80,10 +123,10 @@ export default function BankTransactionsPage() {
         .toLowerCase()
         .includes(needle);
     });
-  }, [direction, matchFilter, query, rows]);
+  }, [accountFilter, direction, matchFilter, periodRows, query]);
 
   const summary = useMemo(() => {
-    return rows.reduce(
+    return periodRows.reduce(
       (result, row) => {
         const amount = Number(row.amount) || 0;
         result.count += 1;
@@ -95,15 +138,15 @@ export default function BankTransactionsPage() {
       },
       { count: 0, income: 0, expense: 0, pending: 0 },
     );
-  }, [rows]);
+  }, [periodRows]);
 
   const directionCounts = useMemo(
     () => ({
-      all: rows.length,
-      in: rows.filter((row) => row.direction === "in").length,
-      out: rows.filter((row) => row.direction === "out").length,
+      all: periodRows.length,
+      in: periodRows.filter((row) => row.direction === "in").length,
+      out: periodRows.filter((row) => row.direction === "out").length,
     }),
-    [rows],
+    [periodRows],
   );
 
   async function uploadBank(file: File) {
@@ -197,16 +240,21 @@ export default function BankTransactionsPage() {
             <span className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate-400">⌕</span>
             <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索对方户名 / 摘要 / 凭证号 / 账户" className="w-full rounded-lg border border-slate-200 bg-white py-1.5 pl-8 pr-3 text-xs outline-none focus:border-blue-400" />
           </div>
+          <select value={accountFilter} onChange={(event) => setAccountFilter(event.target.value)} className="rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs text-slate-600 outline-none">
+            <option value="">全部账户</option>
+            {accountOptions.map(([accountNo, label]) => <option key={accountNo} value={accountNo}>{label} · {accountNo}</option>)}
+          </select>
           <select value={matchFilter} onChange={(event) => setMatchFilter(event.target.value as MatchFilter)} className="rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs text-slate-600 outline-none">
             <option value="all">全部匹配状态</option>
             <option value="matched">已匹配</option>
             <option value="unmatched">待匹配</option>
           </select>
-          <Link href="/finance/monthly-send" className="ml-auto rounded-lg border border-blue-200 px-3 py-1.5 text-xs font-medium text-blue-600 hover:bg-blue-50">月度资料</Link>
+          <Link href="/finance/bank-summary" className="ml-auto rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-medium text-slate-600 hover:bg-slate-50">银行汇总</Link>
+          <Link href={`/finance/monthly-send?tab=match&month=${encodeURIComponent(period)}`} className="rounded-lg border border-blue-200 px-3 py-1.5 text-xs font-medium text-blue-600 hover:bg-blue-50">发起对账</Link>
         </div>
 
         <div className="flex items-center justify-between border-b border-slate-100 bg-slate-50/50 px-4 py-2 text-[11px] text-slate-400">
-          <span>{loading ? "正在读取银行流水…" : `当前显示 ${visibleRows.length} / ${rows.length} 笔`}</span>
+          <span>{loading ? "正在读取银行流水…" : `当前显示 ${visibleRows.length} / ${periodRows.length} 笔 · ${period}`}</span>
           <span>重复导入按流水指纹自动跳过</span>
         </div>
 

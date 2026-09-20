@@ -121,7 +121,8 @@ export const MODULES: ModuleDef[] = [
     items: [
       { href: "/finance", label: "财务工作台", icon: "finance" },
       { href: "/finance/monthly-send", label: "月结中心", icon: "mail" },
-      { href: "/finance/bank-transactions", label: "银行流水", icon: "wallet" },
+      { href: "/finance/bank-summary", label: "银行汇总", icon: "wallet" },
+      { href: "/finance/bank-transactions", label: "银行流水", icon: "flow" },
       { href: "/finance/invoices", label: "发票管理", icon: "tax" },
       { href: "/finance/tax-accounting", label: "税务数据", icon: "tax" },
       { href: "/finance/opening", label: "期初数据", icon: "wallet" },

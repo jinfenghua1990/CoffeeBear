@@ -116,8 +116,8 @@ def test_build_report_links_bank_invoice_purchase_and_product(db_session):
 
     blob = service.corporate_payment_xlsx(report)
     wb = load_workbook(BytesIO(blob), read_only=True)
-    assert wb.sheetnames == ["月度汇总", "发票付款汇总", "商品明细"]
-    assert wb["发票付款汇总"]["L2"].value == invoice.invoice_number
+    assert wb.sheetnames == ["月度汇总", "对公付款汇总", "商品明细"]
+    assert wb["对公付款汇总"]["M2"].value == invoice.invoice_number
     assert wb["商品明细"]["G2"].value == item.sku_code
 
 
@@ -160,3 +160,66 @@ def test_report_excludes_unconfirmed_or_other_month(db_session):
     report = service.build_report(db_session, 2026, 8)
     ids = {row["invoiceId"] for row in report["rows"]}
     assert invoice.id not in ids
+
+
+
+def test_corporate_payment_xlsx_groups_links_by_payment():
+    report = {
+        "summary": {
+            "paymentCount": 1,
+            "invoiceCount": 2,
+            "paymentTotal": "1000.00",
+            "allocatedTotal": "1000.00",
+            "invoiceTotal": "1000.00",
+            "outstandingTotal": "0.00",
+            "productRowCount": 0,
+        },
+        "rows": [
+            {
+                "paymentId": 10,
+                "paymentDate": "2026-08-15",
+                "supplierName": "供应商甲",
+                "supplierTaxId": "TAX-A",
+                "paymentAccount": "ZJRC-001",
+                "paymentAccountName": "测试账户",
+                "counterpartyAccount": "CP-001",
+                "voucherNo": "V-001",
+                "summary": "货款",
+                "paymentAmount": "1000.00",
+                "paymentAllocatedAmount": "400.00",
+                "paymentMatchedTotal": "1000.00",
+                "paymentStatus": "matched",
+                "invoiceNumber": "INV-A",
+                "purchaseOrderNos": ["PO-A"],
+            },
+            {
+                "paymentId": 10,
+                "paymentDate": "2026-08-15",
+                "supplierName": "供应商甲",
+                "supplierTaxId": "TAX-A",
+                "paymentAccount": "ZJRC-001",
+                "paymentAccountName": "测试账户",
+                "counterpartyAccount": "CP-001",
+                "voucherNo": "V-001",
+                "summary": "货款",
+                "paymentAmount": "1000.00",
+                "paymentAllocatedAmount": "600.00",
+                "paymentMatchedTotal": "1000.00",
+                "paymentStatus": "matched",
+                "invoiceNumber": "INV-B",
+                "purchaseOrderNos": ["PO-B"],
+            },
+        ],
+        "productDetails": [],
+    }
+
+    wb = load_workbook(BytesIO(service.corporate_payment_xlsx(report)), read_only=True)
+    ws = wb["对公付款汇总"]
+
+    assert ws.max_row == 2
+    assert ws["I2"].value == 1000
+    assert ws["J2"].value == 1000
+    assert ws["K2"].value == 0
+    assert ws["M2"].value == "INV-A、INV-B"
+    assert ws["N2"].value == 2
+    assert ws["O2"].value == "PO-A、PO-B"
