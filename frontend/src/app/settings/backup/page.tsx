@@ -2,11 +2,14 @@
 
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import {
+  getBackupStatus,
   getKodoColdBackupConfig,
   getR2BackupConfig,
+  prepareR2Restore,
   runR2Backup,
   saveKodoColdBackupConfig,
   saveR2BackupConfig,
+  type BackupStatus,
   type KodoColdBackupConfig,
   type R2BackupConfig,
 } from "@/lib/api";
@@ -361,6 +364,13 @@ const STORAGE_DETAILS: Record<StorageKey, {
   },
 };
 
+function backupTime(value: string | null | undefined) {
+  if (!value) return "—";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
+}
+
 export default function BackupSettingsPage() {
   const [activeTab, setActiveTab] = useState<TabKey>("overview");
   const [selectedStorage, setSelectedStorage] = useState<StorageKey>("r2");
@@ -370,6 +380,8 @@ export default function BackupSettingsPage() {
   const [r2Loading, setR2Loading] = useState(true);
   const [r2Saving, setR2Saving] = useState(false);
   const [r2Running, setR2Running] = useState(false);
+  const [restorePreparing, setRestorePreparing] = useState(false);
+  const [backupStatus, setBackupStatus] = useState<BackupStatus | null>(null);
   const [r2Form, setR2Form] = useState({
     endpointUrl: "",
     bucket: "",
@@ -407,6 +419,23 @@ export default function BackupSettingsPage() {
     setNotice(message);
     window.setTimeout(() => setNotice(""), 3200);
   }
+
+  useEffect(() => {
+    let cancelled = false;
+    const loadStatus = () => {
+      getBackupStatus()
+        .then((status) => {
+          if (!cancelled) setBackupStatus(status);
+        })
+        .catch(() => {});
+    };
+    loadStatus();
+    const timer = window.setInterval(loadStatus, 30_000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -522,6 +551,23 @@ export default function BackupSettingsPage() {
       showNotice("启动失败：" + (error instanceof Error ? error.message : String(error)));
     } finally {
       setR2Running(false);
+    }
+  }
+
+  async function prepareLatestR2Restore() {
+    if (!r2Config?.configured || !r2Config.enabled) {
+      openStorage("r2");
+      showNotice("请先配置并启用 Cloudflare R2。");
+      return;
+    }
+    setRestorePreparing(true);
+    try {
+      await prepareR2Restore();
+      showNotice("已开始下载并校验 R2 最新全量恢复点；只写入 staging，不会覆盖生产环境。");
+    } catch (error) {
+      showNotice("恢复准备启动失败：" + (error instanceof Error ? error.message : String(error)));
+    } finally {
+      setRestorePreparing(false);
     }
   }
 
@@ -773,12 +819,12 @@ export default function BackupSettingsPage() {
               </div>
               <div className="mt-3 divide-y divide-slate-100 text-[10px]">
                 <div className="flex items-center justify-between gap-3 py-2">
-                  <span className="text-slate-500">R2 主备份</span>
-                  <span className="font-medium text-slate-700">{r2Loading ? "读取配置" : r2Config?.configured ? (r2Config.enabled ? "已启用" : "已停用") : "待配置"}</span>
+                  <span className="text-slate-500">最近 R2 备份</span>
+                  <span className="font-medium text-slate-700">{backupStatus?.lastR2 ? backupTime(backupStatus.lastR2.time) : r2Loading ? "读取配置" : r2Config?.configured ? "尚无成功记录" : "待配置"}</span>
                 </div>
                 <div className="flex items-center justify-between gap-3 py-2">
-                  <span className="text-slate-500">Kodo 国内冷备</span>
-                  <span className="font-medium text-slate-700">{kodoLoading ? "读取配置" : kodoConfig?.configured ? (kodoConfig.enabled ? "已启用 · 只写" : "已停用") : "待配置"}</span>
+                  <span className="text-slate-500">最近 Kodo 冷备</span>
+                  <span className="font-medium text-slate-700">{backupStatus?.lastKodo ? backupTime(backupStatus.lastKodo.time) : kodoLoading ? "读取配置" : kodoConfig?.configured ? "尚无成功记录" : "待配置"}</span>
                 </div>
                 <div className="flex items-center justify-between gap-3 py-2">
                   <span className="text-slate-500">R2 日常计划</span>
@@ -862,7 +908,7 @@ export default function BackupSettingsPage() {
                 <div className="text-[13px] font-semibold text-slate-900">恢复管理</div>
                 <p className="mt-1 text-[10px] leading-5 text-slate-400">恢复来源仅使用 R2 / NAS。七牛云 Kodo 冷备按“只存不取”执行，不提供下载、取回、预览或恢复入口。</p>
               </div>
-              <Pill>执行器接入后开放</Pill>
+              <Pill tone={r2Config?.configured && r2Config.enabled ? "green" : "amber"}>{r2Config?.configured && r2Config.enabled ? "R2 可准备恢复" : "R2 待配置"}</Pill>
             </div>
             <div className="mt-5 grid gap-3 md:grid-cols-4">
               {[
@@ -878,6 +924,12 @@ export default function BackupSettingsPage() {
                 </div>
               ))}
             </div>
+            <div className="mt-5 flex flex-wrap items-center gap-3 border-t border-slate-100 pt-4">
+              <button type="button" disabled={restorePreparing || !r2Config?.configured || !r2Config.enabled} onClick={() => void prepareLatestR2Restore()} className="app-button-primary rounded-lg px-4 py-2 text-[11px] font-medium disabled:opacity-40">
+                {restorePreparing ? "启动中…" : "准备最新 R2 恢复点"}
+              </button>
+              <span className="text-[11px] text-slate-500">仅下载到 staging + Hash 校验 + 临时数据库恢复演练，不自动覆盖生产环境。</span>
+            </div>
           </section>
         </div>
       ) : null}
@@ -887,12 +939,23 @@ export default function BackupSettingsPage() {
           <section className="app-card rounded-xl overflow-hidden">
             <div className="border-b border-slate-100 px-4 py-3">
               <div className="text-[13px] font-semibold text-slate-900">备份记录</div>
-              <div className="mt-1 text-[10px] text-slate-400">真实云端执行器接入后，这里显示每一次备份、校验结果、大小和恢复点。</div>
+              <div className="mt-1 text-[11px] text-slate-400">来自本地 manifest、R2 成功回执和 Kodo 本地上传回执；不通过 Kodo 远端读取校验。</div>
             </div>
-            <div className="grid grid-cols-[1.1fr_.9fr_.8fr_.7fr] border-b border-slate-100 bg-slate-50 px-4 py-2 text-[9px] font-medium text-slate-500">
-              <span>时间</span><span>类型</span><span>目标</span><span>状态</span>
+            <div className="grid grid-cols-[1.1fr_.9fr_.8fr_1.2fr_.7fr] border-b border-slate-100 bg-slate-50 px-4 py-2 text-[11px] font-medium text-slate-500">
+              <span>时间</span><span>类型</span><span>目标</span><span>说明</span><span>状态</span>
             </div>
-            <div className="px-4 py-12 text-center text-[10px] text-slate-400">暂无云端备份记录</div>
+            <div className="divide-y divide-slate-100">
+              {(backupStatus?.records || []).map((row) => (
+                <div key={`${row.type}-${row.timestamp}-${row.target}`} className="grid grid-cols-[1.1fr_.9fr_.8fr_1.2fr_.7fr] items-center px-4 py-3 text-[11px]">
+                  <span className="text-slate-600">{backupTime(row.time)}</span>
+                  <span className="font-medium text-slate-700">{row.type === "r2_full" ? "全量容灾" : row.type === "r2_daily" ? "日常模块化" : row.type === "kodo_full" ? "冷备全量" : "本地基础"}</span>
+                  <span className="text-slate-600">{row.target}</span>
+                  <span className="text-slate-500">{row.detail}</span>
+                  <span className="text-emerald-700">成功</span>
+                </div>
+              ))}
+              {!backupStatus?.records.length ? <div className="px-4 py-12 text-center text-[11px] text-slate-400">暂无成功备份记录</div> : null}
+            </div>
           </section>
         </div>
       ) : null}
