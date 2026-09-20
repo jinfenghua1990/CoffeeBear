@@ -4,6 +4,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any
+from uuid import uuid4
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -318,7 +319,10 @@ def save_entry(
     row.legal_entity_id = entity.id
     row.business_scope = business_scope
     row.source_type = source_type.strip() or "manual"
-    row.source_id = source_id.strip()
+    clean_source_id = source_id.strip()
+    if not clean_source_id and row.source_type == "manual":
+        clean_source_id = f"manual-{entry_id or uuid4().hex}"
+    row.source_id = clean_source_id
     row.source_no = source_no.strip()
     row.category = category.strip() or "other"
     row.direction = direction
