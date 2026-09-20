@@ -3,7 +3,6 @@
 import Link from "next/link";
 import { useState } from "react";
 import { changePassword } from "@/lib/api";
-import SystemSettingsTabs from "@/components/system-settings-tabs";
 
 type InfraItem = {
   key: string;
@@ -80,11 +79,10 @@ export default function SettingsPage() {
       <header className="app-page-header -mx-1 pb-4">
         <h1 className="text-xl font-semibold text-slate-900">系统设置</h1>
         <p className="mt-1.5 text-sm leading-6 text-slate-500">
-          系统级能力统一放在这里；通过下方 3 个模块切换，不再在左侧重复增加入口。
+          管理系统基础配置、基础设施与账号安全。
         </p>
       </header>
 
-      <SystemSettingsTabs />
 
       <section className="mt-5 max-w-6xl">
         <div className="mb-2.5 flex items-end justify-between gap-3">
