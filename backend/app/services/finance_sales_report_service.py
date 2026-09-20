@@ -866,6 +866,9 @@ def build_unbilled_income_report(
         "sourceCount": len(source_details),
         "selectedCount": len(details),
         "updatedAt": adjustment.updated_at.isoformat() if adjustment and adjustment.updated_at else None,
+        # 调整弹窗必须能看到完整原始明细，才能把上一版本取消的行重新勾回来；
+        # details 始终代表当前保存版本，用于只读预览和最终交付。
+        "sourceDetails": source_details,
         "details": details,
     }
 

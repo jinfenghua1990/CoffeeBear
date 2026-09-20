@@ -280,5 +280,9 @@ def test_unbilled_adjustment_persists_selected_details_and_version(db_session):
     assert current["sourceCount"] == 2
     assert current["selectedCount"] == 1
     assert current["selectedKeys"] == [selected_key]
+    assert len(current["sourceDetails"]) == 2
+    assert {svc.unbilled_detail_key(row) for row in current["sourceDetails"]} == {
+        svc.unbilled_detail_key(row) for row in base["details"]
+    }
     assert len(current["details"]) == 1
     assert svc.unbilled_detail_key(current["details"][0]) == selected_key

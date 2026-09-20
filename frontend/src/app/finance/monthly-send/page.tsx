@@ -59,6 +59,7 @@ type Unbilled = {
   unbilledAmount: string;
   rowInvoicedTotal?: string;
   unattributedInvoiced?: string;
+  sourceDetails?: Array<{ period: string; taxCode: string; taxName: string; product: string; quantity: string; sales: string; invoiced?: string; unbilled?: string; cost: string }>;
   details: Array<{ period: string; taxCode: string; taxName: string; product: string; quantity: string; sales: string; invoiced?: string; unbilled?: string; cost: string }>;
 };
 type FileRow = {
@@ -414,6 +415,7 @@ export default function MonthlySendPage() {
   /** 发送内容勾选：打包时只包含勾选的表（自动发送仍走全部 3 张）。 */
   const [includeSel, setIncludeSel] = useState<string[]>(["交易明细", "回单详情", "无票收入", "已收票对公付款明细"]);
   const [showUnbilledDetail, setShowUnbilledDetail] = useState(false);
+  const [unbilledDetailMode, setUnbilledDetailMode] = useState<"adjust" | "preview">("adjust");
   const [showCorporateDetail, setShowCorporateDetail] = useState(false);
   const [unbilledSearch, setUnbilledSearch] = useState("");
   const [unbilledSelectedKeys, setUnbilledSelectedKeys] = useState<string[]>([]);
@@ -626,7 +628,8 @@ export default function MonthlySendPage() {
       setUnbilledSelectedKeys([]);
       return;
     }
-    const available = unbilled.details.map(unbilledDetailKey);
+    const sourceDetails = unbilled.sourceDetails?.length ? unbilled.sourceDetails : unbilled.details;
+    const available = sourceDetails.map(unbilledDetailKey);
     const selected = unbilled.selectedKeys?.length ? unbilled.selectedKeys : available;
     setUnbilledSelectedKeys(selected.filter((key) => available.includes(key)));
   }, [unbilled]);
@@ -903,11 +906,16 @@ export default function MonthlySendPage() {
   const latestPkg = period?.packages.length ? period.packages[period.packages.length - 1] : null;
   const latestSentPkg = [...(period?.packages || [])].reverse().find((pkg) => pkg.status === "SENT") || null;
   const attachmentSize = (bankTx?.size || 0) + (bankReceipt?.size || 0);
+  const unbilledSourceDetails = useMemo(
+    () => unbilled?.sourceDetails?.length ? unbilled.sourceDetails : (unbilled?.details || []),
+    [unbilled],
+  );
+  const unbilledViewDetails = unbilledDetailMode === "adjust" ? unbilledSourceDetails : (unbilled?.details || []);
   const filteredUnbilledDetails = useMemo(() => {
     const query = unbilledSearch.trim().toLowerCase();
-    if (!unbilled?.details || !query) return unbilled?.details || [];
-    return unbilled.details.filter((row) => [row.taxCode, row.taxName, row.product].some((value) => value.toLowerCase().includes(query)));
-  }, [unbilled, unbilledSearch]);
+    if (!query) return unbilledViewDetails;
+    return unbilledViewDetails.filter((row) => [row.taxCode, row.taxName, row.product].some((value) => value.toLowerCase().includes(query)));
+  }, [unbilledViewDetails, unbilledSearch]);
   const visibleUnbilledKeys = filteredUnbilledDetails.map(unbilledDetailKey);
   const selectedVisibleCount = visibleUnbilledKeys.filter((key) => unbilledSelectedKeys.includes(key)).length;
   const allVisibleSelected = visibleUnbilledKeys.length > 0 && selectedVisibleCount === visibleUnbilledKeys.length;
@@ -936,7 +944,8 @@ export default function MonthlySendPage() {
 
   function closeUnbilledDetail() {
     if (unbilled) {
-      const available = unbilled.details.map(unbilledDetailKey);
+      const sourceDetails = unbilled.sourceDetails?.length ? unbilled.sourceDetails : unbilled.details;
+      const available = sourceDetails.map(unbilledDetailKey);
       const selected = unbilled.selectedKeys?.length ? unbilled.selectedKeys : available;
       setUnbilledSelectedKeys(selected.filter((key) => available.includes(key)));
     } else {
@@ -1184,7 +1193,7 @@ export default function MonthlySendPage() {
           </div>
           <ItemRow kind="bank" title={`${sel?.month || ""}月-银行交易明细`} state={{ ok: Boolean(bankTx), text: bankTx ? "已导入" : "待上传" }} summary={bankTx ? <>全部账户 · 已导入<br />{formatBytes(bankTx.size)}</> : <>等待上传原始银行流水<br /><span className="text-amber-600">上传后自动归档</span></>} updatedAt={bankTx?.uploadedAt} version={bankTx?.version} parameter={bankTx ? "账期内 · 全部账户" : "待补充资料"} selected={includeSel.includes("交易明细")} onToggle={() => setIncludeSel((s) => s.includes("交易明细") ? s.filter((x) => x !== "交易明细") : [...s, "交易明细"])} actions={<>{bankTx && <button type="button" onClick={() => void downloadFile(bankTx)} disabled={busy} className="rounded-md border border-slate-200 px-2.5 py-1.5 text-[11px] text-slate-600 hover:bg-slate-50 disabled:opacity-50">下载</button>}<button type="button" onClick={() => { uploadKind.current = "交易明细"; fileRef.current?.click(); }} disabled={busy} className="rounded-md bg-blue-600 px-2.5 py-1.5 text-[11px] font-medium text-white hover:bg-blue-700 disabled:opacity-50">{bankTx ? "替换" : "上传"}</button></>} />
           <ItemRow kind="receipt" title={`${sel?.month || ""}月-银行回单详情`} state={{ ok: Boolean(bankReceipt), text: bankReceipt ? "已导入" : "待上传" }} summary={bankReceipt ? <>全部账户 · 已导入<br />{formatBytes(bankReceipt.size)}</> : <>等待上传银行回单<br /><span className="text-amber-600">上传后自动归档</span></>} updatedAt={bankReceipt?.uploadedAt} version={bankReceipt?.version} parameter={bankReceipt ? "账期内 · 全部账户" : "待补充资料"} selected={includeSel.includes("回单详情")} onToggle={() => setIncludeSel((s) => s.includes("回单详情") ? s.filter((x) => x !== "回单详情") : [...s, "回单详情"])} actions={<>{bankReceipt && <button type="button" onClick={() => void downloadFile(bankReceipt)} disabled={busy} className="rounded-md border border-slate-200 px-2.5 py-1.5 text-[11px] text-slate-600 hover:bg-slate-50 disabled:opacity-50">下载</button>}<button type="button" onClick={() => { uploadKind.current = "回单详情"; fileRef.current?.click(); }} disabled={busy} className="rounded-md bg-blue-600 px-2.5 py-1.5 text-[11px] font-medium text-white hover:bg-blue-700 disabled:opacity-50">{bankReceipt ? "替换" : "上传"}</button></>} />
-          {needsUnbilled && (<ItemRow kind="sales" title={`${sel?.month || ""}月-销售出库-无票收入`} state={{ ok: Boolean(unbilled), text: unbilled ? (unbilled.adjusted ? "已调整" : "已生成") : "计算中" }} summary={unbilled ? <>销售总额 {money(unbilled.salesAmount)}<br />无票收入 {money(unbilled.unbilledAmount)}</> : <>正在读取销售出库数据<br /><span className="text-slate-400">按当前账期自动计算</span></>} updatedAt={unbilled?.updatedAt || salesFile?.uploadedAt} version={unbilled?.version || salesFile?.version} parameter={unbilled?.adjusted ? `已选择 ${unbilled.selectedCount || 0}/${unbilled.sourceCount || 0} 条` : "出库时间 · 全部渠道"} selected={includeSel.includes("无票收入")} onToggle={() => setIncludeSel((s) => s.includes("无票收入") ? s.filter((x) => x !== "无票收入") : [...s, "无票收入"])} actions={<><button type="button" onClick={() => setShowUnbilledDetail(true)} disabled={!unbilled} className="rounded-md border border-slate-200 px-2.5 py-1.5 text-[11px] text-slate-600 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-40">调整明细</button><button type="button" onClick={() => { setFinanceTab("ledger"); void previewSales(); }} disabled={busy} className="rounded-md border border-blue-200 px-2.5 py-1.5 text-[11px] text-blue-600 hover:bg-blue-50 disabled:opacity-50">预览</button></>} />)}
+          {needsUnbilled && (<ItemRow kind="sales" title={`${sel?.month || ""}月-销售出库-无票收入`} state={{ ok: Boolean(unbilled), text: unbilled ? (unbilled.adjusted ? "已调整" : "已生成") : "计算中" }} summary={unbilled ? <>销售总额 {money(unbilled.salesAmount)}<br />无票收入 {money(unbilled.unbilledAmount)}</> : <>正在读取销售出库数据<br /><span className="text-slate-400">按当前账期自动计算</span></>} updatedAt={unbilled?.updatedAt || salesFile?.uploadedAt} version={unbilled?.version || salesFile?.version} parameter={unbilled?.adjusted ? `已选择 ${unbilled.selectedCount || 0}/${unbilled.sourceCount || 0} 条` : "出库时间 · 全部渠道"} selected={includeSel.includes("无票收入")} onToggle={() => setIncludeSel((s) => s.includes("无票收入") ? s.filter((x) => x !== "无票收入") : [...s, "无票收入"])} actions={<><button type="button" onClick={() => { setUnbilledDetailMode("adjust"); setShowUnbilledDetail(true); }} disabled={!unbilled} className="rounded-md border border-slate-200 px-2.5 py-1.5 text-[11px] text-slate-600 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-40">调整明细</button><button type="button" onClick={() => { setUnbilledDetailMode("preview"); setShowUnbilledDetail(true); }} disabled={!unbilled || busy} className="rounded-md border border-blue-200 px-2.5 py-1.5 text-[11px] text-blue-600 hover:bg-blue-50 disabled:opacity-50">预览</button></>} />)}
           {needsUnbilled && (<ItemRow kind="purchase_inbound" title={`${sel?.month || ""}月-已收票对公付款明细`} state={corporateDeliveryState} summary={corporatePayment ? <>进项发票 {corporatePayment.summary.invoiceCount} 张 · 对公付款 {corporatePayment.summary.paymentCount} 笔<br />已关联 {money(corporatePayment.summary.allocatedTotal)}</> : <>正在关联银行付款、发票与采购商品<br /><span className="text-slate-400">只统计已确认的付款↔发票关联</span></>} parameter={corporatePayment ? `商品明细 ${corporatePayment.summary.productRowCount} 行 · ${corporateReviewSummary}` : corporateReviewSummary} updatedAt={corporatePayment?.updatedAt} version={corporatePayment?.version} selected={includeSel.includes("已收票对公付款明细")} onToggle={() => setIncludeSel((s) => s.includes("已收票对公付款明细") ? s.filter((x) => x !== "已收票对公付款明细") : [...s, "已收票对公付款明细"])} actions={<><button type="button" onClick={() => { setShowCorporateDetail(true); void loadCorporatePayment(); }} disabled={!corporatePayment} className="rounded-md border border-slate-200 px-2.5 py-1.5 text-[11px] text-slate-600 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-40">调整明细</button><button type="button" onClick={() => { setCorporateView("preview"); setFinanceTab("corporate"); void loadCorporatePayment(); }} disabled={!corporatePayment} className="rounded-md border border-violet-200 px-2.5 py-1.5 text-[11px] text-violet-600 hover:bg-violet-50 disabled:cursor-not-allowed disabled:opacity-40">预览</button></>} />)}
           <input ref={fileRef} type="file" accept=".xlsx,.xls,.csv,.pdf" className="hidden" onChange={(e) => { const file = e.target.files?.[0]; if (file) handleUploadSelection(file); }} />
         </section>
@@ -1312,7 +1321,7 @@ export default function MonthlySendPage() {
           }}
           role="dialog"
           aria-modal="true"
-          aria-label="无票收入明细调整"
+          aria-label={unbilledDetailMode === "adjust" ? "无票收入明细调整" : "无票收入发送预览"}
         >
           <div className="w-full max-w-[1180px] overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-2xl">
             <div className="flex items-center justify-between gap-3 border-b border-slate-200 px-4 py-3 sm:px-5">
@@ -1325,7 +1334,11 @@ export default function MonthlySendPage() {
                       {unbilled?.version || salesFile?.version ? "v" + (unbilled?.version || salesFile?.version) : "预览"}
                     </span>
                   </h2>
-                  <p className="mt-1 text-xs text-slate-400">勾选要纳入本版本的明细；保存后生成新版财务资料，历史版本保留。</p>
+                  <p className="mt-1 text-xs text-slate-400">
+                    {unbilledDetailMode === "adjust"
+                      ? "勾选要纳入本版本的明细；这里始终显示完整原始明细，之前取消的行也可以重新勾选。"
+                      : `发送前只读预览 · ${unbilled?.adjusted ? `当前保存版本 v${unbilled.version || "—"}，显示 ${unbilled.selectedCount || 0}/${unbilled.sourceCount || 0} 条明细` : "尚未人工调整，按当前全部明细发送"}。`}
+                  </p>
                 </div>
               </div>
               <button
@@ -1369,7 +1382,9 @@ export default function MonthlySendPage() {
                   />
                 </label>
                 <div className="mt-4 rounded-lg border border-blue-100 bg-blue-50/60 p-3 text-[11px] leading-4 text-blue-800">
-                  无票收入 = 销售总金额 − 已开票金额。当前明细按税务编号 + 产品聚合；取消勾选的明细不会进入本次版本。
+                  {unbilledDetailMode === "adjust"
+                    ? "无票收入 = 销售总金额 − 已开票金额。当前明细按税务编号 + 产品聚合；取消勾选的明细不会进入本次版本。"
+                    : "当前为只读发送预览，只展示这个版本实际会进入附件的明细。"} 
                 </div>
               </div>
 
@@ -1393,13 +1408,13 @@ export default function MonthlySendPage() {
                   </div>
                 </div>
 
-                {!unbilled?.details.length ? (
+                {!unbilledViewDetails.length ? (
                   <div className="flex h-48 items-center justify-center text-sm text-slate-400">该账期暂无销售明细</div>
                 ) : (
                   <table className="w-full min-w-[820px] border-collapse text-xs">
                     <thead className="bg-slate-50 text-left text-slate-500">
                       <tr>
-                        <th className="w-10 border-b border-slate-200 px-3 py-2 font-medium">
+                        {unbilledDetailMode === "adjust" && <th className="w-10 border-b border-slate-200 px-3 py-2 font-medium">
                           <input
                             type="checkbox"
                             checked={allVisibleSelected}
@@ -1407,7 +1422,7 @@ export default function MonthlySendPage() {
                             aria-label="全选当前筛选明细"
                             className="h-4 w-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500"
                           />
-                        </th>
+                        </th>}
                         <th className="border-b border-slate-200 px-3 py-2 font-medium">月度时间</th>
                         <th className="border-b border-slate-200 px-3 py-2 font-medium">税务编号</th>
                         <th className="border-b border-slate-200 px-3 py-2 font-medium">税收分类名称</th>
@@ -1425,8 +1440,8 @@ export default function MonthlySendPage() {
                         const rowInvoiced = invoicedValue(detail);
                         const rowUnbilled = unbilledValue(detail);
                         return (
-                          <tr key={key || index} className={unbilledSelectedKeys.includes(key) ? "" : "bg-slate-50/70 text-slate-400"}>
-                            <td className="px-3 py-2">
+                          <tr key={key || index} className={unbilledDetailMode === "adjust" && !unbilledSelectedKeys.includes(key) ? "bg-slate-50/70 text-slate-400" : ""}>
+                            {unbilledDetailMode === "adjust" && <td className="px-3 py-2">
                               <input
                                 type="checkbox"
                                 checked={unbilledSelectedKeys.includes(key)}
@@ -1434,7 +1449,7 @@ export default function MonthlySendPage() {
                                 aria-label={"选择 " + detail.product}
                                 className="h-4 w-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500"
                               />
-                            </td>
+                            </td>}
                             <td className="px-3 py-2 text-slate-600">{detail.period}</td>
                             <td className="px-3 py-2 font-mono text-[11px] text-slate-500">{detail.taxCode || "—"}</td>
                             <td className="px-3 py-2">{detail.taxName || "—"}</td>
@@ -1450,7 +1465,7 @@ export default function MonthlySendPage() {
                     </tbody>
                     <tfoot className="bg-slate-50 font-semibold text-slate-900">
                       <tr>
-                        <td colSpan={5} className="px-3 py-2">合计</td>
+                        <td colSpan={unbilledDetailMode === "adjust" ? 5 : 4} className="px-3 py-2">合计</td>
                         <td className="px-3 py-2 text-right tabular-nums">
                           {filteredUnbilledDetails.reduce((sum, detail) => sum + Number(detail.quantity || 0), 0).toLocaleString("zh-CN")}
                         </td>
@@ -1481,37 +1496,26 @@ export default function MonthlySendPage() {
 
             <div className="flex flex-wrap items-center justify-end gap-2 border-t border-slate-200 bg-slate-50/70 px-4 py-3">
               <div className="mr-auto text-xs text-slate-500">
-                已选择 {unbilledSelectedKeys.length} / {unbilled?.sourceCount ?? unbilled?.details.length ?? 0} 条 · 当前筛选 {filteredUnbilledDetails.length} 条 · 当前筛选合计{" "}
-                {money(filteredUnbilledDetails.reduce((sum, detail) => sum + Number(detail.sales || 0), 0))}
+                {unbilledDetailMode === "adjust"
+                  ? <>已选择 {unbilledSelectedKeys.length} / {unbilled?.sourceCount ?? unbilledSourceDetails.length} 条 · 当前筛选 {filteredUnbilledDetails.length} 条 · 当前筛选合计{" "}
+                    {money(filteredUnbilledDetails.reduce((sum, detail) => sum + Number(detail.sales || 0), 0))}</>
+                  : <>当前版本明细 {unbilled?.selectedCount ?? unbilled?.details.length ?? 0} / {unbilled?.sourceCount ?? unbilled?.details.length ?? 0} 条 · 预览合计{" "}
+                    {money(filteredUnbilledDetails.reduce((sum, detail) => sum + Number(detail.sales || 0), 0))}</>}
                 {Number(unbilled?.unattributedInvoiced || 0) > 0 ? (
                   <span className="ml-2 text-amber-700">
                     已开票 {money(unbilled?.invoicedAmount)} 中有 {money(unbilled?.unattributedInvoiced)} 未关联到具体销售订单，仅计入总额、不摊入明细行
                   </span>
                 ) : null}
               </div>
-              <button
-                type="button"
-                onClick={closeUnbilledDetail}
-                className="rounded-lg border border-slate-200 bg-white px-4 py-2 text-xs text-slate-600"
-              >
-                取消
-              </button>
-              <button
-                type="button"
-                onClick={() => void saveUnbilledAdjustment(false)}
-                disabled={busy || !unbilled || unbilledSelectedKeys.length === 0}
-                className="rounded-lg border border-blue-200 bg-white px-4 py-2 text-xs font-medium text-blue-600 disabled:cursor-not-allowed disabled:opacity-50"
-              >
-                保存调整
-              </button>
-              <button
-                type="button"
-                onClick={() => void saveUnbilledAdjustment(true)}
-                disabled={busy || !unbilled || unbilledSelectedKeys.length === 0}
-                className="rounded-lg bg-blue-600 px-4 py-2 text-xs font-medium text-white disabled:cursor-not-allowed disabled:opacity-50"
-              >
-                保存并生成新版
-              </button>
+              {unbilledDetailMode === "adjust" ? <>
+                <button type="button" onClick={closeUnbilledDetail} className="rounded-lg border border-slate-200 bg-white px-4 py-2 text-xs text-slate-600">取消</button>
+                <button type="button" onClick={() => void saveUnbilledAdjustment(false)} disabled={busy || !unbilled || unbilledSelectedKeys.length === 0} className="rounded-lg border border-blue-200 bg-white px-4 py-2 text-xs font-medium text-blue-600 disabled:cursor-not-allowed disabled:opacity-50">保存调整</button>
+                <button type="button" onClick={() => void saveUnbilledAdjustment(true)} disabled={busy || !unbilled || unbilledSelectedKeys.length === 0} className="rounded-lg bg-blue-600 px-4 py-2 text-xs font-medium text-white disabled:cursor-not-allowed disabled:opacity-50">保存并生成新版</button>
+              </> : <>
+                <button type="button" onClick={closeUnbilledDetail} className="rounded-lg border border-slate-200 bg-white px-4 py-2 text-xs text-slate-600">关闭</button>
+                <span className={`rounded-full px-2.5 py-1 text-[11px] font-medium ${includeSel.includes("无票收入") ? "bg-emerald-50 text-emerald-700 ring-1 ring-emerald-200" : "bg-amber-50 text-amber-700 ring-1 ring-amber-200"}`}>{includeSel.includes("无票收入") ? "已纳入本次发送" : "未纳入本次发送"}</span>
+                <button type="button" onClick={packageAndSend} disabled={busy || !sel || !ready || !emails(toText).length || !includeSel.includes("无票收入")} className="rounded-lg bg-blue-600 px-4 py-2 text-xs font-semibold text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-40">{busy ? "发送中…" : "确认并发送给财务"}</button>
+              </>}
             </div>
           </div>
         </div>
