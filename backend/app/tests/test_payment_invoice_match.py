@@ -415,3 +415,6 @@ def test_transaction_api_legacy_matched_follows_direction_specific_domain(client
     assert row["invoicePaymentMatched"] is True
     assert row["invoicePaymentMatchStatus"] == "matched"
     assert row["matchStatus"] == "matched"
+    assert row["settlementMatchedAt"] is None
+    assert row["invoicePaymentMatchedAt"]
+    assert row["matchedAt"] == row["invoicePaymentMatchedAt"]

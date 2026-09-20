@@ -515,6 +515,9 @@ export type ReconTxn = {
   invoicePaymentMatchedAmount?: string;
   invoicePaymentRemainingAmount?: string;
   matchStatus?: "matched" | "partial" | "unmatched" | "not_applicable" | string;
+  settlementMatchedAt?: string | null;
+  invoicePaymentMatchedAt?: string | null;
+  /** 兼容时间：收入=settlementMatchedAt；支出=invoicePaymentMatchedAt。 */
   matchedAt?: string | null;
 };
 

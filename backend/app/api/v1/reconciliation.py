@@ -173,7 +173,28 @@ def list_transactions(
                 if r.direction == "out"
                 else "not_applicable"
             ),
-            "matchedAt": r.matched_at.isoformat() if r.matched_at else None,
+            "settlementMatchedAt": (
+                r.matched_at.isoformat()
+                if r.direction == "in"
+                and r.id in settlement_matched_ids
+                and r.matched_at is not None
+                else None
+            ),
+            "invoicePaymentMatchedAt": (
+                invoice_statuses.get(r.id, {}).get("matchedAt")
+                if r.direction == "out"
+                else None
+            ),
+            # 兼容时间按流水方向映射到对应核对域。
+            "matchedAt": (
+                r.matched_at.isoformat()
+                if r.direction == "in"
+                and r.id in settlement_matched_ids
+                and r.matched_at is not None
+                else invoice_statuses.get(r.id, {}).get("matchedAt")
+                if r.direction == "out"
+                else None
+            ),
             "accountNo": accounts[r.account_id].account_no if r.account_id in accounts else "",
             "accountName": accounts[r.account_id].account_name if r.account_id in accounts else "",
             "bankName": accounts[r.account_id].bank_name if r.account_id in accounts else "",

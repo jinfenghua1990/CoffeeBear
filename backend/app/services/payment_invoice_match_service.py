@@ -367,21 +367,28 @@ def txn_reconciliation_statuses(db: Session, txn_ids: list[int]) -> dict[int, di
     } if invoice_ids else {}
 
     allocated_by_txn: dict[int, Decimal] = {}
+    matched_at_by_txn: dict[int, Any] = {}
     for link in links:
         allocated_by_txn[link.target_id] = (
             allocated_by_txn.get(link.target_id, Decimal("0"))
             + _link_amount(link, invoice_map.get(link.invoice_id))
         )
+        link_time = link.updated_at or link.created_at
+        current_time = matched_at_by_txn.get(link.target_id)
+        if link_time is not None and (current_time is None or link_time > current_time):
+            matched_at_by_txn[link.target_id] = link_time
 
     result: dict[int, dict[str, Any]] = {}
     for txn_id, txn in txn_map.items():
         total = _dec(txn.amount)
         allocated = min(allocated_by_txn.get(txn_id, Decimal("0")), total)
         remaining = total - allocated
+        matched_at = matched_at_by_txn.get(txn_id)
         result[txn_id] = {
             "allocatedAmount": str(_dec(allocated)),
             "remainingAmount": str(_dec(remaining)),
             "status": _status(remaining, total),
+            "matchedAt": matched_at.isoformat() if matched_at is not None else None,
         }
     return result
 
