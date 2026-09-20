@@ -46,6 +46,19 @@ DEFAULT_REQUIRED = {
 }
 
 
+def delivery_required_types(required: dict[str, int] | None) -> dict[str, int]:
+    """财务交付只要求交付资料；采购/销售业务源由各自业务模块负责。
+
+    兼容旧账期：即使历史 required_types 曾把 purchase_inbound / sales_query
+    设为必填，也不再把它们作为月结发送门禁。
+    """
+    normalized = {**DEFAULT_REQUIRED, **(required or {})}
+    normalized["purchase_inbound"] = 0
+    normalized["sales_query"] = 0
+    normalized["sales_summary"] = 0
+    return normalized
+
+
 def validate_period(year: int, month: int) -> None:
     """统一约束账期，避免异常年份进入文件路径或数据库。"""
     if not (1900 <= year <= 2999):
@@ -132,7 +145,9 @@ def evaluate_completeness(files: list[ArchiveFile], required: dict[str, int]) ->
 def refresh_period_status(db: Session, company: str, year: int, month: int) -> MonthlyFinancePeriod:
     period = get_or_create_period(db, company, year, month)
     files = db.query(ArchiveFile).filter_by(company=company, period_year=year, period_month=month).all()
-    status, summary = evaluate_completeness(files, period.required_types or DEFAULT_REQUIRED)
+    status, summary = evaluate_completeness(
+        files, delivery_required_types(period.required_types)
+    )
     if period.status != "SENT":  # 已发送状态不被自动覆盖
         period.status = status
     period.missing_summary = summary
@@ -290,7 +305,9 @@ def package_period(db: Session, company: str, year: int, month: int,
 
     period = get_or_create_period(db, company, year, month)
     files = db.query(ArchiveFile).filter_by(company=company, period_year=year, period_month=month).all()
-    status, summary = evaluate_completeness(files, period.required_types or DEFAULT_REQUIRED)
+    status, summary = evaluate_completeness(
+        files, delivery_required_types(period.required_types)
+    )
     if not selective and (status != "READY" or not files):
         raise ValueError(f"资料不完整，禁止打包，缺少: {summary['missing']}")
 
@@ -397,7 +414,7 @@ def period_overview(db: Session, company: str | None = None) -> list[dict[str, A
         periods[(row.company, row.period_year, row.period_month)] = {
             "company": row.company, "year": row.period_year, "month": row.period_month,
             "status": row.status, "missing": (row.missing_summary or {}).get("missing", {}),
-            "requiredTypes": row.required_types or DEFAULT_REQUIRED,
+            "requiredTypes": delivery_required_types(row.required_types),
         }
     archive_q = db.query(ArchiveFile)
     if company:
@@ -407,7 +424,7 @@ def period_overview(db: Session, company: str | None = None) -> list[dict[str, A
         if key not in periods:
             periods[key] = {
                 "company": f.company, "year": f.period_year, "month": f.period_month,
-                "status": "INCOMPLETE", "missing": {}, "requiredTypes": DEFAULT_REQUIRED,
+                "status": "INCOMPLETE", "missing": {}, "requiredTypes": delivery_required_types(DEFAULT_REQUIRED),
             }
 
     file_count_rows = db.query(
@@ -455,13 +472,10 @@ def send_delivery(db: Session, company: str, year: int, month: int, *,
     """发送财务交付包；首次发送与重发分别留痕。"""
     from app.adapters.mail import MailAdapter
     from app.models.finance import EmailDeliveryLog
-    from app.services.monthly_intake_service import require_ready
-
     adapter = MailAdapter()
     adapter.ensure_configured()
 
     period = get_or_create_period(db, company, year, month)
-    require_ready(db, company=company, year=year, month=month)
     q = db.query(FinanceDeliveryPackage).filter_by(period_id=period.id)
     if version:
         q = q.filter_by(version=version)
