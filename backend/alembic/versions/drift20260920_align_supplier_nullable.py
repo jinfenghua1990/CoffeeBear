@@ -15,7 +15,7 @@ branch_labels = None
 depends_on = None
 
 
-def _replace_fk(
+def _ensure_fk(
     name: str,
     source_table: str,
     target_table: str,
@@ -23,23 +23,88 @@ def _replace_fk(
     target_columns: list[str],
     *,
     ondelete: str | None = None,
+    operations=op,
 ) -> None:
-    """Recreate the expected FK deterministically.
+    """Create the expected FK and tolerate a pre-existing identical constraint.
 
-    Some production databases already contain these constraints even though
-    Alembic still considers this revision pending. Drop-by-name first, then
-    recreate the canonical definition. PostgreSQL transactional DDL keeps the
-    migration atomic if validation fails.
+    Production may already contain the named FK even when this Alembic revision
+    is still pending. PostgreSQL raises DuplicateObject in that case, so catch
+    that database-native condition inside one DO block, then validate the
+    existing constraint from pg_constraint before continuing.
     """
-    op.execute(sa.text(f"ALTER TABLE {source_table} DROP CONSTRAINT IF EXISTS {name}"))
-    op.create_foreign_key(
-        name,
-        source_table,
-        target_table,
-        source_columns,
-        target_columns,
-        ondelete=ondelete,
+    if len(source_columns) != 1 or len(target_columns) != 1:
+        raise RuntimeError("finance delivery migration only supports single-column FKs")
+
+    source_column = source_columns[0]
+    target_column = target_columns[0]
+    delete_sql = f" ON DELETE {ondelete}" if ondelete else ""
+
+    operations.execute(
+        sa.text(
+            f"""
+            DO $$
+            BEGIN
+                BEGIN
+                    ALTER TABLE {source_table}
+                    ADD CONSTRAINT {name}
+                    FOREIGN KEY ({source_column})
+                    REFERENCES {target_table} ({target_column}){delete_sql};
+                EXCEPTION
+                    WHEN duplicate_object THEN
+                        NULL;
+                END;
+            END
+            $$;
+            """
+        )
     )
+
+    row = operations.get_bind().execute(
+        sa.text(
+            """
+            SELECT
+                ARRAY(
+                    SELECT a.attname
+                    FROM unnest(c.conkey) WITH ORDINALITY AS k(attnum, ord)
+                    JOIN pg_attribute AS a
+                      ON a.attrelid = c.conrelid
+                     AND a.attnum = k.attnum
+                    ORDER BY k.ord
+                ) AS source_columns,
+                c.confrelid::regclass::text AS target_table,
+                ARRAY(
+                    SELECT a.attname
+                    FROM unnest(c.confkey) WITH ORDINALITY AS k(attnum, ord)
+                    JOIN pg_attribute AS a
+                      ON a.attrelid = c.confrelid
+                     AND a.attnum = k.attnum
+                    ORDER BY k.ord
+                ) AS target_columns,
+                c.confdeltype
+            FROM pg_constraint AS c
+            WHERE c.conrelid = to_regclass(:source_table)
+              AND c.conname = :constraint_name
+              AND c.contype = 'f'
+            """
+        ),
+        {"source_table": source_table, "constraint_name": name},
+    ).mappings().first()
+
+    expected_delete = {"CASCADE": "c", "RESTRICT": "r", "SET NULL": "n", "SET DEFAULT": "d"}.get(
+        str(ondelete or "").upper(),
+        "a",
+    )
+    if (
+        row is None
+        or list(row["source_columns"] or []) != source_columns
+        or str(row["target_table"] or "").split(".")[-1] != target_table
+        or list(row["target_columns"] or []) != target_columns
+        or str(row["confdeltype"] or "") != expected_delete
+    ):
+        raise RuntimeError(
+            f"constraint {name} exists but does not match the expected "
+            f"{source_table}({source_column}) -> {target_table}({target_column}) definition"
+        )
 
 
 def _drop_fk_if_exists(name: str, table: str) -> None:
@@ -65,7 +130,7 @@ def upgrade() -> None:
 
     # FinanceDeliveryFile 模型声明了两个 FK，但 phase0 迁移只建了列与索引。
     # 正式补上约束；如果生产库存在孤儿行，迁移会明确失败而不是静默删除数据。
-    _replace_fk(
+    _ensure_fk(
         "fk_fdf_package",
         "finance_delivery_files",
         "finance_delivery_packages",
@@ -73,7 +138,7 @@ def upgrade() -> None:
         ["id"],
         ondelete="CASCADE",
     )
-    _replace_fk(
+    _ensure_fk(
         "fk_fdf_archive",
         "finance_delivery_files",
         "archive_files",
