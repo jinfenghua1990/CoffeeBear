@@ -115,7 +115,7 @@ export default function SystemUpdatePage() {
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [showAllChecks, setShowAllChecks] = useState(false);
-  const [showLogs, setShowLogs] = useState(false);
+  const [activeTab, setActiveTab] = useState<"overview" | "strategy" | "logs" | "history">("overview");
   const [autoScrollLogs, setAutoScrollLogs] = useState(true);
   const logRef = useRef<HTMLPreElement | null>(null);
   const firstCheckRef = useRef(false);
@@ -164,18 +164,9 @@ export default function SystemUpdatePage() {
 
 
   useEffect(() => {
-    if (!showLogs) return;
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setShowLogs(false);
-    };
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
-  }, [showLogs]);
-
-  useEffect(() => {
-    if (!showLogs || !autoScrollLogs || !logRef.current) return;
+    if (activeTab !== "logs" || !autoScrollLogs || !logRef.current) return;
     logRef.current.scrollTop = logRef.current.scrollHeight;
-  }, [autoScrollLogs, showLogs, status?.logs]);
+  }, [activeTab, autoScrollLogs, status?.logs]);
 
   useEffect(() => {
     if (
@@ -346,7 +337,8 @@ export default function SystemUpdatePage() {
   const updateLevel = (status.updateLevel || "patch") as SystemUpdateLevel;
   const levelMeta = LEVEL_COPY[updateLevel];
   const autoInstallLevelMeta = LEVEL_COPY[draft.autoInstallLevel || "patch"];
-  const visibleChanges = (status.changes || []).slice(0, 4);
+  const visibleChanges = (status.changes || []).slice(0, 6);
+  const showProgressNumber = status.running || status.phase === "success";
 
   const phaseStep: Record<string, number> = {
     checking: 0,
@@ -387,7 +379,7 @@ export default function SystemUpdatePage() {
 
   return (
     <div className="pb-10 text-slate-900 dark:text-slate-100">
-      <header className="app-page-header -mx-1 pb-4">
+      <header className="app-page-header -mx-1 pb-3">
         <div className="flex items-start gap-3">
           <div className="mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-blue-600/10 text-blue-600 dark:bg-blue-400/10 dark:text-blue-300">
             <svg viewBox="0 0 24 24" className="h-5 w-5" fill="none" aria-hidden="true">
@@ -398,14 +390,40 @@ export default function SystemUpdatePage() {
           <div>
             <h1 className="text-[22px] font-semibold tracking-tight text-slate-900 dark:text-slate-100">系统更新</h1>
             <p className="mt-1 text-[13px] leading-6 text-slate-500 dark:text-slate-300">
-              版本信息、更新内容和执行进度集中展示；执行日志按需打开，更新前自动备份，失败自动回滚。
+              版本更新、更新策略、更新日志和历史记录分开管理。
             </p>
           </div>
         </div>
       </header>
 
+      <nav className="mb-4 flex items-center gap-1 border-b border-slate-200 dark:border-slate-700" aria-label="系统更新页签">
+        {([
+          ["overview", "版本更新"],
+          ["strategy", "更新策略"],
+          ["logs", "更新日志"],
+          ["history", "历史记录"],
+        ] as const).map(([key, label]) => (
+          <button
+            type="button"
+            key={key}
+            onClick={() => setActiveTab(key)}
+            className={`relative px-4 py-2.5 text-[12px] font-medium transition-colors ${
+              activeTab === key
+                ? "text-blue-600 dark:text-blue-300"
+                : "text-slate-500 hover:text-slate-800 dark:text-slate-400 dark:hover:text-slate-100"
+            }`}
+          >
+            {label}
+            {key === "logs" && status.logs?.length ? <span className="ml-1.5 rounded-full bg-slate-100 px-1.5 py-0.5 text-[9px] text-slate-500 dark:bg-slate-800 dark:text-slate-300">{status.logs.length}</span> : null}
+            {activeTab === key && <span className="absolute inset-x-2 -bottom-px h-0.5 rounded-full bg-blue-600 dark:bg-blue-400" />}
+          </button>
+        ))}
+      </nav>
+
+      {activeTab === "overview" && (
+        <>
       <section className="app-card overflow-hidden rounded-2xl">
-        <div className="grid xl:grid-cols-[minmax(0,1fr)_320px]">
+        <div className="grid xl:grid-cols-[minmax(0,1fr)_280px]">
           <div className="min-w-0 p-5">
             <div className="mb-4 flex flex-wrap items-center gap-2">
               <span className={`inline-flex rounded-full px-2.5 py-1 text-[11px] font-medium ring-1 ring-inset ${state.tone} dark:bg-slate-800 dark:text-slate-100 dark:ring-slate-600`}>
@@ -423,28 +441,46 @@ export default function SystemUpdatePage() {
               )}
             </div>
 
-            <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_360px]">
+            <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_360px] 2xl:grid-cols-[minmax(520px,660px)_minmax(0,1fr)]">
               <div className="min-w-0">
                 <div className="text-[13px] font-semibold text-slate-800 dark:text-slate-100">更新概览</div>
                 <div className="mt-1 text-[11px] text-slate-400 dark:text-slate-400">版本信息与影响范围</div>
 
-                <div className="mt-4 grid items-stretch gap-3 sm:grid-cols-[minmax(0,1fr)_36px_minmax(0,1fr)]">
-                  <VersionCard
-                    label="当前版本"
-                    version={status.currentCommit?.version}
-                    sha={currentSha}
-                    note={status.currentCommit?.subject || "当前正在运行的版本"}
-                    tone="current"
-                  />
-                  <div className="hidden items-center justify-center text-3xl font-light text-blue-500 sm:flex">→</div>
-                  <VersionCard
-                    label={status.updateAvailable ? "待更新版本" : "远端版本"}
-                    version={status.latestCommit?.version}
-                    sha={targetSha}
-                    note={latestSubject || (status.updateAvailable ? "已检测到新版本" : "与当前版本一致")}
-                    tone={status.updateAvailable ? "target" : "current"}
-                  />
-                </div>
+                {status.updateAvailable ? (
+                  <div className="mt-4 grid items-stretch gap-3 sm:grid-cols-[minmax(0,1fr)_32px_minmax(0,1fr)]">
+                    <VersionCard
+                      label="当前版本"
+                      version={status.currentCommit?.version}
+                      sha={currentSha}
+                      note={status.currentCommit?.subject || "当前正在运行的版本"}
+                      tone="current"
+                    />
+                    <div className="hidden items-center justify-center text-2xl font-light text-blue-500 sm:flex">→</div>
+                    <VersionCard
+                      label="待更新版本"
+                      version={status.latestCommit?.version}
+                      sha={targetSha}
+                      note={latestSubject || "已检测到新版本"}
+                      tone="target"
+                    />
+                  </div>
+                ) : (
+                  <div className="mt-4 grid gap-3 sm:grid-cols-[minmax(280px,420px)_minmax(220px,1fr)]">
+                    <VersionCard
+                      label="当前版本"
+                      version={status.currentCommit?.version}
+                      sha={currentSha}
+                      note={status.currentCommit?.subject || "当前正在运行的版本"}
+                      tone="current"
+                    />
+                    <div className="flex min-h-[104px] items-center rounded-xl border border-emerald-100 bg-emerald-50/60 px-4 dark:border-emerald-500/25 dark:bg-emerald-500/5">
+                      <div>
+                        <div className="text-[12px] font-semibold text-emerald-700 dark:text-emerald-300">已是最新版本</div>
+                        <div className="mt-1 text-[11px] leading-5 text-slate-500 dark:text-slate-300">远端版本与当前运行版本一致，不重复显示第二张版本卡。</div>
+                      </div>
+                    </div>
+                  </div>
+                )}
 
                 <div className="mt-4 flex flex-wrap items-center gap-2 border-t border-slate-100 pt-4 dark:border-slate-700/70">
                   <span className="mr-1 text-[11px] font-semibold text-slate-600 dark:text-slate-300">影响模块</span>
@@ -478,8 +514,8 @@ export default function SystemUpdatePage() {
                       </div>
                     </div>
                   )) : (
-                    <div className="px-4 py-8 text-center text-[12px] text-slate-400 dark:text-slate-400">
-                      暂无待安装更新
+                    <div className="flex min-h-[104px] items-center px-4 py-4 text-[12px] text-slate-400 dark:text-slate-400">
+                      当前没有待安装更新。检测到新版本后，这里会直接列出本次改动。
                     </div>
                   )}
                 </div>
@@ -559,8 +595,8 @@ export default function SystemUpdatePage() {
                 <div className="h-2 flex-1 overflow-hidden rounded-full bg-slate-100 dark:bg-slate-700">
                   <div className="h-full rounded-full bg-blue-500 transition-all duration-500" style={{ width: `${status.running ? Math.max(progress, 4) : status.phase === "success" ? 100 : 0}%` }} />
                 </div>
-                <span className="w-11 text-right font-mono text-[14px] font-semibold text-slate-700 dark:text-slate-100">
-                  {status.running ? `${progress}%` : status.phase === "success" ? "100%" : "0%"}
+                <span className="min-w-11 text-right font-mono text-[14px] font-semibold text-slate-700 dark:text-slate-100">
+                  {showProgressNumber ? (status.running ? `${progress}%` : "100%") : "待命"}
                 </span>
                 <div className="hidden border-l border-slate-200 pl-4 text-right sm:block dark:border-slate-700">
                   <div className="text-[10px] text-slate-400">当前阶段</div>
@@ -569,7 +605,7 @@ export default function SystemUpdatePage() {
               </div>
               <button
                 type="button"
-                onClick={() => setShowLogs(true)}
+                onClick={() => setActiveTab("logs")}
                 className="app-button-secondary h-9 rounded-lg px-3 text-[11px] font-medium"
               >
                 查看日志{status.logs?.length ? ` · ${status.logs.length}` : ""}
@@ -613,12 +649,16 @@ export default function SystemUpdatePage() {
         </section>
       )}
 
-      <details className="mt-4 app-card overflow-hidden rounded-2xl">
-        <summary className="cursor-pointer list-none px-5 py-4 text-[13px] font-semibold text-slate-700 hover:bg-slate-50 dark:text-slate-100 dark:hover:bg-slate-800/50">
-          更新策略与历史记录
-          <span className="ml-2 text-[11px] font-normal text-slate-400">非日常操作，默认收起</span>
-        </summary>
-        <div className="grid gap-4 border-t border-slate-100 p-5 xl:grid-cols-2 dark:border-slate-700">
+
+        </>
+      )}
+
+      {activeTab === "strategy" && (
+        <section className="app-card rounded-2xl p-5">
+          <div className="mb-4">
+            <h2 className="text-[15px] font-semibold text-slate-900 dark:text-slate-100">更新策略</h2>
+            <p className="mt-1 text-[11px] text-slate-400 dark:text-slate-400">非日常设置；调整检查频率、安装方式和自动安装范围。</p>
+          </div>
           {!isContainer ? (
             <section className="rounded-xl border border-slate-100 p-4 dark:border-slate-700">
               <div className="flex items-start justify-between gap-3">
@@ -666,11 +706,63 @@ export default function SystemUpdatePage() {
               </button>
             </section>
           ) : (
-            <section className="rounded-xl border border-slate-100 p-4 text-[11px] text-slate-500 dark:border-slate-700 dark:text-slate-300">
+            <div className="rounded-xl border border-slate-100 p-4 text-[11px] text-slate-500 dark:border-slate-700 dark:text-slate-300">
               当前为容器托管模式，版本由 GitHub / GHCR / Compose 管理。
-            </section>
+            </div>
           )}
+        </section>
+      )}
 
+      {activeTab === "logs" && (
+        <section className="app-card overflow-hidden rounded-2xl">
+          <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 px-5 py-4 dark:border-slate-700">
+            <div>
+              <div className="flex items-center gap-2">
+                <h2 className="text-[15px] font-semibold text-slate-900 dark:text-slate-100">更新日志</h2>
+                {status.running && <span className="rounded-full bg-blue-50 px-2 py-0.5 text-[10px] font-medium text-blue-700 dark:bg-blue-500/10 dark:text-blue-200">实时更新</span>}
+                {status.backupDb && <span className="rounded-full bg-emerald-50 px-2 py-0.5 text-[10px] font-medium text-emerald-700 dark:bg-emerald-500/10 dark:text-emerald-300">已生成备份</span>}
+              </div>
+              <p className="mt-1 text-[11px] text-slate-400 dark:text-slate-400">一般无需查看；更新失败或排查问题时再进入此页签。</p>
+            </div>
+            <div className="flex items-center gap-2">
+              <label className="flex cursor-pointer items-center gap-1.5 text-[11px] text-slate-500 dark:text-slate-300">
+                <input type="checkbox" checked={autoScrollLogs} onChange={(event) => setAutoScrollLogs(event.target.checked)} className="h-3.5 w-3.5 rounded border-slate-300" />
+                自动滚动
+              </label>
+              <button type="button" onClick={() => void load(true)} className="app-button-secondary h-8 rounded-lg px-2.5 text-[10px] font-medium">刷新</button>
+              <button
+                type="button"
+                onClick={() => {
+                  const text = (status.logs || []).join("\n");
+                  if (!text) return;
+                  void navigator.clipboard.writeText(text).then(
+                    () => setNotice("更新日志已复制。"),
+                    () => setNotice("复制失败，请手动选择日志内容。"),
+                  );
+                }}
+                disabled={!status.logs?.length}
+                className="app-button-secondary h-8 rounded-lg px-2.5 text-[10px] font-medium disabled:opacity-40"
+              >
+                复制日志
+              </button>
+            </div>
+          </div>
+          <div className="flex items-center gap-4 border-b border-slate-200 bg-slate-50/70 px-5 py-3 text-[11px] text-slate-500 dark:border-slate-700 dark:bg-slate-800/50 dark:text-slate-300">
+            <span>{status.logs?.length || 0} 条记录</span>
+            <span>当前阶段：<strong className="font-medium text-slate-700 dark:text-slate-100">{stageMessage}</strong></span>
+          </div>
+          <pre ref={logRef} className="min-h-[420px] max-h-[68vh] overflow-auto whitespace-pre-wrap break-all bg-slate-950 px-5 py-4 font-mono text-[11px] leading-6 text-slate-300">
+            {(status.logs || []).join("\n") || "暂无执行日志。开始更新后，这里会显示环境检查、备份、安装、迁移、构建、重启和验证记录。"}
+          </pre>
+        </section>
+      )}
+
+      {activeTab === "history" && (
+        <section className="app-card rounded-2xl p-5">
+          <div className="mb-4">
+            <h2 className="text-[15px] font-semibold text-slate-900 dark:text-slate-100">历史记录</h2>
+            <p className="mt-1 text-[11px] text-slate-400 dark:text-slate-400">查看历史安装、回滚和版本切换记录。</p>
+          </div>
           <section className="rounded-xl border border-slate-100 dark:border-slate-700">
             <div className="border-b border-slate-100 px-4 py-3 text-[13px] font-semibold text-slate-800 dark:border-slate-700 dark:text-slate-100">历史更新记录</div>
             <div className="max-h-[340px] divide-y divide-slate-100 overflow-auto px-4 dark:divide-slate-700">
@@ -687,97 +779,7 @@ export default function SystemUpdatePage() {
               {(!status.history || status.history.length === 0) && <div className="py-10 text-center text-xs text-slate-400">还没有更新记录</div>}
             </div>
           </section>
-        </div>
-      </details>
-
-      {showLogs && !isContainer && (
-        <div
-          className="fixed inset-0 z-modal bg-slate-950/35 backdrop-blur-[1px]"
-          role="dialog"
-          aria-modal="true"
-          aria-label="更新日志"
-          onMouseDown={(event) => {
-            if (event.target === event.currentTarget) setShowLogs(false);
-          }}
-        >
-          <aside className="absolute inset-y-0 right-0 flex w-[760px] max-w-[92vw] flex-col border-l border-slate-200 bg-white shadow-2xl dark:border-slate-700 dark:bg-slate-900">
-            <div className="flex shrink-0 items-start justify-between gap-4 border-b border-slate-200 px-5 py-4 dark:border-slate-700">
-              <div>
-                <div className="flex items-center gap-2">
-                  <h2 className="text-[15px] font-semibold text-slate-900 dark:text-slate-100">更新日志</h2>
-                  {status.running && (
-                    <span className="rounded-full bg-blue-50 px-2 py-0.5 text-[10px] font-medium text-blue-700 dark:bg-blue-500/10 dark:text-blue-200">
-                      实时更新
-                    </span>
-                  )}
-                  {status.backupDb && (
-                    <span className="rounded-full bg-emerald-50 px-2 py-0.5 text-[10px] font-medium text-emerald-700 dark:bg-emerald-500/10 dark:text-emerald-300">
-                      已生成备份
-                    </span>
-                  )}
-                </div>
-                <p className="mt-1 text-[11px] text-slate-400 dark:text-slate-400">
-                  只在排查更新过程时查看；关闭后不影响更新任务继续执行。
-                </p>
-              </div>
-              <button
-                type="button"
-                onClick={() => setShowLogs(false)}
-                className="flex h-8 w-8 items-center justify-center rounded-lg border border-slate-200 text-lg leading-none text-slate-500 hover:bg-slate-50 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800"
-                aria-label="关闭更新日志"
-              >
-                ×
-              </button>
-            </div>
-
-            <div className="flex shrink-0 flex-wrap items-center justify-between gap-3 border-b border-slate-200 bg-slate-50/70 px-5 py-3 dark:border-slate-700 dark:bg-slate-800/50">
-              <div className="flex items-center gap-3 text-[11px] text-slate-500 dark:text-slate-300">
-                <span>{status.logs?.length || 0} 条记录</span>
-                <span>当前阶段：<strong className="font-medium text-slate-700 dark:text-slate-100">{stageMessage}</strong></span>
-              </div>
-              <div className="flex items-center gap-2">
-                <label className="flex cursor-pointer items-center gap-1.5 text-[11px] text-slate-500 dark:text-slate-300">
-                  <input
-                    type="checkbox"
-                    checked={autoScrollLogs}
-                    onChange={(event) => setAutoScrollLogs(event.target.checked)}
-                    className="h-3.5 w-3.5 rounded border-slate-300"
-                  />
-                  自动滚动
-                </label>
-                <button
-                  type="button"
-                  onClick={() => void load(true)}
-                  className="app-button-secondary h-8 rounded-lg px-2.5 text-[10px] font-medium"
-                >
-                  刷新
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    const text = (status.logs || []).join("\n");
-                    if (!text) return;
-                    void navigator.clipboard.writeText(text).then(
-                      () => setNotice("更新日志已复制。"),
-                      () => setNotice("复制失败，请手动选择日志内容。"),
-                    );
-                  }}
-                  disabled={!status.logs?.length}
-                  className="app-button-secondary h-8 rounded-lg px-2.5 text-[10px] font-medium disabled:opacity-40"
-                >
-                  复制日志
-                </button>
-              </div>
-            </div>
-
-            <pre
-              ref={logRef}
-              className="min-h-0 flex-1 overflow-auto whitespace-pre-wrap break-all bg-slate-950 px-5 py-4 font-mono text-[11px] leading-6 text-slate-300"
-            >
-              {(status.logs || []).join("\n") || "暂无执行日志。开始更新后，这里会实时显示环境检查、备份、安装、迁移、构建、重启和验证记录。"}
-            </pre>
-          </aside>
-        </div>
+        </section>
       )}
     </div>
   );
