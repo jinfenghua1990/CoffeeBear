@@ -60,8 +60,9 @@ export default function TopBar() {
   const active = resolveModule(pathname);
   const activeWorkspace = moduleWorkspace(active);
   const isForeignWorkspace = activeWorkspace === "foreign";
-  const workspaceLabel = isForeignWorkspace ? "外贸工作台" : "内销工作台";
-  const workspaceHome = isForeignWorkspace ? "/foreign-trade" : "/";
+  const isFinanceCenter = active.key === "finance";
+  const workspaceLabel = isFinanceCenter ? "财务中心" : isForeignWorkspace ? "外贸工作台" : "内销工作台";
+  const workspaceHome = isFinanceCenter ? "/finance" : isForeignWorkspace ? "/foreign-trade" : "/";
   const topModules = MODULES.filter(
     (module) => module.showInTop !== false && moduleWorkspace(module) === activeWorkspace,
   );
@@ -190,18 +191,26 @@ export default function TopBar() {
             <button
               type="button"
               onClick={() => go("/")}
-              className={"flex w-full items-center justify-between rounded-lg px-3 py-2 text-left text-[13px] font-medium " + (!isForeignWorkspace ? "bg-slate-50 text-slate-800" : "text-slate-600 hover:bg-slate-50")}
+              className={"flex w-full items-center justify-between rounded-lg px-3 py-2 text-left text-[13px] font-medium " + (!isForeignWorkspace && !isFinanceCenter ? "bg-slate-50 text-slate-800" : "text-slate-600 hover:bg-slate-50")}
             >
               内销工作台
-              {!isForeignWorkspace && <span className="text-[10px] font-normal text-blue-600">当前</span>}
+              {!isForeignWorkspace && !isFinanceCenter && <span className="text-[10px] font-normal text-blue-600">当前</span>}
             </button>
             <button
               type="button"
               onClick={() => go("/foreign-trade")}
-              className={"flex w-full items-center justify-between rounded-lg px-3 py-2 text-left text-[13px] font-medium " + (isForeignWorkspace ? "bg-slate-50 text-slate-800" : "text-slate-600 hover:bg-slate-50")}
+              className={"flex w-full items-center justify-between rounded-lg px-3 py-2 text-left text-[13px] font-medium " + (isForeignWorkspace && !isFinanceCenter ? "bg-slate-50 text-slate-800" : "text-slate-600 hover:bg-slate-50")}
             >
               外贸工作台
-              {isForeignWorkspace && <span className="text-[10px] font-normal text-blue-600">当前</span>}
+              {isForeignWorkspace && !isFinanceCenter && <span className="text-[10px] font-normal text-blue-600">当前</span>}
+            </button>
+            <button
+              type="button"
+              onClick={() => go("/finance")}
+              className={"flex w-full items-center justify-between rounded-lg px-3 py-2 text-left text-[13px] font-medium " + (isFinanceCenter ? "bg-slate-50 text-slate-800" : "text-slate-600 hover:bg-slate-50")}
+            >
+              财务中心
+              {isFinanceCenter && <span className="text-[10px] font-normal text-blue-600">当前</span>}
             </button>
           </div>
         )}

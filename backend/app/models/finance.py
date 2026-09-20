@@ -1,3 +1,4 @@
+from decimal import Decimal
 from datetime import datetime
 
 from sqlalchemy import BigInteger, Boolean, CheckConstraint, DateTime, ForeignKey, Index, Integer, Numeric, String, Text, UniqueConstraint, text
@@ -187,3 +188,68 @@ class ClosingVersion(Base, PkMixin, TimestampMixin):
     version: Mapped[int] = mapped_column(BigInteger, default=1)
     snapshot: Mapped[dict] = mapped_column(JSONB, default=dict)
     is_current: Mapped[bool] = mapped_column(Boolean, default=True)
+
+
+
+class FinanceLegalEntity(Base, PkMixin, TimestampMixin):
+    """财务主体主档。财务中心的第一维度。"""
+
+    __tablename__ = "finance_legal_entities"
+    __table_args__ = (
+        UniqueConstraint("code", name="uq_finance_legal_entities_code"),
+        UniqueConstraint("name", name="uq_finance_legal_entities_name"),
+    )
+
+    code: Mapped[str] = mapped_column(String(64), nullable=False)
+    name: Mapped[str] = mapped_column(String(256), nullable=False)
+    country_code: Mapped[str] = mapped_column(String(8), default="CN")
+    base_currency: Mapped[str] = mapped_column(String(8), default="CNY")
+    tax_id: Mapped[str] = mapped_column(String(128), default="")
+    status: Mapped[str] = mapped_column(String(24), default="active", index=True)
+    is_default: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    business_scopes: Mapped[list] = mapped_column(JSONB, default=lambda: ["domestic", "foreign_trade"])
+    note: Mapped[str] = mapped_column(Text, default="")
+
+
+class FinanceEntry(Base, PkMixin, TimestampMixin):
+    """统一财务事项池。业务事实先归集到这里，再做收支、税务、利润和月结。"""
+
+    __tablename__ = "finance_entries"
+    __table_args__ = (
+        UniqueConstraint(
+            "legal_entity_id",
+            "source_type",
+            "source_id",
+            "category",
+            "value_type",
+            name="uq_finance_entry_source_category_value",
+        ),
+        Index(
+            "ix_finance_entries_period_scope",
+            "legal_entity_id", "accounting_year", "accounting_month", "business_scope",
+        ),
+    )
+
+    legal_entity_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("finance_legal_entities.id", name="fk_finance_entries_legal_entity", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    business_scope: Mapped[str] = mapped_column(String(24), default="domestic", index=True)
+    source_type: Mapped[str] = mapped_column(String(48), default="manual", index=True)
+    source_id: Mapped[str] = mapped_column(String(128), default="", index=True)
+    source_no: Mapped[str] = mapped_column(String(128), default="", index=True)
+    category: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    direction: Mapped[str] = mapped_column(String(24), default="expense", index=True)
+    currency: Mapped[str] = mapped_column(String(8), default="CNY")
+    amount: Mapped[Decimal] = mapped_column(MONEY, default=0)
+    tax_amount: Mapped[Decimal] = mapped_column(MONEY, default=0)
+    value_type: Mapped[str] = mapped_column(String(16), default="actual", index=True)
+    settlement_status: Mapped[str] = mapped_column(String(24), default="pending", index=True)
+    invoice_status: Mapped[str] = mapped_column(String(24), default="unknown", index=True)
+    accounting_year: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    accounting_month: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    occurred_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    note: Mapped[str] = mapped_column(Text, default="")
+    raw: Mapped[dict] = mapped_column(JSONB, default=dict)
