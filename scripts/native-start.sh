@@ -26,6 +26,12 @@ VENV="${VENV:-$ROOT/backend/.venv}"
 export PATH="/Users/gino/.workbuddy/binaries/node/versions/22.22.2-2/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
 export API_BIND_HOST="${API_BIND_HOST:-0.0.0.0}"
 
+# 每次服务启动都刷新 Git reference-transaction hook。
+# 系统更新进行中时，任何人工 git pull / fetch / reset / checkout 的 ref 写入都会被拒绝。
+if [[ -f "$ROOT/scripts/update-guard.sh" ]]; then
+  bash "$ROOT/scripts/update-guard.sh" install "$ROOT" >/dev/null
+fi
+
 # ---------- 后端：api / worker / beat ----------
 source "$VENV/bin/activate"
 BACKEND_DIR="$ROOT/backend"

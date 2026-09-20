@@ -11,6 +11,7 @@ import argparse
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -35,6 +36,8 @@ class Runner:
         self.status_file = self.state_dir / "status.json"
         self.history_file = self.state_dir / "history.jsonl"
         self.maintenance_file = self.state_dir / "maintenance.json"
+        self.lock_dir = self.root / ".git" / "ecommerce-system-update.lock"
+        self.lock_owner_file = self.lock_dir / "owner.json"
         self.venv_python = self.root / "backend" / ".venv" / "bin" / "python"
         self.pip = self.root / "backend" / ".venv" / "bin" / "pip"
         self.previous_sha = ""
@@ -101,9 +104,43 @@ class Runner:
         with self.history_file.open("a", encoding="utf-8") as fh:
             fh.write(json.dumps(row, ensure_ascii=False) + "\n")
 
+    def read_lock_owner(self) -> dict[str, Any]:
+        try:
+            value = json.loads(self.lock_owner_file.read_text(encoding="utf-8"))
+            return value if isinstance(value, dict) else {}
+        except Exception:
+            return {}
+
+    def claim_update_lock(self) -> None:
+        if not self.lock_dir.is_dir():
+            raise RuntimeError("系统更新全局锁不存在，拒绝无锁执行更新")
+        owner = self.read_lock_owner()
+        if owner.get("runId") != self.args.run_id:
+            raise RuntimeError("系统更新全局锁已由其他任务持有")
+        owner.update({
+            "runId": self.args.run_id,
+            "pid": os.getpid(),
+            "targetSha": self.args.target,
+            "actor": self.args.actor,
+            "runnerClaimedAt": now_iso(),
+        })
+        tmp = self.lock_owner_file.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(owner, ensure_ascii=False, indent=2), encoding="utf-8")
+        os.replace(tmp, self.lock_owner_file)
+
+    def release_update_lock(self) -> None:
+        if not self.lock_dir.exists():
+            return
+        owner = self.read_lock_owner()
+        if owner.get("runId") != self.args.run_id:
+            return
+        shutil.rmtree(self.lock_dir, ignore_errors=True)
+
     def run(self, command: list[str], *, cwd: Path | None = None, timeout: int = 1800,
             check: bool = True) -> subprocess.CompletedProcess[str]:
         self.log("$ " + " ".join(command))
+        env = os.environ.copy()
+        env["ECOMMERCE_UPDATE_RUN_ID"] = self.args.run_id
         result = subprocess.run(
             command,
             cwd=str(cwd or self.root),
@@ -112,7 +149,7 @@ class Runner:
             stderr=subprocess.STDOUT,
             timeout=timeout,
             check=False,
-            env=os.environ.copy(),
+            env=env,
         )
         if result.stdout:
             print(result.stdout.rstrip(), flush=True)
@@ -348,6 +385,13 @@ class Runner:
         return True
 
     def execute(self) -> int:
+        self.claim_update_lock()
+        try:
+            return self._execute_locked()
+        finally:
+            self.release_update_lock()
+
+    def _execute_locked(self) -> int:
         self.log(f"开始系统更新：{self.args.branch} -> {self.args.target}")
         try:
             self.preflight()
@@ -418,6 +462,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--branch", required=True)
     parser.add_argument("--remote", required=True)
     parser.add_argument("--actor", default="system")
+    parser.add_argument("--run-id", required=True)
     parser.add_argument("--health-url", default="http://127.0.0.1:8000/healthz")
     return parser.parse_args()
 

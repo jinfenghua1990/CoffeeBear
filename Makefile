@@ -8,14 +8,20 @@ SYSTEM_UPDATE_LAUNCH_LABEL ?= com.gino.ecommerce-dashboard
 LAUNCH_LABEL := gui/$(shell id -u)/$(SYSTEM_UPDATE_LAUNCH_LABEL)
 NATIVE_ENV = set -a; . "$(ROOT)/.env"; set +a; export DATABASE_URL="postgresql+psycopg://$$POSTGRES_USER:$$POSTGRES_PASSWORD@localhost:5432/$$POSTGRES_DB"; export REDIS_URL="redis://localhost:6379/0"; export DATA_DIR="$(ROOT)/data";
 
-.PHONY: help up restart status logs logs-api rebuild rebuild-fe test test-db lint tsc verify release-check secret-scan repo-hygiene smoke migrate migration-check exec-api backup restore-check orphan-audit backup-schedule-install backup-schedule-status backup-schedule-uninstall fresh
+.PHONY: help update-guard-check update-guard-install up restart status logs logs-api rebuild rebuild-fe test test-db lint tsc verify release-check secret-scan repo-hygiene smoke migrate migration-check exec-api backup restore-check orphan-audit backup-schedule-install backup-schedule-status backup-schedule-uninstall fresh
 
 help: ## 列出所有 target
-	@awk 'BEGIN {FS = ":.*##"} /^[a-zA-Z_-]+:.*?##/ {printf "  \033[36m%-16s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
+	@awk 'BEGIN {FS = ":.*##"} /^[a-zA-Z_-]+:.*?##/ {printf "  \033[36m%-16s\033[0m %s\n", $1, $2}' $(MAKEFILE_LIST)
+
+update-guard-check: ## 检查系统更新全局锁；更新中拒绝人工修改运行目录
+	@bash "$(ROOT)/scripts/update-guard.sh" check "$(ROOT)"
+
+update-guard-install: ## 安装 Git 更新保护 hook
+	@bash "$(ROOT)/scripts/update-guard.sh" install "$(ROOT)"
 
 up: restart ## 启动或重新加载本地服务
 
-restart: ## 重新加载 API、worker 与 beat
+restart: update-guard-check ## 重新加载 API、worker 与 beat
 	launchctl kickstart -k "$(LAUNCH_LABEL)"
 
 status: ## 显示本机健康状态
@@ -30,7 +36,7 @@ logs-api: ## 跟踪 API 日志
 
 rebuild: restart ## 后端代码已直接由原生虚拟环境加载，重启即可
 
-rebuild-fe: ## 重建静态前端并重启服务
+rebuild-fe: update-guard-check ## 重建静态前端并重启服务
 	cd frontend && npm run build
 	$(MAKE) restart
 
@@ -58,7 +64,7 @@ repo-hygiene: ## 禁止 Git 跟踪手工 .bak 源码备份
 secret-scan: ## 扫描 Git 已跟踪文件中的高置信度 token / 私钥
 	bash ./scripts/secret-scan.sh
 
-verify: repo-hygiene secret-scan migration-check orphan-audit lint test tsc ## 本地一键验收：仓库卫生 + 敏感信息 + 真实库引用 + 迁移 + 后端 + 前端静态构建
+verify: update-guard-check repo-hygiene secret-scan migration-check orphan-audit lint test tsc ## 本地一键验收：仓库卫生 + 敏感信息 + 真实库引用 + 迁移 + 后端 + 前端静态构建
 	cd frontend && npm run build
 	@test -f frontend/out/index.html
 	@echo "本地验收通过：repo hygiene / secret scan / migration / orphan audit / backend tests / TypeScript / static build 均正常。"
@@ -69,7 +75,7 @@ release-check: verify restore-check smoke ## 发布前门禁：完整回归 + �
 smoke: ## 枚举公开 API 并做带鉴权 smoke test
 	./scripts/smoke.sh
 
-migrate: ## 应用 Alembic 迁移
+migrate: update-guard-check ## 应用 Alembic 迁移
 	$(NATIVE_ENV) cd "$(BACKEND)" && "$(VENV)/bin/alembic" upgrade head
 
 migration-check: ## 检查 models 与迁移是否漂移
@@ -78,7 +84,7 @@ migration-check: ## 检查 models 与迁移是否漂移
 exec-api: ## 进入后端原生虚拟环境 shell
 	$(NATIVE_ENV) cd "$(BACKEND)" && exec "$(SHELL)"
 
-backup: ## 备份 PostgreSQL 与 data/ 原始归档
+backup: update-guard-check ## 备份 PostgreSQL 与 data/ 原始归档
 	./scripts/backup.sh
 
 restore-check: ## 将最新备份恢复到临时库验证，生产库不做任何修改

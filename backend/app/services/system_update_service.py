@@ -59,6 +59,81 @@ def _history_path() -> Path:
     return _state_dir() / "history.jsonl"
 
 
+def _repo_update_lock_dir() -> Path:
+    return _repo_root() / ".git" / "ecommerce-system-update.lock"
+
+
+def _lock_owner_path() -> Path:
+    return _repo_update_lock_dir() / "owner.json"
+
+
+def _read_update_lock_owner() -> dict[str, Any]:
+    return _read_json(_lock_owner_path(), {})
+
+
+def _cleanup_stale_update_lock() -> bool:
+    lock_dir = _repo_update_lock_dir()
+    if not lock_dir.exists():
+        return True
+    owner = _read_update_lock_owner()
+    if _pid_running(owner.get("pid")):
+        return False
+    try:
+        shutil.rmtree(lock_dir)
+    except FileNotFoundError:
+        pass
+    return True
+
+
+def _acquire_update_lock(*, run_id: str, target_sha: str, actor: str) -> None:
+    lock_dir = _repo_update_lock_dir()
+    lock_dir.parent.mkdir(parents=True, exist_ok=True)
+    for _ in range(2):
+        try:
+            os.mkdir(lock_dir)
+            _atomic_json(
+                _lock_owner_path(),
+                {
+                    "runId": run_id,
+                    "pid": os.getpid(),
+                    "targetSha": target_sha,
+                    "actor": actor,
+                    "acquiredAt": _now_iso(),
+                },
+            )
+            return
+        except FileExistsError:
+            if not _cleanup_stale_update_lock():
+                owner = _read_update_lock_owner()
+                raise ValueError(
+                    "已有系统更新持有全局更新锁"
+                    + (f"（任务 {owner.get('runId')}）" if owner.get("runId") else "")
+                )
+    raise ValueError("无法取得系统更新全局锁")
+
+
+def _handoff_update_lock(*, run_id: str, pid: int) -> None:
+    lock_dir = _repo_update_lock_dir()
+    if not lock_dir.exists():
+        return
+    owner = _read_update_lock_owner()
+    if owner.get("runId") != run_id:
+        return
+    owner["pid"] = int(pid)
+    owner["runnerStartedAt"] = _now_iso()
+    _atomic_json(_lock_owner_path(), owner)
+
+
+def _release_update_lock(*, run_id: str) -> None:
+    lock_dir = _repo_update_lock_dir()
+    if not lock_dir.exists():
+        return
+    owner = _read_update_lock_owner()
+    if owner.get("runId") not in {None, "", run_id}:
+        return
+    shutil.rmtree(lock_dir, ignore_errors=True)
+
+
 def _atomic_json(path: Path, payload: dict[str, Any]) -> None:
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -149,6 +224,7 @@ def _run(args: list[str], *, timeout: int = 60, cwd: Path | None = None) -> subp
     env = os.environ.copy()
     if args and args[0] == "git":
         env["GIT_TERMINAL_PROMPT"] = "0"
+        env["ECOMMERCE_UPDATE_SERVICE_GIT"] = "1"
     return subprocess.run(
         args,
         cwd=str(cwd or _repo_root()),
@@ -574,6 +650,29 @@ def update_readiness() -> dict[str, Any]:
         blocking=not runner_path.is_file(),
     )
 
+    guard_script = root / "scripts" / "update-guard.sh"
+    hook_path = root / ".git" / "ecommerce-hooks" / "reference-transaction"
+    hooks_path = ""
+    try:
+        hooks_path = _git("config", "--get", "core.hooksPath", timeout=10)
+    except Exception:
+        hooks_path = ""
+    guard_ok = (
+        guard_script.is_file()
+        and hook_path.is_file()
+        and os.access(hook_path, os.X_OK)
+        and hooks_path == str(hook_path.parent)
+    )
+    add(
+        "update_guard",
+        "全局更新锁",
+        "ok" if guard_ok else "error",
+        "Git / Alembic / 前端构建 / Make 运维均已接入同一更新锁"
+        if guard_ok
+        else "更新保护 hook 未安装或未启用；请重启服务或执行 make update-guard-install",
+        blocking=not guard_ok,
+    )
+
     quiesce_path = root / "scripts" / "quiesce-update-workers.sh"
     add(
         "quiesce_workers", "后台任务暂停脚本",
@@ -702,37 +801,45 @@ def start_update(*, actor: str = "system") -> dict[str, Any]:
             raise ValueError("目标 commit 无效")
 
         run_id = datetime.now().strftime("%Y%m%d_%H%M%S") + "_" + uuid.uuid4().hex[:8]
-        _cleanup_old_artifacts()
-        state_dir = _state_dir()
-        source_runner = _repo_root() / "scripts" / "system_update_runner.py"
-        if not source_runner.is_file():
-            raise ValueError("系统更新执行器不存在")
-        runner = state_dir / f"runner_{run_id}.py"
-        shutil.copy2(source_runner, runner)
-        log_path = state_dir / f"update_{run_id}.log"
+        _acquire_update_lock(run_id=run_id, target_sha=target_sha, actor=actor)
+        try:
+            _cleanup_old_artifacts()
+            state_dir = _state_dir()
+            source_runner = _repo_root() / "scripts" / "system_update_runner.py"
+            if not source_runner.is_file():
+                raise ValueError("系统更新执行器不存在")
+            runner = state_dir / f"runner_{run_id}.py"
+            shutil.copy2(source_runner, runner)
+            log_path = state_dir / f"update_{run_id}.log"
 
-        env = os.environ.copy()
-        env["PYTHONUNBUFFERED"] = "1"
-        command = [
-            str(_repo_root() / "backend" / ".venv" / "bin" / "python"),
-            str(runner),
-            "--root", str(_repo_root()),
-            "--data-dir", str(Path(settings.DATA_DIR).expanduser()),
-            "--target", target_sha,
-            "--branch", settings.SYSTEM_UPDATE_BRANCH,
-            "--remote", settings.SYSTEM_UPDATE_REMOTE,
-            "--actor", actor,
-            "--health-url", settings.SYSTEM_UPDATE_HEALTH_URL,
-        ]
-        with log_path.open("a", encoding="utf-8") as log_file:
-            proc = subprocess.Popen(
-                command,
-                cwd=str(_repo_root()),
-                env=env,
-                stdout=log_file,
-                stderr=subprocess.STDOUT,
-                start_new_session=True,
-            )
+            env = os.environ.copy()
+            env["PYTHONUNBUFFERED"] = "1"
+            env["ECOMMERCE_UPDATE_RUN_ID"] = run_id
+            command = [
+                str(_repo_root() / "backend" / ".venv" / "bin" / "python"),
+                str(runner),
+                "--root", str(_repo_root()),
+                "--data-dir", str(Path(settings.DATA_DIR).expanduser()),
+                "--target", target_sha,
+                "--branch", settings.SYSTEM_UPDATE_BRANCH,
+                "--remote", settings.SYSTEM_UPDATE_REMOTE,
+                "--actor", actor,
+                "--run-id", run_id,
+                "--health-url", settings.SYSTEM_UPDATE_HEALTH_URL,
+            ]
+            with log_path.open("a", encoding="utf-8") as log_file:
+                proc = subprocess.Popen(
+                    command,
+                    cwd=str(_repo_root()),
+                    env=env,
+                    stdout=log_file,
+                    stderr=subprocess.STDOUT,
+                    start_new_session=True,
+                )
+            _handoff_update_lock(run_id=run_id, pid=proc.pid)
+        except Exception:
+            _release_update_lock(run_id=run_id)
+            raise
         _write_status({
             "runId": run_id,
             "pid": proc.pid,
@@ -761,6 +868,8 @@ def status_payload(*, include_log: bool = True) -> dict[str, Any]:
     runtime["currentCommit"] = _commit_info(current_sha) if current_sha else None
     runtime["settings"] = load_update_settings()
     runtime["history"] = read_history(20)
+    lock_owner = _read_update_lock_owner() if _repo_update_lock_dir().exists() else {}
+    runtime["updateLock"] = lock_owner if _pid_running(lock_owner.get("pid")) else None
     runtime["running"] = _pid_running(runtime.get("pid")) and runtime.get("phase") not in {"success", "failed", "rolled_back", "idle"}
     if include_log:
         runtime["logs"] = _tail(runtime.get("logFile"), 120)
