@@ -294,34 +294,36 @@ export default function MonthlySendPage() {
   }, [setEntityId]);
 
   const loadTemplate = useCallback(async () => {
-    const res = await authenticatedFetch("/api/v1/finance/sales-report/template", { cache: "no-store" });
+    if (!companyName) return;
+    const res = await authenticatedFetch(`/api/v1/finance/sales-report/template?company=${encodeURIComponent(companyName)}`, { cache: "no-store" });
     const data = await res.json();
     if (!res.ok) throw new Error(data.detail || "加载失败");
     setTemplate(data);
     setToText((data.toAddrs || []).join(", "));
     setCcText((data.ccAddrs || []).join(", "));
-  }, []);
+  }, [companyName]);
 
   const loadPeriods = useCallback(() => {
-    authenticatedFetch("/api/v1/finance/periods", { cache: "no-store" })
+    if (!companyName) return;
+    authenticatedFetch(`/api/v1/finance/periods?company=${encodeURIComponent(companyName)}`, { cache: "no-store" })
       .then((r) => r.json())
       .then(setPeriods)
       .catch(() => {});
-  }, []);
+  }, [companyName]);
 
   const loadFiles = useCallback(() => {
-    if (!sel) return;
+    if (!sel || !companyName) return;
     const seq = ++filesRequestSeq.current;
-    authenticatedFetch(`/api/v1/finance/${sel.year}/${sel.month}/files`, { cache: "no-store" })
+    authenticatedFetch(`/api/v1/finance/${sel.year}/${sel.month}/files?company=${encodeURIComponent(companyName)}`, { cache: "no-store" })
       .then((r) => r.json())
       .then((rows) => { if (seq === filesRequestSeq.current) setFiles(rows); })
       .catch(() => {});
-  }, [sel]);
+  }, [companyName, sel]);
 
   const loadBusiness = useCallback(() => {
-    if (!sel) return;
+    if (!sel || !companyName || !entityId) return;
     const seq = ++businessRequestSeq.current;
-    authenticatedFetch(`/api/v1/finance/${sel.year}/${sel.month}/refresh-business`, {
+    authenticatedFetch(`/api/v1/finance/${sel.year}/${sel.month}/refresh-business?company=${encodeURIComponent(companyName)}&legal_entity_id=${entityId}`, {
       method: "POST",
       cache: "no-store",
     })
@@ -332,16 +334,19 @@ export default function MonthlySendPage() {
       })
       .then((data) => { if (seq === businessRequestSeq.current) setBusinessStatus(data); })
       .catch(() => { if (seq === businessRequestSeq.current) setBusinessStatus(null); });
-  }, [sel]);
+  }, [companyName, entityId, sel]);
 
   const loadUnbilled = useCallback(() => {
-    if (!sel) return;
+    if (!sel || !companyName || !domesticSupportedByEntity) {
+      setUnbilled(null);
+      return;
+    }
     const seq = ++unbilledRequestSeq.current;
-    authenticatedFetch(`/api/v1/finance/unbilled/preview?year=${sel.year}&month=${sel.month}`, { cache: "no-store" })
+    authenticatedFetch(`/api/v1/finance/unbilled/preview?year=${sel.year}&month=${sel.month}&company=${encodeURIComponent(companyName)}`, { cache: "no-store" })
       .then((r) => (r.ok ? r.json() : null))
       .then((data) => { if (seq === unbilledRequestSeq.current) setUnbilled(data); })
       .catch(() => {});
-  }, [sel]);
+  }, [companyName, domesticSupportedByEntity, sel]);
 
   const loadMatch = useCallback(() => {
     if (!sel) return;
