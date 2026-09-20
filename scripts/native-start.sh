@@ -1,5 +1,5 @@
 #!/bin/bash
-# ecommerce-dashboard 原生启动脚本（由 LaunchAgent com.gino.ecommerce-dashboard 调用）
+# 电商工作平台原生启动脚本（LaunchAgent label 由 SYSTEM_UPDATE_LAUNCH_LABEL 配置；旧安装可继续沿用 com.gino.ecommerce-dashboard）
 # 依赖：原生 PostgreSQL + Redis 已在跑；backend/.venv 已建；前端已 build
 # 代码目录可替换；业务数据、备份和日志可通过 .env 放到仓库之外。
 ROOT="${PROJECT_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
