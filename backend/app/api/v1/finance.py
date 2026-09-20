@@ -13,6 +13,7 @@ from app.models.bank import BankTransaction
 from app.models.tax import TaxInvoice
 from app.services import finance_sales_report_service as sales_report_service
 from app.services import finance_center_service
+from app.services import finance_closing_service
 from app.services import finance_projection_service
 from app.services import finance_service
 from app.services import monthly_intake_service
@@ -128,26 +129,62 @@ def refresh_monthly_business(
     year: int,
     month: int,
     company: str = "",
+    legal_entity_id: int | None = None,
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
-    """月结读取业务库：同步财务事项并返回销售/成本完整性，不接收业务源文件。"""
+    """月结读取业务库：主体隔离 + FinanceEntry 同步，不再接收业务源文件。"""
     finance_service.validate_period(year, month)
-    company_name = company or finance_service.DEFAULT_COMPANY
+    entity = finance_center_service.resolve_entity(db, legal_entity_id)
+    if company and entity.name != company:
+        matched = finance_closing_service.resolve_entity_by_name(db, company)
+        if matched is None:
+            raise HTTPException(status_code=404, detail="公司主体不存在")
+        entity = matched
+    company_name = entity.name
+
+    # 全量同步是幂等的：内销进入当前默认中国主体，外贸按各自订单/Shipment 的主体归属。
     sync_result = finance_projection_service.sync_business_period(
         db,
         year=year,
         month=month,
-        business_scope="domestic",
+        business_scope="all",
     )
-    template = sales_report_service.get_or_create_template(db, company_name)
-    report = sales_report_service.build_report(db, year, month, template)
-    summary = report.get("summary") or {}
-    missing = summary.get("costMissingDetail") or []
+
+    # 现有内销销售主表尚未拆 legal_entity_id，因此只允许默认主体读取国内销售/月结口径；
+    # 其他主体只读取自己的 FinanceEntry，避免把浙江公司的销售复制过去。
+    domestic_supported = bool(entity.is_default and "domestic" in (entity.business_scopes or []))
+    if domestic_supported:
+        template = sales_report_service.get_or_create_template(db, company_name)
+        report = sales_report_service.build_report(db, year, month, template)
+        summary = report.get("summary") or {}
+        missing = summary.get("costMissingDetail") or []
+    else:
+        summary = {
+            "orderCount": 0,
+            "warehouseCount": 0,
+            "totalQuantity": "0",
+            "salesAmount": "0",
+            "costAmount": "0",
+            "costIncomplete": False,
+            "costMissingDetail": [],
+        }
+        missing = []
+
+    foreign_summary = finance_closing_service.foreign_trade_summary(
+        db,
+        legal_entity_id=entity.id,
+        year=year,
+        month=month,
+    )
     return {
         "ready": not bool(summary.get("costIncomplete")),
         "source": "business_database",
-        "salesSource": "sales_orders",
-        "costSource": "jackyun_goods_documents",
+        "legalEntityId": entity.id,
+        "company": company_name,
+        "businessScopes": entity.business_scopes or [],
+        "domesticSupported": domestic_supported,
+        "salesSource": "sales_orders" if domestic_supported else "",
+        "costSource": "jackyun_goods_documents" if domestic_supported else "",
         "salesOrderCount": int(summary.get("orderCount") or 0),
         "warehouseCount": int(summary.get("warehouseCount") or 0),
         "totalQuantity": str(summary.get("totalQuantity") or "0"),
@@ -156,6 +193,8 @@ def refresh_monthly_business(
         "costIncomplete": bool(summary.get("costIncomplete")),
         "costMissingCount": len(missing),
         "costMissingDetail": missing,
+        "foreignEntryCount": foreign_summary["rowCount"],
+        "foreignTotalsByCurrency": foreign_summary["totalsByCurrency"],
         "sync": sync_result,
     }
 
