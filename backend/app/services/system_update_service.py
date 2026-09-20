@@ -41,6 +41,19 @@ def _repo_root() -> Path:
     return Path(__file__).resolve().parents[3]
 
 
+def _remote_repository_name(remote_url: str) -> str:
+    """Extract the repository name from HTTPS/SSH Git remotes."""
+    value = (remote_url or "").strip().rstrip("/")
+    if value.endswith(".git"):
+        value = value[:-4]
+    return re.split(r"[:/]", value)[-1].lower() if value else ""
+
+
+def _is_legacy_repo_remote(remote_url: str) -> bool:
+    """The old ecommerce-dashboard repository must never be used as the update source."""
+    return _remote_repository_name(remote_url) == "ecommerce-dashboard"
+
+
 def _state_dir() -> Path:
     path = Path(settings.DATA_DIR).expanduser() / "system-update"
     path.mkdir(parents=True, exist_ok=True)
@@ -617,7 +630,19 @@ def update_readiness() -> dict[str, Any]:
 
         try:
             remote_url = _git("remote", "get-url", cfg["remote"], timeout=10)
-            add("remote", "Git 远端", "ok", f"{cfg['remote']} · {remote_url}")
+            legacy_remote = _is_legacy_repo_remote(remote_url)
+            add(
+                "remote",
+                "Git 远端",
+                "error" if legacy_remote else "ok",
+                (
+                    "当前运行服务仍指向旧仓库 ecommerce-dashboard；"
+                    "请把 LaunchAgent / SYSTEM_UPDATE_REPO_ROOT 切换到 ecommerce-workspace 后再更新"
+                    if legacy_remote
+                    else f"{cfg['remote']} · {remote_url}"
+                ),
+                blocking=legacy_remote,
+            )
         except Exception as exc:
             add("remote", "Git 远端", "error", str(exc), blocking=True)
 

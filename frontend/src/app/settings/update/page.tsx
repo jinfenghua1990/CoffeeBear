@@ -102,7 +102,12 @@ function blockerReason(
   if (status.running) return "更新正在执行。";
   if (status.dirty) return "本地存在未提交修改，为避免覆盖，已禁止自动更新。";
   if (status.diverged) return "本地与远端分支已经分叉，需要先人工处理 Git 历史。";
-  if (readiness && !readiness.ready) return `环境自检有 ${readiness.blockingCount} 项阻塞，请先处理。`;
+  if (readiness && !readiness.ready) {
+    const blocker = readiness.checks.find((item) => item.blocking && item.status === "error");
+    return blocker
+      ? `${blocker.label}：${blocker.detail}`
+      : `环境自检有 ${readiness.blockingCount} 项阻塞，请先处理。`;
+  }
   if (!status.updateAvailable) return "当前没有待安装的新版本。";
   return "";
 }

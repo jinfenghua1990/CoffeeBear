@@ -8,6 +8,12 @@ import pytest
 from app.services import system_update_service as service
 
 
+def test_legacy_repository_remote_detection():
+    assert service._is_legacy_repo_remote("git@github.com:jinfenghua1990/ecommerce-dashboard.git") is True
+    assert service._is_legacy_repo_remote("https://github.com/jinfenghua1990/ecommerce-dashboard") is True
+    assert service._is_legacy_repo_remote("https://github.com/jinfenghua1990/ecommerce-workspace.git") is False
+
+
 def test_update_settings_validation_and_cross_midnight_window():
     cfg = service._validate_settings({
         "enabled": True,
