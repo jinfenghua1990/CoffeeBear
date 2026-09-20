@@ -208,6 +208,7 @@ export type SystemUpdateCommit = {
   shortSha: string;
   subject: string;
   committedAt: string;
+  version?: string;
 };
 
 export type SystemUpdateHistory = {
