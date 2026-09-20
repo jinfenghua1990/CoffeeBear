@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { authenticatedFetch, logout } from "@/lib/api";
+import { authenticatedFetch, changePassword, logout } from "@/lib/api";
 import { MODULES, moduleWorkspace, resolveModule } from "@/lib/navigation";
 import { syncWorkspaceUrl } from "@/lib/workspace/url-sync";
 import ThemeToggle from "@/components/theme-toggle";
@@ -67,6 +67,12 @@ export default function TopBar() {
     (module) => module.showInTop !== false && moduleWorkspace(module) === activeWorkspace,
   );
   const [openMenu, setOpenMenu] = useState<"workspace" | "sync" | "account" | null>(null);
+  const [passwordOpen, setPasswordOpen] = useState(false);
+  const [pwOld, setPwOld] = useState("");
+  const [pwNew, setPwNew] = useState("");
+  const [pwConfirm, setPwConfirm] = useState("");
+  const [pwError, setPwError] = useState("");
+  const [pwBusy, setPwBusy] = useState(false);
   const [keyword, setKeyword] = useState("");
   const [groups, setGroups] = useState<SearchGroups>(EMPTY_GROUPS);
   const [searchOpen, setSearchOpen] = useState(false);
@@ -110,6 +116,15 @@ export default function TopBar() {
   }, []);
 
   useEffect(() => {
+    if (!passwordOpen) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape" && !pwBusy) setPasswordOpen(false);
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [passwordOpen, pwBusy]);
+
+  useEffect(() => {
     const trimmed = keyword.trim();
     if (!trimmed) {
       setGroups(EMPTY_GROUPS);
@@ -144,6 +159,34 @@ export default function TopBar() {
     const trimmed = keyword.trim();
     if (!trimmed) return;
     go(groups.products.length > 0 ? `/products?q=${encodeURIComponent(trimmed)}` : `/sales?q=${encodeURIComponent(trimmed)}`);
+  }
+
+  async function submitPasswordChange() {
+    setPwError("");
+    if (pwNew.length < 8) {
+      setPwError("新密码至少 8 位。");
+      return;
+    }
+    if (pwNew !== pwConfirm) {
+      setPwError("两次输入的新密码不一致。");
+      return;
+    }
+    setPwBusy(true);
+    try {
+      await changePassword(pwOld, pwNew);
+    } catch (error) {
+      setPwError(error instanceof Error ? error.message : String(error));
+      setPwBusy(false);
+    }
+  }
+
+  function closePasswordModal() {
+    if (pwBusy) return;
+    setPasswordOpen(false);
+    setPwOld("");
+    setPwNew("");
+    setPwConfirm("");
+    setPwError("");
   }
 
   const syncDot =
@@ -344,7 +387,7 @@ export default function TopBar() {
         </Link>
 
         <Link
-          href="/settings"
+          href="/settings/backup"
           prefetch={false}
           className={`flex h-8 items-center gap-1.5 rounded-lg px-2 text-[12px] font-medium transition-colors ${
             pathname.startsWith("/settings") || pathname.startsWith("/automation")
@@ -375,14 +418,17 @@ export default function TopBar() {
           </button>
           {openMenu === "account" && (
             <div className="absolute right-0 top-full z-dropdown mt-1.5 w-44 app-popover rounded-xl border p-1.5 shadow-lg">
-              <Link
-                href="/settings#account-security"
-                prefetch={false}
-                onClick={() => setOpenMenu(null)}
-                className="block rounded-lg px-3 py-2 text-[13px] text-slate-700 hover:bg-slate-50"
+              <button
+                type="button"
+                onClick={() => {
+                  setOpenMenu(null);
+                  setPwError("");
+                  setPasswordOpen(true);
+                }}
+                className="block w-full rounded-lg px-3 py-2 text-left text-[13px] text-slate-700 hover:bg-slate-50"
               >
-                账号安全
-              </Link>
+                修改管理员密码
+              </button>
               {process.env.NEXT_PUBLIC_ACCESS_MODE !== "open" && (
                 <button
                   type="button"
@@ -400,6 +446,92 @@ export default function TopBar() {
           )}
         </div>
       </div>
+
+      {passwordOpen && (
+        <div
+          className="fixed inset-0 z-modal flex items-center justify-center bg-slate-950/35 p-4 backdrop-blur-[1px]"
+          role="dialog"
+          aria-modal="true"
+          aria-label="修改管理员密码"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) closePasswordModal();
+          }}
+        >
+          <div className="w-full max-w-md overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-2xl dark:border-slate-700 dark:bg-slate-900">
+            <div className="flex items-start justify-between gap-4 border-b border-slate-200 px-5 py-4 dark:border-slate-700">
+              <div>
+                <h2 className="text-[15px] font-semibold text-slate-900 dark:text-slate-100">修改管理员密码</h2>
+                <p className="mt-1 text-[11px] leading-5 text-slate-500 dark:text-slate-300">修改成功后会退出当前登录，需要使用新密码重新登录。</p>
+              </div>
+              <button
+                type="button"
+                onClick={closePasswordModal}
+                disabled={pwBusy}
+                className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-slate-200 text-lg leading-none text-slate-500 hover:bg-slate-50 disabled:opacity-40 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800"
+                aria-label="关闭"
+              >
+                ×
+              </button>
+            </div>
+
+            <div className="space-y-4 p-5">
+              <label className="block">
+                <span className="text-[11px] font-medium text-slate-600 dark:text-slate-300">当前密码</span>
+                <input
+                  type="password"
+                  autoComplete="current-password"
+                  value={pwOld}
+                  onChange={(event) => setPwOld(event.target.value)}
+                  className="app-input-control mt-1.5 block h-10 w-full rounded-lg px-3 text-sm"
+                  placeholder="请输入当前管理员密码"
+                />
+              </label>
+              <label className="block">
+                <span className="text-[11px] font-medium text-slate-600 dark:text-slate-300">新密码</span>
+                <input
+                  type="password"
+                  autoComplete="new-password"
+                  value={pwNew}
+                  onChange={(event) => setPwNew(event.target.value)}
+                  className="app-input-control mt-1.5 block h-10 w-full rounded-lg px-3 text-sm"
+                  placeholder="至少 8 位"
+                />
+              </label>
+              <label className="block">
+                <span className="text-[11px] font-medium text-slate-600 dark:text-slate-300">确认新密码</span>
+                <input
+                  type="password"
+                  autoComplete="new-password"
+                  value={pwConfirm}
+                  onChange={(event) => setPwConfirm(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter" && !pwBusy && pwOld && pwNew && pwConfirm) void submitPasswordChange();
+                  }}
+                  className="app-input-control mt-1.5 block h-10 w-full rounded-lg px-3 text-sm"
+                  placeholder="再次输入新密码"
+                />
+              </label>
+              {pwError && (
+                <div className="rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-[11px] leading-5 text-rose-700 dark:border-rose-500/40 dark:bg-rose-500/10 dark:text-rose-200">
+                  {pwError}
+                </div>
+              )}
+            </div>
+
+            <div className="flex items-center justify-end gap-2 border-t border-slate-200 bg-slate-50/70 px-5 py-3 dark:border-slate-700 dark:bg-slate-800/50">
+              <button type="button" onClick={closePasswordModal} disabled={pwBusy} className="app-button-secondary h-9 rounded-lg px-4 text-[12px] font-medium disabled:opacity-40">取消</button>
+              <button
+                type="button"
+                onClick={() => void submitPasswordChange()}
+                disabled={pwBusy || !pwOld || pwNew.length < 8 || !pwConfirm}
+                className="app-button-primary h-9 rounded-lg px-4 text-[12px] font-medium disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                {pwBusy ? "修改中…" : "确认修改"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </header>
   );
 }

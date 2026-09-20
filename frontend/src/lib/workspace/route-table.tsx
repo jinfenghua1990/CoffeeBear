@@ -282,12 +282,6 @@ const ROUTES: RouteEntry[] = [
     load: () => import("@/app/logistics/bills/page"),
   },
   {
-    pathname: "/settings",
-    title: "基础设置",
-    businessType: "master",
-    load: () => import("@/app/settings/page"),
-  },
-  {
     pathname: "/settings/backup",
     title: "备份与容灾",
     businessType: "master",
@@ -308,6 +302,7 @@ const ENTRY_BY_PATH = new Map(ROUTES.map((entry) => [entry.pathname, entry]));
  * 采购域旧地址由 lib/workbench-navigation.ts 的 workbenchHref() 统一处理。
  */
 const IN_PAGE_REDIRECTS: Record<string, string> = {
+  "/settings": "/settings/backup",
   // 这两个旧导入地址必须直连数据中心：经采购工作台的 imports 视图会先开一个「数据接入」Tab
   // 再被工作台自己重定向走，留下一个用户没要过的残留 Tab。
   "/alibaba1688-import": "/data-center-import?tab=alibaba1688",
