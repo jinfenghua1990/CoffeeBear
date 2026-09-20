@@ -54,6 +54,9 @@ jobs:
       - name: Migrate
         run: |
           cd backend && alembic upgrade head
+      - name: Migration drift check (blocking)
+        run: |
+          cd backend && alembic check
       - name: Validate ops scripts and FK orphan audit
         env:
           POSTGRES_HOST: 127.0.0.1
@@ -180,4 +183,4 @@ jobs:
           rm -f deploy/zspace/.env
       - name: Build unified production image
         run: |
-          docker build -f Dockerfile -t ecommerce-dashboard:ci .
+          docker build -f Dockerfile -t ecommerce-workspace:ci .
