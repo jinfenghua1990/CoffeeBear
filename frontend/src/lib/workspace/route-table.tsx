@@ -252,6 +252,12 @@ const ROUTES: RouteEntry[] = [
     load: () => import("@/app/finance/monthly-send/page"),
   },
   {
+    pathname: "/finance/bank-summary",
+    title: "银行汇总",
+    businessType: "master",
+    load: () => import("@/app/finance/bank-summary/page"),
+  },
+  {
     pathname: "/finance/bank-transactions",
     title: "银行流水",
     businessType: "master",
