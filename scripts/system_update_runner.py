@@ -8,6 +8,7 @@ replace the code that is currently performing the update.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -287,6 +288,18 @@ class Runner:
 
     def migrate(self) -> None:
         self.status("migrating", 52, "执行数据库迁移")
+        actual_sha = self.git("rev-parse", "HEAD")
+        if actual_sha != self.args.target:
+            raise RuntimeError(
+                f"执行迁移前 HEAD 已偏离目标版本：{actual_sha} != {self.args.target}"
+            )
+        migration_file = self.root / "backend" / "alembic" / "versions" / "drift20260920_align_supplier_nullable.py"
+        migration_marker = "missing"
+        if migration_file.is_file():
+            migration_marker = hashlib.sha256(migration_file.read_bytes()).hexdigest()[:16]
+        self.log(
+            f"迁移代码确认：HEAD={actual_sha} drift20260920.sha256={migration_marker}"
+        )
         self.migration_started = True
         self.run(
             [str(self.venv_python), "-m", "alembic", "upgrade", "head"],
