@@ -8,6 +8,8 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import Base, PkMixin, TimestampMixin
 
+UNIT_COST = Numeric(24, 10)
+
 
 class ConsumablePurchase(Base, PkMixin, TimestampMixin):
     __tablename__ = "consumable_purchases"
@@ -42,7 +44,7 @@ class ConsumablePurchaseItem(Base, PkMixin, TimestampMixin):
     quantity: Mapped[Decimal] = mapped_column(Numeric(18, 4))
     received_qty: Mapped[Decimal] = mapped_column(Numeric(18, 4), default=Decimal("0"))
     # 单价 10 位小数：总金额对齐订单实付时（如 800 ÷ 1050），4 位小数会产生分毫尾差，发票口径对不上。
-    unit_cost: Mapped[Decimal] = mapped_column(Numeric(18, 10))
+    unit_cost: Mapped[Decimal] = mapped_column(UNIT_COST)
 
 
 class ConsumableReceipt(Base, PkMixin, TimestampMixin):
