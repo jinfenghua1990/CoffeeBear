@@ -344,30 +344,10 @@ export default function TopBar() {
         </Link>
 
         <Link
-          href="/settings/update"
-          prefetch={false}
-          className={`flex h-8 items-center gap-1.5 rounded-lg px-2 text-[12px] font-medium transition-colors ${
-            pathname.startsWith("/settings/update")
-              ? "bg-slate-100 text-slate-800"
-              : "text-slate-600 hover:bg-slate-100 hover:text-slate-900"
-          }`}
-          aria-label="系统更新"
-          title="系统更新"
-        >
-          <svg viewBox="0 0 20 20" fill="none" className="h-[17px] w-[17px] shrink-0" aria-hidden="true">
-            <path d="M15.8 7A6.2 6.2 0 0 0 5.2 4.6L3.8 6" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
-            <path d="M3.8 3.7V6h2.3" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
-            <path d="M4.2 13A6.2 6.2 0 0 0 14.8 15.4l1.4-1.4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
-            <path d="M16.2 16.3V14h-2.3" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
-          </svg>
-          <span>系统更新</span>
-        </Link>
-
-        <Link
           href="/settings"
           prefetch={false}
           className={`flex h-8 items-center gap-1.5 rounded-lg px-2 text-[12px] font-medium transition-colors ${
-            pathname === "/settings"
+            pathname.startsWith("/settings") || pathname.startsWith("/automation")
               ? "bg-slate-100 text-slate-800"
               : "text-slate-600 hover:bg-slate-100 hover:text-slate-900"
           }`}
