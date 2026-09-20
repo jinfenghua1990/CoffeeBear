@@ -49,8 +49,14 @@ type CurrencyTotal = {
   actualExpense: string;
   estimatedIncome: string;
   estimatedExpense: string;
+  actualCashInflow: string;
+  actualCashOutflow: string;
+  forecastCashInflow: string;
+  forecastCashOutflow: string;
   actualProfit: string;
   estimatedProfit: string;
+  actualNetCash: string;
+  forecastNetCash: string;
 };
 
 type CenterData = {
@@ -151,6 +157,8 @@ export default function FinanceCenterPage() {
   const [entryOpen, setEntryOpen] = useState(false);
   const [entityOpen, setEntityOpen] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [syncing, setSyncing] = useState(false);
+  const [syncMessage, setSyncMessage] = useState("");
 
   const periodParts = useMemo(() => parseMonth(period), [period]);
 
@@ -249,6 +257,32 @@ export default function FinanceCenterPage() {
     }
   }
 
+  async function syncBusiness() {
+    setSyncing(true);
+    setSyncMessage("");
+    setError("");
+    try {
+      const params = new URLSearchParams({
+        year: String(periodParts.year),
+        month: String(periodParts.month),
+        business_scope: scope,
+      });
+      const res = await authenticatedFetch("/api/v1/finance/sync-business?" + params.toString(), {
+        method: "POST",
+      });
+      const body = await res.json();
+      if (!res.ok) throw new Error(body.detail || "业务数据同步失败");
+      setSyncMessage(
+        `已同步：新增 ${body.created ?? 0} · 更新 ${body.updated ?? 0} · 清理 ${body.deleted ?? 0}`
+      );
+      await loadCenter();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "业务数据同步失败");
+    } finally {
+      setSyncing(false);
+    }
+  }
+
   async function saveEntry() {
     if (!entityId) return;
     setSaving(true);
@@ -331,6 +365,13 @@ export default function FinanceCenterPage() {
             </p>
           </div>
           <div className="flex flex-wrap gap-2">
+            <button
+              onClick={() => void syncBusiness()}
+              disabled={syncing}
+              className="app-button-secondary rounded-lg px-3 py-2 text-[11px] font-medium disabled:opacity-50"
+            >
+              {syncing ? "同步中…" : "同步业务数据"}
+            </button>
             <button onClick={() => setEntityOpen((v) => !v)} className="app-button-secondary rounded-lg px-3 py-2 text-[11px] font-medium">
               + 公司主体
             </button>
@@ -342,6 +383,7 @@ export default function FinanceCenterPage() {
       </header>
 
       {error && <div className="mt-4 rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-[12px] text-rose-700">{error}</div>}
+      {syncMessage && <div className="mt-4 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-2.5 text-[11px] text-emerald-700">{syncMessage}</div>}
 
       <section className="mt-4 app-card rounded-xl p-3">
         <div className="flex flex-wrap items-center gap-3">
@@ -523,10 +565,12 @@ export default function FinanceCenterPage() {
                   <span className="text-[9px] text-slate-400">实际 / 含预计</span>
                 </div>
                 <div className="mt-3 grid grid-cols-2 gap-x-3 gap-y-2 text-[10px]">
-                  <Metric label="收入" value={money(row.actualIncome, row.currency)} />
-                  <Metric label="支出" value={money(row.actualExpense, row.currency)} />
+                  <Metric label="实际收入" value={money(row.actualIncome, row.currency)} />
+                  <Metric label="实际支出" value={money(row.actualExpense, row.currency)} />
                   <Metric label="实际利润" value={money(row.actualProfit, row.currency)} strong />
                   <Metric label="预计利润" value={money(row.estimatedProfit, row.currency)} strong />
+                  <Metric label="已结算净现金" value={money(row.actualNetCash, row.currency)} />
+                  <Metric label="含待结算现金预测" value={money(row.forecastNetCash, row.currency)} />
                 </div>
               </div>
             ))}
