@@ -641,8 +641,11 @@ export default function MonthlySendPage() {
   }
 
   const businessReady = Boolean(businessStatus?.ready);
-  const ready = Boolean(businessReady && bankTx && bankReceipt && unbilled);
-  const readyCount = [bankTx, bankReceipt, unbilled].filter(Boolean).length;
+  const needsUnbilled = Boolean(businessStatus?.domesticSupported ?? domesticSupportedByEntity);
+  const ready = Boolean(businessReady && bankTx && bankReceipt && (!needsUnbilled || unbilled));
+  const readyCount = [bankTx, bankReceipt, ...(needsUnbilled ? [unbilled] : [])].filter(Boolean).length;
+  const requiredDeliveryCount = needsUnbilled ? 3 : 2;
+  const hasForeignSummary = (businessStatus?.foreignEntryCount ?? 0) > 0;
   const latestPkg = period?.packages.length ? period.packages[period.packages.length - 1] : null;
   const latestSentPkg = [...(period?.packages || [])].reverse().find((pkg) => pkg.status === "SENT") || null;
   const attachmentSize = (bankTx?.size || 0) + (bankReceipt?.size || 0);
@@ -736,17 +739,17 @@ export default function MonthlySendPage() {
 
   return (
     <div className="mx-auto w-full max-w-[1500px] space-y-4 pb-8">
-      <nav aria-label="月度资料入库导航" className="sticky top-0 z-20 -mx-2 flex min-h-12 items-center gap-1 overflow-x-auto border-b border-slate-200 bg-white px-2 shadow-[0_1px_0_rgba(15,23,42,0.02)] sm:-mx-4 sm:px-4">
-        <Link href="/finance/monthly-send" className="mr-2 inline-flex shrink-0 items-center gap-2 px-1 py-3 text-sm font-semibold text-slate-800"><span className="inline-flex h-6 w-6 items-center justify-center rounded-md bg-blue-600 text-white"><svg viewBox="0 0 24 24" className="h-4 w-4" fill="none"><path d="M7 4h10v16H7V4Zm3 3h4M10 11h4M10 15h3" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" /></svg></span>月度资料入库</Link>
+      <nav aria-label="月结中心导航" className="sticky top-0 z-20 -mx-2 flex min-h-12 items-center gap-1 overflow-x-auto border-b border-slate-200 bg-white px-2 shadow-[0_1px_0_rgba(15,23,42,0.02)] sm:-mx-4 sm:px-4">
+        <Link href="/finance/monthly-send" className="mr-2 inline-flex shrink-0 items-center gap-2 px-1 py-3 text-sm font-semibold text-slate-800"><span className="inline-flex h-6 w-6 items-center justify-center rounded-md bg-blue-600 text-white"><svg viewBox="0 0 24 24" className="h-4 w-4" fill="none"><path d="M7 4h10v16H7V4Zm3 3h4M10 11h4M10 15h3" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" /></svg></span>月结中心</Link>
         <span className="shrink-0 px-1 text-slate-300">›</span>
         {([
-          ["monthly", "本月入库与发送"],
+          ["monthly", "本月月结与发送"],
           ["match", "付款发票匹配"],
           ["records", "发送记录"],
           ["archive", "资料归档"],
           ["ledger", "销售汇总台账"],
         ] as const).map(([key, label]) => (
-          <button key={key} type="button" onClick={() => setFinanceTab(key)} className={`relative shrink-0 px-4 py-3 text-sm font-medium transition-colors ${financeTab === key ? "text-blue-600" : "text-slate-600 hover:text-blue-600"}`}>
+          <button key={key} type="button" disabled={!domesticSupportedByEntity && (key === "match" || key === "ledger")} onClick={() => setFinanceTab(key)} className={`relative shrink-0 px-4 py-3 text-sm font-medium transition-colors disabled:cursor-not-allowed disabled:text-slate-300 ${financeTab === key ? "text-blue-600" : "text-slate-600 hover:text-blue-600"}`}>
             {label}{financeTab === key && <span className="absolute inset-x-3 bottom-0 h-0.5 rounded-full bg-blue-600" />}
           </button>
         ))}
@@ -754,7 +757,7 @@ export default function MonthlySendPage() {
       </nav>
 
       <header className="flex flex-wrap items-end justify-between gap-3 px-1">
-        <div><h1 className="text-2xl font-bold tracking-tight text-slate-900">月度资料入库</h1><p className="mt-1 text-sm text-slate-500">每月在这里上传业务源文件、完成校验计算，再统一整理并发送财务资料</p></div>
+        <div><h1 className="text-2xl font-bold tracking-tight text-slate-900">月结中心</h1><p className="mt-1 text-sm text-slate-500">按公司主体读取业务结果，核对交付资料，生成月度财务包并发送。</p></div>
         <button type="button" onClick={() => { setMailOpen(true); void loadMailStatus(); }} className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3.5 py-2 text-sm font-medium text-slate-700 shadow-sm hover:border-blue-300 hover:text-blue-600">
           <svg viewBox="0 0 24 24" className="h-4 w-4" fill="none" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="2" stroke="currentColor" strokeWidth="1.8" /><path d="m3 7 9 6 9-6" stroke="currentColor" strokeWidth="1.8" /></svg>
           设置邮箱{mailStatus && !mailStatus.configured && <span title="SMTP 未配置" className="h-1.5 w-1.5 rounded-full bg-rose-500" />}
@@ -762,6 +765,18 @@ export default function MonthlySendPage() {
       </header>
 
       <section className={`${CARD} flex flex-wrap items-center gap-3 px-3 py-3 sm:px-4`}>
+        <label className="min-w-[260px]">
+          <span className="sr-only">公司主体</span>
+          <select
+            value={entityId ?? ""}
+            onChange={(e) => setEntityId(Number(e.target.value) || null)}
+            className="h-9 w-full rounded-lg border border-slate-200 bg-white px-3 text-xs font-medium text-slate-700 shadow-sm"
+          >
+            {entities.map((row) => (
+              <option key={row.id} value={row.id}>{row.name}{row.isDefault ? " · 默认" : ""}</option>
+            ))}
+          </select>
+        </label>
         <div className="flex items-center rounded-lg border border-slate-200 bg-white shadow-sm">
           <button type="button" aria-label="上一个账期" onClick={() => setSendMonth(shiftMonthValue(sendMonth, -1))} className="px-3 py-2 text-lg leading-none text-slate-500 hover:bg-slate-50 hover:text-blue-600">‹</button>
           <label className="border-x border-slate-200 px-3 text-sm font-semibold text-slate-800"><span className="sr-only">账期</span><input type="month" value={sendMonth} onChange={(e) => setSendMonth(e.target.value)} className="w-[118px] border-0 bg-transparent p-0 text-sm font-semibold outline-none" /></label>
@@ -778,7 +793,7 @@ export default function MonthlySendPage() {
       {financeTab === "monthly" && <div className="grid items-start gap-4 xl:grid-cols-[minmax(0,1fr)_360px]">
         <section className={`${CARD} min-w-0 overflow-hidden`}>
           <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 px-4 py-4">
-            <div><h2 className="text-base font-semibold text-slate-900">本月处理清单 <span className="ml-1 text-slate-500">({readyCount}/3)</span></h2><p className="mt-1 text-xs text-slate-400">业务数据从销售中心与采购入库自动读取；这里仅整理银行资料、无票收入并发送给财务</p></div>
+            <div><h2 className="text-base font-semibold text-slate-900">本月处理清单 <span className="ml-1 text-slate-500">({readyCount}/{requiredDeliveryCount})</span></h2><p className="mt-1 text-xs text-slate-400">业务数据自动读取；这里按主体整理银行资料、系统生成资料并发送给财务</p></div>
             <div className="flex items-center gap-2"><button type="button" onClick={() => { uploadKind.current = "交易明细"; fileRef.current?.click(); }} disabled={busy} className="inline-flex items-center gap-1 rounded-lg border border-blue-200 bg-white px-3 py-2 text-xs font-medium text-blue-600 hover:bg-blue-50 disabled:opacity-50">＋ 新增资料</button><button type="button" onClick={() => { loadFiles(); loadPeriods(); loadBusiness(); loadUnbilled(); }} className="rounded-lg border border-slate-200 px-3 py-2 text-xs text-slate-600 hover:bg-slate-50">刷新</button></div>
           </div>
           <div className="hidden items-center gap-3 bg-slate-50 px-4 py-2 text-[11px] font-medium text-slate-500 md:grid md:grid-cols-[28px_minmax(180px,1.2fr)_minmax(150px,1fr)_58px_112px_88px_minmax(150px,1fr)_auto]">
