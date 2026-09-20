@@ -64,18 +64,20 @@ def build_summary(db: Session, *, year: int, month: int) -> dict[str, Any]:
         )
     } if month_ids else set()
 
+    account_ids = {row.id for row in accounts}
     all_by_account: dict[int | None, list[BankTransaction]] = defaultdict(list)
     month_by_account: dict[int | None, list[BankTransaction]] = defaultdict(list)
     for row in transactions:
-        all_by_account[row.account_id].append(row)
+        key = row.account_id if row.account_id in account_ids else None
+        all_by_account[key].append(row)
     for row in month_txns:
-        month_by_account[row.account_id].append(row)
+        key = row.account_id if row.account_id in account_ids else None
+        month_by_account[key].append(row)
 
     rows: list[dict[str, Any]] = []
-    account_ids = {row.id for row in accounts}
     # 历史脏数据可能没有 account_id；保留一个“未归属账户”行，避免汇总静默丢金额。
     account_keys: list[int | None] = [row.id for row in accounts]
-    if any(row.account_id not in account_ids for row in transactions):
+    if None in all_by_account:
         account_keys.append(None)
 
     total_balance = Decimal("0")
