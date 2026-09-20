@@ -8,7 +8,7 @@ SYSTEM_UPDATE_LAUNCH_LABEL ?= com.gino.ecommerce-dashboard
 LAUNCH_LABEL := gui/$(shell id -u)/$(SYSTEM_UPDATE_LAUNCH_LABEL)
 NATIVE_ENV = set -a; . "$(ROOT)/.env"; set +a; export DATABASE_URL="postgresql+psycopg://$$POSTGRES_USER:$$POSTGRES_PASSWORD@localhost:5432/$$POSTGRES_DB"; export REDIS_URL="redis://localhost:6379/0"; export DATA_DIR="$(ROOT)/data";
 
-.PHONY: help update-guard-check update-guard-install up restart status logs logs-api rebuild rebuild-fe test test-db lint tsc verify release-check secret-scan repo-hygiene smoke migrate migration-check exec-api backup restore-check orphan-audit backup-schedule-install backup-schedule-status backup-schedule-uninstall fresh
+.PHONY: help update-guard-check update-guard-install up restart status logs logs-api rebuild rebuild-fe test test-db lint tsc verify release-check secret-scan repo-hygiene smoke migrate migration-check exec-api backup cold-backup-kodo restore-check orphan-audit backup-schedule-install backup-schedule-status backup-schedule-uninstall fresh
 
 help: ## 列出所有 target
 	@awk 'BEGIN {FS = ":.*##"} /^[a-zA-Z_-]+:.*?##/ {printf "  \033[36m%-16s\033[0m %s\n", $1, $2}' $(MAKEFILE_LIST)
@@ -86,6 +86,9 @@ exec-api: ## 进入后端原生虚拟环境 shell
 
 backup: update-guard-check ## 备份 PostgreSQL 与 data/ 原始归档
 	./scripts/backup.sh
+
+cold-backup-kodo: update-guard-check ## 上传最新本地恢复点到七牛云 Kodo；只写入，不下载/取回/远端校验
+	@set -a; . "$(ROOT)/.env"; set +a; "$(VENV)/bin/python" "$(ROOT)/scripts/kodo-cold-upload.py"
 
 restore-check: ## 将最新备份恢复到临时库验证，生产库不做任何修改
 	bash ./scripts/restore-check.sh

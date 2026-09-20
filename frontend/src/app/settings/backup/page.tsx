@@ -1,10 +1,15 @@
 "use client";
 
-import { useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
+import {
+  getKodoColdBackupConfig,
+  saveKodoColdBackupConfig,
+  type KodoColdBackupConfig,
+} from "@/lib/api";
 
 type TabKey = "overview" | "config" | "restore" | "records" | "storage";
 type Tone = "green" | "blue" | "amber" | "slate";
-type StorageKey = "r2" | "b2" | "nas" | "other";
+type StorageKey = "r2" | "kodo" | "nas" | "other";
 
 function Pill({
   children,
@@ -263,6 +268,7 @@ function StorageRow({
   stateTone,
   onConfigure,
   secondary,
+  allowConnectionTest = true,
 }: {
   name: string;
   subtitle: string;
@@ -271,6 +277,7 @@ function StorageRow({
   stateTone: Tone;
   onConfigure: () => void;
   secondary?: string;
+  allowConnectionTest?: boolean;
 }) {
   return (
     <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-slate-100 bg-white px-3 py-3">
@@ -298,9 +305,11 @@ function StorageRow({
         <button type="button" onClick={onConfigure} className="rounded-md border border-slate-200 bg-white px-3 py-1.5 text-[9px] font-medium text-slate-600">
           配置
         </button>
-        <button type="button" onClick={onConfigure} className="rounded-md border border-slate-200 bg-white px-3 py-1.5 text-[9px] font-medium text-slate-600">
-          测试连接
-        </button>
+        {allowConnectionTest ? (
+          <button type="button" onClick={onConfigure} className="rounded-md border border-slate-200 bg-white px-3 py-1.5 text-[9px] font-medium text-slate-600">
+            测试连接
+          </button>
+        ) : null}
         {secondary ? (
           <button type="button" onClick={onConfigure} className="rounded-md border border-slate-200 bg-white px-3 py-1.5 text-[9px] font-medium text-slate-600">
             {secondary}
@@ -325,12 +334,12 @@ const STORAGE_DETAILS: Record<StorageKey, {
     fields: ["Endpoint", "Bucket", "Access Key ID", "Secret Access Key"],
     note: "凭据只保存到部署环境，不写入 GitHub。",
   },
-  b2: {
-    title: "Backblaze B2",
-    role: "冷备份",
-    desc: "每天生成一个可完整恢复的快照，底层去重，只上传发生变化的数据块。",
-    fields: ["Endpoint", "Bucket", "Key ID", "Application Key"],
-    note: "默认计划保留 90 个恢复点。",
+  kodo: {
+    title: "七牛云 Kodo",
+    role: "国内冷备 · 只写入",
+    desc: "使用标准存储作为国内冷备目标。系统只负责上传保存，不提供下载、取回、在线预览或远端恢复。",
+    fields: ["Bucket", "上传域名（Upload Host）", "Access Key", "Secret Key", "对象前缀"],
+    note: "密钥只保存到部署环境，不写入 GitHub。冷备通道不执行 GET / 下载 / 取回 / 远端校验；完整性在上传前本地完成。",
   },
   nas: {
     title: "本地 NAS",
@@ -353,6 +362,17 @@ export default function BackupSettingsPage() {
   const [selectedStorage, setSelectedStorage] = useState<StorageKey>("r2");
   const [notice, setNotice] = useState("");
   const [menuOpen, setMenuOpen] = useState(false);
+  const [kodoConfig, setKodoConfig] = useState<KodoColdBackupConfig | null>(null);
+  const [kodoLoading, setKodoLoading] = useState(true);
+  const [kodoSaving, setKodoSaving] = useState(false);
+  const [kodoForm, setKodoForm] = useState({
+    bucket: "",
+    uploadUrl: "",
+    prefix: "ecommerce-workspace/cold",
+    accessKey: "",
+    secretKey: "",
+    enabled: true,
+  });
 
   const tabs = useMemo(
     () =>
@@ -369,6 +389,77 @@ export default function BackupSettingsPage() {
   function showNotice(message: string) {
     setNotice(message);
     window.setTimeout(() => setNotice(""), 3200);
+  }
+
+  useEffect(() => {
+    let cancelled = false;
+    getKodoColdBackupConfig()
+      .then((config) => {
+        if (cancelled) return;
+        setKodoConfig(config);
+        setKodoForm((current) => ({
+          ...current,
+          bucket: config.bucket || "",
+          uploadUrl: config.uploadUrl || "",
+          prefix: config.prefix || "ecommerce-workspace/cold",
+          enabled: config.configured ? config.enabled : true,
+          accessKey: "",
+          secretKey: "",
+        }));
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setKodoConfig(null);
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setKodoLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  async function saveKodoConfig() {
+    if (!kodoForm.bucket.trim() || !kodoForm.uploadUrl.trim()) {
+      showNotice("请填写 Bucket 和上传域名。");
+      return;
+    }
+    if (!kodoConfig?.configured && (!kodoForm.accessKey.trim() || !kodoForm.secretKey.trim())) {
+      showNotice("首次配置需要填写 Access Key 和 Secret Key。");
+      return;
+    }
+    if (Boolean(kodoForm.accessKey.trim()) !== Boolean(kodoForm.secretKey.trim())) {
+      showNotice("Access Key 与 Secret Key 需要同时填写。");
+      return;
+    }
+
+    setKodoSaving(true);
+    try {
+      const saved = await saveKodoColdBackupConfig({
+        bucket: kodoForm.bucket.trim(),
+        uploadUrl: kodoForm.uploadUrl.trim(),
+        prefix: kodoForm.prefix.trim() || "ecommerce-workspace/cold",
+        accessKey: kodoForm.accessKey.trim(),
+        secretKey: kodoForm.secretKey.trim(),
+        enabled: kodoForm.enabled,
+      });
+      setKodoConfig(saved);
+      setKodoForm((current) => ({
+        ...current,
+        bucket: saved.bucket,
+        uploadUrl: saved.uploadUrl,
+        prefix: saved.prefix,
+        enabled: saved.enabled,
+        accessKey: "",
+        secretKey: "",
+      }));
+      showNotice(saved.enabled ? "Kodo 冷备配置已保存；仅允许上传写入。" : "Kodo 冷备配置已保存，当前保持停用。");
+    } catch (error) {
+      showNotice("保存失败：" + (error instanceof Error ? error.message : String(error)));
+    } finally {
+      setKodoSaving(false);
+    }
   }
 
   function openStorage(key: StorageKey) {
@@ -389,7 +480,7 @@ export default function BackupSettingsPage() {
           <div className="relative flex items-center gap-2">
             <button
               type="button"
-              onClick={() => showNotice("云端执行器尚未接入，当前不会触发真实 R2/B2 备份。")}
+              onClick={() => showNotice("云端执行器尚未接入，当前不会触发真实 R2/Kodo 备份。")}
               className="app-button-primary inline-flex h-9 items-center gap-2 rounded-lg px-4 text-[11px] font-medium"
             >
               <span className="text-[9px]">▶</span>
@@ -488,7 +579,7 @@ export default function BackupSettingsPage() {
                 <div className="mb-3 text-center text-[11px] font-semibold text-slate-800">存储目标</div>
                 <div className="space-y-2">
                   <ArchitectureItem icon="cloud" title="Cloudflare R2（主存储）" desc="S3 兼容对象存储 · 待配置" tone="amber" />
-                  <ArchitectureItem icon="box" title="Backblaze B2（冷备）" desc="每日完整恢复点 · 待配置" tone="blue" />
+                  <ArchitectureItem icon="box" title="七牛云 Kodo（国内冷备）" desc="标准存储 · 只写入 · 待密钥" tone="blue" />
                   <ArchitectureItem icon="nas" title="本地 NAS（可选）" desc="本地冷备 / 第三副本" tone="slate" />
                   <ArchitectureItem icon="box" title="其他存储（可扩展）" desc="AWS S3 / 阿里云 / 本地硬盘等" tone="slate" />
                 </div>
@@ -536,12 +627,13 @@ export default function BackupSettingsPage() {
                   secondary="查看文件"
                 />
                 <StorageRow
-                  name="Backblaze B2（冷备）"
-                  subtitle="每天完整可恢复快照，底层去重增量"
+                  name="七牛云 Kodo（国内冷备）"
+                  subtitle="标准存储；只上传保存，不下载、不取回、不在线预览"
                   tone="blue"
-                  state="待配置"
-                  stateTone="slate"
-                  onConfigure={() => openStorage("b2")}
+                  state={kodoLoading ? "读取配置" : kodoConfig?.configured ? (kodoConfig.enabled ? "已配置" : "已配置 · 停用") : "待填写密钥"}
+                  stateTone={kodoConfig?.configured && kodoConfig.enabled ? "green" : "amber"}
+                  onConfigure={() => openStorage("kodo")}
+                  allowConnectionTest={false}
                 />
                 <StorageRow
                   name="本地 NAS（可选）"
@@ -634,7 +726,7 @@ export default function BackupSettingsPage() {
               <div>
                 <div className="text-[12px] font-semibold text-amber-700">冷备份 · 每日恢复点</div>
                 <div className="mt-1 text-[10px] leading-5 text-slate-500">
-                  每天生成一个可完整恢复的快照，底层去重增量，只上传发生变化的数据块。
+                  每天把本地已完成校验的恢复点上传到七牛云 Kodo 标准存储；冷备通道只写入，不执行下载、取回、在线预览或远端恢复。
                 </div>
               </div>
               <Pill tone="amber">计划启用</Pill>
@@ -642,9 +734,9 @@ export default function BackupSettingsPage() {
             <div className="mt-4 grid gap-3 md:grid-cols-4">
               {[
                 ["执行时间", "每天 04:00"],
-                ["默认目标", "Backblaze B2"],
-                ["保留策略", "90 个恢复点"],
-                ["底层方式", "去重 + 增量上传"],
+                ["默认目标", "七牛云 Kodo"],
+                ["启用条件", "填写密钥后启用"],
+                ["访问规则", "只写入 · 禁止取回"],
               ].map(([label, value]) => (
                 <div key={label} className="rounded-lg bg-slate-50 px-3 py-3">
                   <div className="text-[9px] text-slate-400">{label}</div>
@@ -662,14 +754,14 @@ export default function BackupSettingsPage() {
             <div className="flex flex-wrap items-start justify-between gap-3">
               <div>
                 <div className="text-[13px] font-semibold text-slate-900">恢复管理</div>
-                <p className="mt-1 text-[10px] leading-5 text-slate-400">按日期选择恢复点，再选择 R2 / B2 / NAS 作为恢复来源。</p>
+                <p className="mt-1 text-[10px] leading-5 text-slate-400">恢复来源仅使用 R2 / NAS。七牛云 Kodo 冷备按“只存不取”执行，不提供下载、取回、预览或恢复入口。</p>
               </div>
               <Pill>执行器接入后开放</Pill>
             </div>
             <div className="mt-5 grid gap-3 md:grid-cols-4">
               {[
                 ["1", "选择恢复点", "按日期选择目标版本"],
-                ["2", "选择来源", "R2 / B2 / NAS"],
+                ["2", "选择来源", "R2 / NAS（不含 Kodo）"],
                 ["3", "自动校验", "manifest / Hash / 数据库"],
                 ["4", "确认恢复", "恢复并执行健康检查"],
               ].map(([step, title, desc]) => (
@@ -706,7 +798,7 @@ export default function BackupSettingsPage() {
             <div className="space-y-2">
               {([
                 ["r2", "Cloudflare R2", "主存储"],
-                ["b2", "Backblaze B2", "冷备份"],
+                ["kodo", "七牛云 Kodo", "国内冷备 · 只写入"],
                 ["nas", "本地 NAS", "可选冷备"],
                 ["other", "其他存储", "可扩展"],
               ] as Array<[StorageKey, string, string]>).map(([key, title, role]) => (
@@ -733,33 +825,138 @@ export default function BackupSettingsPage() {
                 <div className="mt-1 text-[10px] font-medium text-blue-600">{STORAGE_DETAILS[selectedStorage].role}</div>
                 <p className="mt-2 text-[10px] leading-5 text-slate-500">{STORAGE_DETAILS[selectedStorage].desc}</p>
               </div>
-              <Pill tone={selectedStorage === "r2" ? "amber" : "slate"}>待配置</Pill>
+              <Pill tone={selectedStorage === "kodo" && kodoConfig?.configured && kodoConfig.enabled ? "green" : selectedStorage === "kodo" || selectedStorage === "r2" ? "amber" : "slate"}>
+                {selectedStorage === "kodo"
+                  ? kodoLoading
+                    ? "读取配置"
+                    : kodoConfig?.configured
+                      ? kodoConfig.enabled
+                        ? "已配置"
+                        : "已配置 · 停用"
+                      : "待填写密钥"
+                  : "待配置"}
+              </Pill>
             </div>
 
-            <div className="mt-5 rounded-xl border border-slate-100">
-              <div className="border-b border-slate-100 px-4 py-3 text-[10px] font-semibold text-slate-700">配置字段</div>
-              <div className="divide-y divide-slate-100 px-4">
-                {STORAGE_DETAILS[selectedStorage].fields.map((field) => (
-                  <div key={field} className="flex items-center justify-between gap-4 py-3">
-                    <span className="text-[10px] font-medium text-slate-600">{field}</span>
-                    <span className="text-[9px] text-slate-400">待接入真实配置</span>
+            {selectedStorage === "kodo" ? (
+              <>
+                <div className="mt-5 rounded-xl border border-slate-100">
+                  <div className="border-b border-slate-100 px-4 py-3">
+                    <div className="text-[10px] font-semibold text-slate-700">Kodo 上传配置</div>
+                    <div className="mt-1 text-[9px] leading-4 text-slate-400">
+                      后续只需要把 Bucket、上传域名、Access Key、Secret Key 填进来即可。密钥保存后加密存储，不会在页面回显。
+                    </div>
                   </div>
-                ))}
-              </div>
-            </div>
+                  <div className="grid gap-3 p-4 md:grid-cols-2">
+                    <label className="space-y-1.5">
+                      <span className="text-[10px] font-medium text-slate-600">Bucket</span>
+                      <input
+                        value={kodoForm.bucket}
+                        onChange={(event) => setKodoForm((current) => ({ ...current, bucket: event.target.value }))}
+                        placeholder="七牛空间名称"
+                        className="h-9 w-full rounded-lg border border-slate-200 bg-white px-3 text-[10px] text-slate-700 outline-none focus:border-blue-400"
+                      />
+                    </label>
+                    <label className="space-y-1.5">
+                      <span className="text-[10px] font-medium text-slate-600">上传域名（Upload Host）</span>
+                      <input
+                        value={kodoForm.uploadUrl}
+                        onChange={(event) => setKodoForm((current) => ({ ...current, uploadUrl: event.target.value }))}
+                        placeholder="https://..."
+                        className="h-9 w-full rounded-lg border border-slate-200 bg-white px-3 text-[10px] text-slate-700 outline-none focus:border-blue-400"
+                      />
+                    </label>
+                    <label className="space-y-1.5">
+                      <span className="text-[10px] font-medium text-slate-600">
+                        Access Key {kodoConfig?.accessKeyHint ? <span className="font-normal text-slate-400">（已保存 {kodoConfig.accessKeyHint}）</span> : null}
+                      </span>
+                      <input
+                        type="password"
+                        autoComplete="new-password"
+                        value={kodoForm.accessKey}
+                        onChange={(event) => setKodoForm((current) => ({ ...current, accessKey: event.target.value }))}
+                        placeholder={kodoConfig?.configured ? "留空则保持现有密钥" : "待填写"}
+                        className="h-9 w-full rounded-lg border border-slate-200 bg-white px-3 text-[10px] text-slate-700 outline-none focus:border-blue-400"
+                      />
+                    </label>
+                    <label className="space-y-1.5">
+                      <span className="text-[10px] font-medium text-slate-600">Secret Key</span>
+                      <input
+                        type="password"
+                        autoComplete="new-password"
+                        value={kodoForm.secretKey}
+                        onChange={(event) => setKodoForm((current) => ({ ...current, secretKey: event.target.value }))}
+                        placeholder={kodoConfig?.configured ? "已保存且不回显；留空保持现有密钥" : "待填写"}
+                        className="h-9 w-full rounded-lg border border-slate-200 bg-white px-3 text-[10px] text-slate-700 outline-none focus:border-blue-400"
+                      />
+                    </label>
+                    <label className="space-y-1.5 md:col-span-2">
+                      <span className="text-[10px] font-medium text-slate-600">对象前缀</span>
+                      <input
+                        value={kodoForm.prefix}
+                        onChange={(event) => setKodoForm((current) => ({ ...current, prefix: event.target.value }))}
+                        placeholder="ecommerce-workspace/cold"
+                        className="h-9 w-full rounded-lg border border-slate-200 bg-white px-3 text-[10px] text-slate-700 outline-none focus:border-blue-400"
+                      />
+                    </label>
+                  </div>
+                  <div className="flex flex-wrap items-center justify-between gap-3 border-t border-slate-100 px-4 py-3">
+                    <label className="flex items-center gap-2 text-[10px] text-slate-600">
+                      <input
+                        type="checkbox"
+                        checked={kodoForm.enabled}
+                        onChange={(event) => setKodoForm((current) => ({ ...current, enabled: event.target.checked }))}
+                      />
+                      保存后启用每日 04:00 冷备上传
+                    </label>
+                    <span className="text-[9px] text-slate-400">读取权限：关闭且不提供</span>
+                  </div>
+                </div>
 
-            <div className="mt-4 rounded-lg bg-slate-50 px-3 py-2.5 text-[9px] leading-5 text-slate-500">
-              {STORAGE_DETAILS[selectedStorage].note}
-            </div>
+                <div className="mt-4 rounded-lg border border-amber-100 bg-amber-50 px-3 py-2.5 text-[9px] leading-5 text-amber-700">
+                  只存不取：不会调用 GET、List、Head、下载、在线预览、远端校验或远端恢复。备份完整性在本地完成校验后再上传。Kodo 空间请保持“标准存储”，不要配置自动转低频/归档的生命周期规则。
+                </div>
 
-            <div className="mt-4 flex flex-wrap gap-2">
-              <button type="button" onClick={() => showNotice("真实配置保存将在存储执行器接入后开放。")} className="app-button-primary rounded-lg px-4 py-2 text-[10px] font-medium">
-                保存配置
-              </button>
-              <button type="button" onClick={() => showNotice("当前尚未接入真实存储连接器。")} className="app-button-secondary rounded-lg px-4 py-2 text-[10px] font-medium">
-                测试连接
-              </button>
-            </div>
+                <div className="mt-4 flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    disabled={kodoSaving || kodoLoading}
+                    onClick={saveKodoConfig}
+                    className="app-button-primary rounded-lg px-4 py-2 text-[10px] font-medium disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    {kodoSaving ? "保存中…" : "保存 Kodo 配置"}
+                  </button>
+                  <span className="text-[9px] text-slate-400">不提供“测试连接”按钮，避免读取远端对象。</span>
+                </div>
+              </>
+            ) : (
+              <>
+                <div className="mt-5 rounded-xl border border-slate-100">
+                  <div className="border-b border-slate-100 px-4 py-3 text-[10px] font-semibold text-slate-700">配置字段</div>
+                  <div className="divide-y divide-slate-100 px-4">
+                    {STORAGE_DETAILS[selectedStorage].fields.map((field) => (
+                      <div key={field} className="flex items-center justify-between gap-4 py-3">
+                        <span className="text-[10px] font-medium text-slate-600">{field}</span>
+                        <span className="text-[9px] text-slate-400">待接入真实配置</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="mt-4 rounded-lg bg-slate-50 px-3 py-2.5 text-[9px] leading-5 text-slate-500">
+                  {STORAGE_DETAILS[selectedStorage].note}
+                </div>
+
+                <div className="mt-4 flex flex-wrap gap-2">
+                  <button type="button" onClick={() => showNotice("真实配置保存将在存储执行器接入后开放。")} className="app-button-primary rounded-lg px-4 py-2 text-[10px] font-medium">
+                    保存配置
+                  </button>
+                  <button type="button" onClick={() => showNotice("当前尚未接入真实存储连接器。")} className="app-button-secondary rounded-lg px-4 py-2 text-[10px] font-medium">
+                    测试连接
+                  </button>
+                </div>
+              </>
+            )}
           </section>
         </div>
       ) : null}

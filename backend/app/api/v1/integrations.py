@@ -1,11 +1,12 @@
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.orm import Session
 
 from app.db import get_db
 from app.api.deps import current_actor
-from app.services import integration_service
+from app.services import integration_service, kodo_backup_service
 
 router = APIRouter(prefix="/integrations", tags=["integrations"])
 
@@ -13,6 +14,45 @@ router = APIRouter(prefix="/integrations", tags=["integrations"])
 @router.get("")
 def list_integrations(db: Session = Depends(get_db)) -> list[dict[str, Any]]:
     return integration_service.integration_status(db)
+
+
+class KodoColdBackupConfigIn(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    bucket: str
+    upload_url: str = Field(alias="uploadUrl")
+    prefix: str = "ecommerce-workspace/cold"
+    access_key: str = Field(default="", alias="accessKey")
+    secret_key: str = Field(default="", alias="secretKey")
+    enabled: bool = True
+
+
+@router.get("/kodo-cold")
+def get_kodo_cold_backup_config(db: Session = Depends(get_db)) -> dict[str, Any]:
+    """只返回脱敏后的 Kodo 冷备配置；密钥永不回传前端。"""
+    return kodo_backup_service.get_config(db)
+
+
+@router.put("/kodo-cold")
+def save_kodo_cold_backup_config(
+    body: KodoColdBackupConfigIn,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    """保存 Kodo upload-only 配置。该通道不提供任何读取/下载/恢复接口。"""
+    try:
+        return kodo_backup_service.save_config(
+            db,
+            bucket=body.bucket,
+            upload_url=body.upload_url,
+            prefix=body.prefix,
+            access_key=body.access_key,
+            secret_key=body.secret_key,
+            enabled=body.enabled,
+            actor=current_actor(request),
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
 
 
 @router.post("/jackyun/test")

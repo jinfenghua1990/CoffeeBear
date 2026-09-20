@@ -321,6 +321,39 @@ export async function testJackyun(): Promise<{
   return res.json();
 }
 
+export type KodoColdBackupConfig = {
+  configured: boolean;
+  enabled: boolean;
+  bucket: string;
+  uploadUrl: string;
+  prefix: string;
+  accessKeyHint: string;
+  mode: "upload_only" | string;
+  readEnabled: false;
+};
+
+export type KodoColdBackupConfigInput = {
+  bucket: string;
+  uploadUrl: string;
+  prefix: string;
+  accessKey?: string;
+  secretKey?: string;
+  enabled: boolean;
+};
+
+export function getKodoColdBackupConfig(): Promise<KodoColdBackupConfig> {
+  return jsonFetch<KodoColdBackupConfig>("/api/v1/integrations/kodo-cold");
+}
+
+export function saveKodoColdBackupConfig(
+  body: KodoColdBackupConfigInput,
+): Promise<KodoColdBackupConfig> {
+  return jsonFetch<KodoColdBackupConfig>("/api/v1/integrations/kodo-cold", {
+    method: "PUT",
+    body: JSON.stringify(body),
+  });
+}
+
 export type ExceptionRow = {
   id: number;
   code: string;
