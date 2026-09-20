@@ -13,6 +13,7 @@ from app.models.bank import BankTransaction
 from app.models.tax import TaxInvoice
 from app.services import finance_sales_report_service as sales_report_service
 from app.services import finance_center_service
+from app.services import finance_projection_service
 from app.services import finance_service
 from app.services import monthly_intake_service
 from app.services import payment_invoice_match_service as payment_match_service
@@ -650,6 +651,27 @@ def update_finance_entry(
         )
         entity = finance_center_service.resolve_entity(db, row.legal_entity_id)
         return finance_center_service.entry_dict(row, entity)
+    except ValueError as exc:
+        db.rollback()
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+
+@router.post("/sync-business")
+def sync_business_finance(
+    year: int = Query(..., ge=1900, le=2999),
+    month: int = Query(..., ge=1, le=12),
+    business_scope: str = Query("all", pattern="^(all|domestic|foreign_trade)$"),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    """把指定账期的业务事实幂等投影到统一财务事项池。"""
+    try:
+        return finance_projection_service.sync_business_period(
+            db,
+            year=year,
+            month=month,
+            business_scope=business_scope,
+        )
     except ValueError as exc:
         db.rollback()
         raise HTTPException(status_code=422, detail=str(exc)) from exc
