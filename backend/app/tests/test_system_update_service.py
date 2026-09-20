@@ -368,3 +368,9 @@ def test_update_settings_accept_auto_install_level():
 
     with pytest.raises(ValueError, match="自动安装范围"):
         service._validate_settings({**cfg, "autoInstallLevel": "unsafe"})
+
+
+def test_time_based_version_uses_project_timezone(monkeypatch):
+    monkeypatch.setattr(service.settings, "TZ", "Asia/Shanghai")
+    assert service._version_from_time("2026-09-20T10:30:00+00:00") == "2026.09.20.1830"
+    assert service._version_from_time("2026-09-20T18:30:00+08:00") == "2026.09.20.1830"
