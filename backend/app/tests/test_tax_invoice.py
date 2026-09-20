@@ -290,6 +290,7 @@ def test_invoice_business_match_and_bank_payment_status_are_independent(db_sessi
 
     payload = service.serialize_invoice(invoice, db=db_session)
     assert payload["businessMatchStatus"] == "partial"
+    assert payload["matchStatus"] == "partial"
     assert payload["businessMatchedAmount"] == "600.0000"
     assert payload["businessRemainingAmount"] == "400.0000"
     assert payload["bankPaymentStatus"] == "partial"
@@ -301,6 +302,7 @@ def test_invoice_business_match_and_bank_payment_status_are_independent(db_sessi
     db_session.flush()
     payload = service.serialize_invoice(invoice, db=db_session)
     assert payload["businessMatchStatus"] == "partial"
+    assert payload["matchStatus"] == "partial"
     assert payload["businessMatchedAmount"] == "600.0000"
     assert payload["bankPaymentStatus"] == "matched"
     assert payload["bankPaidAmount"] == "1000.00"

@@ -564,6 +564,8 @@ def _serialize_invoice(row: TaxInvoice, context: dict | None = None, db: Session
     }
     if context is not None:
         payload.update(context)
+    # 兼容字段也必须镜像实时业务匹配状态，禁止旧调用读到数据库缓存旧值。
+    payload["matchStatus"] = payload.get("businessMatchStatus", row.match_status)
     # categoryLabel 跟随最终 category（含明细兜底识别），保证前后端文案一致；
     # 销项走独立 OUTPUT_CATEGORY 文案（空 = 待判断）。
     payload["categoryLabel"] = category_label_for_direction(row.direction, payload.get("category") or "")
