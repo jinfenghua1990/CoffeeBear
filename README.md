@@ -1,228 +1,358 @@
-# 电商经营数据平台 V1
+# 电商工作平台
 
-连接 **吉客云（唯一商品/SKU 主档）+ 1688（采购交易来源）+ 浙江农信（原始资金资料）** 的经营数据平台。
+> GitHub 仓库：`jinfenghua1990/ecommerce-workspace`
+
+这是一个面向实际经营的电商工作平台，不是单纯的数据看板。当前系统同时承载 **内销、外贸、供应链、库存、物流、财务与月结**，并通过统一业务数据与财务事项底座把各模块串起来。
+
+## 当前定位
+
+平台分为三个主要工作入口：
+
+### 内销工作台
+
+- 经营总览
+- 销售中心
+- 基础货品
+- 库存中心
+- 供应链中心
+- 快递物流
+- 财务中心
+
+### 外贸工作台
+
+- 外贸总览
+- 外贸订单
+- B2B 客户 / 经销商
+- 渠道管理
+- 海外 SKU 映射
+- 国际出运 / Shipment
+- 外贸财务
+- Alsvid 业务
+
+### 财务中心
+
+财务中心是独立的统一财务中枢。
+
+第一维度是 **公司主体**，第二维度是 **业务范围**：
+
+```text
+公司主体
+  ↓
+全部 / 内销 / 外贸
+  ↓
+财务事项 FinanceEntry
+  ↓
+收支 / 发票税务 / 利润 / 月结
+```
+
+当前默认主体为浙江公司；以后新增奥地利、德国、香港等主体，不需要重做一套财务系统。
+
+## 核心业务链路
+
+### 内销
+
+```text
+销售订单
+  ├─ 销售收入
+  ├─ 售后退款
+  └─ 销售成本
+
+采购 / 入库
+  └─ 库存采购 / 应付
+
+快递物流
+  ├─ 平时按预估成本
+  └─ 实际账单核销后替换预估
+
+以上统一进入 FinanceEntry
+```
+
+采购入库和销售数据在各自业务模块完成，不在月结页重复上传业务源文件。
+
+### 外贸
+
+```text
+外贸订单
+  ↓
+Shipment 出运单
+  ↓
+中国出口
+  ↓
+国际运输
+  ↓
+欧盟进口 / 清关
+  ↓
+海外末端配送
+  ↓
+财务事项 / 月结
+```
+
+Shipment 可记录：
+
+- 出口公司主体
+- 进口责任方
+- 进口公司主体
+- 提单 / 柜号 / Tracking
+- 出口报关 / 进口报关
+- 普通关税
+- 反倾销税
+- 反补贴税
+- 进口 VAT
+- 清关 / 港杂 / 末端配送
+- 出口退税
+- 预计与实际成本
+
+进口税费只有在 **我方公司主体承担进口责任** 时才进入对应主体财务。海外客户、经销商或第三方代理承担的进口费用不会错误记入中国公司账。
+
+## 财务口径
+
+统一财务事项模型：`FinanceEntry`。
+
+主要维度包括：
+
+- legal entity / 公司主体
+- business scope / 内销或外贸
+- 来源模块与来源单号
+- 财务类别
+- 收入 / 支出
+- 币种
+- 金额 / 税额
+- 预计 / 实际
+- 结算状态
+- 发票状态
+- 会计账期
+- 是否影响现金
+- 是否影响利润
+
+现金与利润分开处理。例如：
+
+- 可抵扣进口 VAT：影响现金，不直接影响利润
+- Shipment 货品成本：影响利润，不重复计算采购付款现金
+- 采购入库：先形成库存采购 / 应付事实，不在入库时直接扣利润
+- 物流：实际账单到达后替换原预估，不重复计算
+
+## 月结中心
+
+月结中心按 **公司主体** 切换。
+
+它不再承担采购入库、销售数据导入，而是直接读取业务数据库：
+
+- 业务数据完整性检查
+- 销售金额与销售成本检查
+- 银行交易明细
+- 银行回单
+- 无票收入
+- 外贸财务汇总
+- 月度 ZIP 打包
+- 邮件发送给财务
+- 历史版本归档
+
+如果销售 SKU 缺采购入库成本，系统会明确提示缺失 SKU，不会用虚构成本生成错误利润。
+
+## 主要外部数据源
+
+当前支持或预留：
+
+- 吉客云
+- 1688
+- 浙江农信文件导入
+- 税务发票清单
+- SMTP 财务邮件
+- 外贸渠道 / Shopify 后续接入
+
+外部系统未配置时必须如实显示未配置，不使用模拟数据伪装真实连接。
 
 ## 技术栈
 
-- 后端：FastAPI + SQLAlchemy 2 + Alembic + Pydantic（Python 3.12）
-- 前端：Next.js 16 + React 19 + Tailwind CSS 4
-- 任务：Celery Worker + Celery Beat（Redis broker）
-- 基础：本机 PostgreSQL / Redis / LaunchAgent / 本地 `data/` 归档
-- 金额：全链路 Decimal / Numeric(18,4)，禁止 float
+### 后端
 
+- Python 3.12
+- FastAPI
+- SQLAlchemy 2
+- Alembic
+- Pydantic
+- PostgreSQL
+- Celery
+- Redis
 
-## 标准发布与持久化
+### 前端
 
-项目采用单仓库、多环境发布：功能分支先进入 `develop`，由 STAGING 验证后再通过 PR 晋级到 `main`；生产环境只跟踪 `main`。测试版与正式版不是两套代码，正常发布应保持同一提交/SHA 逐级晋级。
+- Next.js 16
+- React 19
+- Tailwind CSS 4
+- 静态导出，由 FastAPI 同端口托管
 
-业务数据与代码生命周期分离。PostgreSQL 使用独立数据目录/卷；原始文件、备份与日志可通过 `PERSIST_ROOT`、`DATA_DIR`、`BACKUP_DIR`、`LOG_DIR` 放到代码仓库之外。标准说明见：
+### 运行方式
 
-- `docs/RELEASE_STANDARD.md`
-- `docs/PERSISTENCE_STANDARD.md`
-
-## 启动
-
-```bash
-cp .env.example .env   # 填入真实凭证
-make up
-```
-
-- Web 与 API：http://localhost:8000 （局域网 http://<本机IP>:8000）
-- PostgreSQL / Redis 只在本机 `5432` / `6379` 提供服务；前端静态产物由同一 FastAPI 端口托管。
-
-当前固定使用 `ACCESS_MODE=rbac`：除登录、1688 OAuth 回调和 `/healthz` 外，全部 `/api/v1` 都需要登录令牌。`viewer` 只读，`operator/admin` 可执行写操作，用户管理仅限 `admin`。
-
-登录页默认勾选“记住登录”：同一浏览器 30 天内免重复输入；取消勾选则令牌有效 12 小时。改密码或点击退出会让该账号此前签发的令牌立即失效。局域网只开放 Web 端口 8000，PostgreSQL/Redis 仅绑定 `127.0.0.1`。**不要把 8000 做公网端口转发**；公网访问必须另加 TLS 与网络访问控制。
-
-服务由 LaunchAgent `com.gino.ecommerce-dashboard` 启动；入口脚本为 `scripts/native-start.sh`。后端、worker、beat 均使用 `backend/.venv` 与本机 PostgreSQL/Redis。
-
-首次登录用 `.env` 里的 `ADMIN_USERNAME` / `ADMIN_PASSWORD`，登录后请立即在设置页改密码。
-
-> `make smoke` 默认在本机为现有管理员签发 5 分钟诊断令牌，不读取或输出密码；也可用 `SMOKE_USER=xxx SMOKE_PASS=yyy make smoke` 显式验证真实登录链路。任一 401/403、非预期 4xx 或 5xx 都会使 smoke 失败；唯一允许的配置型 400 是未提供 1688 AppKey/Secret 时的明确阻塞提示。
-
-## 本地开发（前后端同时改）
-
-后端以原生虚拟环境运行，前端为静态导出。改动后按改动面重新加载：
-
-```bash
-make rebuild                                        # 改了 backend/ → 重启 api+worker+beat
-make rebuild-fe                                     # 改了 frontend/ → 重新构建静态产物并重启
-```
-
-约定：
-
-- 只改后端逻辑：`make rebuild`；迁移文件直接写到 `backend/alembic/versions/`
-- 只改前端：`make rebuild-fe`，无需动后端
-- 改依赖（requirements.txt / package.json）：更新虚拟环境或 `npm install` 后执行对应重建
-- 前端类型检查：`make tsc`；后端 lint：`make lint`
-- 回归一把梭：`make test && make lint && make tsc && make smoke && make migration-check`
-
-## 首次上线清单
+当前主要开发与验收环境：
 
 ```text
-[ ] 在 .env 设管理员账号（ADMIN_USERNAME / ADMIN_PASSWORD），首次启动自动建号，登录后立即改密码
-[ ] 重置此前暴露过的吉客云 MCP Token（旧 Token 一律作废）
-[ ] 填写新的吉客云 Token 到 .env
-[ ] 设置页「立即测试连接」验证吉客云 MCP（initialize → tools/list）
-[ ] 在“自动化”页立即同步商品，再同步 SKU/价格主档
-[ ] 同步订单
-[ ] 配置公司主体
-[ ] 完成期初初始化（允许不平，差异进差异池）
-[ ] 配置 SMTP 和财务邮箱
-[ ] 创建 1688 开放平台应用，配置 OAuth 回调
-[ ] 测试 1688 订单同步（每天 1 次 + 手动立即同步）
-[ ] 上传浙江农信测试 XLSX（先 SHA256 版本化归档，再解析；旧 XLS 请先另存为 XLSX）
-[ ] 在「吉客云导入」页上传客户端官方导出的 XLSX/CSV；首次上传先核对识别出的表头和报表类型
-[ ] 生成测试财务 ZIP
-[ ] 测试邮件发送（人工确认后）
-[ ] 做数据库和 /data 备份
+Mac 本地原生运行
 ```
 
-## 三个凭证开启后的下一步
+NAS / 极空间部署暂缓，容器化与发布配置继续保留。
 
-| 凭证 | 开启后立即做 |
-| --- | --- |
-| 吉客云 MCP Token | 设置页验证 `initialize → tools/list`，再到自动化页依次立即同步“商品”“SKU/价格”；业务权限未开通时显示“业务权限未开通”，不会记成成功 |
-| 1688 开放平台 OAuth | 回调配好后点「立即同步」跑一次，验证 OAuth 换 token 与订单拉取（只读，不下单） |
-| 浙江农信 / SMTP | 上传测试 Excel/PDF 验证 SHA256 归档，再「生成测试 ZIP」走一遍财务包、最后「发送测试邮件」人工确认 |
+默认服务端口：
 
-顺序建议：吉客云主档 → 浙江农信资料 → 1688 订单 → SMTP 邮件。每一步成功后才会解锁下一环节的「未配置」占位。
+```text
+http://127.0.0.1:8000
+```
 
-## 吉客云客户端文件导入（开放平台 API 的替代路径）
+PostgreSQL 与 Redis 不对公网开放。
 
-当吉客云开放平台 API 未开通时，可在客户端使用**官方导出**，然后登录 8000 的「吉客云导入」页面上传 `.xlsx` 或 `.csv`。上传入口沿用既有账号权限，不会额外暴露无密码端口。
+## 分支与开发流程
 
-- 单文件最多 25 MiB、20,000 行；只接受 XLSX/CSV，旧 XLS 请在客户端另存为 XLSX
-- 系统按 SHA256 去重，原件落在 `data/jackyun-exports/`，并把原始中文列名和行数据存入本地 staging
-- 自动识别销售、售后、库存、商品/SKU、采购、入库、出库、仓库等常见表头；未知格式显示「待字段映射」，不会把猜测字段写入业务数据表
-- 首次每一种报表上传后，核对页面的「类型」和「识别列」；以真实导出文件为准补充映射后，才接入相应看板数据
+当前开发主线：
 
-不读取吉客云客户端的 Token、Cookie、缓存或私有网络接口。
+```text
+codex/* / feature/*
+        ↓
+       PR
+        ↓
+     develop
+        ↓
+        CI
+        ↓
+Mac 本地拉取 / 验收
+```
 
-## 税务系统官方发票清单
+`main` 作为正式发布主线；当前日常开发不要直接把 `develop` 无条件合并到 `main`。
 
-在「税务发票」页上传税务系统下载的 `.xlsx` / `.csv` 清单，可选填所属月份。系统会保留原文件和每一行原始内容，并自动识别发票代码/号码、开票日期、购销方、金额、税额、价税合计、进销项和发票状态。
+GitHub 仓库重命名后的远程地址：
 
-- 相同文件按 SHA256 幂等，不会重复写入；原件落在 `data/tax-invoices/`
-- 清单明确给出关联订单号时，才会自动关联 1688 采购单或销售单；金额/名称相似但没有编号的记录进入「待核对」
-- 某次清单没有出现发票，不等同于系统已经确认“未开票”；先核对清单所属期间和税务口径
-- 采购详情页会同时显示由官方清单明确匹配的税票，完整台账可在 `/tax-invoices` 查看
+```bash
+git@github.com:jinfenghua1990/ecommerce-workspace.git
+```
+
+本地更新远程地址：
+
+```bash
+git remote set-url origin git@github.com:jinfenghua1990/ecommerce-workspace.git
+git fetch origin
+git switch develop
+git pull origin develop
+```
+
+## Mac 本地运行
+
+首次准备：
+
+```bash
+cp deploy/mac/.env.example .env
+```
+
+然后配置：
+
+- PostgreSQL
+- Redis
+- 管理员账号
+- 数据持久化目录
+- SMTP
+- 吉客云 / 1688 等按需凭证
+
+常用命令：
+
+```bash
+make status          # 查看运行状态
+make restart         # 重启 API / worker / beat
+make rebuild-fe      # 前端重建并重启
+make migrate         # Alembic 迁移
+make test            # 后端测试
+make tsc             # 前端类型检查
+make verify          # 本地完整验收
+make backup          # 数据库 + DATA_DIR 备份
+```
+
+## 持久化原则
+
+代码、数据库、业务文件、备份、日志应尽量分离。
+
+推荐：
+
+```text
+代码：
+/Users/<user>/ecommerce-workspace
+
+业务数据：
+/Users/<user>/ecommerce-workspace-data/<environment>/
+
+其中：
+data/
+backups/
+logs/
+```
+
+具体以实际 `.env` 中：
+
+- `PERSIST_ROOT`
+- `DATA_DIR`
+- `BACKUP_DIR`
+- `LOG_DIR`
+
+为准。
+
+不要因为 Git 更新或切换分支覆盖业务数据。
 
 ## 目录结构
 
 ```text
-backend/    FastAPI 应用（app/models 45+ 表、app/adapters 四个 Adapter、app/api/v1、Celery）
-frontend/   Next.js 前端（含吉客云客户端文件上传入口，未落地的 Phase 明确占位不造假数据）
-data/       原始文件长期归档 /data（财务资料按 公司/年/月/original 分类）
-docs/       实施状态、ER 图、吉客云字段 mapping、外部集成说明
+backend/        FastAPI / SQLAlchemy / Alembic / Celery
+frontend/       Next.js 前端
+deploy/         Mac / 容器 / NAS 部署配置
+docs/           架构、发布、持久化、集成说明
+scripts/        启动、备份、恢复、检查脚本
+data/           兼容本地默认数据目录；正式环境建议放仓库外
+backups/        兼容本地默认备份目录；正式环境建议放仓库外
 ```
 
-## 业务原则（必须遵守）
+## 安全原则
 
-1. 吉客云是唯一商品/SKU 主档，关联主键用吉客云内部 ID / SKU 编码
-2. 1688 只读同步已发生的买家订单，**不下单、不付款**；"定制专拍"标题不得建成 SKU
-3. 浙江农信只做文件导入，不做银企直联、不做网页 RPA
-4. 给财务的是原始资料：原样 ZIP、已发送版本不可覆盖，修正生成 V2/V3
-5. 期初允许不平，历史差异进差异池，所有调整写审计日志
-6. 未配置的外部系统如实显示"未配置"，禁止用模拟数据伪装连接
+- `.env` 不提交 Git
+- PostgreSQL / Redis 不开放公网
+- Mac 开发阶段不要把 8000 直接暴露公网
+- 1688 只同步已发生采购，不自动下单 / 付款
+- 原始财务资料保留版本，不覆盖历史交付包
+- 数据库结构变更必须走 Alembic
+- 较大结构调整前先做数据库与业务文件备份
 
-## 数据库迁移
+## 系统更新
 
-```bash
-make migrate                                          # 应用迁移
-cd backend && .venv/bin/alembic revision --autogenerate -m "..."  # 生成新迁移
-```
+系统支持原生模式更新与容器发布身份识别。
 
-## 备份 / 恢复
-
-一键备份（pg_dump 自定义格式 + `/data` 原始文件 tar.gz，保留最近 14 份自动滚动）：
-
-```bash
-./scripts/backup.sh            # 产物落 backups/db_<时间戳>.dump + data_<时间戳>.tar.gz
-./scripts/backup.sh --no-files # 只备数据库，跳过 /data
-```
-
-恢复：
-
-```bash
-# 数据库
-source .env
-PGPASSWORD="$POSTGRES_PASSWORD" pg_restore -h localhost -U "$POSTGRES_USER" -d "$POSTGRES_DB" --clean --if-exists < backups/db_xxx.dump
-# /data 原始文件
-tar xzf backups/data_xxx.tar.gz -C /Users/gino/ecommerce-dashboard
-```
-
-## Celery 死信队列
-
-Redis 无原生 DLX，采用「`task_reject_on_worker_lost` + `task_failure` 信号」等价实现：worker 崩溃（OOM/SIGKILL）时消息拒绝回队；任务重试耗尽后的最终失败会写入 Redis list `ecommerce:dead-letter`（保留 30 天），中间重试不落、避免噪声。
-
-```bash
-# 检视死信
-redis-cli -n 0 LRANGE ecommerce:dead-letter 0 -1
-# 手动重投某类任务（示例：吉客云销售同步）
-cd backend && .venv/bin/python -c "from app.tasks.sync import sync_jackyun; sync_jackyun.delay('sales', True)"
-```
-
-注：失败的每一次尝试都已同时落库（`SyncLog` + 异常中心 `ensure_exception`），死信队列是补充的 Redis 侧可重投副本。
-
-## 系统更新中心
-
-系统设置 → **系统更新** 提供应用内自更新，代码来源固定为 `SYSTEM_UPDATE_REMOTE/SYSTEM_UPDATE_BRANCH`，前端不能切换到任意仓库、分支或 commit。
-
-三种模式：
-
-- **手动更新**：后台自动检查可关闭，但管理员仍可随时点击“检查更新”和“立即更新”。
-- **自动检测 + 下载（默认）**：API 常驻任务按默认 10 分钟间隔执行 `git fetch`，只下载 Git 对象，不改变当前工作区；管理员确认后再安装。
-- **全自动更新**：定时检查，只有进入配置的凌晨维护窗口才执行安装。
-
-进入更新页时会执行“更新环境自检”，检查当前分支、Git 远端、工作区、Python venv / pip、Node.js / npm、`pg_dump` / `psql`、更新执行器、备份脚本、LaunchAgent、状态目录写权限、当前前端产物、服务健康状态和磁盘空间。存在阻塞项时，前端会禁用“立即更新”，后端也会再次拒绝启动更新。
-
-安装流程固定为：
+Mac 当前使用：
 
 ```text
-Git 快进与目标 SHA 校验
-→ 进入维护模式，普通业务 API 临时返回 503
-→ PostgreSQL + data/ 全量备份，并确认本次生成了有效数据库备份
-→ 暂停本项目 Celery worker / beat，避免迁移期间继续写库
-→ 切换到远端目标 commit
-→ 按需更新 Python / Node 依赖
-→ alembic upgrade head
-→ 按需构建 frontend/out
-→ 重启 API / worker / beat
-→ /healthz 健康检查
-→ 解除维护模式
+DEPLOYMENT_MODE=native
+SYSTEM_UPDATE_BRANCH=develop
 ```
 
-任一步失败后会自动尝试：
+系统更新会检查：
 
-1. 若已开始迁移，先使用新版本迁移脚本退回更新前 Alembic revision；
-2. Git reset 回更新前 commit；
-3. 恢复旧版本依赖与前端产物；
-4. 重启并再次健康检查；
-5. 回滚完整成功后解除维护；若回滚不完整则继续保持维护，避免系统在半更新状态下继续写业务数据。
+- Git 分支 / 远端
+- 工作区状态
+- Python / Node 环境
+- Alembic
+- 备份能力
+- 前端产物
+- 健康检查
+- 磁盘空间
 
-更新状态、执行日志与历史记录写在 `DATA_DIR/system-update/`。最近一次安装结果（成功 / 已回滚 / 失败、时间、from/to SHA）会单独保留，后续自动检查不会把结果覆盖掉。更新前生成的数据库与其余 data 业务文件备份仍保留在 `backups/`，自动回滚异常时可用于人工灾备恢复。
+现有 Mac 如果已经安装旧的 LaunchAgent label（例如 `com.gino.ecommerce-dashboard`），可以继续沿用；该 label 是运行配置，不要求与 GitHub 仓库名称完全一致。不要只为仓库改名而直接改 LaunchAgent，除非同时完成本机服务迁移。
 
-> 系统发现 Git 历史分叉、本地存在未提交修改、当前分支不符、更新环境自检存在阻塞项、目标 SHA 变化或健康检查失败时，会停止自动覆盖。
+## 进一步文档
 
-## 升级说明
+- `deploy/mac/README.md`
+- `docs/ARCHITECTURE.md`
+- `docs/RELEASE_STANDARD.md`
+- `docs/PERSISTENCE_STANDARD.md`
+- `docs/IMPLEMENTATION_STATUS.md`
 
-```bash
-# 1. 拉取最新代码，先备份（见上节）
-git pull
-# 2. 如修改了前端，重建静态产物；后端直接重启
-make rebuild-fe   # 仅前端改动时需要
-make restart
-# 3. 应用新迁移（如有）
-make migrate
-# 4. 验证
-make status
-```
+---
 
-升级注意事项：
+项目名称统一使用：
 
-- **数据库结构变更一律走 Alembic 迁移**，禁止手改表结构；`alembic upgrade head` 幂等可重复执行
-- **已发送给财务的 V1/V2 包不可覆盖**：升级不会触碰 `data/finance/*/output/` 已生成 ZIP（文件名带版本号天然隔离）
-- **原始文件只读归档**：升级不影响 `data/finance/*/original/`，同名上传自动 version 递增
-- **Celery 任务**：升级后 worker/beat 随 `make restart` 自动加载新代码；未配置的外部同步（吉客云/1688/SMTP）如实跳过并写日志
-- **回滚**：代码回滚后执行 `make restart`；数据回滚用备份 SQL 恢复（注意备份时间点之后的写入会丢失，先确认）
+**电商工作平台**
+
+GitHub 仓库统一使用：
+
+**`ecommerce-workspace`**
