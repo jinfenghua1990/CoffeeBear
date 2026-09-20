@@ -65,6 +65,16 @@ async function readErrorDetail(res: Response, fallback = "请求失败"): Promis
 
 // ---------- 认证 ----------
 
+export type RuntimeAuthConfig = {
+  accessMode: "rbac" | "open";
+};
+
+export async function getRuntimeAuthConfig(): Promise<RuntimeAuthConfig> {
+  const res = await fetch("/api/v1/auth/config", { cache: "no-store" });
+  if (!res.ok) throw new Error(`auth config ${res.status}`);
+  return res.json();
+}
+
 export type AuthUser = {
   id: number;
   username: string;
