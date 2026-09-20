@@ -24,48 +24,44 @@ def _ensure_fk(
     *,
     ondelete: str | None = None,
 ) -> None:
-    """Create the FK only when it is genuinely missing.
+    """Create FK idempotently inside PostgreSQL itself.
 
-    Some live databases already received these constraints during schema-drift
-    repair before this Alembic revision was stamped. Re-running the migration
-    must therefore be safe, but an existing constraint with the same name and
-    a different definition must still fail loudly.
+    A previous production repair may already have created the constraint while
+    Alembic still considers this revision pending. SQLAlchemy reflection proved
+    unreliable on that live schema/search_path, so the existence check must run
+    in pg_catalog against the exact relation that ALTER TABLE would target.
     """
-    foreign_keys = sa.inspect(op.get_bind()).get_foreign_keys(source_table)
-    existing = next((item for item in foreign_keys if item.get("name") == name), None)
-    if existing is not None:
-        actual_source = list(existing.get("constrained_columns") or [])
-        actual_target_table = existing.get("referred_table")
-        actual_target = list(existing.get("referred_columns") or [])
-        actual_ondelete = str((existing.get("options") or {}).get("ondelete") or "").upper()
-        expected_ondelete = str(ondelete or "").upper()
-        if (
-            actual_source != source_columns
-            or actual_target_table != target_table
-            or actual_target != target_columns
-            or (expected_ondelete and actual_ondelete != expected_ondelete)
-        ):
-            raise RuntimeError(
-                f"existing constraint {name} has a different definition: "
-                f"{actual_source} -> {actual_target_table}.{actual_target}, "
-                f"ondelete={actual_ondelete or '-'}"
-            )
-        return
+    if len(source_columns) != 1 or len(target_columns) != 1:
+        raise RuntimeError("this migration helper only supports single-column foreign keys")
 
-    op.create_foreign_key(
-        name,
-        source_table,
-        target_table,
-        source_columns,
-        target_columns,
-        ondelete=ondelete,
+    delete_sql = f" ON DELETE {ondelete}" if ondelete else ""
+    source_column = source_columns[0]
+    target_column = target_columns[0]
+    op.execute(
+        sa.text(
+            f"""
+            DO $
+            BEGIN
+                IF NOT EXISTS (
+                    SELECT 1
+                    FROM pg_constraint
+                    WHERE conname = '{name}'
+                      AND conrelid = to_regclass('{source_table}')
+                ) THEN
+                    ALTER TABLE {source_table}
+                    ADD CONSTRAINT {name}
+                    FOREIGN KEY ({source_column})
+                    REFERENCES {target_table} ({target_column}){delete_sql};
+                END IF;
+            END
+            $;
+            """
+        )
     )
 
 
 def _drop_fk_if_exists(name: str, table: str) -> None:
-    foreign_keys = sa.inspect(op.get_bind()).get_foreign_keys(table)
-    if any(item.get("name") == name for item in foreign_keys):
-        op.drop_constraint(name, table, type_="foreignkey")
+    op.execute(sa.text(f"ALTER TABLE {table} DROP CONSTRAINT IF EXISTS {name}"))
 
 
 def upgrade() -> None:
