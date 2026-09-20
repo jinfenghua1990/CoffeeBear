@@ -86,13 +86,6 @@ const ROUTES: RouteEntry[] = [
   },
   {
     workspace: "foreign",
-    pathname: "/foreign-trade/finance",
-    title: "收款与利润",
-    businessType: "master",
-    load: () => import("@/app/foreign-trade/finance/page"),
-  },
-  {
-    workspace: "foreign",
     pathname: "/foreign-trade/alsvid",
     title: "Alsvid",
     businessType: "master",
@@ -201,12 +194,6 @@ const ROUTES: RouteEntry[] = [
     load: () => import("@/app/supply-chain/receiving/manual/page"),
   },
   {
-    pathname: "/supply-chain/receiving/jackyun",
-    title: "吉客云入库单",
-    businessType: "master",
-    load: () => import("@/app/supply-chain/receiving/jackyun/page"),
-  },
-  {
     pathname: "/supply-chain/material-flow",
     title: "耗材流转",
     businessType: "master",
@@ -303,6 +290,8 @@ const ENTRY_BY_PATH = new Map(ROUTES.map((entry) => [entry.pathname, entry]));
  */
 const IN_PAGE_REDIRECTS: Record<string, string> = {
   "/settings": "/settings/backup",
+  "/foreign-trade/finance": "/finance?scope=foreign_trade",
+  "/supply-chain/receiving/jackyun": "/supply-chain/receiving?panel=jackyun",
   // 这两个旧导入地址必须直连数据中心：经采购工作台的 imports 视图会先开一个「数据接入」Tab
   // 再被工作台自己重定向走，留下一个用户没要过的残留 Tab。
   "/alibaba1688-import": "/data-center-import?tab=alibaba1688",

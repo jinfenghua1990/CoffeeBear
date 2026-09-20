@@ -201,6 +201,8 @@ function canonicalSidebarPath(href: string) {
   const pathname = href.split("?", 1)[0];
   const legacyAliases: Record<string, string> = {
     "/finance/bank-summary": "/finance/bank-transactions",
+    "/foreign-trade/finance": "/finance",
+    "/supply-chain/receiving/jackyun": "/supply-chain/receiving",
     "/payments": "/finance/monthly-send",
     "/profit": "/finance/monthly-send",
     "/tax-invoices": "/finance/invoices",
