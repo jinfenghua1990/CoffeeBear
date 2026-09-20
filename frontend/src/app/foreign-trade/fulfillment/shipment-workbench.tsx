@@ -20,6 +20,15 @@ type ShipmentCosts = {
   chinaNetCostActualCny: string;
 };
 
+type LegalEntity = {
+  id: number;
+  code: string;
+  name: string;
+  countryCode: string;
+  baseCurrency: string;
+  isDefault: boolean;
+};
+
 type Milestone = {
   code: string;
   label?: string;
@@ -39,6 +48,9 @@ type Shipment = {
   transportMode: string;
   incoterm: string;
   status: string;
+  exporterLegalEntityId: number | null;
+  importerKind: string;
+  importerLegalEntityId: number | null;
   carrier: string;
   bookingNo: string;
   billOfLadingNo: string;
@@ -75,6 +87,7 @@ type Shipment = {
   exportRefundRate: string;
   actualExportRefundCny: string;
   exportRefundStatus: string;
+  exportRefundReceivedAt: string | null;
   eurToCny: string;
   etd: string | null;
   eta: string | null;
@@ -97,6 +110,9 @@ type ShipmentDraft = {
   transport_mode: string;
   incoterm: string;
   status: string;
+  exporter_legal_entity_id: number | null;
+  importer_kind: string;
+  importer_legal_entity_id: number | null;
   carrier: string;
   booking_no: string;
   bill_of_lading_no: string;
@@ -133,6 +149,7 @@ type ShipmentDraft = {
   export_refund_rate: string;
   actual_export_refund_cny: string;
   export_refund_status: string;
+  export_refund_received_at: string | null;
   eur_to_cny: string;
   etd: string | null;
   eta: string | null;
@@ -155,6 +172,9 @@ const EMPTY: ShipmentDraft = {
   transport_mode: "sea",
   incoterm: "FOB",
   status: "preparing",
+  exporter_legal_entity_id: null,
+  importer_kind: "external_customer",
+  importer_legal_entity_id: null,
   carrier: "",
   booking_no: "",
   bill_of_lading_no: "",
@@ -191,6 +211,7 @@ const EMPTY: ShipmentDraft = {
   export_refund_rate: "0",
   actual_export_refund_cny: "0",
   export_refund_status: "pending",
+  export_refund_received_at: null,
   eur_to_cny: "1",
   etd: null,
   eta: null,
@@ -272,6 +293,9 @@ function toDraft(row: Shipment): ShipmentDraft {
     transport_mode: row.transportMode,
     incoterm: row.incoterm,
     status: row.status,
+    exporter_legal_entity_id: row.exporterLegalEntityId,
+    importer_kind: row.importerKind,
+    importer_legal_entity_id: row.importerLegalEntityId,
     carrier: row.carrier,
     booking_no: row.bookingNo,
     bill_of_lading_no: row.billOfLadingNo,
@@ -308,6 +332,7 @@ function toDraft(row: Shipment): ShipmentDraft {
     export_refund_rate: row.exportRefundRate,
     actual_export_refund_cny: row.actualExportRefundCny,
     export_refund_status: row.exportRefundStatus,
+    export_refund_received_at: row.exportRefundReceivedAt,
     eur_to_cny: row.eurToCny,
     etd: row.etd,
     eta: row.eta,
@@ -335,6 +360,7 @@ function StatusPill({ value }: { value: string }) {
 
 export default function ShipmentWorkbench() {
   const [rows, setRows] = useState<Shipment[]>([]);
+  const [entities, setEntities] = useState<LegalEntity[]>([]);
   const [selected, setSelected] = useState<Shipment | null>(null);
   const [draft, setDraft] = useState<ShipmentDraft>({ ...EMPTY });
   const [q, setQ] = useState("");
@@ -371,6 +397,12 @@ export default function ShipmentWorkbench() {
   }, [q, selected, status]);
 
   useEffect(() => {
+    api<{ items: LegalEntity[] }>("/api/v1/finance/entities")
+      .then((data) => setEntities(data.items))
+      .catch(() => setEntities([]));
+  }, []);
+
+  useEffect(() => {
     const timer = window.setTimeout(() => void load(), 120);
     return () => window.clearTimeout(timer);
   }, [q, status]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -388,7 +420,12 @@ export default function ShipmentWorkbench() {
 
   function openNew() {
     setSelected(null);
-    setDraft({ ...EMPTY, shipment_no: "EXP-" + new Date().toISOString().slice(0, 10).replaceAll("-", "") + "-" });
+    const defaultEntity = entities.find((item) => item.isDefault) ?? entities[0];
+    setDraft({
+      ...EMPTY,
+      exporter_legal_entity_id: defaultEntity?.id ?? null,
+      shipment_no: "EXP-" + new Date().toISOString().slice(0, 10).replaceAll("-", "") + "-",
+    });
     setFormOpen(true);
   }
 
@@ -544,6 +581,40 @@ export default function ShipmentWorkbench() {
               <Field label="贸易条款"><select className="ft-input" value={draft.incoterm} onChange={(e) => setDraft({ ...draft, incoterm: e.target.value })}><option>EXW</option><option>FOB</option><option>CIF</option><option>DAP</option><option>DDP</option></select></Field>
               <Field label="状态"><select className="ft-input" value={draft.status} onChange={(e) => setDraft({ ...draft, status: e.target.value })}>{Object.entries(STATUS).map(([k,v]) => <option key={k} value={k}>{v}</option>)}</select></Field>
 
+              <Field label="出口公司主体">
+                <select className="ft-input" value={draft.exporter_legal_entity_id ?? ""} onChange={(e) => setDraft({ ...draft, exporter_legal_entity_id: Number(e.target.value) || null })}>
+                  <option value="">默认主体</option>
+                  {entities.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
+                </select>
+              </Field>
+              <Field label="进口责任方">
+                <select
+                  className="ft-input"
+                  value={draft.importer_kind}
+                  onChange={(e) => setDraft({
+                    ...draft,
+                    importer_kind: e.target.value,
+                    importer_legal_entity_id: e.target.value === "own_entity" ? draft.importer_legal_entity_id : null,
+                  })}
+                >
+                  <option value="external_customer">海外客户自行进口</option>
+                  <option value="dealer">经销商进口</option>
+                  <option value="own_entity">我方海外公司进口</option>
+                  <option value="agent">第三方进口代理</option>
+                </select>
+              </Field>
+              <Field label="进口公司主体">
+                <select
+                  className="ft-input"
+                  disabled={draft.importer_kind !== "own_entity"}
+                  value={draft.importer_legal_entity_id ?? ""}
+                  onChange={(e) => setDraft({ ...draft, importer_legal_entity_id: Number(e.target.value) || null })}
+                >
+                  <option value="">{draft.importer_kind === "own_entity" ? "请选择主体" : "非我方主体"}</option>
+                  {entities.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
+                </select>
+              </Field>
+
               <Field label="目的城市"><input className="ft-input" value={draft.destination_city} onChange={(e) => setDraft({ ...draft, destination_city: e.target.value })} placeholder="Vienna / Graz..." /></Field>
               <Field label="船司 / 货代"><input className="ft-input" value={draft.carrier} onChange={(e) => setDraft({ ...draft, carrier: e.target.value })} /></Field>
               <Field label="Booking No."><input className="ft-input" value={draft.booking_no} onChange={(e) => setDraft({ ...draft, booking_no: e.target.value })} /></Field>
@@ -605,6 +676,7 @@ export default function ShipmentWorkbench() {
               <Field label="出口退税率 %"><input className="ft-input" inputMode="decimal" value={draft.export_refund_rate} onChange={(e) => setDraft({ ...draft, export_refund_rate: e.target.value })} /></Field>
               <Field label="实际退税到账 ¥"><input className="ft-input" inputMode="decimal" value={draft.actual_export_refund_cny} onChange={(e) => setDraft({ ...draft, actual_export_refund_cny: e.target.value })} /></Field>
               <Field label="退税状态"><select className="ft-input" value={draft.export_refund_status} onChange={(e) => setDraft({ ...draft, export_refund_status: e.target.value })}><option value="pending">待申报</option><option value="submitted">已申报</option><option value="reviewing">审核中</option><option value="approved">已核准</option><option value="paid">已到账</option><option value="rejected">异常/退回</option></select></Field>
+              <Field label="退税到账时间"><input type="datetime-local" className="ft-input" value={localInput(draft.export_refund_received_at)} onChange={(e) => setDraft({ ...draft, export_refund_received_at: fromInput(e.target.value) })} /></Field>
               <Field label="EUR → CNY"><input className="ft-input" inputMode="decimal" value={draft.eur_to_cny} onChange={(e) => setDraft({ ...draft, eur_to_cny: e.target.value })} /></Field>
             </div>
 
