@@ -240,6 +240,12 @@ const ROUTES: RouteEntry[] = [
     load: () => import("@/app/automation/page"),
   },
   {
+    pathname: "/finance",
+    title: "财务中心",
+    businessType: "master",
+    load: () => import("@/app/finance/page"),
+  },
+  {
     pathname: "/finance/monthly-send",
     title: "月度资料",
     businessType: "master",
@@ -294,7 +300,6 @@ const IN_PAGE_REDIRECTS: Record<string, string> = {
   // 再被工作台自己重定向走，留下一个用户没要过的残留 Tab。
   "/alibaba1688-import": "/data-center-import?tab=alibaba1688",
   "/jackyun-import": "/data-center-import?tab=jackyun",
-  "/finance": "/finance/monthly-send",
   "/payments": "/finance/monthly-send",
   "/profit": "/finance/monthly-send",
   "/tax-invoices": "/finance/invoices",
