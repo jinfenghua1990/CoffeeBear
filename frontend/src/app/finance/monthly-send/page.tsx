@@ -748,8 +748,16 @@ export default function MonthlySendPage() {
   /** 手动发送 = 每次都用最新资料重新打包（新版本），再发给财务；保证收到的一定是最新数据。 */
   async function packageAndSend() {
     if (!sel) return;
-    if (!ready) {
-      setMsg("请先补齐业务成本、银行资料、无票收入和已收票对公付款资料，再发送给财务。");
+    if (!selectedMaterialsReady) {
+      setMsg("本次勾选的发送资料尚未就绪，请先补齐对应资料或取消勾选后再发送。");
+      return;
+    }
+    if (!emails(toText).length) {
+      setMsg("请先在“发送设置”中填写财务收件人。");
+      return;
+    }
+    if (!mailReady) {
+      setMsg("邮件通道尚未配置完成，请先检查发送设置。");
       return;
     }
     setBusy(true); setMsg("");
@@ -900,7 +908,16 @@ export default function MonthlySendPage() {
 
   const businessReady = Boolean(businessStatus?.ready);
   const needsUnbilled = Boolean(businessStatus?.domesticSupported ?? domesticSupportedByEntity);
-  const ready = Boolean(businessReady && bankTx && bankReceipt && (!needsUnbilled || (unbilled && corporatePayment)));
+  const monthlyReady = Boolean(businessReady && bankTx && bankReceipt && (!needsUnbilled || (unbilled && corporatePayment)));
+  const selectedMaterialsReady = Boolean(
+    includeSel.length
+    && (!includeSel.includes("交易明细") || bankTx)
+    && (!includeSel.includes("回单详情") || bankReceipt)
+    && (!includeSel.includes("无票收入") || (unbilled && businessReady))
+    && (!includeSel.includes("已收票对公付款明细") || corporatePayment)
+  );
+  const mailReady = Boolean(mailStatus?.configured);
+  const sendReady = Boolean(selectedMaterialsReady && emails(toText).length && mailReady);
   const readyCount = [bankTx, bankReceipt, ...(needsUnbilled ? [unbilled, corporatePayment] : [])].filter(Boolean).length;
   const requiredDeliveryCount = needsUnbilled ? 4 : 2;
   const hasForeignSummary = (businessStatus?.foreignEntryCount ?? 0) > 0;
@@ -1140,7 +1157,7 @@ export default function MonthlySendPage() {
           <label className="border-x border-slate-200 px-3 text-sm font-semibold text-slate-800"><span className="sr-only">账期</span><input type="month" value={sendMonth} onChange={(e) => setSendMonth(e.target.value)} className="w-[118px] border-0 bg-transparent p-0 text-sm font-semibold outline-none" /></label>
           <button type="button" aria-label="下一个账期" onClick={() => setSendMonth(shiftMonthValue(sendMonth, 1))} className="px-3 py-2 text-lg leading-none text-slate-500 hover:bg-slate-50 hover:text-blue-600">›</button>
         </div>
-        <div className="flex items-center gap-2 text-xs text-slate-500">月度状态：<span className={`inline-flex items-center gap-1 rounded-full px-2.5 py-1 font-medium ring-1 ring-inset ${ready ? "bg-emerald-50 text-emerald-700 ring-emerald-200" : "bg-amber-50 text-amber-700 ring-amber-200"}`}><span className={`h-1.5 w-1.5 rounded-full ${ready ? "bg-emerald-500" : "bg-amber-500"}`} />{ready ? "可发送" : businessStatus && !businessReady ? "待补业务成本" : "待补财务资料"}</span></div>
+        <div className="flex items-center gap-2 text-xs text-slate-500">月度状态：<span className={`inline-flex items-center gap-1 rounded-full px-2.5 py-1 font-medium ring-1 ring-inset ${monthlyReady ? "bg-emerald-50 text-emerald-700 ring-emerald-200" : "bg-amber-50 text-amber-700 ring-amber-200"}`}><span className={`h-1.5 w-1.5 rounded-full ${monthlyReady ? "bg-emerald-500" : "bg-amber-500"}`} />{monthlyReady ? "全量资料齐全" : businessStatus && !businessReady ? "待补业务成本" : "待补财务资料"}</span></div>
         <div className="flex items-center gap-2 text-xs text-slate-500">发送状态：<span className={`inline-flex items-center gap-1 rounded-full px-2.5 py-1 font-medium ring-1 ring-inset ${period?.status === "SENT" ? "bg-blue-50 text-blue-700 ring-blue-200" : "bg-slate-50 text-slate-600 ring-slate-200"}`}><span className={`h-1.5 w-1.5 rounded-full ${period?.status === "SENT" ? "bg-blue-500" : "bg-slate-400"}`} />{period?.status === "SENT" ? "已发送" : period?.status === "PACKAGED" ? "已打包" : "未发送"}</span></div>
         <div className="text-xs text-slate-500">最后发送：<span className="text-slate-700">{latestSentPkg ? formatDate(latestSentPkg.createdAt) : "—"}</span></div>
         <button type="button" onClick={() => latestPkg ? void downloadPackage(latestPkg) : setMsg("该账期暂无可导出的发送包")} disabled={busy || !latestPkg} className="ml-auto inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-medium text-blue-600 hover:border-blue-300 disabled:cursor-not-allowed disabled:text-slate-300"><svg viewBox="0 0 24 24" className="h-3.5 w-3.5" fill="none"><path d="M12 4v11m0 0-4-4m4 4 4-4M5 20h14" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" /></svg>导出清单</button>
@@ -1243,8 +1260,18 @@ export default function MonthlySendPage() {
                 <button type="button" onClick={() => { setMailOpen(true); void loadMailStatus(); }} className="shrink-0 rounded-md border border-slate-200 bg-white px-2.5 py-1.5 text-[11px] font-medium text-blue-600 hover:border-blue-300">修改设置</button>
               </div>
             </div>
-            <div><div className="mb-1.5 text-xs font-medium text-slate-600">发送条件</div><div className="space-y-1.5 text-xs text-slate-500"><label className="flex items-center gap-2"><input type="checkbox" checked={businessReady} disabled className="h-4 w-4 rounded border-slate-300 text-blue-600" />业务数据已按当前公司主体同步，必要成本完整</label><label className="flex items-center gap-2"><input type="checkbox" checked={Boolean(bankTx && bankReceipt)} disabled className="h-4 w-4 rounded border-slate-300 text-blue-600" />银行交易明细和回单已齐全</label>{needsUnbilled && <><label className="flex items-center gap-2"><input type="checkbox" checked={Boolean(unbilled)} disabled className="h-4 w-4 rounded border-slate-300 text-blue-600" />无票收入已生成</label><label className="flex items-center gap-2"><input type="checkbox" checked={Boolean(corporatePayment)} disabled className="h-4 w-4 rounded border-slate-300 text-blue-600" />已收票对公付款明细已生成</label></>}<label className="flex items-center gap-2"><input type="checkbox" checked={!mailStatus || mailStatus.configured} disabled className="h-4 w-4 rounded border-slate-300 text-blue-600" />邮件通道可用</label></div></div>
-            <button type="button" onClick={packageAndSend} disabled={busy || !sel || !ready || !emails(toText).length || !includeSel.length} className="flex w-full items-center justify-center gap-2 rounded-lg bg-emerald-600 px-4 py-3 text-sm font-semibold text-white shadow-sm hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-40">➤ 确认并发送给财务</button>
+            <div>
+              <div className="mb-1.5 text-xs font-medium text-slate-600">本次发送条件</div>
+              <div className="space-y-1.5 text-xs text-slate-500">
+                {includeSel.includes("交易明细") && <label className="flex items-center gap-2"><input type="checkbox" checked={Boolean(bankTx)} disabled className="h-4 w-4 rounded border-slate-300 text-blue-600" />银行交易明细已就绪</label>}
+                {includeSel.includes("回单详情") && <label className="flex items-center gap-2"><input type="checkbox" checked={Boolean(bankReceipt)} disabled className="h-4 w-4 rounded border-slate-300 text-blue-600" />银行回单详情已就绪</label>}
+                {includeSel.includes("无票收入") && <label className="flex items-center gap-2"><input type="checkbox" checked={Boolean(unbilled && businessReady)} disabled className="h-4 w-4 rounded border-slate-300 text-blue-600" />无票收入已生成且业务成本完整</label>}
+                {includeSel.includes("已收票对公付款明细") && <label className="flex items-center gap-2"><input type="checkbox" checked={Boolean(corporatePayment)} disabled className="h-4 w-4 rounded border-slate-300 text-blue-600" />已收票对公付款明细已生成</label>}
+                <label className="flex items-center gap-2"><input type="checkbox" checked={emails(toText).length > 0} disabled className="h-4 w-4 rounded border-slate-300 text-blue-600" />财务收件人已设置</label>
+                <label className="flex items-center gap-2"><input type="checkbox" checked={mailReady} disabled className="h-4 w-4 rounded border-slate-300 text-blue-600" />邮件通道可用</label>
+              </div>
+            </div>
+            <button type="button" onClick={packageAndSend} disabled={busy || !sel || !sendReady} className="flex w-full items-center justify-center gap-2 rounded-lg bg-emerald-600 px-4 py-3 text-sm font-semibold text-white shadow-sm hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-40">➤ 确认并发送给财务</button>
             <div className="text-[11px] leading-4 text-slate-400">{latestPkg ? <>最新包 V{latestPkg.version} · {latestPkg.status === "SENT" ? "已发送" : "已打包"} · {formatDate(latestPkg.createdAt)}</> : "该账期还没有打包记录"}{mailStatus && !mailStatus.configured && <span className="ml-1.5 rounded bg-rose-50 px-1.5 py-0.5 font-medium text-rose-600 ring-1 ring-inset ring-rose-200">SMTP 未配置</span>}</div>
           </div>
         </aside>
@@ -1272,7 +1299,7 @@ export default function MonthlySendPage() {
               <button type="button" onClick={loadCorporatePayment} className="rounded-lg border border-slate-200 px-3 py-2 text-xs text-slate-600 hover:bg-slate-50">刷新</button>
             </> : <>
               <span className={`rounded-full px-2.5 py-1 text-[11px] font-medium ${includeSel.includes("已收票对公付款明细") ? "bg-emerald-50 text-emerald-700 ring-1 ring-emerald-200" : "bg-amber-50 text-amber-700 ring-1 ring-amber-200"}`}>{includeSel.includes("已收票对公付款明细") ? "已纳入本次发送" : "未纳入本次发送"}</span>
-              <button type="button" onClick={packageAndSend} disabled={busy || !sel || !ready || !emails(toText).length || !includeSel.includes("已收票对公付款明细")} className="rounded-lg bg-blue-600 px-4 py-2 text-xs font-semibold text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-40">{busy ? "发送中…" : "确认并发送给财务"}</button>
+              <button type="button" onClick={packageAndSend} disabled={busy || !sel || !sendReady || !includeSel.includes("已收票对公付款明细")} className="rounded-lg bg-blue-600 px-4 py-2 text-xs font-semibold text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-40">{busy ? "发送中…" : "确认并发送给财务"}</button>
             </>}
           </div>
         </div>
@@ -1539,7 +1566,7 @@ export default function MonthlySendPage() {
               </> : <>
                 <button type="button" onClick={closeUnbilledDetail} className="rounded-lg border border-slate-200 bg-white px-4 py-2 text-xs text-slate-600">关闭</button>
                 <span className={`rounded-full px-2.5 py-1 text-[11px] font-medium ${includeSel.includes("无票收入") ? "bg-emerald-50 text-emerald-700 ring-1 ring-emerald-200" : "bg-amber-50 text-amber-700 ring-1 ring-amber-200"}`}>{includeSel.includes("无票收入") ? "已纳入本次发送" : "未纳入本次发送"}</span>
-                <button type="button" onClick={packageAndSend} disabled={busy || !sel || !ready || !emails(toText).length || !includeSel.includes("无票收入")} className="rounded-lg bg-blue-600 px-4 py-2 text-xs font-semibold text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-40">{busy ? "发送中…" : "确认并发送给财务"}</button>
+                <button type="button" onClick={packageAndSend} disabled={busy || !sel || !sendReady || !includeSel.includes("无票收入")} className="rounded-lg bg-blue-600 px-4 py-2 text-xs font-semibold text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-40">{busy ? "发送中…" : "确认并发送给财务"}</button>
               </>}
             </div>
           </div>
