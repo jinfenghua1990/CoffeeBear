@@ -968,7 +968,7 @@ export default function BackupSettingsPage() {
                 ["1", "选择恢复点", "按日期选择目标版本"],
                 ["2", "选择来源", "当前仅 R2；NAS 后续接入"],
                 ["3", "自动校验", "manifest / Hash / 数据库"],
-                ["4", "确认恢复", "恢复并执行健康检查"],
+                ["4", "恢复准备完成", "人工确认后再执行生产恢复"],
               ].map(([step, title, desc]) => (
                 <div key={step} className="rounded-xl border border-slate-100 bg-slate-50 p-3">
                   <span className="flex h-6 w-6 items-center justify-center rounded-full bg-blue-50 text-[10px] font-semibold text-blue-700">{step}</span>
