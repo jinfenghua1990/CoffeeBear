@@ -505,6 +505,8 @@ class FinanceEntryInput(BaseModel):
     source_no: str = Field(default="", max_length=128)
     category: str = Field(default="other", max_length=64)
     direction: str = Field(default="expense", max_length=24)
+    cash_effect: bool = True
+    profit_effect: bool = True
     currency: str = Field(default="CNY", max_length=8)
     amount: str = "0"
     tax_amount: str = "0"
