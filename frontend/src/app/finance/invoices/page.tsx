@@ -162,6 +162,7 @@ function outputCategoryLabel(value: string): string {
 const PAYMENT_METHOD_META: Record<string, { label: string; cls: string }> = {
   corporate: { label: "对公账户支出", cls: "border-blue-200 bg-blue-50 text-blue-700" },
   personal: { label: "个人垫付", cls: "border-amber-200 bg-amber-50 text-amber-700" },
+  mixed: { label: "对公 + 个人垫付", cls: "border-violet-200 bg-violet-50 text-violet-700" },
   "": { label: "未设置", cls: "border-slate-200 bg-slate-100 text-slate-500" },
 };
 function paymentMethodLabel(value: string): string {
@@ -330,13 +331,13 @@ export default function InvoiceManagementPage() {
       setError(caught instanceof Error ? caught.message : String(caught));
     }
   }
-  async function changePaymentMethod(id: number, paymentMethod: string) {
+  async function changePaymentMethod(id: number, paymentMethod: "personal" | "") {
     setError("");
     setMessage("");
     try {
       await taxInvoiceApi.bulkSetPaymentMethod([id], paymentMethod);
-      setRows((current) => current.map((row) => (row.id === id ? { ...row, paymentMethod } : row)));
-      setMessage(paymentMethod ? `已设置为「${paymentMethodLabel(paymentMethod)}」` : "已清除支付方式");
+      await load();
+      setMessage(paymentMethod ? "已标记个人垫付。" : "已清除人工付款方式标记。");
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : String(caught));
     }
@@ -398,7 +399,7 @@ export default function InvoiceManagementPage() {
       <header className="app-page-header -mx-1 bg-[#f4f7fb]/95 pb-2 backdrop-blur">
         <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
           <h1 className="text-lg font-semibold tracking-tight text-slate-900">发票管理</h1>
-          <p className="text-xs text-slate-500">统一管理进项、销项发票，上传后自动识别并匹配采购单</p>
+          <p className="text-xs text-slate-500">发票业务匹配、银行付款核对分开管理；进项付款方式以银行证据为准，个人垫付需人工明确</p>
           <Link href="/data-center-import?tab=tax" className="text-xs text-indigo-600 hover:underline">查看原始导入批次与明细</Link>
         </div>
       </header>
@@ -490,7 +491,7 @@ export default function InvoiceManagementPage() {
                 <th className="px-3 py-2.5 text-right">价税合计</th>
                 <th className="px-3 py-2.5">票据状态</th>
                 <th className="px-3 py-2.5">类别</th>
-                <th className="px-3 py-2.5">支付方式</th>
+                <th className="px-3 py-2.5">付款方式</th>
                 <th className="px-3 py-2.5">采购关联</th>
                 <th className="px-3 py-2.5">入库关联</th>
                 <th className="px-3 py-2.5">业务匹配</th>
@@ -528,12 +529,23 @@ export default function InvoiceManagementPage() {
                     </div>
                   </td>
                   <td className="px-3 py-2.5">
-                    {row.direction === "input" ? (
-                      <span className={`whitespace-nowrap rounded-full border px-2 py-0.5 text-[10px] font-medium ${paymentMethodClass(row.paymentMethod || "")}`}>
-                        {paymentMethodLabel(row.paymentMethod || "")}
+                    {row.direction !== "input" || row.bankPaymentStatus === "not_applicable" ? (
+                      <span className="text-slate-300">—</span>
+                    ) : row.bankPaymentStatus === "matched" ? (
+                      <span className={`whitespace-nowrap rounded-full border px-2 py-0.5 text-[10px] font-medium ${paymentMethodClass("corporate")}`}>
+                        对公账户支出
                       </span>
                     ) : (
-                      <span className="text-slate-300">—</span>
+                      <select
+                        value={row.manualPaymentMethod || ""}
+                        onChange={(event) => void changePaymentMethod(row.id, event.target.value as "personal" | "")}
+                        onClick={(event) => event.stopPropagation()}
+                        title={row.bankPaymentStatus === "partial" ? "银行已部分付款；可标记剩余部分是否个人垫付" : "无银行付款证据时可人工标记个人垫付"}
+                        className={`max-w-[150px] rounded-full border px-2 py-0.5 text-[10px] font-medium outline-none ${paymentMethodClass(row.paymentMethod || "")}`}
+                      >
+                        <option value="">{row.bankPaymentStatus === "partial" ? "对公部分付款" : "未设置"}</option>
+                        <option value="personal">{row.bankPaymentStatus === "partial" ? "对公 + 个人垫付" : "个人垫付"}</option>
+                      </select>
                     )}
                   </td>
                   <td className="max-w-[210px] px-3 py-2.5 text-slate-600">{row.purchaseOrderNos.length ? <span title={row.purchaseOrderNos.join("、")}>{row.purchaseOrderNos.slice(0, 2).join("、")}{row.purchaseOrderNos.length > 2 ? ` 等 ${row.purchaseOrderNos.length} 单` : ""}</span> : <span className="text-slate-400">未匹配</span>}</td>
@@ -745,10 +757,25 @@ function InvoiceDetailModal({ row, onRefresh, onClose }: { row: TaxInvoiceRow; o
                 <span className="pointer-events-none absolute right-1.5 text-[8px] text-current opacity-50">▾</span>
               </span>
             )}
-            {row.direction === "input" && row.paymentMethod && (
-              <span className={`rounded-full border px-2 py-0.5 text-[10px] font-medium ${paymentMethodClass(row.paymentMethod)}`}>
-                {paymentMethodLabel(row.paymentMethod)}
-              </span>
+            {row.direction === "input" && row.bankPaymentStatus !== "not_applicable" && (
+              row.bankPaymentStatus === "matched" ? (
+                <span className={`rounded-full border px-2 py-0.5 text-[10px] font-medium ${paymentMethodClass("corporate")}`}>
+                  对公账户支出
+                </span>
+              ) : (
+                <span className="relative inline-flex items-center" onClick={(event) => event.stopPropagation()}>
+                  <select
+                    value={row.manualPaymentMethod || ""}
+                    onChange={(event) => void handlePaymentMethodChange(event.target.value)}
+                    title={row.bankPaymentStatus === "partial" ? "银行已部分付款；可标记剩余部分个人垫付" : "可人工标记个人垫付；对公付款必须由银行核对产生"}
+                    className={`cursor-pointer appearance-none whitespace-nowrap rounded-full border py-0.5 pl-2 pr-5 text-[10px] font-medium outline-none ${paymentMethodClass(row.paymentMethod || "")}`}
+                  >
+                    <option value="">{row.bankPaymentStatus === "partial" ? "对公部分付款" : "付款方式未设置"}</option>
+                    <option value="personal">{row.bankPaymentStatus === "partial" ? "对公 + 个人垫付" : "个人垫付"}</option>
+                  </select>
+                  <span className="pointer-events-none absolute right-1.5 text-[8px] text-current opacity-50">▾</span>
+                </span>
+              )
             )}</div>
             <div className="mt-1 text-xs text-slate-500">{row.sellerName || "未记录开票方"} · 开票日期 {dateText(row.issueDate)} · 价税合计 {money(row.totalAmount)}</div>
           </div>

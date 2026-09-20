@@ -93,8 +93,9 @@ class TaxInvoice(Base, PkMixin, TimestampMixin):
     verified: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
     verified_month: Mapped[str] = mapped_column(String(16), default="")
     verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    # 发票支付方式人工字段：corporate=对公账户支出；personal=个人垫付；空=未设置。
-    # 进项列表的 corporate 优先由已确认 bank_transaction 关联推导；无证据保持空，不反推 personal。
+    # 进项发票人工付款补充字段：personal=个人垫付；空=未设置。
+    # corporate / mixed 不直接存库，必须由已确认 bank_transaction 付款证据动态派生。
+    # 销项发票不适用；历史错误值在序列化时忽略。
     payment_method: Mapped[str] = mapped_column(String(16), default="", server_default="", index=True)
     raw: Mapped[dict] = mapped_column(JSONB, default=dict)
 

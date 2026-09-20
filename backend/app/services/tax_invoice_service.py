@@ -508,6 +508,31 @@ def serialize_import(row: TaxInvoiceImport) -> dict:
     return _serialize_import(row)
 
 
+def _payment_method_context(row: TaxInvoice, bank_status: str) -> dict[str, str]:
+    """付款方式唯一派生入口；发票业务匹配状态不得参与计算。"""
+    manual_method = (
+        "personal"
+        if row.direction == "input" and row.payment_method == "personal"
+        else ""
+    )
+    if row.direction != "input":
+        final_method = ""
+    elif bank_status == "matched":
+        final_method = "corporate"
+    elif bank_status == "partial" and manual_method == "personal":
+        final_method = "mixed"
+    elif bank_status == "partial":
+        final_method = "corporate"
+    elif manual_method == "personal":
+        final_method = "personal"
+    else:
+        final_method = ""
+    return {
+        "manualPaymentMethod": manual_method,
+        "paymentMethod": final_method,
+    }
+
+
 def _serialize_invoice(row: TaxInvoice, context: dict | None = None, db: Session | None = None) -> dict:
     payload = {
         "id": row.id,
@@ -553,20 +578,11 @@ def _serialize_invoice(row: TaxInvoice, context: dict | None = None, db: Session
                 "bankRemainingAmount": "0.00",
             })
 
-    # 支付方式：
-    # - 进项：只有已确认且实际分摊金额 > 0 的银行付款证据才推导 corporate；
-    # - 销项：直接回显用户维护的 payment_method，不能在序列化时抹掉。
-    if "paymentMethod" not in payload:
-        if row.direction == "input":
-            payload["paymentMethod"] = (
-                "corporate"
-                if payload.get("bankPaymentStatus") in {"partial", "matched"}
-                else ""
-            )
-        elif row.direction == "output":
-            payload["paymentMethod"] = row.payment_method or ""
-        else:
-            payload["paymentMethod"] = ""
+    # 付款方式只由“银行付款事实 + 人工 personal 标记”派生。
+    # 即使上游 context 带旧字段也在这里覆盖，保证列表/详情/单票一个事实源。
+    payload.update(
+        _payment_method_context(row, str(payload.get("bankPaymentStatus") or "not_applicable"))
+    )
     return payload
 
 
@@ -1151,15 +1167,6 @@ def list_invoices(
                 "bankRemainingAmount": "0.00",
             }),
         }
-        if row.direction == "input":
-            # 付款方式由独立的银行付款核对状态推导，不能由发票业务 match_status 推导。
-            ctx["paymentMethod"] = (
-                "corporate"
-                if ctx["bankPaymentStatus"] in {"partial", "matched"}
-                else ""
-            )
-        elif row.direction == "output":
-            ctx["paymentMethod"] = row.payment_method or ""
         # 明细兜底识别只面向进项（6+1）；销项分类不按货物名推断，空即待判断。
         if not row.category and row.direction != "output":
             ctx["category"] = classify_category_from_items(
@@ -1517,10 +1524,14 @@ def set_invoice_categories(
     return invoices
 
 
-PAYMENT_METHOD_VALUES = ("corporate", "personal", "")
+# payment_method 是人工补充事实，不是银行付款事实：
+# personal=进项发票个人垫付（或部分对公后的剩余部分个人垫付）；空=未人工标记。
+# corporate / mixed 只能由银行付款事实动态派生，禁止人工直接写入。
+MANUAL_PAYMENT_METHOD_VALUES = ("personal", "")
 PAYMENT_METHOD_LABELS = {
     "corporate": "对公账户支出",
     "personal": "个人垫付",
+    "mixed": "对公 + 个人垫付",
     "": "未设置",
 }
 
@@ -1528,21 +1539,32 @@ PAYMENT_METHOD_LABELS = {
 def set_invoice_payment_methods(
     db: Session, invoice_ids: list[int], payment_method: str, actor: str = "system"
 ) -> list[TaxInvoice]:
-    """批量设置销项发票支付方式：corporate=对公账户支出；personal=个人垫付；空=清除。
-    仅销项发票（output）可设置；进项发票传非空值会被拒绝。"""
-    if payment_method not in PAYMENT_METHOD_VALUES:
-        raise ValueError("无效的支付方式，合法值：corporate（对公账户支出）、personal（个人垫付）、空（清除）")
+    """人工维护有效正数进项发票的个人垫付标记。
+
+    corporate 必须来自已确认银行付款证据；销项不适用。
+    部分银行付款后可人工标 personal，表示剩余部分个人垫付，最终派生为 mixed。
+    """
+    if payment_method not in MANUAL_PAYMENT_METHOD_VALUES:
+        raise ValueError("只能人工设置 personal（个人垫付）或清除；对公付款必须由已确认银行付款生成")
     invoices = db.query(TaxInvoice).filter(TaxInvoice.id.in_(invoice_ids)).all()
     if not invoices:
         return []
     for invoice in invoices:
-        if invoice.direction != "output" and payment_method:
-            raise ValueError(f"发票 #{invoice.id} 不是销项发票，不能设置支付方式")
+        if invoice.direction != "input":
+            if payment_method:
+                raise ValueError(f"发票 #{invoice.id} 不是进项发票，不适用个人垫付")
+            continue
+        if payment_method == "personal":
+            if not is_bank_payment_reconciliation_eligible(invoice):
+                raise ValueError(bank_payment_reconciliation_ineligible_reason(invoice))
+            bank = _invoice_bank_payment_context(db, [invoice]).get(invoice.id, {})
+            if bank.get("bankPaymentStatus") == "matched":
+                raise ValueError(f"发票 #{invoice.id} 已由银行付款全额核对，不能再标记个人垫付")
     for invoice in invoices:
-        invoice.payment_method = payment_method
+        invoice.payment_method = payment_method if invoice.direction == "input" else ""
         audit(
             db, actor, "tax.invoice.set_payment_method", "tax_invoices", invoice.id,
-            {"payment_method": payment_method}, commit=False,
+            {"manual_payment_method": invoice.payment_method}, commit=False,
         )
     db.commit()
     return invoices
