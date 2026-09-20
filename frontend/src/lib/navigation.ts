@@ -197,19 +197,36 @@ export function moduleWorkspace(module: ModuleDef): WorkspaceKey {
  * 开发期导航防重：同一业务模块下，相同 pathname 只能出现一次。
  * overview/detail、summary/transactions 等视图必须放页面内部 TAB、筛选或弹窗。
  */
+function canonicalSidebarPath(href: string) {
+  const pathname = href.split("?", 1)[0];
+  const legacyAliases: Record<string, string> = {
+    "/finance/bank-summary": "/finance/bank-transactions",
+    "/payments": "/finance/monthly-send",
+    "/profit": "/finance/monthly-send",
+    "/tax-invoices": "/finance/invoices",
+    "/settings": "/settings/backup",
+    "/settings/warehouses": "/supply-chain/warehouses",
+    "/products/inventory-goods": "/inventory",
+    "/products/inventory-consumables": "/products",
+    "/alibaba1688-import": "/data-center-import",
+    "/jackyun-import": "/data-center-import",
+  };
+  return legacyAliases[pathname] ?? pathname;
+}
+
 function assertNoDuplicateSidebarViews() {
   for (const module of MODULES) {
     const items = module.groups?.flatMap((group) => group.items) ?? module.items ?? [];
     const seen = new Map<string, string>();
     for (const item of items) {
-      const pathname = item.href.split("?", 1)[0];
-      const previous = seen.get(pathname);
+      const canonicalPath = canonicalSidebarPath(item.href);
+      const previous = seen.get(canonicalPath);
       if (previous) {
         throw new Error(
-          `[navigation] ${module.key} 左侧菜单重复页面：${previous} / ${item.label} → ${pathname}。同一页面的不同视图必须使用页内 TAB、筛选或弹窗。`,
+          `[navigation] ${module.key} 左侧菜单重复业务入口：${previous} / ${item.label} → ${canonicalPath}。同一业务模块的旧路径、汇总/明细等视图必须收进页内 TAB、筛选或弹窗。`,
         );
       }
-      seen.set(pathname, item.label);
+      seen.set(canonicalPath, item.label);
     }
   }
 }
