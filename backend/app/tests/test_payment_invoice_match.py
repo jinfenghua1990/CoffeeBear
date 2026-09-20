@@ -157,7 +157,13 @@ def test_overview_invoice_pool_counts_bank_links_only(db_session):
     row = next(r for r in data["invoicePool"] if r["id"] == linked.id)
     assert row["bankLinkedAmount"] == "400.00"
     assert row["remaining"] == "0.00"
+    assert row["bankMatchStatus"] == "matched"
     assert row["links"][0]["counterpartyName"] == "供货商甲"
+    assert row["links"][0]["txnId"] == txn.id
+    assert data["summary"]["invoiceTotal"] == "400.00"
+    assert data["summary"]["invoiceMatchedTotal"] == "400.00"
+    assert data["summary"]["invoiceOutstandingTotal"] == "0.00"
+    assert data["summary"]["invoiceMatchedCount"] == 1
 
 
 def test_suggestion_same_name_and_equal_remaining(db_session):
@@ -170,6 +176,7 @@ def test_suggestion_same_name_and_equal_remaining(db_session):
     assert miss.id not in data["payments"][0]["suggestedInvoiceIds"]
     row = next(r for r in data["invoicePool"] if r["id"] == hit.id)
     assert row["suggested"] is True
+    assert row["suggestedPaymentIds"] == [txn.id]
 
 
 # ---------- link / unlink ----------

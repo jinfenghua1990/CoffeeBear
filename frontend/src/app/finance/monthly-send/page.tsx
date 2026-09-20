@@ -119,14 +119,28 @@ type PaymentMatchRow = {
   id: number;
   txnDate: string;
   counterpartyName: string;
+  counterpartyAccount?: string;
   amount: string;
   voucherNo: string;
   summary: string;
+  accountNo?: string;
+  accountName?: string;
   invoices: PaymentMatchInvoice[];
   matchedAmount: string;
   remaining: string;
   status: "matched" | "partial" | "unmatched" | string;
   suggestedInvoiceIds: number[];
+};
+type PaymentMatchPoolInvoiceLink = PaymentMatchInvoice & {
+  txnId: number | null;
+  txnDate: string;
+  txnAmount: string;
+  counterpartyName: string;
+  counterpartyAccount: string;
+  voucherNo: string;
+  summary: string;
+  accountNo: string;
+  accountName: string;
 };
 type PaymentMatchPoolInvoice = {
   id: number;
@@ -136,8 +150,11 @@ type PaymentMatchPoolInvoice = {
   totalAmount: string;
   bankLinkedAmount: string;
   remaining: string;
+  bankMatchStatus: "matched" | "partial" | "unmatched" | string;
   matchStatus: string;
+  links: PaymentMatchPoolInvoiceLink[];
   suggested: boolean;
+  suggestedPaymentIds: number[];
 };
 type PaymentMatchOverview = {
   year: number;
@@ -152,6 +169,13 @@ type PaymentMatchOverview = {
     matchedCount: number;
     partialCount: number;
     unmatchedCount: number;
+    invoiceTotal: string;
+    invoiceMatchedTotal: string;
+    invoiceOutstandingTotal: string;
+    invoiceCount: number;
+    invoiceMatchedCount: number;
+    invoicePartialCount: number;
+    invoiceUnmatchedCount: number;
   };
 };
 
@@ -182,6 +206,36 @@ type CorporatePaymentRow = {
   invoiceStatus: string;
   purchaseOrderNos: string[];
 };
+type CorporateInvoicePayment = {
+  linkId: number;
+  paymentId: number;
+  paymentDate: string;
+  paymentAccount: string;
+  paymentAccountName: string;
+  counterpartyAccount: string;
+  voucherNo: string;
+  summary: string;
+  paymentAmount: string;
+  allocatedAmount: string;
+  paymentMatchedTotal: string;
+  paymentStatus: string;
+};
+type CorporateInvoiceRow = {
+  invoiceId: number;
+  invoiceNumber: string;
+  invoiceDate: string;
+  invoiceType: string;
+  supplierName: string;
+  supplierTaxId: string;
+  invoiceAmountExclTax: string;
+  invoiceTaxAmount: string;
+  invoiceTotalAmount: string;
+  invoiceCorporatePaidTotal: string;
+  invoiceOutstandingAmount: string;
+  invoiceStatus: "paid" | "partial" | "unpaid" | string;
+  purchaseOrderNos: string[];
+  payments: CorporateInvoicePayment[];
+};
 type CorporatePaymentProductDetail = {
   invoiceId: number;
   invoiceNumber: string;
@@ -209,7 +263,11 @@ type CorporatePaymentReport = {
     invoiceTotal: string;
     outstandingTotal: string;
     productRowCount: number;
+    paidInvoiceCount?: number;
+    partialInvoiceCount?: number;
+    unpaidInvoiceCount?: number;
   };
+  invoiceRows: CorporateInvoiceRow[];
   rows: CorporatePaymentRow[];
   productDetails: CorporatePaymentProductDetail[];
 };
@@ -321,6 +379,7 @@ export default function MonthlySendPage() {
   const [corporatePayment, setCorporatePayment] = useState<CorporatePaymentReport | null>(null);
   const [matchLoading, setMatchLoading] = useState(false);
   const [pickerTxn, setPickerTxn] = useState<PaymentMatchRow | null>(null);
+  const [pickerInvoice, setPickerInvoice] = useState<PaymentMatchPoolInvoice | null>(null);
   const [pickerQuery, setPickerQuery] = useState("");
   const [pickerScope, setPickerScope] = useState<"month" | "all">("month");
   const [allInvoices, setAllInvoices] = useState<PickerInvoice[]>([]);
@@ -341,52 +400,7 @@ export default function MonthlySendPage() {
   const pickerRequestSeq = useRef(0);
   const uploadKind = useRef<"交易明细" | "回单详情">("交易明细");
 
-  const corporatePaymentGroups = useMemo(() => {
-    const grouped = new Map<number, {
-      paymentId: number;
-      paymentDate: string;
-      paymentAccount: string;
-      paymentAccountName: string;
-      counterpartyAccount: string;
-      voucherNo: string;
-      summary: string;
-      paymentAmount: string;
-      paymentMatchedTotal: string;
-      paymentStatus: string;
-      supplierNames: string[];
-      purchaseOrderNos: string[];
-      invoices: CorporatePaymentRow[];
-    }>();
-    for (const row of corporatePayment?.rows || []) {
-      let group = grouped.get(row.paymentId);
-      if (!group) {
-        group = {
-          paymentId: row.paymentId,
-          paymentDate: row.paymentDate,
-          paymentAccount: row.paymentAccount,
-          paymentAccountName: row.paymentAccountName,
-          counterpartyAccount: row.counterpartyAccount,
-          voucherNo: row.voucherNo,
-          summary: row.summary,
-          paymentAmount: row.paymentAmount,
-          paymentMatchedTotal: row.paymentMatchedTotal,
-          paymentStatus: row.paymentStatus,
-          supplierNames: [],
-          purchaseOrderNos: [],
-          invoices: [],
-        };
-        grouped.set(row.paymentId, group);
-      }
-      group.invoices.push(row);
-      if (row.supplierName && !group.supplierNames.includes(row.supplierName)) group.supplierNames.push(row.supplierName);
-      for (const orderNo of row.purchaseOrderNos) {
-        if (orderNo && !group.purchaseOrderNos.includes(orderNo)) group.purchaseOrderNos.push(orderNo);
-      }
-    }
-    return Array.from(grouped.values()).sort((a, b) =>
-      a.paymentDate.localeCompare(b.paymentDate) || a.paymentId - b.paymentId
-    );
-  }, [corporatePayment]);
+  const corporateInvoices = corporatePayment?.invoiceRows || [];
 
   const selectedEntity = entities.find((row) => row.id === entityId) ?? null;
   const companyName = selectedEntity?.name ?? "";
@@ -622,6 +636,30 @@ export default function MonthlySendPage() {
       loadMatch();
     } catch (e) {
       setMsg(`标记失败：${e instanceof Error ? e.message : String(e)}`);
+    } finally { setBusy(false); }
+  }
+
+  async function matchInvoiceToPayment(invoice: PaymentMatchPoolInvoice, txn: PaymentMatchRow) {
+    const invoiceRemain = Number(invoice.remaining) || 0;
+    const paymentRemain = Number(txn.remaining) || 0;
+    const alloc = Math.min(invoiceRemain, paymentRemain);
+    if (alloc <= 0) { setMsg("当前发票或付款已没有可核对金额"); return; }
+    setBusy(true); setMsg("");
+    try {
+      const res = await authenticatedFetch("/api/v1/finance/payment-invoice-match/link", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ txn_id: txn.id, invoice_id: invoice.id, allocated_amount: alloc.toFixed(2) }),
+      });
+      const d = await res.json();
+      if (!res.ok) throw new Error(d.detail || "核对失败");
+      setMsg(`已核对：发票 ${invoice.invoiceNumber || "未记录号码"} ↔ ${txn.txnDate} 银行付款 ${money(alloc)}`);
+      setPickerInvoice(null);
+      setPickerQuery("");
+      await loadMatch();
+      await loadCorporatePayment();
+    } catch (e) {
+      setMsg(`核对失败：${e instanceof Error ? e.message : String(e)}`);
     } finally { setBusy(false); }
   }
 
@@ -1013,62 +1051,65 @@ export default function MonthlySendPage() {
 
       {financeTab === "corporate" && <section className={`${CARD} overflow-hidden`}>
         <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 px-4 py-4">
-          <div><h2 className="text-base font-semibold text-slate-900">已收票对公付款明细</h2><p className="mt-1 text-xs text-slate-400">主表按“银行付款流水”一笔一行；发票是付款下面的匹配对象，再继续下钻采购订单、商品数量和采购单价。</p></div>
-          <div className="flex gap-2"><button type="button" onClick={() => { setFinanceTab("match"); void loadMatch(); }} className="rounded-lg border border-blue-200 px-3 py-2 text-xs font-medium text-blue-600 hover:bg-blue-50">发起对账</button><button type="button" onClick={loadCorporatePayment} className="rounded-lg border border-slate-200 px-3 py-2 text-xs text-slate-600 hover:bg-slate-50">刷新</button></div>
+          <div>
+            <h2 className="text-base font-semibold text-slate-900">已收票对公核对明细</h2>
+            <p className="mt-1 text-xs text-slate-400">财务交付以进项发票为主：一张发票一行，再核对对应银行付款、采购订单和商品采购价；已收票但尚未付款的发票也会保留。</p>
+          </div>
+          <div className="flex gap-2">
+            <button type="button" onClick={() => { setFinanceTab("match"); void loadMatch(); }} className="rounded-lg border border-blue-200 px-3 py-2 text-xs font-medium text-blue-600 hover:bg-blue-50">核对银行</button>
+            <button type="button" onClick={loadCorporatePayment} className="rounded-lg border border-slate-200 px-3 py-2 text-xs text-slate-600 hover:bg-slate-50">刷新</button>
+          </div>
         </div>
         {corporatePayment && <div className="grid grid-cols-2 gap-px bg-slate-100 sm:grid-cols-5">
           {([
-            ["对公付款", money(corporatePayment.summary.paymentTotal), `${corporatePayment.summary.paymentCount} 笔`],
-            ["已匹配发票", money(corporatePayment.summary.allocatedTotal), `${corporatePayment.summary.invoiceCount} 张`],
-            ["发票价税合计", money(corporatePayment.summary.invoiceTotal), "作为付款匹配对象"],
-            ["发票未付", money(corporatePayment.summary.outstandingTotal), "跨月付款也累计"],
+            ["发票价税合计", money(corporatePayment.summary.invoiceTotal), `${corporatePayment.summary.invoiceCount} 张进项票`],
+            ["已核对银行", money(corporatePayment.summary.allocatedTotal), `${corporatePayment.summary.paymentCount} 笔付款`],
+            ["待核对 / 未付", money(corporatePayment.summary.outstandingTotal), `${corporatePayment.summary.unpaidInvoiceCount || 0} 张未核对`],
+            ["已完成核对", String(corporatePayment.summary.paidInvoiceCount || 0), "张发票"],
             ["商品明细", String(corporatePayment.summary.productRowCount), "行"],
           ] as const).map(([label, value, hint]) => <div key={label} className="bg-white px-4 py-3"><div className="text-[10px] text-slate-400">{label}</div><div className="mt-1 text-base font-semibold text-slate-800">{value}</div><div className="mt-0.5 text-[10px] text-slate-400">{hint}</div></div>)}
         </div>}
-        {!corporatePayment ? <div className="px-4 py-12 text-center text-sm text-slate-400">正在生成清单…</div> : !corporatePaymentGroups.length ? <div className="px-4 py-12 text-center text-sm text-slate-400">当前账期还没有已确认的付款对账记录。请先从银行付款流水发起对账，再匹配进项发票。</div> : <>
+        {!corporatePayment ? <div className="px-4 py-12 text-center text-sm text-slate-400">正在生成发票核对清单…</div> : !corporateInvoices.length ? <div className="px-4 py-12 text-center text-sm text-slate-400">当前账期没有收到进项发票。</div> : <>
           <div className="overflow-x-auto border-b border-slate-200">
-            <table className="w-full min-w-[1480px] text-xs">
+            <table className="w-full min-w-[1520px] text-xs">
               <thead className="bg-slate-50 text-left text-slate-500"><tr>
-                <th className="px-3 py-2.5 font-medium">付款日期</th><th className="px-3 py-2.5 font-medium">供应商 / 对方</th><th className="px-3 py-2.5 text-right font-medium">付款金额</th><th className="px-3 py-2.5 font-medium">已匹配发票</th><th className="px-3 py-2.5 font-medium">采购订单</th><th className="px-3 py-2.5 font-medium">我方付款账号</th><th className="px-3 py-2.5 font-medium">银行流水/凭证号</th><th className="px-3 py-2.5 text-right font-medium">未对账差额</th><th className="px-3 py-2.5 font-medium">状态</th><th className="px-3 py-2.5 text-right font-medium">操作</th>
+                <th className="px-3 py-2.5 font-medium">发票日期</th><th className="px-3 py-2.5 font-medium">供应商</th><th className="px-3 py-2.5 font-medium">发票号码</th><th className="px-3 py-2.5 text-right font-medium">价税合计</th><th className="px-3 py-2.5 text-right font-medium">已核对银行</th><th className="px-3 py-2.5 text-right font-medium">待核对 / 未付</th><th className="px-3 py-2.5 font-medium">银行付款</th><th className="px-3 py-2.5 font-medium">采购订单</th><th className="px-3 py-2.5 font-medium">状态</th><th className="px-3 py-2.5 text-right font-medium">操作</th>
               </tr></thead>
-              <tbody className="divide-y divide-slate-100">{corporatePaymentGroups.map((row) => {
-                const remaining = Math.max(Number(row.paymentAmount || 0) - Number(row.paymentMatchedTotal || 0), 0);
-                return <tr key={row.paymentId}>
-                  <td className="whitespace-nowrap px-3 py-2.5 text-slate-600">{row.paymentDate}</td>
-                  <td className="max-w-[230px] px-3 py-2.5"><div className="truncate font-medium text-slate-800">{row.supplierNames.join("、") || "—"}</div>{row.counterpartyAccount && <div className="mt-0.5 truncate font-mono text-[10px] text-slate-400">{row.counterpartyAccount}</div>}</td>
-                  <td className="px-3 py-2.5 text-right font-semibold tabular-nums text-slate-800">{money(row.paymentAmount)}</td>
-                  <td className="px-3 py-2.5"><div className="space-y-1">{row.invoices.map((invoice) => <div key={invoice.linkId} className="flex items-center gap-2"><span className="font-mono text-[11px] text-slate-600">{invoice.invoiceNumber || "—"}</span><span className="text-[10px] text-slate-400">{money(invoice.paymentAllocatedAmount)}</span></div>)}</div></td>
-                  <td className="max-w-[260px] px-3 py-2.5 text-slate-600">{row.purchaseOrderNos.join("、") || "—"}</td>
-                  <td className="px-3 py-2.5"><div className="font-mono text-[11px] text-slate-600">{row.paymentAccount || "—"}</div><div className="mt-0.5 text-[10px] text-slate-400">{row.paymentAccountName || ""}</div></td>
-                  <td className="px-3 py-2.5 font-mono text-[11px] text-slate-500">{row.voucherNo || "—"}</td>
-                  <td className={`px-3 py-2.5 text-right font-medium tabular-nums ${remaining <= 0.05 ? "text-emerald-700" : "text-amber-700"}`}>{money(remaining)}</td>
-                  <td className="px-3 py-2.5"><span className={`rounded-full px-2 py-1 text-[10px] ${row.paymentStatus === "matched" ? "bg-emerald-50 text-emerald-700" : "bg-amber-50 text-amber-700"}`}>{row.paymentStatus === "matched" ? "付款已对清" : "部分对账"}</span></td>
-                  <td className="px-3 py-2.5 text-right"><button type="button" onClick={() => { setFinanceTab("match"); void loadMatch(); }} className="rounded-md border border-blue-200 px-2.5 py-1.5 text-[11px] font-medium text-blue-600 hover:bg-blue-50">{row.paymentStatus === "matched" ? "查看对账" : "继续对账"}</button></td>
-                </tr>;
-              })}</tbody>
+              <tbody className="divide-y divide-slate-100">{corporateInvoices.map((row) => <tr key={row.invoiceId} className={row.invoiceStatus === "unpaid" ? "bg-amber-50/25" : ""}>
+                <td className="whitespace-nowrap px-3 py-2.5 text-slate-600">{row.invoiceDate || "—"}</td>
+                <td className="max-w-[220px] px-3 py-2.5"><div className="truncate font-medium text-slate-800">{row.supplierName || "—"}</div><div className="mt-0.5 truncate font-mono text-[10px] text-slate-400">{row.supplierTaxId || ""}</div></td>
+                <td className="px-3 py-2.5 font-mono text-[11px] text-slate-600">{row.invoiceNumber || "—"}</td>
+                <td className="px-3 py-2.5 text-right font-semibold tabular-nums text-slate-800">{money(row.invoiceTotalAmount)}</td>
+                <td className="px-3 py-2.5 text-right tabular-nums text-emerald-700">{money(row.invoiceCorporatePaidTotal)}</td>
+                <td className={`px-3 py-2.5 text-right font-medium tabular-nums ${Number(row.invoiceOutstandingAmount || 0) <= 0.05 ? "text-slate-400" : "text-amber-700"}`}>{money(row.invoiceOutstandingAmount)}</td>
+                <td className="px-3 py-2.5"><div className="space-y-1">{row.payments.length ? row.payments.map((payment) => <div key={payment.linkId} className="text-[11px] text-slate-600"><span>{payment.paymentDate}</span><span className="mx-1 text-slate-300">·</span><span>{money(payment.allocatedAmount)}</span><div className="text-[10px] text-slate-400">{payment.paymentAccount || payment.paymentAccountName || "未记录账户"}{payment.voucherNo ? ` · ${payment.voucherNo}` : ""}</div></div>) : <span className="text-slate-300">尚未核对银行付款</span>}</div></td>
+                <td className="max-w-[260px] px-3 py-2.5 text-slate-600">{row.purchaseOrderNos.join("、") || "—"}</td>
+                <td className="px-3 py-2.5"><span className={`rounded-full px-2 py-1 text-[10px] ${row.invoiceStatus === "paid" ? "bg-emerald-50 text-emerald-700" : row.invoiceStatus === "partial" ? "bg-amber-50 text-amber-700" : "bg-slate-100 text-slate-500"}`}>{row.invoiceStatus === "paid" ? "已核对" : row.invoiceStatus === "partial" ? "部分核对" : "待核对银行"}</span></td>
+                <td className="px-3 py-2.5 text-right"><button type="button" onClick={() => { setFinanceTab("match"); void loadMatch(); }} className="rounded-md border border-blue-200 px-2.5 py-1.5 text-[11px] font-medium text-blue-600 hover:bg-blue-50">{row.invoiceStatus === "paid" ? "查看核对" : "核对银行"}</button></td>
+              </tr>)}</tbody>
             </table>
           </div>
-          <div className="border-b border-slate-100 bg-slate-50/60 px-4 py-3"><h3 className="text-sm font-semibold text-slate-800">商品采购价格明细</h3><p className="mt-0.5 text-[11px] text-slate-400">商品价格来自采购分配明细；发票可覆盖多订单，一张票/一笔付款都允许拆分。</p></div>
-          {!corporatePayment.productDetails.length ? <div className="px-4 py-8 text-center text-sm text-slate-400">已匹配发票，但当前采购订单还没有可下钻的商品分配明细。</div> : <div className="overflow-x-auto"><table className="w-full min-w-[1100px] text-xs"><thead className="bg-slate-50 text-left text-slate-500"><tr><th className="px-3 py-2.5 font-medium">发票号码</th><th className="px-3 py-2.5 font-medium">采购订单</th><th className="px-3 py-2.5 font-medium">商品编码</th><th className="px-3 py-2.5 font-medium">商品名称</th><th className="px-3 py-2.5 text-right font-medium">数量</th><th className="px-3 py-2.5 text-right font-medium">采购单价</th><th className="px-3 py-2.5 text-right font-medium">商品金额</th><th className="px-3 py-2.5 text-right font-medium">发票覆盖订单金额</th></tr></thead><tbody className="divide-y divide-slate-100">{corporatePayment.productDetails.map((row, index) => <tr key={`${row.invoiceId}-${row.purchaseOrderId}-${row.skuCode}-${index}`}><td className="px-3 py-2.5 font-mono text-slate-600">{row.invoiceNumber}</td><td className="px-3 py-2.5 text-slate-600">{row.purchaseOrderNo || "—"}</td><td className="px-3 py-2.5 font-mono text-[11px] text-slate-500">{row.skuCode || "—"}</td><td className="max-w-[260px] truncate px-3 py-2.5">{row.productName || "—"}</td><td className="px-3 py-2.5 text-right tabular-nums">{row.quantity || "—"}</td><td className="px-3 py-2.5 text-right tabular-nums">{row.unitPrice ? money(row.unitPrice) : "—"}</td><td className="px-3 py-2.5 text-right tabular-nums">{row.itemAmount ? money(row.itemAmount) : "—"}</td><td className="px-3 py-2.5 text-right tabular-nums text-violet-700">{money(row.invoiceCoveredOrderAmount)}</td></tr>)}</tbody></table></div>}
+          <div className="border-b border-slate-100 bg-slate-50/60 px-4 py-3"><h3 className="text-sm font-semibold text-slate-800">商品采购价格明细</h3><p className="mt-0.5 text-[11px] text-slate-400">继续以发票为索引，下钻到采购订单、SKU、数量和采购单价。</p></div>
+          {!corporatePayment.productDetails.length ? <div className="px-4 py-8 text-center text-sm text-slate-400">当前发票还没有可下钻的采购商品分配明细。</div> : <div className="overflow-x-auto"><table className="w-full min-w-[1100px] text-xs"><thead className="bg-slate-50 text-left text-slate-500"><tr><th className="px-3 py-2.5 font-medium">发票号码</th><th className="px-3 py-2.5 font-medium">采购订单</th><th className="px-3 py-2.5 font-medium">商品编码</th><th className="px-3 py-2.5 font-medium">商品名称</th><th className="px-3 py-2.5 text-right font-medium">数量</th><th className="px-3 py-2.5 text-right font-medium">采购单价</th><th className="px-3 py-2.5 text-right font-medium">商品金额</th><th className="px-3 py-2.5 text-right font-medium">发票覆盖订单金额</th></tr></thead><tbody className="divide-y divide-slate-100">{corporatePayment.productDetails.map((row, index) => <tr key={`${row.invoiceId}-${row.purchaseOrderId}-${row.skuCode}-${index}`}><td className="px-3 py-2.5 font-mono text-slate-600">{row.invoiceNumber}</td><td className="px-3 py-2.5 text-slate-600">{row.purchaseOrderNo || "—"}</td><td className="px-3 py-2.5 font-mono text-[11px] text-slate-500">{row.skuCode || "—"}</td><td className="max-w-[260px] truncate px-3 py-2.5">{row.productName || "—"}</td><td className="px-3 py-2.5 text-right tabular-nums">{row.quantity || "—"}</td><td className="px-3 py-2.5 text-right tabular-nums">{row.unitPrice ? money(row.unitPrice) : "—"}</td><td className="px-3 py-2.5 text-right tabular-nums">{row.itemAmount ? money(row.itemAmount) : "—"}</td><td className="px-3 py-2.5 text-right tabular-nums text-violet-700">{money(row.invoiceCoveredOrderAmount)}</td></tr>)}</tbody></table></div>}
         </>}
       </section>}
 
       {financeTab === "match" && <section className={`${CARD} overflow-hidden`}>
         <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 px-4 py-4">
           <div>
-            <h2 className="text-base font-semibold text-slate-900">付款对账</h2>
-            <p className="mt-1 text-xs text-slate-400">以当月银行支出流水为主，一笔付款可匹配多张发票，一张发票也可由多笔付款分摊；确认后再向采购订单和商品明细下钻。</p>
+            <h2 className="text-base font-semibold text-slate-900">发票核对银行</h2>
+            <p className="mt-1 text-xs text-slate-400">财务按当月收到的进项发票逐张核对银行付款；银行流水只作为核对依据，不作为这张月度清单的主维度。</p>
           </div>
           <button type="button" onClick={loadMatch} disabled={matchLoading} className="rounded-lg border border-slate-200 px-3 py-2 text-xs text-slate-600 hover:bg-slate-50 disabled:opacity-50">刷新</button>
         </div>
         {matchData && (
           <div className="grid grid-cols-2 gap-px bg-slate-100 sm:grid-cols-5">
             {([
-              ["付款总额", money(matchData.summary.paymentTotal), `${matchData.summary.txnCount} 笔支出`],
-              ["已配票金额", money(matchData.summary.matchedTotal), `${matchData.summary.matchedCount + matchData.summary.partialCount} 笔`],
-              ["未配票金额", money(matchData.summary.unmatchedTotal), `${matchData.summary.unmatchedCount} 笔待处理`],
-              ["当月进项发票", String(matchData.invoicePool.length), "对方开来"],
-              ["部分配票", String(matchData.summary.partialCount), "金额未配平"],
+              ["进项发票", money(matchData.summary.invoiceTotal), `${matchData.summary.invoiceCount} 张`],
+              ["已核对银行", money(matchData.summary.invoiceMatchedTotal), `${matchData.summary.invoiceMatchedCount} 张完成`],
+              ["待核对金额", money(matchData.summary.invoiceOutstandingTotal), `${matchData.summary.invoiceUnmatchedCount} 张未核对`],
+              ["部分核对", String(matchData.summary.invoicePartialCount), "张发票"],
+              ["可用银行支出", money(matchData.summary.paymentTotal), `${matchData.summary.txnCount} 笔`],
             ] as const).map(([label, value, hint]) => (
               <div key={label} className="bg-white px-4 py-3">
                 <div className="text-[10px] text-slate-400">{label}</div>
@@ -1079,43 +1120,27 @@ export default function MonthlySendPage() {
           </div>
         )}
         {matchLoading && <div className="px-4 py-10 text-center text-sm text-slate-400">加载中…</div>}
-        {matchData && !matchData.payments.length && <div className="px-4 py-12 text-center text-sm text-slate-400">当前账期没有银行支出流水；请先在「本月入库与发送」上传银行交易明细（XLSX）。</div>}
-        {matchData && Boolean(matchData.payments.length) && (
+        {matchData && !matchData.invoicePool.length && <div className="px-4 py-12 text-center text-sm text-slate-400">当前账期没有进项发票；发票导入后会在这里逐张核对银行付款。</div>}
+        {matchData && Boolean(matchData.invoicePool.length) && (
           <div className="overflow-x-auto">
-            <table className="w-full min-w-[900px] text-sm">
+            <table className="w-full min-w-[1260px] text-sm">
               <thead className="bg-slate-50 text-left text-xs text-slate-500">
-                <tr><th className="px-4 py-2.5 font-medium">付款日期</th><th className="px-4 py-2.5 font-medium">对方户名</th><th className="px-4 py-2.5 text-right font-medium">金额</th><th className="px-4 py-2.5 font-medium">凭证号</th><th className="px-4 py-2.5 font-medium">已配发票</th><th className="px-4 py-2.5 font-medium">状态</th><th className="px-4 py-2.5 text-right font-medium">操作</th></tr>
+                <tr><th className="px-4 py-2.5 font-medium">发票日期</th><th className="px-4 py-2.5 font-medium">供应商</th><th className="px-4 py-2.5 font-medium">发票号码</th><th className="px-4 py-2.5 text-right font-medium">价税合计</th><th className="px-4 py-2.5 text-right font-medium">已核对银行</th><th className="px-4 py-2.5 text-right font-medium">待核对</th><th className="px-4 py-2.5 font-medium">已关联银行流水</th><th className="px-4 py-2.5 font-medium">状态</th><th className="px-4 py-2.5 text-right font-medium">操作</th></tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
-                {matchData.payments.map((row) => (
-                  <tr key={row.id} className={row.status === "unmatched" ? "bg-rose-50/30" : ""}>
-                    <td className="whitespace-nowrap px-4 py-3 text-xs text-slate-600">{row.txnDate}</td>
-                    <td className="max-w-[200px] truncate px-4 py-3 text-slate-800">{row.counterpartyName || <span className="text-slate-300">对方未名</span>}</td>
-                    <td className="whitespace-nowrap px-4 py-3 text-right font-medium text-slate-800">{money(row.amount)}</td>
-                    <td className="px-4 py-3 font-mono text-xs text-slate-400">{row.voucherNo || "—"}</td>
+                {matchData.invoicePool.map((row) => (
+                  <tr key={row.id} className={row.bankMatchStatus === "unmatched" ? "bg-amber-50/25" : ""}>
+                    <td className="whitespace-nowrap px-4 py-3 text-xs text-slate-600">{row.issueDate || "—"}</td>
+                    <td className="max-w-[220px] truncate px-4 py-3 text-slate-800">{row.sellerName || <span className="text-slate-300">销方未名</span>}</td>
+                    <td className="px-4 py-3 font-mono text-xs text-slate-600">{row.invoiceNumber || "—"}</td>
+                    <td className="whitespace-nowrap px-4 py-3 text-right font-medium text-slate-800">{money(row.totalAmount)}</td>
+                    <td className="whitespace-nowrap px-4 py-3 text-right text-emerald-700">{money(row.bankLinkedAmount)}</td>
+                    <td className="whitespace-nowrap px-4 py-3 text-right font-medium text-amber-700">{money(row.remaining)}</td>
                     <td className="px-4 py-3">
-                      {row.invoices.length ? (
-                        <div className="space-y-1">
-                          {row.invoices.map((inv) => (
-                            <div key={`${inv.linkId}-${inv.invoiceId}`} className="flex items-center gap-2 text-xs">
-                              <span className="font-mono text-slate-600">{inv.invoiceNumber}</span>
-                              <span className="text-slate-500">{money(inv.allocatedAmount ?? inv.totalAmount)}</span>
-                              <button type="button" onClick={() => inv.linkId && void unlinkPayment(inv.linkId)} disabled={busy} className="text-[10px] text-rose-500 hover:underline disabled:opacity-40">解除</button>
-                            </div>
-                          ))}
-                          {row.status !== "matched" && <div className="text-[10px] text-amber-600">剩余 {money(row.remaining)} 未配</div>}
-                        </div>
-                      ) : <span className="text-xs text-slate-300">未配票</span>}
+                      {row.links.length ? <div className="space-y-1">{row.links.map((link) => <div key={link.linkId || `${row.id}-${link.txnId}`} className="text-xs"><div className="flex flex-wrap items-center gap-2"><span className="text-slate-600">{link.txnDate}</span><span className="font-medium text-slate-700">{money(link.allocatedAmount || 0)}</span>{link.linkId && <button type="button" onClick={() => void unlinkPayment(link.linkId!)} disabled={busy} className="text-[10px] text-rose-500 hover:underline disabled:opacity-40">解除</button>}</div><div className="text-[10px] text-slate-400">{link.accountNo || link.accountName || "未记录账户"}{link.voucherNo ? ` · ${link.voucherNo}` : ""}</div></div>)}</div> : <span className="text-xs text-slate-300">尚未关联银行付款</span>}
                     </td>
-                    <td className="px-4 py-3">
-                      <span className={`inline-flex items-center gap-1 rounded-full px-2 py-1 text-[10px] font-medium ring-1 ring-inset ${row.status === "matched" ? "bg-emerald-50 text-emerald-700 ring-emerald-200" : row.status === "partial" ? "bg-amber-50 text-amber-700 ring-amber-200" : "bg-slate-100 text-slate-500 ring-slate-200"}`}>
-                        <span className={`h-1.5 w-1.5 rounded-full ${row.status === "matched" ? "bg-emerald-500" : row.status === "partial" ? "bg-amber-500" : "bg-slate-400"}`} />
-                        {row.status === "matched" ? "已配票" : row.status === "partial" ? "部分配票" : "未配票"}
-                      </span>
-                    </td>
-                    <td className="px-4 py-3 text-right">
-                      <button type="button" onClick={() => { setPickerQuery(""); setPickerScope("month"); setPickerTxn(row); }} disabled={busy} className="rounded-md border border-blue-200 px-2.5 py-1.5 text-[11px] font-medium text-blue-600 hover:bg-blue-50 disabled:opacity-50">标记已开票</button>
-                    </td>
+                    <td className="px-4 py-3"><span className={`inline-flex rounded-full px-2 py-1 text-[10px] font-medium ${row.bankMatchStatus === "matched" ? "bg-emerald-50 text-emerald-700" : row.bankMatchStatus === "partial" ? "bg-amber-50 text-amber-700" : "bg-slate-100 text-slate-500"}`}>{row.bankMatchStatus === "matched" ? "已核对" : row.bankMatchStatus === "partial" ? "部分核对" : "待核对银行"}</span></td>
+                    <td className="px-4 py-3 text-right"><button type="button" onClick={() => { setPickerQuery(""); setPickerInvoice(row); }} disabled={busy || Number(row.remaining) <= 0.01} className="rounded-md border border-blue-200 px-2.5 py-1.5 text-[11px] font-medium text-blue-600 hover:bg-blue-50 disabled:opacity-40">{row.bankMatchStatus === "matched" ? "已完成" : "选择银行流水"}</button></td>
                   </tr>
                 ))}
               </tbody>
@@ -1337,6 +1362,58 @@ export default function MonthlySendPage() {
           </div>
         </div>
       )}
+
+      {pickerInvoice && (() => {
+        const query = pickerQuery.trim().toLowerCase();
+        const candidates = (matchData?.payments || [])
+          .filter((row) => Number(row.remaining) > 0.01)
+          .filter((row) => !query || [row.txnDate, row.counterpartyName, row.voucherNo, row.accountNo, row.accountName].join(" ").toLowerCase().includes(query))
+          .sort((a, b) =>
+            Number(pickerInvoice.suggestedPaymentIds.includes(b.id)) - Number(pickerInvoice.suggestedPaymentIds.includes(a.id))
+            || a.txnDate.localeCompare(b.txnDate)
+          );
+        return (
+          <div
+            className="fixed inset-0 z-modal flex items-end justify-center bg-slate-950/35 p-3 sm:p-6"
+            onMouseDown={(event) => { if (event.target === event.currentTarget) setPickerInvoice(null); }}
+            role="dialog"
+            aria-modal="true"
+            aria-label="选择银行流水核对发票"
+          >
+            <div className="flex max-h-[80vh] w-full max-w-[920px] flex-col overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-2xl">
+              <div className="flex items-center justify-between gap-3 border-b border-slate-200 px-5 py-4">
+                <div className="min-w-0">
+                  <h2 className="text-base font-semibold text-slate-900">选择银行流水 · 核对发票</h2>
+                  <p className="mt-1 text-xs text-slate-400">
+                    发票 {pickerInvoice.invoiceNumber || "未记录号码"} · {pickerInvoice.sellerName || "销方未名"} · 价税合计 {money(pickerInvoice.totalAmount)} · 待核对 {money(pickerInvoice.remaining)}
+                  </p>
+                </div>
+                <button type="button" onClick={() => setPickerInvoice(null)} aria-label="关闭银行流水选择" className="rounded-lg p-2 text-xl leading-none text-slate-400 hover:bg-slate-100 hover:text-slate-700">×</button>
+              </div>
+              <div className="border-b border-slate-100 bg-slate-50/60 px-5 py-3">
+                <input value={pickerQuery} onChange={(e) => setPickerQuery(e.target.value)} placeholder="搜索付款日期 / 对方户名 / 账号 / 凭证号" className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm outline-none focus:border-blue-400" />
+              </div>
+              <div className="min-h-[220px] flex-1 overflow-y-auto">
+                {!candidates.length && <div className="px-5 py-10 text-center text-sm text-slate-400">当前账期没有可用于核对的银行支出流水。</div>}
+                <div className="divide-y divide-slate-100">
+                  {candidates.map((row) => {
+                    const suggested = pickerInvoice.suggestedPaymentIds.includes(row.id);
+                    return <div key={row.id} className={`grid gap-3 px-5 py-3 sm:grid-cols-[110px_minmax(0,1fr)_130px_110px] sm:items-center ${suggested ? "bg-blue-50/50" : ""}`}>
+                      <div className="text-xs text-slate-600">{row.txnDate}</div>
+                      <div className="min-w-0">
+                        <div className="flex flex-wrap items-center gap-2 text-sm"><span className="truncate font-medium text-slate-800">{row.counterpartyName || "对方未名"}</span>{suggested && <span className="rounded bg-blue-600 px-1.5 py-0.5 text-[10px] font-medium text-white">同名同金额建议</span>}</div>
+                        <div className="mt-0.5 truncate text-[11px] text-slate-400">{row.accountNo || row.accountName || "未记录账户"}{row.voucherNo ? ` · ${row.voucherNo}` : ""}{row.summary ? ` · ${row.summary}` : ""}</div>
+                      </div>
+                      <div className="text-right"><div className="text-sm font-semibold text-slate-800">{money(row.amount)}</div><div className="text-[10px] text-slate-400">可用 {money(row.remaining)}</div></div>
+                      <div className="text-right"><button type="button" onClick={() => void matchInvoiceToPayment(pickerInvoice, row)} disabled={busy} className="rounded-md bg-blue-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-blue-700 disabled:opacity-40">核对这笔</button></div>
+                    </div>;
+                  })}
+                </div>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
 
       {pickerTxn && (() => {
         const query = pickerQuery.trim().toLowerCase();

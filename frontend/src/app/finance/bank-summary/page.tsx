@@ -110,7 +110,7 @@ export default function BankSummaryPage() {
           <div>
             <div className="mb-1 text-[11px] font-medium tracking-wide text-blue-600">财务中心 / 银行汇总</div>
             <h1 className="text-xl font-semibold tracking-tight text-slate-900">银行汇总</h1>
-            <p className="mt-1 text-xs text-slate-500">先看账户和本月资金结果，再下钻银行流水；支出对账从付款流水发起，发票作为匹配对象。</p>
+            <p className="mt-1 text-xs text-slate-500">这里按银行账户看资金结果和流水；月度财务核对仍以进项发票为主，再核对对应银行付款。</p>
           </div>
           <div className="flex flex-wrap items-center gap-2">
             <input
@@ -121,7 +121,7 @@ export default function BankSummaryPage() {
               className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs text-slate-600 outline-none focus:border-blue-400"
             />
             <Link href={matchHref} className="rounded-lg bg-blue-600 px-3.5 py-2 text-xs font-medium text-white shadow-sm hover:bg-blue-700">
-              发起付款对账
+              进入发票核对
             </Link>
             <button type="button" onClick={() => void load()} disabled={loading} className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs text-slate-600 hover:bg-slate-50 disabled:opacity-50">
               刷新
@@ -136,7 +136,7 @@ export default function BankSummaryPage() {
         {[
           ["系统流水余额", money(data?.summary.systemBalance), `${data?.summary.accountCount ?? 0} 个账户 · 按已导入流水`],
           ["本月收入", money(data?.summary.monthIncome), `${data?.summary.monthTxnCount ?? 0} 笔流水`],
-          ["本月支出", money(data?.summary.monthExpense), "付款对账以这里的支出流水为起点"],
+          ["本月支出", money(data?.summary.monthExpense), "用于月度发票核对的银行依据"],
           ["本月净流入", money(data?.summary.monthNet), Number(data?.summary.monthNet || 0) >= 0 ? "流入大于流出" : "流出大于流入"],
           ["待对账", String(data?.summary.pendingCount ?? 0), `收入 ${data?.summary.pendingIncomeCount ?? 0} · 支出 ${data?.summary.pendingExpenseCount ?? 0}`],
         ].map(([label, value, hint]) => (
@@ -207,7 +207,7 @@ export default function BankSummaryPage() {
                     <td className="px-4 py-3">
                       <div className="flex justify-end gap-2">
                         <Link href={transactionHref(row)} className="rounded-md border border-slate-200 px-2.5 py-1.5 text-[11px] text-slate-600 hover:bg-slate-50">查看流水</Link>
-                        {row.pendingExpenseCount > 0 && <Link href={matchHref} className="rounded-md border border-blue-200 px-2.5 py-1.5 text-[11px] font-medium text-blue-600 hover:bg-blue-50">发起对账</Link>}
+                        {row.pendingExpenseCount > 0 && <Link href={matchHref} className="rounded-md border border-blue-200 px-2.5 py-1.5 text-[11px] font-medium text-blue-600 hover:bg-blue-50">核对发票</Link>}
                       </div>
                     </td>
                   </tr>

@@ -18,7 +18,7 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from app.core.audit import audit
-from app.models.bank import BankTransaction
+from app.models.bank import BankAccount, BankTransaction
 from app.models.tax import TaxInvoice, TaxInvoiceLink
 from app.utils.money import quantize, to_decimal
 
@@ -46,8 +46,8 @@ def _month_range(year: int, month: int) -> tuple[date, date]:
     return date(year, month, 1), date(year, month, last)
 
 
-def _dec(value: Decimal | None) -> Decimal:
-    return quantize(value, MONEY_QUANT) if value is not None else Decimal("0.0000")
+def _dec(value: Decimal | int | str | None) -> Decimal:
+    return quantize(to_decimal(value), MONEY_QUANT)
 
 
 def _link_amount(link: TaxInvoiceLink, invoice: TaxInvoice | None) -> Decimal:
@@ -127,6 +127,11 @@ def overview(db: Session, year: int, month: int) -> dict[str, Any]:
         .all()
     )
     txn_ids = [txn.id for txn in txns]
+    account_ids = {txn.account_id for txn in txns if txn.account_id is not None}
+    account_map = {
+        row.id: row
+        for row in db.query(BankAccount).filter(BankAccount.id.in_(account_ids)).all()
+    } if account_ids else {}
 
     links: list[TaxInvoiceLink] = []
     if txn_ids:
@@ -135,6 +140,7 @@ def overview(db: Session, year: int, month: int) -> dict[str, Any]:
             .filter(
                 TaxInvoiceLink.target_type == TARGET_TYPE,
                 TaxInvoiceLink.target_id.in_(txn_ids),
+                TaxInvoiceLink.confirmed.is_(True),
                 TaxInvoiceLink.match_method != "rejected",
             )
             .all()
@@ -171,13 +177,17 @@ def overview(db: Session, year: int, month: int) -> dict[str, Any]:
         status = _status(remaining, amount)
         counts[status] += 1
         matched_total += matched_amount
+        account = account_map.get(txn.account_id)
         payments.append({
             "id": txn.id,
             "txnDate": txn.txn_date.isoformat(),
             "counterpartyName": txn.counterparty_name or "",
+            "counterpartyAccount": txn.counterparty_account or "",
             "amount": str(amount),
             "voucherNo": txn.voucher_no or "",
             "summary": txn.summary or "",
+            "accountNo": account.account_no if account else "",
+            "accountName": account.account_name if account else "",
             "invoices": briefs,
             "matchedAmount": str(_dec(matched_amount)),
             "remaining": str(_dec(remaining)),
@@ -204,6 +214,7 @@ def overview(db: Session, year: int, month: int) -> dict[str, Any]:
             .filter(
                 TaxInvoiceLink.target_type == TARGET_TYPE,
                 TaxInvoiceLink.invoice_id.in_(pool_ids),
+                TaxInvoiceLink.confirmed.is_(True),
                 TaxInvoiceLink.match_method != "rejected",
             )
             .all()
@@ -215,6 +226,11 @@ def overview(db: Session, year: int, month: int) -> dict[str, Any]:
         else []
     )
     pool_txn_map = {row.id: row for row in pool_link_txns}
+    linked_account_ids = {row.account_id for row in pool_link_txns if row.account_id is not None}
+    missing_account_ids = linked_account_ids.difference(account_map)
+    if missing_account_ids:
+        for account in db.query(BankAccount).filter(BankAccount.id.in_(missing_account_ids)).all():
+            account_map[account.id] = account
     linked_by_invoice: dict[int, list[TaxInvoiceLink]] = {}
     for link in pool_links:
         linked_by_invoice.setdefault(link.invoice_id, []).append(link)
@@ -228,10 +244,18 @@ def overview(db: Session, year: int, month: int) -> dict[str, Any]:
         for link in sorted(linked_by_invoice.get(invoice.id, []), key=lambda row: row.id):
             linked_amount += _link_amount(link, invoice)
             txn = pool_txn_map.get(link.target_id)
+            account = account_map.get(txn.account_id) if txn else None
             briefs.append({
                 **_invoice_brief(invoice, link),
+                "txnId": txn.id if txn else None,
                 "txnDate": txn.txn_date.isoformat() if txn else "",
+                "txnAmount": str(_dec(txn.amount)) if txn else "0.00",
                 "counterpartyName": txn.counterparty_name if txn else "",
+                "counterpartyAccount": txn.counterparty_account if txn else "",
+                "voucherNo": txn.voucher_no if txn else "",
+                "summary": txn.summary if txn else "",
+                "accountNo": account.account_no if account else "",
+                "accountName": account.account_name if account else "",
             })
         remaining = total - linked_amount
         row = {
@@ -242,9 +266,11 @@ def overview(db: Session, year: int, month: int) -> dict[str, Any]:
             "totalAmount": str(total),
             "bankLinkedAmount": str(_dec(linked_amount)),
             "remaining": str(_dec(remaining)),
+            "bankMatchStatus": _status(remaining, total),
             "matchStatus": invoice.match_status,
             "links": briefs,
             "suggested": False,
+            "suggestedPaymentIds": [],
         }
         invoice_pool.append(row)
         pool_by_id[invoice.id] = row
@@ -257,9 +283,18 @@ def overview(db: Session, year: int, month: int) -> dict[str, Any]:
         for row in invoice_pool:
             if row["suggested"]:
                 continue
-            if row["remaining"] == payment["remaining"] and row["sellerName"] and row["sellerName"] == payment["counterpartyName"]:
+            if row["remaining"] == payment["remaining"] and row["sellerName"] and _normalize_name(row["sellerName"]) == _normalize_name(payment["counterpartyName"]):
                 row["suggested"] = True
+                row["suggestedPaymentIds"].append(payment["id"])
                 payment["suggestedInvoiceIds"].append(row["id"])
+
+    invoice_total = sum((_dec(row["totalAmount"]) for row in invoice_pool), Decimal("0.0000"))
+    invoice_matched_total = sum((_dec(row["bankLinkedAmount"]) for row in invoice_pool), Decimal("0.0000"))
+    invoice_counts = {
+        "matched": sum(1 for row in invoice_pool if row["bankMatchStatus"] == "matched"),
+        "partial": sum(1 for row in invoice_pool if row["bankMatchStatus"] == "partial"),
+        "unmatched": sum(1 for row in invoice_pool if row["bankMatchStatus"] == "unmatched"),
+    }
 
     return {
         "year": year,
@@ -274,6 +309,13 @@ def overview(db: Session, year: int, month: int) -> dict[str, Any]:
             "matchedCount": counts["matched"],
             "partialCount": counts["partial"],
             "unmatchedCount": counts["unmatched"],
+            "invoiceTotal": str(_dec(invoice_total)),
+            "invoiceMatchedTotal": str(_dec(invoice_matched_total)),
+            "invoiceOutstandingTotal": str(_dec(invoice_total - invoice_matched_total)),
+            "invoiceCount": len(invoice_pool),
+            "invoiceMatchedCount": invoice_counts["matched"],
+            "invoicePartialCount": invoice_counts["partial"],
+            "invoiceUnmatchedCount": invoice_counts["unmatched"],
         },
     }
 
