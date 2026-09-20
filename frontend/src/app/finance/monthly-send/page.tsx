@@ -1299,11 +1299,11 @@ export default function MonthlySendPage() {
         <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 px-4 py-4">
           <div>
             <h2 className="text-base font-semibold text-slate-900">{sel?.month || ""}月-已收票对公付款明细</h2>
-            <p className="mt-1 text-xs text-slate-400">{corporateView === "adjust" ? "调整/核对发票、银行付款、采购订单和商品采购价；一张发票一行，已收票未付款也保留。" : `发送前只读预览 · ${corporatePayment?.adjusted ? `当前保存版本 v${corporatePayment.version || "—"}，显示 ${corporatePayment.selectedCount || 0}/${corporatePayment.sourceCount || 0} 张发票` : "尚未人工调整，按当前全部发票发送"}；是否纳入本次发送以月结清单勾选状态为准。`}</p>
+            <p className="mt-1 text-xs text-slate-400">{corporateView === "adjust" ? "查看并核对发票、银行付款、采购订单和商品采购价；发票取舍请从月结清单的“调整明细”进入。" : `发送前只读预览 · ${corporatePayment?.adjusted ? `当前保存版本 v${corporatePayment.version || "—"}，显示 ${corporatePayment.selectedCount || 0}/${corporatePayment.sourceCount || 0} 张发票` : "尚未人工调整，按当前全部发票发送"}；是否纳入本次发送以月结清单勾选状态为准。`}</p>
           </div>
           <div className="flex flex-wrap items-center gap-2">
             <div className="flex overflow-hidden rounded-lg border border-slate-200 bg-white text-xs">
-              <button type="button" onClick={() => setCorporateView("adjust")} className={`px-3 py-2 font-medium ${corporateView === "adjust" ? "bg-slate-900 text-white" : "text-slate-600 hover:bg-slate-50"}`}>调整明细</button>
+              <button type="button" onClick={() => setCorporateView("adjust")} className={`px-3 py-2 font-medium ${corporateView === "adjust" ? "bg-slate-900 text-white" : "text-slate-600 hover:bg-slate-50"}`}>明细核对</button>
               <button type="button" onClick={() => setCorporateView("preview")} className={`px-3 py-2 font-medium ${corporateView === "preview" ? "bg-violet-600 text-white" : "text-slate-600 hover:bg-slate-50"}`}>发送预览</button>
             </div>
             {corporateView === "adjust" ? <>
