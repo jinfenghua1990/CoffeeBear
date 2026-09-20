@@ -224,14 +224,16 @@ def center_overview(
 
         if row.cash_effect:
             cash_direction = "Inflow" if row.direction == "income" else "Outflow"
-            if row.value_type == "actual":
+            settled_cash = row.value_type == "actual" and row.settlement_status in {"settled", "closed"}
+            if settled_cash:
                 bucket[f"actualCash{cash_direction}"] += _decimal(row.amount)
             elif not superseded_estimate:
+                # 未结算的实际金额和仍有效的预计金额都属于未来现金需求/流入。
                 bucket[f"forecastCash{cash_direction}"] += _decimal(row.amount)
 
         scope = scopes.setdefault(row.business_scope, {"count": 0, "estimated": 0, "pending": 0})
         scope["count"] += 1
-        if row.value_type == "estimated":
+        if row.value_type == "estimated" and not superseded_estimate:
             scope["estimated"] += 1
             todo["estimated"] += 1
         if row.settlement_status not in {"settled", "closed"}:
