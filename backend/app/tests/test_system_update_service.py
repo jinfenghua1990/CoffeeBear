@@ -96,6 +96,55 @@ def test_check_for_updates_returns_complete_status(monkeypatch, tmp_path: Path):
     assert result["changes"][0]["subject"] == "new"
 
 
+def test_check_for_updates_rejects_legacy_repository_remote(monkeypatch, tmp_path: Path):
+    current = "3" * 40
+    status_file = tmp_path / "status.json"
+    history_file = tmp_path / "history.jsonl"
+
+    monkeypatch.setattr(service, "_status_path", lambda: status_file)
+    monkeypatch.setattr(service, "_history_path", lambda: history_file)
+    monkeypatch.setattr(service, "_repo_root", lambda: tmp_path)
+    monkeypatch.setattr(
+        service,
+        "load_update_settings",
+        lambda: {
+            "enabled": True,
+            "mode": "manual",
+            "checkIntervalMinutes": 10,
+            "autoUpdateHour": 3,
+            "autoUpdateWindowMinutes": 60,
+            "autoInstallLevel": "patch",
+            "branch": service.settings.SYSTEM_UPDATE_BRANCH,
+            "remote": service.settings.SYSTEM_UPDATE_REMOTE,
+        },
+    )
+
+    def fake_git(*args: str, timeout: int = 60) -> str:
+        if args == ("rev-parse", "HEAD"):
+            return current
+        if args == ("branch", "--show-current"):
+            return service.settings.SYSTEM_UPDATE_BRANCH
+        if args == ("status", "--porcelain"):
+            return ""
+        raise AssertionError(f"unexpected git call: {args}")
+
+    monkeypatch.setattr(service, "_git", fake_git)
+    monkeypatch.setattr(
+        service,
+        "_run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(
+            args=[],
+            returncode=0,
+            stdout="git@github.com:jinfenghua1990/ecommerce-dashboard.git\n",
+            stderr="",
+        ),
+    )
+
+    result = service.check_for_updates(actor="pytest")
+    assert result["updateAvailable"] is False
+    assert "旧仓库 ecommerce-dashboard" in result["lastCheckError"]
+
+
 def test_manual_check_still_works_when_background_service_disabled(monkeypatch, tmp_path: Path):
     current = "3" * 40
     latest = "4" * 40

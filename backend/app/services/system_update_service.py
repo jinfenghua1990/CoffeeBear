@@ -479,6 +479,16 @@ def check_for_updates(*, actor: str = "system", automatic: bool = False) -> dict
             "lastCheckActor": actor,
         })
         try:
+            remote_probe = _run(["git", "remote", "get-url", remote], timeout=10)
+            if remote_probe.returncode != 0:
+                detail = (remote_probe.stderr or remote_probe.stdout or "无法读取 Git 远端").strip()
+                raise RuntimeError(detail[-1200:])
+            remote_url = remote_probe.stdout.strip()
+            if _is_legacy_repo_remote(remote_url):
+                raise RuntimeError(
+                    "当前运行服务仍指向旧仓库 ecommerce-dashboard；"
+                    "请把 LaunchAgent / SYSTEM_UPDATE_REPO_ROOT 切换到 ecommerce-workspace 后再检查更新"
+                )
             _git("fetch", "--quiet", remote, branch, timeout=120)
             latest_sha = _git("rev-parse", "FETCH_HEAD")
             if not _SHA_RE.fullmatch(latest_sha):
