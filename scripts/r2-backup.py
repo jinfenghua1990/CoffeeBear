@@ -148,15 +148,15 @@ def signed_headers(
     if base.scheme != "https" or not base.netloc:
         raise RuntimeError("R2 Endpoint 必须是有效 https:// 地址")
     path_prefix = base.path.rstrip("/")
-    canonical_uri = quote(f"${path_prefix}/${bucket}/${object_key}", safe="/-_.~")
+    canonical_uri = quote(f"{path_prefix}/{bucket}/{object_key}", safe="/-_.~")
     canonical_headers = (
-        f"host:${base.netloc}\n"
-        f"x-amz-content-sha256:${payload_hash}\n"
-        f"x-amz-date:${amz_date}\n"
+        f"host:{base.netloc}\n"
+        f"x-amz-content-sha256:{payload_hash}\n"
+        f"x-amz-date:{amz_date}\n"
     )
     signed = "host;x-amz-content-sha256;x-amz-date"
     canonical_request = "\n".join(["PUT", canonical_uri, "", canonical_headers, signed, payload_hash])
-    scope = f"${date_stamp}/auto/s3/aws4_request"
+    scope = f"{date_stamp}/auto/s3/aws4_request"
     string_to_sign = "\n".join(
         [
             "AWS4-HMAC-SHA256",
@@ -168,10 +168,10 @@ def signed_headers(
     signature = hmac.new(signing_key(secret_key, date_stamp), string_to_sign.encode(), hashlib.sha256).hexdigest()
     authorization = (
         "AWS4-HMAC-SHA256 "
-        f"Credential=${access_key}/${scope}, "
-        f"SignedHeaders=${signed}, Signature=${signature}"
+        f"Credential={access_key}/{scope}, "
+        f"SignedHeaders={signed}, Signature={signature}"
     )
-    url = f"${endpoint_url.rstrip('/')}/${q(bucket)}/" + "/".join(q(part) for part in object_key.split("/"))
+    url = f"{endpoint_url.rstrip('/')}/{q(bucket)}/" + "/".join(q(part) for part in object_key.split("/"))
     return url, {
         "Authorization": authorization,
         "x-amz-content-sha256": payload_hash,
@@ -192,7 +192,7 @@ def put_bytes(config: dict[str, Any], object_key: str, payload: bytes, content_t
     headers["Content-Type"] = content_type
     response = requests.put(url, data=payload, headers=headers, timeout=(15, 300))
     if response.status_code < 200 or response.status_code >= 300:
-        raise RuntimeError(f"R2 上传失败 HTTP ${response.status_code}: ${response.text[:800].replace(chr(10), ' ')}")
+        raise RuntimeError(f"R2 上传失败 HTTP {response.status_code}: {response.text[:800].replace(chr(10), ' ')}")
 
 
 def put_file(config: dict[str, Any], object_key: str, source: Path) -> None:
@@ -209,7 +209,7 @@ def put_file(config: dict[str, Any], object_key: str, source: Path) -> None:
     with source.open("rb") as stream:
         response = requests.put(url, data=stream, headers=headers, timeout=(15, 7200))
     if response.status_code < 200 or response.status_code >= 300:
-        raise RuntimeError(f"R2 上传失败 HTTP ${response.status_code}: ${response.text[:800].replace(chr(10), ' ')}")
+        raise RuntimeError(f"R2 上传失败 HTTP {response.status_code}: {response.text[:800].replace(chr(10), ' ')}")
 
 
 def backup_dir() -> Path:
@@ -237,7 +237,7 @@ def prepare_full_snapshot(*, include_docker: bool) -> tuple[Path, dict[str, str]
         raise RuntimeError("完整容灾脚本没有返回 FULL_BACKUP_MANIFEST")
     manifest = Path(manifest_path)
     if not manifest.is_file():
-        raise RuntimeError(f"完整容灾 manifest 不存在：${manifest}")
+        raise RuntimeError(f"完整容灾 manifest 不存在：{manifest}")
     return manifest, parse_manifest(manifest)
 
 
@@ -278,20 +278,20 @@ def component_paths(directory: Path, values: dict[str, str]) -> list[tuple[str, 
         if not name:
             continue
         if "/" in name or "\\" in name:
-            raise RuntimeError(f"manifest 文件名非法：${name}")
+            raise RuntimeError(f"manifest 文件名非法：{name}")
         source = directory / name
         if not source.is_file():
-            raise RuntimeError(f"恢复点缺少文件：${source}")
+            raise RuntimeError(f"恢复点缺少文件：{source}")
         actual = sha256_file(source)
         if expected and actual != expected:
-            raise RuntimeError(f"本地 SHA256 校验失败：${source.name}")
+            raise RuntimeError(f"本地 SHA256 校验失败：{source.name}")
         result.append((module, source, actual))
     return result
 
 
 def date_path(timestamp: str) -> str:
     if len(timestamp) >= 8:
-        return f"${timestamp[:4]}/${timestamp[4:6]}/${timestamp[6:8]}"
+        return f"{timestamp[:4]}/{timestamp[4:6]}/{timestamp[6:8]}"
     return "undated"
 
 
@@ -310,10 +310,10 @@ def run_daily(config: dict[str, Any], directory: Path, state: dict[str, Any]) ->
         previous = modules_state.get(module) if isinstance(modules_state, dict) else None
         if isinstance(previous, dict) and previous.get("sha256") == digest and previous.get("object_key"):
             object_key = str(previous["object_key"])
-            print(f"模块未变化，跳过上传：${module} -> ${object_key}")
+            print(f"模块未变化，跳过上传：{module} -> {object_key}")
         else:
-            object_key = f"${prefix}/modules/${module}/${digest}/${source.name}"
-            print(f"上传变化模块：${module} -> ${object_key}")
+            object_key = f"{prefix}/modules/{module}/{digest}/{source.name}"
+            print(f"上传变化模块：{module} -> {object_key}")
             put_file(config, object_key, source)
             modules_state[module] = {"sha256": digest, "object_key": object_key, "name": source.name}
         refs[module] = {"sha256": digest, "objectKey": object_key, "name": source.name}
@@ -326,10 +326,10 @@ def run_daily(config: dict[str, Any], directory: Path, state: dict[str, Any]) ->
         "modules": refs,
         "sourceManifest": manifest.name,
     }
-    snapshot_key = f"${prefix}/daily/${date_path(timestamp)}/${timestamp}.json"
+    snapshot_key = f"{prefix}/daily/{date_path(timestamp)}/{timestamp}.json"
     payload = json.dumps(snapshot, ensure_ascii=False, indent=2).encode()
     put_bytes(config, snapshot_key, payload, "application/json")
-    put_bytes(config, f"${prefix}/latest-daily.json", payload, "application/json")
+    put_bytes(config, f"{prefix}/latest-daily.json", payload, "application/json")
     snapshot["snapshotObjectKey"] = snapshot_key
     return snapshot
 
@@ -340,16 +340,16 @@ def run_full(config: dict[str, Any], directory: Path, state: dict[str, Any]) -> 
     if not timestamp:
         raise RuntimeError("完整容灾 manifest 缺少 timestamp")
     prefix = str(config.get("prefix") or "ecommerce-workspace/backup").strip().strip("/")
-    root_key = f"${prefix}/full/${date_path(timestamp)}/${timestamp}"
+    root_key = f"{prefix}/full/{date_path(timestamp)}/{timestamp}"
     refs: dict[str, Any] = {}
 
     for module, source, digest in component_paths(directory, values):
-        object_key = f"${root_key}/${source.name}"
-        print(f"上传全量模块：${module} -> ${object_key}")
+        object_key = f"{root_key}/{source.name}"
+        print(f"上传全量模块：{module} -> {object_key}")
         put_file(config, object_key, source)
         refs[module] = {"sha256": digest, "objectKey": object_key, "name": source.name}
 
-    manifest_key = f"${root_key}/${manifest.name}"
+    manifest_key = f"{root_key}/{manifest.name}"
     put_file(config, manifest_key, manifest)
     full_index = {
         "version": 1,
@@ -360,9 +360,9 @@ def run_full(config: dict[str, Any], directory: Path, state: dict[str, Any]) -> 
         "modules": refs,
     }
     payload = json.dumps(full_index, ensure_ascii=False, indent=2).encode()
-    index_key = f"${root_key}/snapshot.json"
+    index_key = f"{root_key}/snapshot.json"
     put_bytes(config, index_key, payload, "application/json")
-    put_bytes(config, f"${prefix}/latest-full.json", payload, "application/json")
+    put_bytes(config, f"{prefix}/latest-full.json", payload, "application/json")
     full_index["snapshotObjectKey"] = index_key
     state["last_full_at"] = int(dt.datetime.now(dt.timezone.utc).timestamp())
     state["last_full_timestamp"] = timestamp
@@ -374,7 +374,7 @@ def write_receipt(directory: Path, snapshot: dict[str, Any]) -> None:
     receipt_dir.mkdir(parents=True, exist_ok=True)
     timestamp = str(snapshot.get("timestamp") or "unknown")
     kind = str(snapshot.get("kind") or "backup")
-    path = receipt_dir / f"${timestamp}-${kind}.json"
+    path = receipt_dir / f"{timestamp}-{kind}.json"
     path.write_text(json.dumps(snapshot, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
@@ -398,7 +398,7 @@ def main() -> int:
         try:
             config = resolve_runtime_config()
         except Exception as exc:
-            print(f"R2 配置读取失败：${exc}", file=sys.stderr)
+            print(f"R2 配置读取失败：{exc}", file=sys.stderr)
             return 2
         if not config:
             print("R2 尚未配置或环境未启用；跳过本次备份。")
@@ -414,7 +414,7 @@ def main() -> int:
             last_full = int(state.get("last_full_at") or 0)
             due = last_full <= 0 or (dt.datetime.now(dt.timezone.utc).timestamp() - last_full) >= interval_days * 86400
             mode = "full" if due else "daily"
-            print(f"R2 自动策略：本次执行 ${mode}（全量间隔 ${interval_days} 天）")
+            print(f"R2 自动策略：本次执行 {mode}（全量间隔 {interval_days} 天）")
 
         try:
             snapshot = run_full(config, directory, state) if mode == "full" else run_daily(config, directory, state)
@@ -423,13 +423,13 @@ def main() -> int:
         except subprocess.CalledProcessError as exc:
             sys.stderr.write(exc.stdout or "")
             sys.stderr.write(exc.stderr or "")
-            print(f"本地恢复点生成失败：${exc}", file=sys.stderr)
+            print(f"本地恢复点生成失败：{exc}", file=sys.stderr)
             return 2
         except Exception as exc:
-            print(f"R2 备份失败：${exc}", file=sys.stderr)
+            print(f"R2 备份失败：{exc}", file=sys.stderr)
             return 2
 
-        print(f"==> R2 ${mode} 备份完成：${snapshot.get('timestamp')}")
+        print(f"==> R2 {mode} 备份完成：{snapshot.get('timestamp')}")
         return 0
 
 
