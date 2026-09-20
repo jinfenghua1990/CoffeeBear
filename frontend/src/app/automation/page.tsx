@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { automationApi, jkyOrderApi, JkyOrderStatus, ScheduleItem, SyncJobRow, SyncLogRow } from "@/lib/api";
+import SystemSettingsTabs from "@/components/system-settings-tabs";
 
 const STATUS_STYLE: Record<string, string> = {
   running: "bg-indigo-50 text-indigo-700",
@@ -88,6 +89,8 @@ export default function AutomationPage() {
           统一查看定时同步、手工触发和运行日志。只有已配置凭证的数据源才会真正执行；未配置任务会如实跳过。
         </p>
       </header>
+
+      <SystemSettingsTabs />
 
       {err && <div className="mt-4 rounded-lg bg-red-50 p-3 text-sm text-red-700">{err}</div>}
       {message && <div className="mt-4 rounded-lg bg-indigo-50 p-3 text-sm text-indigo-700">{message}</div>}
