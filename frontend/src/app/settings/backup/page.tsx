@@ -9,6 +9,7 @@ import {
   runR2Backup,
   saveKodoColdBackupConfig,
   saveR2BackupConfig,
+  testR2BackupConnection,
   type BackupStatus,
   type KodoColdBackupConfig,
   type R2BackupConfig,
@@ -381,6 +382,7 @@ export default function BackupSettingsPage() {
   const [r2Config, setR2Config] = useState<R2BackupConfig | null>(null);
   const [r2Loading, setR2Loading] = useState(true);
   const [r2Saving, setR2Saving] = useState(false);
+  const [r2Testing, setR2Testing] = useState(false);
   const [r2Running, setR2Running] = useState(false);
   const [restorePreparing, setRestorePreparing] = useState(false);
   const [backupStatus, setBackupStatus] = useState<BackupStatus | null>(null);
@@ -536,6 +538,22 @@ export default function BackupSettingsPage() {
       showNotice("保存失败：" + (error instanceof Error ? error.message : String(error)));
     } finally {
       setR2Saving(false);
+    }
+  }
+
+  async function testR2Connection() {
+    if (!r2Config?.configured) {
+      showNotice("请先保存 R2 配置，再测试连接。");
+      return;
+    }
+    setR2Testing(true);
+    try {
+      const result = await testR2BackupConnection();
+      showNotice(result.message || "R2 连接正常。");
+    } catch (error) {
+      showNotice("R2 连接失败：" + (error instanceof Error ? error.message : String(error)));
+    } finally {
+      setR2Testing(false);
     }
   }
 
@@ -1080,6 +1098,7 @@ export default function BackupSettingsPage() {
                 </div>
                 <div className="mt-4 flex flex-wrap items-center gap-2">
                   <button type="button" disabled={r2Saving || r2Loading} onClick={() => void saveR2Config()} className="app-button-primary rounded-lg px-4 py-2 text-[11px] font-medium disabled:cursor-not-allowed disabled:opacity-50">{r2Saving ? "保存中…" : "保存 R2 配置"}</button>
+                  <button type="button" disabled={r2Testing || !r2Config?.configured} onClick={() => void testR2Connection()} className="app-button-secondary rounded-lg px-4 py-2 text-[11px] font-medium disabled:opacity-40">{r2Testing ? "测试中…" : "测试连接"}</button>
                   <button type="button" disabled={r2Running || !r2Config?.configured || !r2Config.enabled} onClick={() => void runR2("daily")} className="app-button-secondary rounded-lg px-4 py-2 text-[11px] font-medium disabled:opacity-40">立即日常备份</button>
                   <button type="button" disabled={r2Running || !r2Config?.configured || !r2Config.enabled} onClick={() => void runR2("full")} className="app-button-secondary rounded-lg px-4 py-2 text-[11px] font-medium disabled:opacity-40">立即全量容灾</button>
                 </div>

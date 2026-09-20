@@ -5,7 +5,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.orm import Session
 
 from app.db import get_db
-from app.api.deps import current_actor
+from app.api.deps import current_actor, require_roles
 from app.services import backup_status_service, integration_service, kodo_backup_service, r2_backup_service
 
 router = APIRouter(prefix="/integrations", tags=["integrations"])
@@ -27,13 +27,13 @@ class KodoColdBackupConfigIn(BaseModel):
     enabled: bool = True
 
 
-@router.get("/kodo-cold")
+@router.get("/kodo-cold", dependencies=[Depends(require_roles("admin"))])
 def get_kodo_cold_backup_config(db: Session = Depends(get_db)) -> dict[str, Any]:
     """只返回脱敏后的 Kodo 冷备配置；密钥永不回传前端。"""
     return kodo_backup_service.get_config(db)
 
 
-@router.put("/kodo-cold")
+@router.put("/kodo-cold", dependencies=[Depends(require_roles("admin"))])
 def save_kodo_cold_backup_config(
     body: KodoColdBackupConfigIn,
     request: Request,
@@ -71,13 +71,13 @@ class R2BackupRunIn(BaseModel):
     mode: str = "auto"
 
 
-@router.get("/r2-backup")
+@router.get("/r2-backup", dependencies=[Depends(require_roles("admin"))])
 def get_r2_backup_config(db: Session = Depends(get_db)) -> dict[str, Any]:
     """返回脱敏后的 Cloudflare R2 主备份配置。"""
     return r2_backup_service.get_config(db)
 
 
-@router.put("/r2-backup")
+@router.put("/r2-backup", dependencies=[Depends(require_roles("admin"))])
 def save_r2_backup_config(
     body: R2BackupConfigIn,
     request: Request,
@@ -100,7 +100,16 @@ def save_r2_backup_config(
         raise HTTPException(400, str(exc)) from exc
 
 
-@router.post("/r2-backup/run")
+@router.post("/r2-backup/test", dependencies=[Depends(require_roles("admin"))])
+def test_r2_backup_connection(db: Session = Depends(get_db)) -> dict[str, Any]:
+    """非破坏性测试 R2 主备连接；仅执行签名 HEAD Bucket。"""
+    try:
+        return r2_backup_service.test_connection(db)
+    except (ValueError, RuntimeError) as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@router.post("/r2-backup/run", dependencies=[Depends(require_roles("admin"))])
 def run_r2_backup(body: R2BackupRunIn, db: Session = Depends(get_db)) -> dict[str, Any]:
     """启动 R2 备份任务。auto=每日模块化，并按配置间隔自动插入全量容灾点。"""
     config = r2_backup_service.get_config(db)
@@ -112,13 +121,13 @@ def run_r2_backup(body: R2BackupRunIn, db: Session = Depends(get_db)) -> dict[st
         raise HTTPException(400, str(exc)) from exc
 
 
-@router.get("/backup-status")
+@router.get("/backup-status", dependencies=[Depends(require_roles("admin"))])
 def get_backup_status(limit: int = Query(default=50, ge=1, le=200)) -> dict[str, Any]:
     """读取本地 manifest / R2 / Kodo 成功回执，作为备份中心真实执行记录。"""
     return backup_status_service.get_status(limit=limit)
 
 
-@router.post("/r2-backup/prepare-restore")
+@router.post("/r2-backup/prepare-restore", dependencies=[Depends(require_roles("admin"))])
 def prepare_r2_restore(db: Session = Depends(get_db)) -> dict[str, Any]:
     """下载并校验 R2 最新全量恢复点到 staging；绝不自动覆盖生产环境。"""
     config = r2_backup_service.get_config(db)

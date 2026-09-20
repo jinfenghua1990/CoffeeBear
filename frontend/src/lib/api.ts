@@ -354,6 +354,15 @@ export function saveR2BackupConfig(body: R2BackupConfigInput): Promise<R2BackupC
   });
 }
 
+export function testR2BackupConnection(): Promise<{
+  ok: boolean;
+  status: number;
+  bucket: string;
+  message: string;
+}> {
+  return jsonFetch("/api/v1/integrations/r2-backup/test", { method: "POST" });
+}
+
 export function runR2Backup(mode: "auto" | "daily" | "full" = "auto"): Promise<{
   started: boolean;
   target: "r2";

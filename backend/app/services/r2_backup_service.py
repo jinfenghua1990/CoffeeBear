@@ -1,11 +1,17 @@
 from __future__ import annotations
 
+import datetime as dt
+import hashlib
+import hmac
 import json
 import os
 import subprocess
 import sys
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote, urlsplit
+
+import requests
 
 from sqlalchemy.orm import Session
 
@@ -152,6 +158,89 @@ def runtime_config(db: Session) -> dict[str, Any] | None:
         "access_key": str(payload.get("access_key") or ""),
         "secret_key": str(payload.get("secret_key") or ""),
     }
+
+
+def _signing_key(secret_key: str, date_stamp: str) -> bytes:
+    k_date = hmac.new(("AWS4" + secret_key).encode(), date_stamp.encode(), hashlib.sha256).digest()
+    k_region = hmac.new(k_date, b"auto", hashlib.sha256).digest()
+    k_service = hmac.new(k_region, b"s3", hashlib.sha256).digest()
+    return hmac.new(k_service, b"aws4_request", hashlib.sha256).digest()
+
+
+def test_connection(db: Session) -> dict[str, Any]:
+    """用签名 HEAD Bucket 验证 R2 Endpoint/Bucket/凭据；不创建、修改或删除对象。"""
+    config = runtime_config(db)
+    if not config:
+        raise ValueError("R2 尚未完成配置")
+
+    endpoint_url = str(config["endpoint_url"]).strip().rstrip("/")
+    bucket = str(config["bucket"]).strip()
+    access_key = str(config["access_key"]).strip()
+    secret_key = str(config["secret_key"]).strip()
+
+    base = urlsplit(endpoint_url)
+    if base.scheme != "https" or not base.netloc:
+        raise ValueError("R2 Endpoint 必须是有效 https:// 地址")
+
+    now = dt.datetime.now(dt.timezone.utc)
+    amz_date = now.strftime("%Y%m%dT%H%M%SZ")
+    date_stamp = now.strftime("%Y%m%d")
+    payload_hash = hashlib.sha256(b"").hexdigest()
+
+    path_prefix = base.path.rstrip("/")
+    canonical_uri = quote(f"{path_prefix}/{bucket}", safe="/-_.~")
+    canonical_headers = (
+        f"host:{base.netloc}\n"
+        f"x-amz-content-sha256:{payload_hash}\n"
+        f"x-amz-date:{amz_date}\n"
+    )
+    signed_headers = "host;x-amz-content-sha256;x-amz-date"
+    canonical_request = "\n".join(
+        ["HEAD", canonical_uri, "", canonical_headers, signed_headers, payload_hash]
+    )
+    scope = f"{date_stamp}/auto/s3/aws4_request"
+    string_to_sign = "\n".join(
+        [
+            "AWS4-HMAC-SHA256",
+            amz_date,
+            scope,
+            hashlib.sha256(canonical_request.encode()).hexdigest(),
+        ]
+    )
+    signature = hmac.new(
+        _signing_key(secret_key, date_stamp),
+        string_to_sign.encode(),
+        hashlib.sha256,
+    ).hexdigest()
+    authorization = (
+        "AWS4-HMAC-SHA256 "
+        f"Credential={access_key}/{scope}, "
+        f"SignedHeaders={signed_headers}, Signature={signature}"
+    )
+
+    url = f"{endpoint_url}/{quote(bucket, safe='-_.~')}"
+    headers = {
+        "Authorization": authorization,
+        "x-amz-content-sha256": payload_hash,
+        "x-amz-date": amz_date,
+    }
+    try:
+        response = requests.head(url, headers=headers, timeout=(10, 20), allow_redirects=False)
+    except requests.RequestException as exc:
+        raise RuntimeError(f"无法连接 R2：{exc.__class__.__name__}") from exc
+
+    if 200 <= response.status_code < 300:
+        return {
+            "ok": True,
+            "status": response.status_code,
+            "bucket": bucket,
+            "message": "R2 连接正常，Bucket 与凭据可访问",
+        }
+    if response.status_code in {401, 403}:
+        raise RuntimeError("R2 鉴权失败，请检查 Access Key、Secret Key 与 Bucket 权限")
+    if response.status_code == 404:
+        raise RuntimeError("R2 Bucket 不存在，或 Endpoint / Bucket 名称不正确")
+    raise RuntimeError(f"R2 连接测试失败（HTTP {response.status_code}）")
 
 
 def start_backup(mode: str = "auto") -> dict[str, Any]:

@@ -107,3 +107,79 @@ def test_r2_config_api_never_returns_secret(client):
     assert fetched_payload["readEnabled"] is True
     assert "secretKey" not in fetched_payload
     assert "accessKey" not in fetched_payload
+
+
+def test_r2_connection_test_uses_head_and_never_mutates_bucket(db_session, monkeypatch):
+    monkeypatch.setattr(settings, "APP_SECRET_KEY", "pytest-r2-secret-for-fernet")
+    r2_backup_service.save_config(
+        db_session,
+        endpoint_url="https://account-id.r2.cloudflarestorage.com",
+        bucket="ecommerce-backup",
+        prefix="ecommerce-workspace/backup",
+        access_key="R2_AK_TEST_12345678",
+        secret_key="R2_SK_TEST_SUPER_SECRET",
+        enabled=True,
+        full_interval_days=10,
+        actor="pytest",
+    )
+
+    calls = []
+
+    class Response:
+        status_code = 200
+
+    def fake_head(url, *, headers, timeout, allow_redirects):
+        calls.append(
+            {
+                "url": url,
+                "headers": headers,
+                "timeout": timeout,
+                "allow_redirects": allow_redirects,
+            }
+        )
+        return Response()
+
+    monkeypatch.setattr(r2_backup_service.requests, "head", fake_head)
+    result = r2_backup_service.test_connection(db_session)
+
+    assert result["ok"] is True
+    assert result["status"] == 200
+    assert result["bucket"] == "ecommerce-backup"
+    assert len(calls) == 1
+    assert calls[0]["url"].endswith("/ecommerce-backup")
+    assert calls[0]["allow_redirects"] is False
+    assert "Authorization" in calls[0]["headers"]
+
+
+def test_r2_connection_test_maps_auth_failure_without_leaking_secret(db_session, monkeypatch):
+    monkeypatch.setattr(settings, "APP_SECRET_KEY", "pytest-r2-secret-for-fernet")
+    r2_backup_service.save_config(
+        db_session,
+        endpoint_url="https://account-id.r2.cloudflarestorage.com",
+        bucket="ecommerce-backup",
+        prefix="ecommerce-workspace/backup",
+        access_key="R2_AK_TEST_12345678",
+        secret_key="R2_SK_TEST_SUPER_SECRET",
+        enabled=True,
+        full_interval_days=10,
+        actor="pytest",
+    )
+
+    class Response:
+        status_code = 403
+
+    monkeypatch.setattr(
+        r2_backup_service.requests,
+        "head",
+        lambda *args, **kwargs: Response(),
+    )
+
+    try:
+        r2_backup_service.test_connection(db_session)
+    except RuntimeError as exc:
+        message = str(exc)
+    else:
+        raise AssertionError("expected RuntimeError")
+
+    assert "鉴权失败" in message
+    assert "R2_SK_TEST_SUPER_SECRET" not in message
