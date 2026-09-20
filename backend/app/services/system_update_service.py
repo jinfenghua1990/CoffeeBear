@@ -390,7 +390,7 @@ def check_for_updates(*, actor: str = "system", automatic: bool = False) -> dict
             }
             auto_install_eligible = bool(
                 available
-                and _auto_install_allowed(classification["updateLevel"], cfg["autoInstallLevel"])
+                and _auto_install_allowed(classification["updateLevel"], str(cfg.get("autoInstallLevel") or "patch"))
             )
             payload = {
                 "phase": "idle",
