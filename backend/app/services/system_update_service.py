@@ -805,11 +805,11 @@ def start_update(*, actor: str = "system") -> dict[str, Any]:
         try:
             _cleanup_old_artifacts()
             state_dir = _state_dir()
-            source_runner = _repo_root() / "scripts" / "system_update_runner.py"
-            if not source_runner.is_file():
-                raise ValueError("系统更新执行器不存在")
             runner = state_dir / f"runner_{run_id}.py"
-            shutil.copy2(source_runner, runner)
+            runner_source = _git("show", f"{target_sha}:scripts/system_update_runner.py", timeout=30)
+            if "class Runner" not in runner_source or "def execute" not in runner_source:
+                raise ValueError("目标版本中的系统更新执行器无效")
+            runner.write_text(runner_source, encoding="utf-8")
             log_path = state_dir / f"update_{run_id}.log"
 
             env = os.environ.copy()
