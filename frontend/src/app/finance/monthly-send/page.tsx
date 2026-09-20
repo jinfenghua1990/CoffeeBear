@@ -367,12 +367,29 @@ export default function MonthlySendPage() {
   }, []);
 
   useEffect(() => {
+    void loadEntities().catch((e) => setMsg(String(e)));
+    void loadMailStatus();
+  }, [loadEntities, loadMailStatus]);
+  useEffect(() => {
+    if (!companyName) return;
+    setTemplate(null);
+    setPeriods([]);
+    setFiles([]);
+    setBusinessStatus(null);
+    setUnbilled(null);
     void loadTemplate().catch((e) => setMsg(String(e)));
     void loadPeriods();
-    void loadMailStatus();
-  }, [loadTemplate, loadPeriods, loadMailStatus]);
+  }, [companyName, loadPeriods, loadTemplate]);
+  useEffect(() => {
+    setIncludeSel(domesticSupportedByEntity
+      ? ["交易明细", "回单详情", "无票收入"]
+      : ["交易明细", "回单详情"]);
+    if (!domesticSupportedByEntity && (financeTab === "ledger" || financeTab === "match")) {
+      setFinanceTab("monthly");
+    }
+  }, [domesticSupportedByEntity, entityId, financeTab, setFinanceTab]);
   useEffect(() => { loadFiles(); loadBusiness(); loadUnbilled(); }, [loadFiles, loadBusiness, loadUnbilled]);
-  useEffect(() => { if (financeTab === "match") loadMatch(); }, [financeTab, loadMatch]);
+  useEffect(() => { if (financeTab === "match" && domesticSupportedByEntity) loadMatch(); }, [domesticSupportedByEntity, financeTab, loadMatch]);
   // 弹层切"全部未配发票"时拉取全量未匹配进项票（端点上限 500，靠搜索缩小范围）
   useEffect(() => {
     if (!pickerTxn || pickerScope !== "all") return;
@@ -411,7 +428,7 @@ export default function MonthlySendPage() {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          company: template.company, enabled: template.enabled, fields: template.fields, rules: template.rules,
+          company: companyName || template.company, enabled: template.enabled, fields: template.fields, rules: template.rules,
           to_addrs: emails(toText), cc_addrs: emails(ccText),
           auto_send: template.autoSend, send_day: template.sendDay, send_hour: template.sendHour,
         }),
@@ -434,6 +451,7 @@ export default function MonthlySendPage() {
     fd.append("period_month", String(sel.month));
     fd.append("category", "bank");
     fd.append("original_name", `银行${uploadKind.current}${ext}`);
+    fd.append("company", companyName);
     setBusy(true); setMsg("");
     try {
       const res = await authenticatedFetch("/api/v1/finance/files", { method: "POST", body: fd });
@@ -497,7 +515,7 @@ export default function MonthlySendPage() {
     }
     setBusy(true); setMsg("");
     try {
-      const pkgRes = await authenticatedFetch(`/api/v1/finance/${sel.year}/${sel.month}/package`, {
+      const pkgRes = await authenticatedFetch(`/api/v1/finance/${sel.year}/${sel.month}/package?company=${encodeURIComponent(companyName)}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ include: includeSel }),
@@ -521,7 +539,7 @@ export default function MonthlySendPage() {
     if (!sel) return;
     setBusy(true); setMsg("");
     try {
-      const res = await authenticatedFetch(`/api/v1/finance/sales-report/generate?year=${sel.year}&month=${sel.month}`, { method: "POST" });
+      const res = await authenticatedFetch(`/api/v1/finance/sales-report/generate?year=${sel.year}&month=${sel.month}&company=${encodeURIComponent(companyName)}`, { method: "POST" });
       const data = await res.json();
       if (!res.ok) throw new Error(data.detail || "生成失败");
       setMsg(`销售汇总已生成并归档 v${data.version}`);
@@ -534,7 +552,7 @@ export default function MonthlySendPage() {
     if (!sel) return;
     setBusy(true); setMsg("");
     try {
-      const res = await authenticatedFetch(`/api/v1/finance/sales-report/preview?year=${sel.year}&month=${sel.month}&limit=30`, { cache: "no-store" });
+      const res = await authenticatedFetch(`/api/v1/finance/sales-report/preview?year=${sel.year}&month=${sel.month}&limit=30&company=${encodeURIComponent(companyName)}`, { cache: "no-store" });
       const data = await res.json();
       if (!res.ok) throw new Error(data.detail || "预览失败");
       setPreview(data);
@@ -558,7 +576,7 @@ export default function MonthlySendPage() {
     if (!sel || !unbilled) return;
     setBusy(true); setMsg("");
     try {
-      const res = await authenticatedFetch(`/api/v1/finance/unbilled/adjustment?year=${sel.year}&month=${sel.month}`, {
+      const res = await authenticatedFetch(`/api/v1/finance/unbilled/adjustment?year=${sel.year}&month=${sel.month}&company=${encodeURIComponent(companyName)}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ selected_keys: unbilledSelectedKeys }),
