@@ -1363,6 +1363,58 @@ export default function MonthlySendPage() {
         </div>
       )}
 
+      {pickerInvoice && (() => {
+        const query = pickerQuery.trim().toLowerCase();
+        const candidates = (matchData?.payments || [])
+          .filter((row) => Number(row.remaining) > 0.01)
+          .filter((row) => !query || [row.txnDate, row.counterpartyName, row.voucherNo, row.accountNo, row.accountName].join(" ").toLowerCase().includes(query))
+          .sort((a, b) =>
+            Number(pickerInvoice.suggestedPaymentIds.includes(b.id)) - Number(pickerInvoice.suggestedPaymentIds.includes(a.id))
+            || a.txnDate.localeCompare(b.txnDate)
+          );
+        return (
+          <div
+            className="fixed inset-0 z-modal flex items-end justify-center bg-slate-950/35 p-3 sm:p-6"
+            onMouseDown={(event) => { if (event.target === event.currentTarget) setPickerInvoice(null); }}
+            role="dialog"
+            aria-modal="true"
+            aria-label="选择银行流水核对发票"
+          >
+            <div className="flex max-h-[80vh] w-full max-w-[920px] flex-col overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-2xl">
+              <div className="flex items-center justify-between gap-3 border-b border-slate-200 px-5 py-4">
+                <div className="min-w-0">
+                  <h2 className="text-base font-semibold text-slate-900">选择银行流水 · 核对发票</h2>
+                  <p className="mt-1 text-xs text-slate-400">
+                    发票 {pickerInvoice.invoiceNumber || "未记录号码"} · {pickerInvoice.sellerName || "销方未名"} · 价税合计 {money(pickerInvoice.totalAmount)} · 待核对 {money(pickerInvoice.remaining)}
+                  </p>
+                </div>
+                <button type="button" onClick={() => setPickerInvoice(null)} aria-label="关闭银行流水选择" className="rounded-lg p-2 text-xl leading-none text-slate-400 hover:bg-slate-100 hover:text-slate-700">×</button>
+              </div>
+              <div className="border-b border-slate-100 bg-slate-50/60 px-5 py-3">
+                <input value={pickerQuery} onChange={(e) => setPickerQuery(e.target.value)} placeholder="搜索付款日期 / 对方户名 / 账号 / 凭证号" className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm outline-none focus:border-blue-400" />
+              </div>
+              <div className="min-h-[220px] flex-1 overflow-y-auto">
+                {!candidates.length && <div className="px-5 py-10 text-center text-sm text-slate-400">当前账期没有可用于核对的银行支出流水。</div>}
+                <div className="divide-y divide-slate-100">
+                  {candidates.map((row) => {
+                    const suggested = pickerInvoice.suggestedPaymentIds.includes(row.id);
+                    return <div key={row.id} className={`grid gap-3 px-5 py-3 sm:grid-cols-[110px_minmax(0,1fr)_130px_110px] sm:items-center ${suggested ? "bg-blue-50/50" : ""}`}>
+                      <div className="text-xs text-slate-600">{row.txnDate}</div>
+                      <div className="min-w-0">
+                        <div className="flex flex-wrap items-center gap-2 text-sm"><span className="truncate font-medium text-slate-800">{row.counterpartyName || "对方未名"}</span>{suggested && <span className="rounded bg-blue-600 px-1.5 py-0.5 text-[10px] font-medium text-white">同名同金额建议</span>}</div>
+                        <div className="mt-0.5 truncate text-[11px] text-slate-400">{row.accountNo || row.accountName || "未记录账户"}{row.voucherNo ? ` · ${row.voucherNo}` : ""}{row.summary ? ` · ${row.summary}` : ""}</div>
+                      </div>
+                      <div className="text-right"><div className="text-sm font-semibold text-slate-800">{money(row.amount)}</div><div className="text-[10px] text-slate-400">可用 {money(row.remaining)}</div></div>
+                      <div className="text-right"><button type="button" onClick={() => void matchInvoiceToPayment(pickerInvoice, row)} disabled={busy} className="rounded-md bg-blue-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-blue-700 disabled:opacity-40">核对这笔</button></div>
+                    </div>;
+                  })}
+                </div>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
       {pickerTxn && (() => {
         const query = pickerQuery.trim().toLowerCase();
         const monthRows: PickerInvoice[] = (matchData?.invoicePool || [])
