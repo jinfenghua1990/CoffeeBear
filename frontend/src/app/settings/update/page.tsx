@@ -414,7 +414,7 @@ export default function SystemUpdatePage() {
             }`}
           >
             {label}
-            {key === "logs" && status.logs?.length ? <span className="ml-1.5 rounded-full bg-slate-100 px-1.5 py-0.5 text-[9px] text-slate-500 dark:bg-slate-800 dark:text-slate-300">{status.logs.length}</span> : null}
+            {key === "logs" && status.logs?.length ? <span className="ml-1.5 rounded-full bg-slate-100 px-1.5 py-0.5 text-[11px] text-slate-500 dark:bg-slate-800 dark:text-slate-300">{status.logs.length}</span> : null}
             {activeTab === key && <span className="absolute inset-x-2 -bottom-px h-0.5 rounded-full bg-blue-600 dark:bg-blue-400" />}
           </button>
         ))}
@@ -510,7 +510,7 @@ export default function SystemUpdatePage() {
                       </span>
                       <div className="min-w-0 flex-1">
                         <div className="truncate text-[12px] font-medium text-slate-700 dark:text-slate-100" title={item.subject}>{item.subject}</div>
-                        <div className="mt-0.5 text-[10px] text-slate-400 dark:text-slate-400">{fmtDate(item.committedAt)} · {item.shortSha}</div>
+                        <div className="mt-0.5 text-[11px] text-slate-400 dark:text-slate-400">{fmtDate(item.committedAt)} · {item.shortSha}</div>
                       </div>
                     </div>
                   )) : (
@@ -599,7 +599,7 @@ export default function SystemUpdatePage() {
                   {showProgressNumber ? (status.running ? `${progress}%` : "100%") : "待命"}
                 </span>
                 <div className="hidden border-l border-slate-200 pl-4 text-right sm:block dark:border-slate-700">
-                  <div className="text-[10px] text-slate-400">当前阶段</div>
+                  <div className="text-[11px] text-slate-400">当前阶段</div>
                   <div className="mt-0.5 text-[12px] font-semibold text-slate-700 dark:text-slate-100">{stageMessage}</div>
                 </div>
               </div>
@@ -637,11 +637,11 @@ export default function SystemUpdatePage() {
                 <div key={item.key} className="bg-white px-4 py-3 dark:bg-slate-900">
                   <div className="flex items-center justify-between gap-3">
                     <span className="text-[11px] font-medium text-slate-700 dark:text-slate-100">{item.label}</span>
-                    <span className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${item.status === "ok" ? "bg-emerald-50 text-emerald-700 dark:bg-emerald-500/10 dark:text-emerald-300" : item.status === "warn" ? "bg-amber-50 text-amber-700 dark:bg-amber-500/10 dark:text-amber-200" : "bg-rose-50 text-rose-700 dark:bg-rose-500/10 dark:text-rose-200"}`}>
+                    <span className={`rounded-full px-2 py-0.5 text-[11px] font-medium ${item.status === "ok" ? "bg-emerald-50 text-emerald-700 dark:bg-emerald-500/10 dark:text-emerald-300" : item.status === "warn" ? "bg-amber-50 text-amber-700 dark:bg-amber-500/10 dark:text-amber-200" : "bg-rose-50 text-rose-700 dark:bg-rose-500/10 dark:text-rose-200"}`}>
                       {item.status === "ok" ? "正常" : item.status === "warn" ? "提醒" : "阻塞"}
                     </span>
                   </div>
-                  <div className="mt-1 break-all text-[10px] leading-5 text-slate-400 dark:text-slate-400">{item.detail}</div>
+                  <div className="mt-1 break-all text-[11px] leading-5 text-slate-400 dark:text-slate-400">{item.detail}</div>
                 </div>
               ))}
             </div>
@@ -700,7 +700,7 @@ export default function SystemUpdatePage() {
                 </label>
               </div>
 
-              <div className="mt-3 text-[10px] text-slate-400 dark:text-slate-400">当前自动安装范围：{autoInstallLevelMeta.label}及以下。</div>
+              <div className="mt-3 text-[11px] text-slate-400 dark:text-slate-400">当前自动安装范围：{autoInstallLevelMeta.label}及以下。</div>
               <button type="button" onClick={() => void saveSettings()} disabled={!saveChanged || Boolean(busy)} className="app-button-primary mt-4 w-full rounded-lg px-3 py-2.5 text-[11px] font-medium disabled:opacity-40">
                 {busy === "save" ? "保存中…" : saveChanged ? "保存更新策略" : "更新策略已保存"}
               </button>
@@ -719,8 +719,8 @@ export default function SystemUpdatePage() {
             <div>
               <div className="flex items-center gap-2">
                 <h2 className="text-[15px] font-semibold text-slate-900 dark:text-slate-100">更新日志</h2>
-                {status.running && <span className="rounded-full bg-blue-50 px-2 py-0.5 text-[10px] font-medium text-blue-700 dark:bg-blue-500/10 dark:text-blue-200">实时更新</span>}
-                {status.backupDb && <span className="rounded-full bg-emerald-50 px-2 py-0.5 text-[10px] font-medium text-emerald-700 dark:bg-emerald-500/10 dark:text-emerald-300">已生成备份</span>}
+                {status.running && <span className="rounded-full bg-blue-50 px-2 py-0.5 text-[11px] font-medium text-blue-700 dark:bg-blue-500/10 dark:text-blue-200">实时更新</span>}
+                {status.backupDb && <span className="rounded-full bg-emerald-50 px-2 py-0.5 text-[11px] font-medium text-emerald-700 dark:bg-emerald-500/10 dark:text-emerald-300">已生成备份</span>}
               </div>
               <p className="mt-1 text-[11px] text-slate-400 dark:text-slate-400">一般无需查看；更新失败或排查问题时再进入此页签。</p>
             </div>
@@ -729,7 +729,7 @@ export default function SystemUpdatePage() {
                 <input type="checkbox" checked={autoScrollLogs} onChange={(event) => setAutoScrollLogs(event.target.checked)} className="h-3.5 w-3.5 rounded border-slate-300" />
                 自动滚动
               </label>
-              <button type="button" onClick={() => void load(true)} className="app-button-secondary h-8 rounded-lg px-2.5 text-[10px] font-medium">刷新</button>
+              <button type="button" onClick={() => void load(true)} className="app-button-secondary h-8 rounded-lg px-2.5 text-[11px] font-medium">刷新</button>
               <button
                 type="button"
                 onClick={() => {
@@ -741,7 +741,7 @@ export default function SystemUpdatePage() {
                   );
                 }}
                 disabled={!status.logs?.length}
-                className="app-button-secondary h-8 rounded-lg px-2.5 text-[10px] font-medium disabled:opacity-40"
+                className="app-button-secondary h-8 rounded-lg px-2.5 text-[11px] font-medium disabled:opacity-40"
               >
                 复制日志
               </button>
@@ -770,10 +770,10 @@ export default function SystemUpdatePage() {
                 <div key={item.at + index} className="py-3">
                   <div className="flex items-center justify-between gap-3">
                     <span className={`text-[11px] font-medium ${item.result === "success" ? "text-emerald-700 dark:text-emerald-300" : item.result === "rolled_back" ? "text-amber-700 dark:text-amber-200" : "text-rose-700 dark:text-rose-200"}`}>{item.message}</span>
-                    <span className="shrink-0 text-[10px] text-slate-400">{fmtDate(item.at)}</span>
+                    <span className="shrink-0 text-[11px] text-slate-400">{fmtDate(item.at)}</span>
                   </div>
-                  <div className="mt-1 font-mono text-[10px] text-slate-400">{shortSha(item.fromSha)} → {shortSha(item.toSha)} · {item.actor}</div>
-                  {item.error && <div className="mt-1 text-[10px] text-rose-600 dark:text-rose-300">{item.error}</div>}
+                  <div className="mt-1 font-mono text-[11px] text-slate-400">{shortSha(item.fromSha)} → {shortSha(item.toSha)} · {item.actor}</div>
+                  {item.error && <div className="mt-1 text-[11px] text-rose-600 dark:text-rose-300">{item.error}</div>}
                 </div>
               ))}
               {(!status.history || status.history.length === 0) && <div className="py-10 text-center text-xs text-slate-400">还没有更新记录</div>}
@@ -803,14 +803,14 @@ function VersionCard({
     <div className={`rounded-xl border p-4 ${target ? "border-amber-300 bg-amber-50/70 dark:border-amber-500/60 dark:bg-amber-500/10" : "border-blue-300 bg-blue-50/60 dark:border-blue-500/50 dark:bg-blue-500/10"}`}>
       <div className="flex items-center justify-between gap-2">
         <div className={`text-[11px] font-medium ${target ? "text-amber-700 dark:text-amber-200" : "text-blue-700 dark:text-blue-200"}`}>{label}</div>
-        <span className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${target ? "bg-amber-100 text-amber-700 dark:bg-amber-400/15 dark:text-amber-200" : "bg-emerald-100 text-emerald-700 dark:bg-emerald-400/15 dark:text-emerald-300"}`}>
+        <span className={`rounded-full px-2 py-0.5 text-[11px] font-medium ${target ? "bg-amber-100 text-amber-700 dark:bg-amber-400/15 dark:text-amber-200" : "bg-emerald-100 text-emerald-700 dark:bg-emerald-400/15 dark:text-emerald-300"}`}>
           {target ? "有新版本" : "当前运行中"}
         </span>
       </div>
       <div className={`mt-2 font-mono text-[19px] font-semibold tracking-tight ${target ? "text-amber-800 dark:text-amber-100" : "text-slate-900 dark:text-slate-100"}`}>
         {version || shortSha(sha)}
       </div>
-      <div className="mt-2 flex min-w-0 items-center gap-2 text-[10px] text-slate-500 dark:text-slate-300">
+      <div className="mt-2 flex min-w-0 items-center gap-2 text-[11px] text-slate-500 dark:text-slate-300">
         <span className="shrink-0 font-mono text-slate-400">{shortSha(sha)}</span>
         <span className="truncate" title={note}>{note}</span>
       </div>
@@ -849,8 +849,8 @@ function UpdateStep({
         </span>
         <div className="min-w-0">
           <div className="text-[12px] font-semibold text-slate-800 dark:text-slate-100">{index}　{title}</div>
-          <div className="mt-1 text-[10px] leading-5 text-slate-400 dark:text-slate-400">{desc}</div>
-          <div className={`mt-1.5 text-[10px] font-medium ${status === "done" ? "text-emerald-600 dark:text-emerald-300" : status === "active" ? "text-blue-600 dark:text-blue-300" : status === "error" ? "text-rose-600 dark:text-rose-300" : "text-slate-400"}`}>
+          <div className="mt-1 text-[11px] leading-5 text-slate-400 dark:text-slate-400">{desc}</div>
+          <div className={`mt-1.5 text-[11px] font-medium ${status === "done" ? "text-emerald-600 dark:text-emerald-300" : status === "active" ? "text-blue-600 dark:text-blue-300" : status === "error" ? "text-rose-600 dark:text-rose-300" : "text-slate-400"}`}>
             {time || statusText}
           </div>
         </div>
