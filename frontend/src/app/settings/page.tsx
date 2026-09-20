@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useState } from "react";
 import { changePassword } from "@/lib/api";
+import SystemSettingsTabs from "@/components/system-settings-tabs";
 
 type InfraItem = {
   key: string;
@@ -77,18 +78,13 @@ export default function SettingsPage() {
   return (
     <div className="pb-10">
       <header className="app-page-header -mx-1 pb-4">
-        <div className="flex flex-wrap items-end justify-between gap-3">
-          <div>
-            <h1 className="text-xl font-semibold text-slate-900">系统设置</h1>
-            <p className="mt-1.5 text-sm leading-6 text-slate-500">
-              只管理系统级、安全与基础设施能力。1688、吉客云、Shopify 等业务集成继续在各自业务页面配置。
-            </p>
-          </div>
-          <Link href="/settings/update" className="app-button-secondary rounded-lg px-3.5 py-2 text-[12px] font-medium">
-            更新中心
-          </Link>
-        </div>
+        <h1 className="text-xl font-semibold text-slate-900">系统设置</h1>
+        <p className="mt-1.5 text-sm leading-6 text-slate-500">
+          系统级能力统一放在这里；通过下方 3 个模块切换，不再在左侧重复增加入口。
+        </p>
       </header>
+
+      <SystemSettingsTabs />
 
       <section className="mt-5 max-w-6xl">
         <div className="mb-2.5 flex items-end justify-between gap-3">
@@ -149,14 +145,7 @@ export default function SettingsPage() {
         </div>
       </section>
 
-      <section className="mt-6 grid max-w-6xl gap-3 md:grid-cols-2">
-        <div className="app-card-muted rounded-xl p-4">
-          <div className="text-[13px] font-semibold text-slate-900">系统更新</div>
-          <p className="mt-1.5 text-[11px] leading-5 text-slate-500">
-            查看当前版本、候选版本、数据库版本和发布历史。容器模式由 GitHub / GHCR 管理发布。
-          </p>
-          <Link href="/settings/update" className="mt-3 inline-flex text-[11px] font-medium text-blue-600 hover:text-blue-700">打开更新中心 →</Link>
-        </div>
+      <section className="mt-6 max-w-6xl">
         <div className="app-card-muted rounded-xl p-4">
           <div className="text-[13px] font-semibold text-slate-900">业务集成入口</div>
           <p className="mt-1.5 text-[11px] leading-5 text-slate-500">
