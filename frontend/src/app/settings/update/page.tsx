@@ -1,7 +1,6 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import SystemSettingsTabs from "@/components/system-settings-tabs";
 import {
   systemUpdateApi,
   type SystemUpdateMode,
@@ -239,10 +238,9 @@ export default function SystemUpdatePage() {
     return (
       <div className="pb-10">
         <header className="app-page-header -mx-1 pb-4">
-          <h1 className="text-xl font-semibold text-slate-900">系统设置</h1>
-          <p className="mt-1.5 text-sm text-slate-500">系统设置统一入口。</p>
+          <h1 className="text-xl font-semibold text-slate-900">系统更新</h1>
+          <p className="mt-1.5 text-sm text-slate-500">正在读取版本与更新状态。</p>
         </header>
-        <SystemSettingsTabs />
         <div className="app-card rounded-xl p-6 text-sm text-slate-500">
           {error ? "系统更新加载失败：" + error : "正在读取运行版本和更新状态…"}
         </div>
@@ -267,13 +265,12 @@ export default function SystemUpdatePage() {
   return (
     <div className="pb-10">
       <header className="app-page-header -mx-1 pb-4">
-        <h1 className="text-xl font-semibold text-slate-900">系统设置</h1>
+        <h1 className="text-xl font-semibold text-slate-900">系统更新</h1>
         <p className="mt-1.5 text-sm leading-6 text-slate-500">
-          系统级能力统一放在这里；系统更新是其中一个模块，不再单独占用顶部或左侧入口。
+          检查版本、配置自动更新策略，并查看更新进度、日志与历史记录。
         </p>
       </header>
 
-      <SystemSettingsTabs />
 
       <section className="app-card overflow-hidden rounded-xl">
         <div className="flex flex-wrap items-start justify-between gap-4 px-4 py-4">
