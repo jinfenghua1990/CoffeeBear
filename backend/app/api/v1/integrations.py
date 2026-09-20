@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session
 
 from app.db import get_db
 from app.api.deps import current_actor
-from app.services import integration_service, kodo_backup_service
+from app.services import integration_service, kodo_backup_service, r2_backup_service
 
 router = APIRouter(prefix="/integrations", tags=["integrations"])
 
@@ -52,6 +52,63 @@ def save_kodo_cold_backup_config(
             actor=current_actor(request),
         )
     except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+class R2BackupConfigIn(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    endpoint_url: str = Field(alias="endpointUrl")
+    bucket: str
+    prefix: str = "ecommerce-workspace/backup"
+    access_key: str = Field(default="", alias="accessKey")
+    secret_key: str = Field(default="", alias="secretKey")
+    enabled: bool = True
+    full_interval_days: int = Field(default=10, alias="fullIntervalDays")
+
+
+class R2BackupRunIn(BaseModel):
+    mode: str = "auto"
+
+
+@router.get("/r2-backup")
+def get_r2_backup_config(db: Session = Depends(get_db)) -> dict[str, Any]:
+    """返回脱敏后的 Cloudflare R2 主备份配置。"""
+    return r2_backup_service.get_config(db)
+
+
+@router.put("/r2-backup")
+def save_r2_backup_config(
+    body: R2BackupConfigIn,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    """保存 R2 主备份配置；密钥加密落库且永不回传。"""
+    try:
+        return r2_backup_service.save_config(
+            db,
+            endpoint_url=body.endpoint_url,
+            bucket=body.bucket,
+            prefix=body.prefix,
+            access_key=body.access_key,
+            secret_key=body.secret_key,
+            enabled=body.enabled,
+            full_interval_days=body.full_interval_days,
+            actor=current_actor(request),
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@router.post("/r2-backup/run")
+def run_r2_backup(body: R2BackupRunIn, db: Session = Depends(get_db)) -> dict[str, Any]:
+    """启动 R2 备份任务。auto=每日模块化，并按配置间隔自动插入全量容灾点。"""
+    config = r2_backup_service.get_config(db)
+    if not config["configured"] or not config["enabled"]:
+        raise HTTPException(400, "R2 尚未配置或当前未启用")
+    try:
+        return r2_backup_service.start_backup(body.mode)
+    except (ValueError, RuntimeError) as exc:
         raise HTTPException(400, str(exc)) from exc
 
 
