@@ -228,8 +228,14 @@ def _classify_update(changes: list[dict[str, Any]], changed_files: list[str]) ->
     level = "patch"
     reasons: list[str] = []
 
-    explicit_major = any(token in subject_blob for token in ("[major]", "breaking change", "breaking:", "major:"))
-    explicit_feature = any(token in subject_blob for token in ("[feature]", "feature:", "feat:"))
+    explicit_major = (
+        any(token in subject_blob for token in ("[major]", "breaking change", "breaking:", "major:"))
+        or bool(re.search(r"(?m)^[a-z]+(?:\([^)]+\))?!:", subject_blob))
+    )
+    explicit_feature = (
+        any(token in subject_blob for token in ("[feature]", "feature:"))
+        or bool(re.search(r"(?m)^feat(?:\([^)]+\))?:", subject_blob))
+    )
     infra_major_prefixes = (
         ".github/workflows/",
         "Dockerfile",
