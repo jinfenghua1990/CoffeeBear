@@ -307,27 +307,60 @@ def _style_sheet(ws) -> None:
 def corporate_payment_xlsx(report: dict[str, Any]) -> bytes:
     wb = Workbook()
     ws = wb.active
-    ws.title = "发票付款汇总"
+    ws.title = "对公付款汇总"
     headers = [
-        "付款日期", "供应商", "供应商税号", "我方付款账号", "我方账户名", "对方账号",
-        "银行流水/凭证号", "付款摘要", "付款金额", "本次分摊金额", "付款匹配状态",
-        "发票号码", "发票日期", "发票类型", "不含税金额", "税额", "价税合计",
-        "累计对公已付", "发票未付余额", "发票付款状态", "关联采购订单",
+        "付款日期", "供应商/对方", "供应商税号", "我方付款账号", "我方账户名", "对方账号",
+        "银行流水/凭证号", "付款摘要", "付款金额", "已匹配发票金额", "未对账差额",
+        "付款对账状态", "已匹配发票号码", "发票张数", "关联采购订单",
     ]
     ws.append(headers)
+
+    payments: dict[int, dict[str, Any]] = {}
     for row in report.get("rows", []):
+        payment_id = int(row["paymentId"])
+        group = payments.setdefault(payment_id, {
+            "paymentDate": row["paymentDate"],
+            "supplierNames": [],
+            "supplierTaxIds": [],
+            "paymentAccount": row["paymentAccount"],
+            "paymentAccountName": row["paymentAccountName"],
+            "counterpartyAccount": row["counterpartyAccount"],
+            "voucherNo": row["voucherNo"],
+            "summary": row["summary"],
+            "paymentAmount": _dec(row["paymentAmount"]),
+            "paymentMatchedTotal": _dec(row["paymentMatchedTotal"]),
+            "paymentStatus": row["paymentStatus"],
+            "invoiceNumbers": [],
+            "purchaseOrderNos": [],
+        })
+        if row["supplierName"] and row["supplierName"] not in group["supplierNames"]:
+            group["supplierNames"].append(row["supplierName"])
+        if row["supplierTaxId"] and row["supplierTaxId"] not in group["supplierTaxIds"]:
+            group["supplierTaxIds"].append(row["supplierTaxId"])
+        if row["invoiceNumber"] and row["invoiceNumber"] not in group["invoiceNumbers"]:
+            group["invoiceNumbers"].append(row["invoiceNumber"])
+        for order_no in row["purchaseOrderNos"]:
+            if order_no and order_no not in group["purchaseOrderNos"]:
+                group["purchaseOrderNos"].append(order_no)
+
+    for group in payments.values():
+        remaining = max(group["paymentAmount"] - group["paymentMatchedTotal"], Decimal("0"))
         ws.append([
-            row["paymentDate"], row["supplierName"], row["supplierTaxId"],
-            row["paymentAccount"], row["paymentAccountName"], row["counterpartyAccount"],
-            row["voucherNo"], row["summary"], float(_dec(row["paymentAmount"])),
-            float(_dec(row["paymentAllocatedAmount"])),
-            "已配平" if row["paymentStatus"] == "matched" else "部分配平",
-            row["invoiceNumber"], row["invoiceDate"], row["invoiceType"],
-            float(_dec(row["invoiceAmountExclTax"])), float(_dec(row["invoiceTaxAmount"])),
-            float(_dec(row["invoiceTotalAmount"])), float(_dec(row["invoiceCorporatePaidTotal"])),
-            float(_dec(row["invoiceOutstandingAmount"])),
-            "已付清" if row["invoiceStatus"] == "paid" else "部分付款",
-            "、".join(row["purchaseOrderNos"]),
+            group["paymentDate"],
+            "、".join(group["supplierNames"]),
+            "、".join(group["supplierTaxIds"]),
+            group["paymentAccount"],
+            group["paymentAccountName"],
+            group["counterpartyAccount"],
+            group["voucherNo"],
+            group["summary"],
+            float(group["paymentAmount"]),
+            float(group["paymentMatchedTotal"]),
+            float(remaining),
+            "已对清" if group["paymentStatus"] == "matched" else "部分对账",
+            "、".join(group["invoiceNumbers"]),
+            len(group["invoiceNumbers"]),
+            "、".join(group["purchaseOrderNos"]),
         ])
     _style_sheet(ws)
 
