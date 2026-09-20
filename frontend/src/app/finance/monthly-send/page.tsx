@@ -1100,13 +1100,12 @@ export default function MonthlySendPage() {
         {([
           ["monthly", "本月月结与发送"],
           ["corporate", "已收票对公付款明细"],
-          ["match", "付款对账"],
           ["records", "发送记录"],
           ["archive", "资料归档"],
           ["ledger", "销售汇总台账"],
         ] as const).map(([key, label]) => (
-          <button key={key} type="button" disabled={!domesticSupportedByEntity && (key === "match" || key === "ledger" || key === "corporate")} onClick={() => setFinanceTab(key)} className={`relative shrink-0 px-4 py-3 text-sm font-medium transition-colors disabled:cursor-not-allowed disabled:text-slate-300 ${financeTab === key ? "text-blue-600" : "text-slate-600 hover:text-blue-600"}`}>
-            {label}{financeTab === key && <span className="absolute inset-x-3 bottom-0 h-0.5 rounded-full bg-blue-600" />}
+          <button key={key} type="button" disabled={!domesticSupportedByEntity && (key === "ledger" || key === "corporate")} onClick={() => setFinanceTab(key)} className={`relative shrink-0 px-4 py-3 text-sm font-medium transition-colors disabled:cursor-not-allowed disabled:text-slate-300 ${financeTab === key || (key === "corporate" && financeTab === "match") ? "text-blue-600" : "text-slate-600 hover:text-blue-600"}`}>
+            {label}{(financeTab === key || (key === "corporate" && financeTab === "match")) && <span className="absolute inset-x-3 bottom-0 h-0.5 rounded-full bg-blue-600" />}
           </button>
         ))}
         <button type="button" onClick={() => setMsg("每月发送会按选定账期汇总资料，确认发送前可在右侧检查附件与收件人。")} className="ml-auto inline-flex shrink-0 items-center gap-1.5 px-2 py-3 text-xs text-slate-500 hover:text-blue-600">ⓘ 使用帮助</button>
@@ -1280,10 +1279,14 @@ export default function MonthlySendPage() {
       {financeTab === "match" && <section className={`${CARD} overflow-hidden`}>
         <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 px-4 py-4">
           <div>
+            <div className="mb-1 text-[11px] font-medium text-violet-600">{sel?.month || ""}月-已收票对公付款明细 / 银行核对</div>
             <h2 className="text-base font-semibold text-slate-900">发票 ↔ 银行付款核对</h2>
-            <p className="mt-1 text-xs text-slate-400">财务按当月收到的进项发票逐张核对银行付款；银行流水只作为核对依据，不作为这张月度清单的主维度。</p>
+            <p className="mt-1 text-xs text-slate-400">这是“已收票对公付款明细”的内部核对步骤：按进项发票逐张核对银行付款，银行流水只作为核对依据。</p>
           </div>
-          <button type="button" onClick={loadMatch} disabled={matchLoading} className="rounded-lg border border-slate-200 px-3 py-2 text-xs text-slate-600 hover:bg-slate-50 disabled:opacity-50">刷新</button>
+          <div className="flex items-center gap-2">
+            <button type="button" onClick={() => { setCorporateView("adjust"); setFinanceTab("corporate"); void loadCorporatePayment(); }} className="rounded-lg border border-violet-200 px-3 py-2 text-xs font-medium text-violet-600 hover:bg-violet-50">返回付款明细</button>
+            <button type="button" onClick={loadMatch} disabled={matchLoading} className="rounded-lg border border-slate-200 px-3 py-2 text-xs text-slate-600 hover:bg-slate-50 disabled:opacity-50">刷新</button>
+          </div>
         </div>
         {matchData && (
           <div className="grid grid-cols-2 gap-px bg-slate-100 sm:grid-cols-5">
