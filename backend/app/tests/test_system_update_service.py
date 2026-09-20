@@ -316,3 +316,55 @@ def test_git_merge_base_operational_error_is_not_treated_as_divergence(monkeypat
     assert result["diverged"] is False
     assert "repository transport error" in result["lastCheckError"]
     assert result["changes"] == []
+
+
+def test_update_classification_detects_patch_module_and_auto_policy():
+    result = service._classify_update(
+        [{"subject": "fix: 修复月结页面", "sha": "a" * 40}],
+        ["frontend/src/app/finance/monthly-send/page.tsx"],
+    )
+    assert result["updateLevel"] == "patch"
+    assert "财务中心" in result["impactedModules"]
+    assert result["hasMigration"] is False
+    assert service._auto_install_allowed("patch", "patch") is True
+    assert service._auto_install_allowed("feature", "patch") is False
+
+
+def test_update_classification_promotes_migration_to_feature():
+    result = service._classify_update(
+        [{"subject": "feat: 新增付款明细", "sha": "b" * 40}],
+        [
+            "backend/alembic/versions/20260920_add_payment_detail.py",
+            "frontend/src/app/finance/page.tsx",
+        ],
+    )
+    assert result["updateLevel"] == "feature"
+    assert result["hasMigration"] is True
+    assert "财务中心" in result["impactedModules"]
+    assert "平台公共底层" in result["impactedModules"]
+    assert service._auto_install_allowed("feature", "feature") is True
+
+
+def test_update_classification_marks_core_deployment_change_major():
+    result = service._classify_update(
+        [{"subject": "chore: 调整启动配置", "sha": "c" * 40}],
+        ["backend/app/config.py"],
+    )
+    assert result["updateLevel"] == "major"
+    assert "平台公共底层" in result["impactedModules"]
+    assert service._auto_install_allowed("major", "feature") is False
+
+
+def test_update_settings_accept_auto_install_level():
+    cfg = service._validate_settings({
+        "enabled": True,
+        "mode": "auto_update",
+        "checkIntervalMinutes": 10,
+        "autoUpdateHour": 3,
+        "autoUpdateWindowMinutes": 60,
+        "autoInstallLevel": "feature",
+    })
+    assert cfg["autoInstallLevel"] == "feature"
+
+    with pytest.raises(ValueError, match="自动安装范围"):
+        service._validate_settings({**cfg, "autoInstallLevel": "unsafe"})

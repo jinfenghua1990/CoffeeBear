@@ -24,6 +24,7 @@ class SystemUpdateSettingsBody(BaseModel):
     checkIntervalMinutes: int | None = Field(None, ge=5, le=1440)
     autoUpdateHour: int | None = Field(None, ge=0, le=23)
     autoUpdateWindowMinutes: int | None = Field(None, ge=15, le=360)
+    autoInstallLevel: str | None = None
 
 
 

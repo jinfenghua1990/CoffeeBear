@@ -24,6 +24,8 @@ from app.config import settings
 
 _SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 _MODES = {"manual", "auto_download", "auto_update"}
+_AUTO_INSTALL_LEVELS = {"patch", "feature", "major"}
+_LEVEL_RANK = {"patch": 1, "feature": 2, "major": 3}
 _ACTIVE_PHASES = {"queued", "preflight", "backup", "quiescing", "installing", "migrating", "building", "restarting", "healthcheck", "rollback"}
 _LOCK = threading.RLock()
 
@@ -78,6 +80,7 @@ def default_update_settings() -> dict[str, Any]:
         "checkIntervalMinutes": 10,
         "autoUpdateHour": 3,
         "autoUpdateWindowMinutes": 60,
+        "autoInstallLevel": "patch",
         "branch": settings.SYSTEM_UPDATE_BRANCH,
         "remote": settings.SYSTEM_UPDATE_REMOTE,
     }
@@ -87,7 +90,7 @@ def load_update_settings() -> dict[str, Any]:
     base = default_update_settings()
     stored = _read_json(_settings_path(), {})
     # branch/remote 只允许部署配置决定，前端不可任意切换代码来源。
-    for key in ("enabled", "mode", "checkIntervalMinutes", "autoUpdateHour", "autoUpdateWindowMinutes"):
+    for key in ("enabled", "mode", "checkIntervalMinutes", "autoUpdateHour", "autoUpdateWindowMinutes", "autoInstallLevel"):
         if key in stored:
             base[key] = stored[key]
     base["branch"] = settings.SYSTEM_UPDATE_BRANCH
@@ -112,12 +115,16 @@ def _validate_settings(value: dict[str, Any]) -> dict[str, Any]:
     window = int(value.get("autoUpdateWindowMinutes") or 60)
     if not 15 <= window <= 360:
         raise ValueError("自动更新窗口必须在 15～360 分钟")
+    auto_install_level = str(value.get("autoInstallLevel") or "patch")
+    if auto_install_level not in _AUTO_INSTALL_LEVELS:
+        raise ValueError("自动安装范围必须是 patch / feature / major")
     return {
         "enabled": bool(value.get("enabled", True)),
         "mode": mode,
         "checkIntervalMinutes": interval,
         "autoUpdateHour": hour,
         "autoUpdateWindowMinutes": window,
+        "autoInstallLevel": auto_install_level,
         "branch": settings.SYSTEM_UPDATE_BRANCH,
         "remote": settings.SYSTEM_UPDATE_REMOTE,
     }
@@ -129,7 +136,7 @@ def save_update_settings(patch: dict[str, Any]) -> dict[str, Any]:
         if runtime.get("phase") in _ACTIVE_PHASES and _pid_running(runtime.get("pid")):
             raise ValueError("系统更新正在执行，完成后再修改更新策略")
         current = load_update_settings()
-        allowed = {"enabled", "mode", "checkIntervalMinutes", "autoUpdateHour", "autoUpdateWindowMinutes"}
+        allowed = {"enabled", "mode", "checkIntervalMinutes", "autoUpdateHour", "autoUpdateWindowMinutes", "autoInstallLevel"}
         for key, value in patch.items():
             if key in allowed:
                 current[key] = value
@@ -191,6 +198,110 @@ def _changes(current_sha: str, latest_sha: str) -> list[dict[str, Any]]:
             continue
         rows.append({"sha": parts[0], "shortSha": parts[0][:10], "subject": parts[1], "committedAt": parts[2]})
     return rows
+
+
+def _changed_files(current_sha: str, latest_sha: str) -> list[str]:
+    try:
+        result = _run(["git", "diff", "--name-only", current_sha, latest_sha], timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return []
+    if result.returncode != 0:
+        return []
+    return [line.strip() for line in result.stdout.splitlines() if line.strip()]
+
+
+_MODULE_RULES: list[tuple[str, tuple[str, ...]]] = [
+    ("财务中心", ("frontend/src/app/finance/", "backend/app/services/finance", "backend/app/models/finance", "backend/app/api/v1/finance")),
+    ("采购 / 供应链", ("frontend/src/app/purchase/", "frontend/src/app/supply-chain/", "frontend/src/app/procurement/", "frontend/src/app/suppliers/", "backend/app/services/purchase", "backend/app/services/procurement", "backend/app/services/supply", "backend/app/api/v1/purchase", "backend/app/api/v1/supply")),
+    ("库存", ("frontend/src/app/inventory/", "backend/app/services/inventory", "backend/app/models/inventory", "backend/app/api/v1/inventory")),
+    ("销售", ("frontend/src/app/sales/", "backend/app/services/sales", "backend/app/api/v1/sales")),
+    ("快递物流", ("frontend/src/app/logistics/", "backend/app/services/logistics", "backend/app/api/v1/logistics")),
+    ("外贸", ("frontend/src/app/foreign-trade/", "backend/app/services/foreign", "backend/app/models/foreign", "backend/app/api/v1/foreign")),
+    ("系统设置 / 更新", ("frontend/src/app/settings/", "frontend/src/app/automation/", "frontend/src/components/top-bar", "frontend/src/lib/navigation", "backend/app/services/system_update", "backend/app/api/v1/system", "scripts/system_update")),
+    ("数据接入", ("frontend/src/app/data-center-import/", "backend/app/adapters/", "backend/app/services/jky", "backend/app/services/alibaba", "backend/app/api/v1/integrations")),
+]
+
+
+def _classify_update(changes: list[dict[str, Any]], changed_files: list[str]) -> dict[str, Any]:
+    subjects = [str(item.get("subject") or "") for item in changes]
+    subject_blob = "\n".join(subjects).lower()
+    level = "patch"
+    reasons: list[str] = []
+
+    explicit_major = (
+        any(token in subject_blob for token in ("[major]", "breaking change", "breaking:", "major:"))
+        or bool(re.search(r"(?m)^[a-z]+(?:\([^)]+\))?!:", subject_blob))
+    )
+    explicit_feature = (
+        any(token in subject_blob for token in ("[feature]", "feature:"))
+        or bool(re.search(r"(?m)^feat(?:\([^)]+\))?:", subject_blob))
+    )
+    infra_major_prefixes = (
+        ".github/workflows/",
+        "Dockerfile",
+        "docker-compose",
+        "compose.",
+        "scripts/native-start",
+        "backend/app/core/security",
+        "backend/app/config.py",
+        "backend/app/main.py",
+    )
+    has_infra_major = any(path.startswith(infra_major_prefixes) for path in changed_files)
+    has_migration = any("alembic/versions/" in path or "/migrations/" in path for path in changed_files)
+    has_model_change = any(path.startswith("backend/app/models/") for path in changed_files)
+
+    if explicit_major or has_infra_major:
+        level = "major"
+        if explicit_major:
+            reasons.append("提交明确标记为重大变更")
+        if has_infra_major:
+            reasons.append("涉及部署 / 安全 / 应用核心启动配置")
+    elif explicit_feature or has_migration or has_model_change:
+        level = "feature"
+        if explicit_feature:
+            reasons.append("提交包含新功能标记")
+        if has_migration:
+            reasons.append("包含数据库迁移")
+        elif has_model_change:
+            reasons.append("涉及数据模型")
+    else:
+        reasons.append("未检测到数据库、部署或重大结构变更")
+
+    impacted_modules: list[str] = []
+    for label, prefixes in _MODULE_RULES:
+        if any(path.startswith(prefixes) for path in changed_files):
+            impacted_modules.append(label)
+
+    core_prefixes = (
+        "frontend/src/lib/",
+        "frontend/src/components/",
+        "backend/app/db",
+        "backend/app/config.py",
+        "backend/app/main.py",
+        "backend/app/core/",
+        "backend/app/models/",
+        "backend/alembic/",
+        ".github/",
+        "scripts/",
+    )
+    if any(path.startswith(core_prefixes) for path in changed_files) and "平台公共底层" not in impacted_modules:
+        impacted_modules.append("平台公共底层")
+    if not impacted_modules and changed_files:
+        impacted_modules.append("其他 / 公共代码")
+
+    return {
+        "updateLevel": level,
+        "updateLevelLabel": {"patch": "小版本", "feature": "功能版本", "major": "重大版本"}[level],
+        "impactedModules": impacted_modules,
+        "changedFiles": changed_files[:200],
+        "changedFileCount": len(changed_files),
+        "hasMigration": has_migration,
+        "classificationReasons": reasons,
+    }
+
+
+def _auto_install_allowed(level: str, configured_level: str) -> bool:
+    return _LEVEL_RANK.get(level, 99) <= _LEVEL_RANK.get(configured_level, 0)
 
 
 def _write_status(patch: dict[str, Any]) -> dict[str, Any]:
@@ -273,6 +384,20 @@ def check_for_updates(*, actor: str = "system", automatic: bool = False) -> dict
             diverged = current_sha != latest_sha and ancestor.returncode == 1
             available = current_sha != latest_sha and not diverged
             change_rows = _changes(current_sha, latest_sha) if available else []
+            changed_files = _changed_files(current_sha, latest_sha) if available else []
+            classification = _classify_update(change_rows, changed_files) if available else {
+                "updateLevel": "patch",
+                "updateLevelLabel": "小版本",
+                "impactedModules": [],
+                "changedFiles": [],
+                "changedFileCount": 0,
+                "hasMigration": False,
+                "classificationReasons": [],
+            }
+            auto_install_eligible = bool(
+                available
+                and _auto_install_allowed(classification["updateLevel"], str(cfg.get("autoInstallLevel") or "patch"))
+            )
             payload = {
                 "phase": "idle",
                 "progress": 0,
@@ -288,6 +413,12 @@ def check_for_updates(*, actor: str = "system", automatic: bool = False) -> dict
                 "latestCommit": _commit_info(latest_sha),
                 "currentCommit": _commit_info(current_sha),
                 "changes": change_rows,
+                **classification,
+                "autoInstallEligible": auto_install_eligible,
+                "autoInstallBlockedReason": "" if auto_install_eligible else (
+                    f"{classification['updateLevelLabel']} 超出自动安装范围"
+                    if available else ""
+                ),
                 "lastCheckAt": _now_iso(),
                 "lastCheckError": "",
                 "automatic": automatic,
@@ -304,6 +435,15 @@ def check_for_updates(*, actor: str = "system", automatic: bool = False) -> dict
                 "updateAvailable": False,
                 "diverged": False,
                 "changes": [],
+                "changedFiles": [],
+                "changedFileCount": 0,
+                "impactedModules": [],
+                "hasMigration": False,
+                "updateLevel": "patch",
+                "updateLevelLabel": "小版本",
+                "classificationReasons": [],
+                "autoInstallEligible": False,
+                "autoInstallBlockedReason": "",
                 "automatic": automatic,
             })
             return status_payload(include_log=False)
@@ -640,6 +780,7 @@ async def poll_loop() -> None:
                     and checked.get("updateAvailable")
                     and not checked.get("dirty")
                     and not checked.get("diverged")
+                    and checked.get("autoInstallEligible")
                     and _in_auto_window(cfg)
                 ):
                     await asyncio.to_thread(start_update, actor="system-scheduler")

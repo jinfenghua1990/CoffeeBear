@@ -190,6 +190,7 @@ export async function getSystemHealth(): Promise<SystemHealth> {
 }
 
 export type SystemUpdateMode = "manual" | "auto_download" | "auto_update";
+export type SystemUpdateLevel = "patch" | "feature" | "major";
 
 export type SystemUpdateSettings = {
   enabled: boolean;
@@ -197,6 +198,7 @@ export type SystemUpdateSettings = {
   checkIntervalMinutes: number;
   autoUpdateHour: number;
   autoUpdateWindowMinutes: number;
+  autoInstallLevel: SystemUpdateLevel;
   branch: string;
   remote: string;
 };
@@ -285,6 +287,15 @@ export type SystemUpdateStatus = {
   logs?: string[];
   history?: SystemUpdateHistory[];
   runtime?: SystemRuntimeRelease;
+  updateLevel?: SystemUpdateLevel;
+  updateLevelLabel?: string;
+  impactedModules?: string[];
+  changedFiles?: string[];
+  changedFileCount?: number;
+  hasMigration?: boolean;
+  classificationReasons?: string[];
+  autoInstallEligible?: boolean;
+  autoInstallBlockedReason?: string;
   settings: SystemUpdateSettings;
 };
 
@@ -292,7 +303,7 @@ export const systemUpdateApi = {
   status: () => jsonFetch<SystemUpdateStatus>("/api/v1/system/update/status"),
   readiness: () => jsonFetch<SystemUpdateReadiness>("/api/v1/system/update/readiness"),
   check: () => jsonFetch<SystemUpdateStatus>("/api/v1/system/update/check", { method: "POST" }),
-  saveSettings: (body: Partial<Pick<SystemUpdateSettings, "enabled" | "mode" | "checkIntervalMinutes" | "autoUpdateHour" | "autoUpdateWindowMinutes">>) =>
+  saveSettings: (body: Partial<Pick<SystemUpdateSettings, "enabled" | "mode" | "checkIntervalMinutes" | "autoUpdateHour" | "autoUpdateWindowMinutes" | "autoInstallLevel">>) =>
     jsonFetch<{ ok: boolean; settings: SystemUpdateSettings }>("/api/v1/system/update/settings", {
       method: "PATCH",
       body: JSON.stringify(body),
