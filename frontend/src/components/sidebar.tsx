@@ -1,6 +1,6 @@
 "use client";
 
-import Link from "next/link";
+import Link from "@/components/workspace/workspace-link";
 import { usePathname, useSearchParams } from "next/navigation";
 import { isSecondaryActive, resolveModule, type IconName, type SecondaryItem } from "@/lib/navigation";
 
