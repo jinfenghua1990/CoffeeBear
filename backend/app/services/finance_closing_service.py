@@ -76,17 +76,28 @@ def foreign_trade_summary(
         db, legal_entity_id=legal_entity_id, year=year, month=month
     )
     totals: dict[str, dict[str, float]] = defaultdict(
-        lambda: {"income": 0.0, "expense": 0.0, "cashIn": 0.0, "cashOut": 0.0}
+        lambda: {
+            "income": 0.0,
+            "expense": 0.0,
+            "profitIncome": 0.0,
+            "profitExpense": 0.0,
+            "cashIn": 0.0,
+            "cashOut": 0.0,
+        }
     )
     for row in rows:
         amount = float(row["amount"] or 0)
         bucket = totals[row["currency"]]
         if row["direction"] == "income":
             bucket["income"] += amount
+            if row["profitEffect"]:
+                bucket["profitIncome"] += amount
             if row["cashEffect"]:
                 bucket["cashIn"] += amount
         else:
             bucket["expense"] += amount
+            if row["profitEffect"]:
+                bucket["profitExpense"] += amount
             if row["cashEffect"]:
                 bucket["cashOut"] += amount
     return {
@@ -96,7 +107,7 @@ def foreign_trade_summary(
             {
                 "currency": currency,
                 **values,
-                "profit": values["income"] - values["expense"],
+                "profit": values["profitIncome"] - values["profitExpense"],
                 "netCash": values["cashIn"] - values["cashOut"],
             }
             for currency, values in sorted(totals.items())
