@@ -13,6 +13,7 @@ from app.models.bank import BankTransaction
 from app.models.tax import TaxInvoice
 from app.services import finance_sales_report_service as sales_report_service
 from app.services import finance_center_service
+from app.services import finance_corporate_payment_report_service as corporate_payment_report_service
 from app.services import finance_closing_service
 from app.services import finance_projection_service
 from app.services import finance_service
@@ -304,6 +305,20 @@ async def upload_file(
     return result
 
 
+@router.get("/corporate-payment-report")
+def corporate_payment_report(
+    year: int = Query(..., ge=2000, le=2100),
+    month: int = Query(..., ge=1, le=12),
+    company: str = "",
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    """月度已收票且通过对公账户付款的发票/采购/商品清单。"""
+    try:
+        return corporate_payment_report_service.build_report(db, year, month, company=company)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
 @router.get("/payment-invoice-match/{year}/{month}")
 def payment_invoice_match_overview(
     year: int,
@@ -489,7 +504,7 @@ def check_period(year: int, month: int, company: str = "", db: Session = Depends
 
 
 class PackageInput(BaseModel):
-    """手动打包时可选交付表子集；不传或为空列表 = 全部 3 张表。"""
+    """手动打包时可选交付表子集；不传或为空列表 = 全部月度交付表。"""
     include: list[str] = Field(default_factory=list)
 
 

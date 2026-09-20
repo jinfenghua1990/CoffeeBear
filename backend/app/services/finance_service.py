@@ -32,8 +32,8 @@ CATEGORIES = (
     "purchase_inbound", "sales_query", "other",
 )
 # 只用于新建账期；历史账期继续使用自己已保存的 required_types，不追溯改口径。
-# 交付包固定 3 张表（交易明细 + 回单详情 + 无票收入），故银行类必备 2 个文件；
-DELIVERY_TABLES = ("交易明细", "回单详情", "无票收入")
+# 月度交付表：银行原件 + 系统生成的无票收入 + 已收票对公付款明细；银行类必备 2 个文件。
+DELIVERY_TABLES = ("交易明细", "回单详情", "无票收入", "已收票对公付款明细")
 # 销售汇总/出库 CSV 为系统自动台账，不作为打包前置条件。
 DEFAULT_REQUIRED = {
     "bank": 2,
@@ -310,7 +310,7 @@ def package_period(db: Session, company: str, year: int, month: int,
                    actor: str = "system", include: list[str] | None = None) -> FinanceDeliveryPackage:
     """打包账期交付 ZIP；每次生成新版本号，ZIP 落 output/V{n}，绝不覆盖。
 
-    include 控制银行/无票收入交付资料；如果该公司主体当月存在外贸 FinanceEntry，
+    include 控制银行/无票收入/已收票对公付款交付资料；如果该公司主体当月存在外贸 FinanceEntry，
     系统会额外自动生成「外贸财务汇总.xlsx」，无需用户重复勾选。
     """
     validate_period(year, month)
@@ -324,8 +324,10 @@ def package_period(db: Session, company: str, year: int, month: int,
             raise ValueError("请至少选择一张交付表")
     else:
         include = list(DELIVERY_TABLES)
-    want_tx, want_receipt, want_unbilled = (
-        "交易明细" in include, "回单详情" in include, "无票收入" in include)
+    want_tx = "交易明细" in include
+    want_receipt = "回单详情" in include
+    want_unbilled = "无票收入" in include
+    want_corporate_payment = "已收票对公付款明细" in include
 
     period = get_or_create_period(db, company, year, month)
     files = db.query(ArchiveFile).filter_by(company=company, period_year=year, period_month=month).all()
@@ -373,6 +375,18 @@ def package_period(db: Session, company: str, year: int, month: int,
         )
     unbilled_name = f"{month}月销售出库-无票收入.xlsx"
 
+    # 已收票且通过对公账户付款：直接读取银行付款↔进项发票事实，并下钻采购订单/商品。
+    corporate_payment_content: bytes | None = None
+    if want_corporate_payment:
+        from app.services import finance_corporate_payment_report_service as corporate_payment_service
+        corporate_payment_report = corporate_payment_service.build_report(
+            db, year, month, company=company
+        )
+        corporate_payment_content = corporate_payment_service.corporate_payment_xlsx(
+            corporate_payment_report
+        )
+    corporate_payment_name = f"{month}月-已收票对公付款明细.xlsx"
+
     # 外贸财务汇总直接来自该公司主体的 FinanceEntry，不复制 Shipment/税费计算逻辑。
     from app.services import finance_closing_service
     foreign_summary_content: bytes | None = None
@@ -419,6 +433,8 @@ def package_period(db: Session, company: str, year: int, month: int,
                 zf.write(source_path, arcname=arc_name)
             if unbilled_content is not None:
                 zf.writestr(unbilled_name, unbilled_content)
+            if corporate_payment_content is not None:
+                zf.writestr(corporate_payment_name, corporate_payment_content)
             if foreign_summary_content is not None:
                 zf.writestr(foreign_summary_name, foreign_summary_content)
         break
@@ -445,6 +461,7 @@ def package_period(db: Session, company: str, year: int, month: int,
               "version": version,
               "files": len(source_files),
               "generatedUnbilled": unbilled_content is not None,
+              "generatedCorporatePayment": corporate_payment_content is not None,
               "generatedForeignSummary": foreign_summary_content is not None,
               "sha256": pkg.zip_sha256[:16],
           })

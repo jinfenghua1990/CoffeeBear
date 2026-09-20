@@ -154,6 +154,65 @@ type PaymentMatchOverview = {
     unmatchedCount: number;
   };
 };
+
+type CorporatePaymentRow = {
+  linkId: number;
+  paymentId: number;
+  paymentDate: string;
+  paymentAccount: string;
+  paymentAccountName: string;
+  supplierName: string;
+  supplierTaxId: string;
+  counterpartyAccount: string;
+  voucherNo: string;
+  summary: string;
+  paymentAmount: string;
+  paymentAllocatedAmount: string;
+  paymentMatchedTotal: string;
+  paymentStatus: string;
+  invoiceId: number;
+  invoiceNumber: string;
+  invoiceDate: string;
+  invoiceType: string;
+  invoiceAmountExclTax: string;
+  invoiceTaxAmount: string;
+  invoiceTotalAmount: string;
+  invoiceCorporatePaidTotal: string;
+  invoiceOutstandingAmount: string;
+  invoiceStatus: string;
+  purchaseOrderNos: string[];
+};
+type CorporatePaymentProductDetail = {
+  invoiceId: number;
+  invoiceNumber: string;
+  invoiceDate: string;
+  supplierName: string;
+  purchaseOrderId: number | null;
+  purchaseOrderNo: string;
+  platform: string;
+  invoiceCoveredOrderAmount: string;
+  skuCode: string;
+  productName: string;
+  quantity: string;
+  unitPrice: string;
+  itemAmount: string;
+};
+type CorporatePaymentReport = {
+  year: number;
+  month: number;
+  company: string;
+  summary: {
+    paymentCount: number;
+    invoiceCount: number;
+    paymentTotal: string;
+    allocatedTotal: string;
+    invoiceTotal: string;
+    outstandingTotal: string;
+    productRowCount: number;
+  };
+  rows: CorporatePaymentRow[];
+  productDetails: CorporatePaymentProductDetail[];
+};
 type PickerInvoice = { id: number; invoiceNumber: string; sellerName: string; issueDate: string; totalAmount: string; remaining: string; suggested: boolean };
 
 function previousMonthValue() {
@@ -242,15 +301,16 @@ export default function MonthlySendPage() {
   const [unbilled, setUnbilled] = useState<Unbilled | null>(null);
   const [mailStatus, setMailStatus] = useState<MailStatus | null>(null);
   const [mailOpen, setMailOpen] = useState(false);
-  const [financeTab, setFinanceTab] = useTabScopedState<"monthly" | "records" | "archive" | "ledger" | "match">("monthly.tab", "monthly");
+  const [financeTab, setFinanceTab] = useTabScopedState<"monthly" | "records" | "archive" | "ledger" | "corporate" | "match">("monthly.tab", "monthly");
   const [matchData, setMatchData] = useState<PaymentMatchOverview | null>(null);
+  const [corporatePayment, setCorporatePayment] = useState<CorporatePaymentReport | null>(null);
   const [matchLoading, setMatchLoading] = useState(false);
   const [pickerTxn, setPickerTxn] = useState<PaymentMatchRow | null>(null);
   const [pickerQuery, setPickerQuery] = useState("");
   const [pickerScope, setPickerScope] = useState<"month" | "all">("month");
   const [allInvoices, setAllInvoices] = useState<PickerInvoice[]>([]);
   /** 发送内容勾选：打包时只包含勾选的表（自动发送仍走全部 3 张）。 */
-  const [includeSel, setIncludeSel] = useState<string[]>(["交易明细", "回单详情", "无票收入"]);
+  const [includeSel, setIncludeSel] = useState<string[]>(["交易明细", "回单详情", "无票收入", "已收票对公付款明细"]);
   const [showUnbilledDetail, setShowUnbilledDetail] = useState(false);
   const [unbilledSearch, setUnbilledSearch] = useState("");
   const [unbilledSelectedKeys, setUnbilledSelectedKeys] = useState<string[]>([]);
@@ -348,6 +408,17 @@ export default function MonthlySendPage() {
       .catch(() => {});
   }, [companyName, domesticSupportedByEntity, sel]);
 
+  const loadCorporatePayment = useCallback(() => {
+    if (!sel || !companyName || !domesticSupportedByEntity) {
+      setCorporatePayment(null);
+      return;
+    }
+    authenticatedFetch(`/api/v1/finance/corporate-payment-report?year=${sel.year}&month=${sel.month}&company=${encodeURIComponent(companyName)}`, { cache: "no-store" })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data) => setCorporatePayment(data))
+      .catch(() => setCorporatePayment(null));
+  }, [companyName, domesticSupportedByEntity, sel]);
+
   const loadMatch = useCallback(() => {
     if (!sel) return;
     const seq = ++matchRequestSeq.current;
@@ -377,18 +448,19 @@ export default function MonthlySendPage() {
     setFiles([]);
     setBusinessStatus(null);
     setUnbilled(null);
+    setCorporatePayment(null);
     void loadTemplate().catch((e) => setMsg(String(e)));
     void loadPeriods();
   }, [companyName, loadPeriods, loadTemplate]);
   useEffect(() => {
     setIncludeSel(domesticSupportedByEntity
-      ? ["交易明细", "回单详情", "无票收入"]
+      ? ["交易明细", "回单详情", "无票收入", "已收票对公付款明细"]
       : ["交易明细", "回单详情"]);
-    if (!domesticSupportedByEntity && (financeTab === "ledger" || financeTab === "match")) {
+    if (!domesticSupportedByEntity && (financeTab === "ledger" || financeTab === "match" || financeTab === "corporate")) {
       setFinanceTab("monthly");
     }
   }, [domesticSupportedByEntity, entityId, financeTab, setFinanceTab]);
-  useEffect(() => { loadFiles(); loadBusiness(); loadUnbilled(); }, [loadFiles, loadBusiness, loadUnbilled]);
+  useEffect(() => { loadFiles(); loadBusiness(); loadUnbilled(); loadCorporatePayment(); }, [loadFiles, loadBusiness, loadUnbilled, loadCorporatePayment]);
   useEffect(() => { if (financeTab === "match" && domesticSupportedByEntity) loadMatch(); }, [domesticSupportedByEntity, financeTab, loadMatch]);
   // 弹层切"全部未配发票"时拉取全量未匹配进项票（端点上限 500，靠搜索缩小范围）
   useEffect(() => {
@@ -642,9 +714,9 @@ export default function MonthlySendPage() {
 
   const businessReady = Boolean(businessStatus?.ready);
   const needsUnbilled = Boolean(businessStatus?.domesticSupported ?? domesticSupportedByEntity);
-  const ready = Boolean(businessReady && bankTx && bankReceipt && (!needsUnbilled || unbilled));
-  const readyCount = [bankTx, bankReceipt, ...(needsUnbilled ? [unbilled] : [])].filter(Boolean).length;
-  const requiredDeliveryCount = needsUnbilled ? 3 : 2;
+  const ready = Boolean(businessReady && bankTx && bankReceipt && (!needsUnbilled || (unbilled && corporatePayment)));
+  const readyCount = [bankTx, bankReceipt, ...(needsUnbilled ? [unbilled, corporatePayment] : [])].filter(Boolean).length;
+  const requiredDeliveryCount = needsUnbilled ? 4 : 2;
   const hasForeignSummary = (businessStatus?.foreignEntryCount ?? 0) > 0;
   const latestPkg = period?.packages.length ? period.packages[period.packages.length - 1] : null;
   const latestSentPkg = [...(period?.packages || [])].reverse().find((pkg) => pkg.status === "SENT") || null;
@@ -744,12 +816,13 @@ export default function MonthlySendPage() {
         <span className="shrink-0 px-1 text-slate-300">›</span>
         {([
           ["monthly", "本月月结与发送"],
+          ["corporate", "已收票对公付款"],
           ["match", "付款发票匹配"],
           ["records", "发送记录"],
           ["archive", "资料归档"],
           ["ledger", "销售汇总台账"],
         ] as const).map(([key, label]) => (
-          <button key={key} type="button" disabled={!domesticSupportedByEntity && (key === "match" || key === "ledger")} onClick={() => setFinanceTab(key)} className={`relative shrink-0 px-4 py-3 text-sm font-medium transition-colors disabled:cursor-not-allowed disabled:text-slate-300 ${financeTab === key ? "text-blue-600" : "text-slate-600 hover:text-blue-600"}`}>
+          <button key={key} type="button" disabled={!domesticSupportedByEntity && (key === "match" || key === "ledger" || key === "corporate")} onClick={() => setFinanceTab(key)} className={`relative shrink-0 px-4 py-3 text-sm font-medium transition-colors disabled:cursor-not-allowed disabled:text-slate-300 ${financeTab === key ? "text-blue-600" : "text-slate-600 hover:text-blue-600"}`}>
             {label}{financeTab === key && <span className="absolute inset-x-3 bottom-0 h-0.5 rounded-full bg-blue-600" />}
           </button>
         ))}
@@ -794,7 +867,7 @@ export default function MonthlySendPage() {
         <section className={`${CARD} min-w-0 overflow-hidden`}>
           <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 px-4 py-4">
             <div><h2 className="text-base font-semibold text-slate-900">本月处理清单 <span className="ml-1 text-slate-500">({readyCount}/{requiredDeliveryCount})</span></h2><p className="mt-1 text-xs text-slate-400">业务数据自动读取；这里按主体整理银行资料、系统生成资料并发送给财务</p></div>
-            <div className="flex items-center gap-2"><button type="button" onClick={() => { uploadKind.current = "交易明细"; fileRef.current?.click(); }} disabled={busy} className="inline-flex items-center gap-1 rounded-lg border border-blue-200 bg-white px-3 py-2 text-xs font-medium text-blue-600 hover:bg-blue-50 disabled:opacity-50">＋ 新增资料</button><button type="button" onClick={() => { loadFiles(); loadPeriods(); loadBusiness(); loadUnbilled(); }} className="rounded-lg border border-slate-200 px-3 py-2 text-xs text-slate-600 hover:bg-slate-50">刷新</button></div>
+            <div className="flex items-center gap-2"><button type="button" onClick={() => { uploadKind.current = "交易明细"; fileRef.current?.click(); }} disabled={busy} className="inline-flex items-center gap-1 rounded-lg border border-blue-200 bg-white px-3 py-2 text-xs font-medium text-blue-600 hover:bg-blue-50 disabled:opacity-50">＋ 新增资料</button><button type="button" onClick={() => { loadFiles(); loadPeriods(); loadBusiness(); loadUnbilled(); loadCorporatePayment(); }} className="rounded-lg border border-slate-200 px-3 py-2 text-xs text-slate-600 hover:bg-slate-50">刷新</button></div>
           </div>
           <div className="hidden items-center gap-3 bg-slate-50 px-4 py-2 text-[11px] font-medium text-slate-500 md:grid md:grid-cols-[28px_minmax(180px,1.2fr)_minmax(150px,1fr)_58px_112px_88px_minmax(150px,1fr)_auto]">
             <span /><span>资料名称</span><span>资料摘要</span><span>当前版本</span><span>更新时间</span><span>资料状态</span><span>参数摘要</span><span className="text-right">操作</span>
@@ -836,6 +909,7 @@ export default function MonthlySendPage() {
           <ItemRow kind="bank" title={`${sel?.month || ""}月-银行交易明细`} state={{ ok: Boolean(bankTx), text: bankTx ? "已核对" : "待上传" }} summary={bankTx ? <>全部账户 · 已导入<br />{formatBytes(bankTx.size)}</> : <>等待上传原始银行流水<br /><span className="text-amber-600">上传后自动归档</span></>} updatedAt={bankTx?.uploadedAt} version={bankTx?.version} parameter={bankTx ? "账期内 · 全部账户" : "待补充资料"} selected={includeSel.includes("交易明细")} onToggle={() => setIncludeSel((s) => s.includes("交易明细") ? s.filter((x) => x !== "交易明细") : [...s, "交易明细"])} actions={<>{bankTx && <button type="button" onClick={() => void downloadFile(bankTx)} disabled={busy} className="rounded-md border border-slate-200 px-2.5 py-1.5 text-[11px] text-slate-600 hover:bg-slate-50 disabled:opacity-50">下载</button>}<button type="button" onClick={() => { uploadKind.current = "交易明细"; fileRef.current?.click(); }} disabled={busy} className="rounded-md bg-blue-600 px-2.5 py-1.5 text-[11px] font-medium text-white hover:bg-blue-700 disabled:opacity-50">{bankTx ? "替换" : "上传"}</button></>} />
           <ItemRow kind="receipt" title={`${sel?.month || ""}月-银行回单详情`} state={{ ok: Boolean(bankReceipt), text: bankReceipt ? "已核对" : "待上传" }} summary={bankReceipt ? <>全部账户 · 已导入<br />{formatBytes(bankReceipt.size)}</> : <>等待上传银行回单<br /><span className="text-amber-600">上传后自动归档</span></>} updatedAt={bankReceipt?.uploadedAt} version={bankReceipt?.version} parameter={bankReceipt ? "账期内 · 全部账户" : "待补充资料"} selected={includeSel.includes("回单详情")} onToggle={() => setIncludeSel((s) => s.includes("回单详情") ? s.filter((x) => x !== "回单详情") : [...s, "回单详情"])} actions={<>{bankReceipt && <button type="button" onClick={() => void downloadFile(bankReceipt)} disabled={busy} className="rounded-md border border-slate-200 px-2.5 py-1.5 text-[11px] text-slate-600 hover:bg-slate-50 disabled:opacity-50">下载</button>}<button type="button" onClick={() => { uploadKind.current = "回单详情"; fileRef.current?.click(); }} disabled={busy} className="rounded-md bg-blue-600 px-2.5 py-1.5 text-[11px] font-medium text-white hover:bg-blue-700 disabled:opacity-50">{bankReceipt ? "替换" : "上传"}</button></>} />
           {needsUnbilled && (<ItemRow kind="sales" title={`${sel?.month || ""}月-销售出库-无票收入`} state={{ ok: Boolean(unbilled), text: unbilled ? (unbilled.adjusted ? "已调整" : "已生成") : "计算中" }} summary={unbilled ? <>销售总额 {money(unbilled.salesAmount)}<br />无票收入 {money(unbilled.unbilledAmount)}</> : <>正在读取销售出库数据<br /><span className="text-slate-400">按当前账期自动计算</span></>} updatedAt={unbilled?.updatedAt || salesFile?.uploadedAt} version={unbilled?.version || salesFile?.version} parameter={unbilled?.adjusted ? `已选择 ${unbilled.selectedCount || 0}/${unbilled.sourceCount || 0} 条` : "出库时间 · 全部渠道"} selected={includeSel.includes("无票收入")} onToggle={() => setIncludeSel((s) => s.includes("无票收入") ? s.filter((x) => x !== "无票收入") : [...s, "无票收入"])} actions={<><button type="button" onClick={() => setShowUnbilledDetail(true)} disabled={!unbilled} className="rounded-md border border-slate-200 px-2.5 py-1.5 text-[11px] text-slate-600 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-40">调整明细</button><button type="button" onClick={() => { setFinanceTab("ledger"); void previewSales(); }} disabled={busy} className="rounded-md border border-blue-200 px-2.5 py-1.5 text-[11px] text-blue-600 hover:bg-blue-50 disabled:opacity-50">预览</button></>} />)}
+          {needsUnbilled && (<ItemRow kind="purchase_inbound" title={`${sel?.month || ""}月-已收票对公付款明细`} state={{ ok: Boolean(corporatePayment), text: corporatePayment ? "已生成" : "计算中" }} summary={corporatePayment ? <>进项发票 {corporatePayment.summary.invoiceCount} 张 · 对公付款 {corporatePayment.summary.paymentCount} 笔<br />已关联 {money(corporatePayment.summary.allocatedTotal)}</> : <>正在关联银行付款、发票与采购商品<br /><span className="text-slate-400">只统计已确认的付款↔发票关联</span></>} parameter={corporatePayment ? `商品明细 ${corporatePayment.summary.productRowCount} 行 · 发票未付 ${money(corporatePayment.summary.outstandingTotal)}` : "发票号 · 商品采购价 · 对公流水"} selected={includeSel.includes("已收票对公付款明细")} onToggle={() => setIncludeSel((s) => s.includes("已收票对公付款明细") ? s.filter((x) => x !== "已收票对公付款明细") : [...s, "已收票对公付款明细"])} actions={<button type="button" onClick={() => { setFinanceTab("corporate"); void loadCorporatePayment(); }} disabled={!corporatePayment} className="rounded-md border border-violet-200 px-2.5 py-1.5 text-[11px] text-violet-600 hover:bg-violet-50 disabled:cursor-not-allowed disabled:opacity-40">查看清单</button>} />)}
           <input ref={fileRef} type="file" accept=".xlsx,.xls,.csv,.pdf" className="hidden" onChange={(e) => { const file = e.target.files?.[0]; if (file) handleUploadSelection(file); }} />
         </section>
 
@@ -846,6 +920,7 @@ export default function MonthlySendPage() {
               ["交易明细", `${sel?.month || ""}月-银行交易明细`, bankTx, "bank"],
               ["回单详情", `${sel?.month || ""}月-银行回单详情`, bankReceipt, "receipt"],
               ["无票收入", `${sel?.month || ""}月-销售出库-无票收入`, unbilled, "sales"],
+              ["已收票对公付款明细", `${sel?.month || ""}月-已收票对公付款明细`, corporatePayment, "purchase_inbound"],
             ] as const).filter(([key]) => key !== "无票收入" || needsUnbilled).map(([key, label, item, kind]) => <label key={key} className="flex cursor-pointer items-center gap-2 rounded-lg bg-white px-2.5 py-2 shadow-sm ring-1 ring-slate-100"><input type="checkbox" checked={includeSel.includes(key)} onChange={() => setIncludeSel((s) => s.includes(key) ? s.filter((x) => x !== key) : [...s, key])} className="h-4 w-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500" /><DataIcon kind={kind} /><span className="min-w-0 flex-1 truncate text-xs font-medium text-slate-700">{label}</span><span className={`h-2 w-2 shrink-0 rounded-full ${item ? "bg-emerald-500" : "bg-amber-400"}`} /></label>)}
             {hasForeignSummary && (
               <div className="flex items-center gap-2 rounded-lg bg-violet-50 px-2.5 py-2 ring-1 ring-violet-100">
@@ -873,6 +948,36 @@ export default function MonthlySendPage() {
       {financeTab === "archive" && <section className={`${CARD} overflow-hidden`}><div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 px-4 py-4"><div><h2 className="text-base font-semibold text-slate-900">资料归档</h2><p className="mt-1 text-xs text-slate-400">业务源文件、银行资料、系统生成资料和历史版本都保留在当前账期。</p></div><button type="button" onClick={() => { uploadKind.current = "交易明细"; fileRef.current?.click(); }} disabled={busy} className="rounded-lg border border-blue-200 px-3 py-2 text-xs font-medium text-blue-600 hover:bg-blue-50 disabled:opacity-50">＋ 新增资料</button></div>{!files.length ? <div className="px-4 py-12 text-center text-sm text-slate-400">该账期暂无归档文件</div> : <div className="overflow-x-auto"><table className="w-full min-w-[760px] text-sm"><thead className="bg-slate-50 text-left text-xs text-slate-500"><tr><th className="px-4 py-2.5 font-medium">文件</th><th className="px-4 py-2.5 font-medium">类型</th><th className="px-4 py-2.5 font-medium">版本</th><th className="px-4 py-2.5 font-medium">归档时间</th><th className="px-4 py-2.5 text-right font-medium">操作</th></tr></thead><tbody className="divide-y divide-slate-100">{[...files].sort((a, b) => a.originalName.localeCompare(b.originalName) || a.version - b.version).map((row) => <tr key={row.id}><td className="px-4 py-3">{deliveryName(sel?.month ?? 0, row.originalName)}<span className="ml-2 text-[10px] text-slate-300">{row.originalName}</span></td><td className="px-4 py-3 text-xs text-slate-500">{row.category === "sales_summary" ? "系统生成" : row.category === "bank" ? "银行资料" : row.category === "purchase_inbound" ? "采购入库源文件" : row.category === "sales_query" ? "销售数量源文件" : "外部数据导入"}</td><td className="px-4 py-3 text-xs text-slate-500">v{row.version}</td><td className="px-4 py-3 text-xs text-slate-400">{formatDate(row.uploadedAt)}</td><td className="px-4 py-3 text-right"><button type="button" onClick={() => void downloadFile(row)} disabled={busy} className="text-xs font-medium text-blue-600 hover:underline disabled:opacity-50">下载</button><button type="button" onClick={() => void deleteFile(row)} disabled={busy} className="ml-4 text-xs font-medium text-rose-500 hover:underline disabled:opacity-50">删除</button></td></tr>)}</tbody></table></div>}<div className="border-t border-slate-100 px-4 py-3 text-[11px] text-slate-400">每次上传 / 生成都会留版本；业务源文件用于本地入库计算，财务交付包只取所选交付资料。</div><input ref={fileRef} type="file" accept=".xlsx,.xls,.csv,.pdf" className="hidden" onChange={(e) => { const file = e.target.files?.[0]; if (file) handleUploadSelection(file); }} /></section>}
 
       {financeTab === "ledger" && <section className={`${CARD} overflow-hidden`}><div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 px-4 py-4"><div><h2 className="text-base font-semibold text-slate-900">销售汇总台账</h2><p className="mt-1 text-xs text-slate-400">月度时间 / 仓库 / 税务编号 / 发货总数量 / 销售总金额 / 销售总成本；无票收入表自动引用销售总金额。</p></div><div className="flex gap-2"><button type="button" onClick={previewSales} disabled={busy} className="rounded-lg border border-slate-200 px-3 py-2 text-xs text-slate-600 hover:bg-slate-50 disabled:opacity-50">预览</button><button type="button" onClick={() => setShowFields((v) => !v)} className="rounded-lg border border-slate-200 px-3 py-2 text-xs text-slate-600 hover:bg-slate-50">字段配置</button><button type="button" onClick={generateSales} disabled={busy} className="rounded-lg bg-blue-600 px-3 py-2 text-xs font-medium text-white hover:bg-blue-700 disabled:opacity-50">生成并归档</button></div></div>{showFields && template && <div className="border-b border-slate-100 bg-slate-50/70 p-4"><div className="grid gap-2 lg:grid-cols-2">{template.fields.map((field, index) => <div key={field.key} className={`grid grid-cols-[28px_1fr_auto] items-center gap-2 rounded-lg border px-2 py-2 ${field.enabled ? "border-blue-100 bg-blue-50/30" : "border-slate-100 bg-white"}`}><input type="checkbox" checked={field.enabled} onChange={(e) => updateField(index, { enabled: e.target.checked })} /><div className="flex min-w-0 items-center gap-2"><span className="w-28 shrink-0 truncate font-mono text-[10px] text-slate-400">{field.key}</span><input value={field.label} onChange={(e) => updateField(index, { label: e.target.value })} className="min-w-0 flex-1 rounded border border-slate-200 bg-white px-2 py-1 text-xs" /></div><div className="flex gap-1"><button type="button" onClick={() => moveField(index, -1)} disabled={index === 0} className="rounded border border-slate-200 px-2 py-1 text-[10px] text-slate-500 disabled:opacity-30">↑</button><button type="button" onClick={() => moveField(index, 1)} disabled={index === template.fields.length - 1} className="rounded border border-slate-200 px-2 py-1 text-[10px] text-slate-500 disabled:opacity-30">↓</button></div></div>)}</div><div className="mt-3 flex justify-end"><button type="button" onClick={saveTemplate} disabled={busy} className="rounded-lg bg-blue-600 px-4 py-2 text-xs font-medium text-white disabled:opacity-50">保存字段配置</button></div></div>}{preview && <div className="p-4"><div className="grid grid-cols-2 gap-px overflow-hidden rounded-xl border border-slate-200 bg-slate-200 md:grid-cols-5">{[["订单数", preview.summary.orderCount], ["仓库数", preview.summary.warehouseCount], ["发货总数量", Number(preview.summary.totalQuantity).toLocaleString("zh-CN")], ["销售总金额", money(preview.summary.salesAmount)], ["销售总成本", money(preview.summary.costAmount)]] .map(([label, value]) => <div key={String(label)} className="bg-white p-3"><div className="text-[10px] text-slate-400">{label}</div><div className="mt-1 text-lg font-semibold text-slate-800">{value}</div></div>)}</div>{preview.summary.costIncomplete && <div className="mt-3 flex flex-wrap items-center justify-between gap-2 rounded-lg bg-amber-50 px-3 py-2 text-[11px] text-amber-700 ring-1 ring-inset ring-amber-200"><span>部分 SKU 没有采购入库成本（{(preview.summary.costMissingDetail || []).map((d) => d.skuCode).join("、") || "—"}），销售总成本只含已覆盖部分，实际成本会更高。请补充采购入库成本后重新生成。</span><Link href="/data-center-import?tab=jackyun" className="shrink-0 font-medium text-amber-800 underline">去补充入库成本</Link></div>}<div className="mt-3 overflow-x-auto rounded-xl border border-slate-200"><table className="w-full min-w-[900px] text-xs"><thead className="bg-slate-50 text-left text-slate-500"><tr>{preview.fields.map((field) => <th key={field.key} className="whitespace-nowrap px-3 py-2 font-medium">{field.label}</th>)}</tr></thead><tbody className="divide-y divide-slate-100">{preview.rows.slice(0, 12).map((row, index) => <tr key={index}>{preview.fields.map((field) => <td key={field.key} className="max-w-[220px] truncate px-3 py-2 text-slate-600">{row[field.key] || "—"}</td>)}</tr>)}</tbody></table><div className="px-3 py-2 text-[10px] text-slate-400">预览前 {Math.min(12, preview.rows.length)} 行 · 本月共 {preview.rowCount} 个仓库</div></div></div>}{!preview && <div className="px-4 py-12 text-center text-sm text-slate-400">点击“预览”查看当前账期数据，字段配置可直接调整导出列。</div>}</section>}
+
+      {financeTab === "corporate" && <section className={`${CARD} overflow-hidden`}>
+        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 px-4 py-4">
+          <div><h2 className="text-base font-semibold text-slate-900">已收票对公付款明细</h2><p className="mt-1 text-xs text-slate-400">只展示已经确认“银行对公支出 ↔ 进项发票”的记录，并继续关联采购订单、商品数量和采购单价。</p></div>
+          <button type="button" onClick={loadCorporatePayment} className="rounded-lg border border-slate-200 px-3 py-2 text-xs text-slate-600 hover:bg-slate-50">刷新</button>
+        </div>
+        {corporatePayment && <div className="grid grid-cols-2 gap-px bg-slate-100 sm:grid-cols-5">
+          {([
+            ["对公付款", money(corporatePayment.summary.paymentTotal), `${corporatePayment.summary.paymentCount} 笔`],
+            ["已关联发票", money(corporatePayment.summary.allocatedTotal), `${corporatePayment.summary.invoiceCount} 张`],
+            ["发票价税合计", money(corporatePayment.summary.invoiceTotal), "进项票"],
+            ["发票未付", money(corporatePayment.summary.outstandingTotal), "跨月付款也累计"],
+            ["商品明细", String(corporatePayment.summary.productRowCount), "行"],
+          ] as const).map(([label, value, hint]) => <div key={label} className="bg-white px-4 py-3"><div className="text-[10px] text-slate-400">{label}</div><div className="mt-1 text-base font-semibold text-slate-800">{value}</div><div className="mt-0.5 text-[10px] text-slate-400">{hint}</div></div>)}
+        </div>}
+        {!corporatePayment ? <div className="px-4 py-12 text-center text-sm text-slate-400">正在生成清单…</div> : !corporatePayment.rows.length ? <div className="px-4 py-12 text-center text-sm text-slate-400">当前账期还没有已确认的“对公付款 ↔ 进项发票”关联。请先到「付款发票匹配」完成标记。</div> : <>
+          <div className="overflow-x-auto border-b border-slate-200">
+            <table className="w-full min-w-[1320px] text-xs">
+              <thead className="bg-slate-50 text-left text-slate-500"><tr>
+                <th className="px-3 py-2.5 font-medium">付款日期</th><th className="px-3 py-2.5 font-medium">供应商</th><th className="px-3 py-2.5 font-medium">发票号码</th><th className="px-3 py-2.5 text-right font-medium">价税合计</th><th className="px-3 py-2.5 text-right font-medium">本次对公分摊</th><th className="px-3 py-2.5 font-medium">我方付款账号</th><th className="px-3 py-2.5 font-medium">银行流水/凭证号</th><th className="px-3 py-2.5 font-medium">采购订单</th><th className="px-3 py-2.5 font-medium">状态</th>
+              </tr></thead>
+              <tbody className="divide-y divide-slate-100">{corporatePayment.rows.map((row) => <tr key={row.linkId}>
+                <td className="whitespace-nowrap px-3 py-2.5 text-slate-600">{row.paymentDate}</td><td className="max-w-[220px] truncate px-3 py-2.5">{row.supplierName || "—"}</td><td className="px-3 py-2.5 font-mono text-slate-600">{row.invoiceNumber || "—"}</td><td className="px-3 py-2.5 text-right tabular-nums">{money(row.invoiceTotalAmount)}</td><td className="px-3 py-2.5 text-right font-medium tabular-nums text-emerald-700">{money(row.paymentAllocatedAmount)}</td><td className="px-3 py-2.5 font-mono text-[11px] text-slate-500">{row.paymentAccount || "—"}</td><td className="px-3 py-2.5 font-mono text-[11px] text-slate-500">{row.voucherNo || "—"}</td><td className="max-w-[260px] truncate px-3 py-2.5 text-slate-600">{row.purchaseOrderNos.join("、") || "—"}</td><td className="px-3 py-2.5"><span className={`rounded-full px-2 py-1 text-[10px] ${row.invoiceStatus === "paid" ? "bg-emerald-50 text-emerald-700" : "bg-amber-50 text-amber-700"}`}>{row.invoiceStatus === "paid" ? "发票已付清" : `待付 ${money(row.invoiceOutstandingAmount)}`}</span></td>
+              </tr>)}</tbody>
+            </table>
+          </div>
+          <div className="border-b border-slate-100 bg-slate-50/60 px-4 py-3"><h3 className="text-sm font-semibold text-slate-800">商品采购价格明细</h3><p className="mt-0.5 text-[11px] text-slate-400">商品价格来自采购分配明细；发票可覆盖多订单，一张票/一笔付款都允许拆分。</p></div>
+          {!corporatePayment.productDetails.length ? <div className="px-4 py-8 text-center text-sm text-slate-400">已匹配发票，但当前采购订单还没有可下钻的商品分配明细。</div> : <div className="overflow-x-auto"><table className="w-full min-w-[1100px] text-xs"><thead className="bg-slate-50 text-left text-slate-500"><tr><th className="px-3 py-2.5 font-medium">发票号码</th><th className="px-3 py-2.5 font-medium">采购订单</th><th className="px-3 py-2.5 font-medium">商品编码</th><th className="px-3 py-2.5 font-medium">商品名称</th><th className="px-3 py-2.5 text-right font-medium">数量</th><th className="px-3 py-2.5 text-right font-medium">采购单价</th><th className="px-3 py-2.5 text-right font-medium">商品金额</th><th className="px-3 py-2.5 text-right font-medium">发票覆盖订单金额</th></tr></thead><tbody className="divide-y divide-slate-100">{corporatePayment.productDetails.map((row, index) => <tr key={`${row.invoiceId}-${row.purchaseOrderId}-${row.skuCode}-${index}`}><td className="px-3 py-2.5 font-mono text-slate-600">{row.invoiceNumber}</td><td className="px-3 py-2.5 text-slate-600">{row.purchaseOrderNo || "—"}</td><td className="px-3 py-2.5 font-mono text-[11px] text-slate-500">{row.skuCode || "—"}</td><td className="max-w-[260px] truncate px-3 py-2.5">{row.productName || "—"}</td><td className="px-3 py-2.5 text-right tabular-nums">{row.quantity || "—"}</td><td className="px-3 py-2.5 text-right tabular-nums">{row.unitPrice ? money(row.unitPrice) : "—"}</td><td className="px-3 py-2.5 text-right tabular-nums">{row.itemAmount ? money(row.itemAmount) : "—"}</td><td className="px-3 py-2.5 text-right tabular-nums text-violet-700">{money(row.invoiceCoveredOrderAmount)}</td></tr>)}</tbody></table></div>}
+        </>}
+      </section>}
 
       {financeTab === "match" && <section className={`${CARD} overflow-hidden`}>
         <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 px-4 py-4">
