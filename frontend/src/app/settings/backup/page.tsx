@@ -195,6 +195,7 @@ function ConfigCard({
   retention,
   status,
   onEdit,
+  onViewLog,
 }: {
   title: string;
   tone: "green" | "blue";
@@ -205,6 +206,7 @@ function ConfigCard({
   retention: string;
   status: string;
   onEdit: () => void;
+  onViewLog: () => void;
 }) {
   const frame =
     tone === "green"
@@ -261,7 +263,7 @@ function ConfigCard({
               {status}
             </div>
           </div>
-          <button type="button" className="rounded-md border border-blue-200 bg-white px-3 py-1.5 text-[9px] font-medium text-blue-600">
+          <button type="button" onClick={onViewLog} className="rounded-md border border-blue-200 bg-white px-3 py-1.5 text-[9px] font-medium text-blue-600">
             查看日志
           </button>
         </div>
@@ -277,8 +279,9 @@ function StorageRow({
   state,
   stateTone,
   onConfigure,
+  onTestConnection,
   secondary,
-  allowConnectionTest = true,
+  onSecondary,
 }: {
   name: string;
   subtitle: string;
@@ -286,8 +289,9 @@ function StorageRow({
   state: string;
   stateTone: Tone;
   onConfigure: () => void;
+  onTestConnection?: () => void;
   secondary?: string;
-  allowConnectionTest?: boolean;
+  onSecondary?: () => void;
 }) {
   return (
     <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-slate-100 bg-white px-3 py-3">
@@ -315,13 +319,13 @@ function StorageRow({
         <button type="button" onClick={onConfigure} className="rounded-md border border-slate-200 bg-white px-3 py-1.5 text-[9px] font-medium text-slate-600">
           配置
         </button>
-        {allowConnectionTest ? (
-          <button type="button" onClick={onConfigure} className="rounded-md border border-slate-200 bg-white px-3 py-1.5 text-[9px] font-medium text-slate-600">
+        {onTestConnection ? (
+          <button type="button" onClick={onTestConnection} className="rounded-md border border-slate-200 bg-white px-3 py-1.5 text-[9px] font-medium text-slate-600">
             测试连接
           </button>
         ) : null}
-        {secondary ? (
-          <button type="button" onClick={onConfigure} className="rounded-md border border-slate-200 bg-white px-3 py-1.5 text-[9px] font-medium text-slate-600">
+        {secondary && onSecondary ? (
+          <button type="button" onClick={onSecondary} className="rounded-md border border-slate-200 bg-white px-3 py-1.5 text-[9px] font-medium text-slate-600">
             {secondary}
           </button>
         ) : null}
@@ -347,9 +351,9 @@ const STORAGE_DETAILS: Record<StorageKey, {
   kodo: {
     title: "七牛云 Kodo",
     role: "国内冷备 · 只写入",
-    desc: "使用标准存储作为国内冷备目标。系统只负责上传保存，不提供下载、取回、在线预览或远端恢复。",
+    desc: "每天保留一个完整冷备恢复点；相同内容按 SHA256 去重，只上传新增或变化内容。系统只负责上传保存，不提供下载、取回、在线预览或远端恢复。",
     fields: ["Bucket", "上传域名（Upload Host）", "Access Key", "Secret Key", "对象前缀"],
-    note: "密钥只保存到部署环境，不写入 GitHub。冷备通道不执行 GET / 下载 / 取回 / 远端校验；完整性在上传前本地完成。",
+    note: "去重索引只读取本地成功回执，不读取 Kodo。冷备通道不执行 GET / List / HEAD / 下载 / 取回 / 远端校验；完整性在上传前本地完成。",
   },
   nas: {
     title: "本地 NAS",
@@ -663,12 +667,15 @@ export default function BackupSettingsPage() {
           <div className="relative flex items-center gap-2">
             <button
               type="button"
-              onClick={() => void runR2("auto")}
+              onClick={() => {
+                if (r2Config?.configured && r2Config.enabled) void runR2("auto");
+                else openStorage("r2");
+              }}
               disabled={r2Running || r2Loading}
               className="app-button-primary inline-flex h-9 items-center gap-2 rounded-lg px-4 text-[11px] font-medium disabled:cursor-wait disabled:opacity-50"
             >
               <span className="text-[11px]">▶</span>
-              {r2Running ? "启动中…" : "立即备份"}
+              {r2Running ? "启动中…" : r2Config?.configured && r2Config.enabled ? "立即备份" : "配置 R2"}
             </button>
             <button
               type="button"
@@ -772,7 +779,7 @@ export default function BackupSettingsPage() {
                   <ArchitectureItem
                     icon="box"
                     title="七牛云 Kodo（国内冷备）"
-                    desc={kodoLoading ? "正在读取配置" : kodoConfig?.configured && kodoConfig.enabled ? "标准存储 · 只写入 · 已启用" : kodoConfig?.configured ? "已配置 · 当前停用" : "标准存储 · 只写入 · 待密钥"}
+                    desc={kodoLoading ? "正在读取配置" : kodoConfig?.configured && kodoConfig.enabled ? "每日完整恢复点 · 内容去重 · 只写入" : kodoConfig?.configured ? "已配置 · 当前停用" : "标准存储 · 去重上传 · 待密钥"}
                     tone={kodoConfig?.configured && kodoConfig.enabled ? "green" : "amber"}
                   />
                   <ArchitectureItem icon="nas" title="本地 NAS（可选）" desc="本地冷备 / 第三副本" tone="slate" />
@@ -795,6 +802,7 @@ export default function BackupSettingsPage() {
                 retention="远端保留：当前不自动删除 · 后续可配置"
                 status={r2Loading ? "读取 R2 配置" : r2Config?.configured && r2Config.enabled ? "R2 已启用" : "R2 待配置"}
                 onEdit={() => setActiveTab("config")}
+                onViewLog={() => setActiveTab("records")}
               />
               <ConfigCard
                 title="全量备份 · 容灾级"
@@ -806,6 +814,7 @@ export default function BackupSettingsPage() {
                 retention="计划：保留容灾恢复点"
                 status={r2Loading ? "读取 R2 配置" : r2Config?.configured && r2Config.enabled ? "R2 已启用" : "R2 待配置"}
                 onEdit={() => setActiveTab("config")}
+                onViewLog={() => setActiveTab("records")}
               />
             </div>
           </section>
@@ -821,16 +830,17 @@ export default function BackupSettingsPage() {
                   state={r2Loading ? "读取配置" : r2Config?.configured ? (r2Config.enabled ? "已配置" : "已配置 · 停用") : "待配置"}
                   stateTone={r2Config?.configured && r2Config.enabled ? "green" : "amber"}
                   onConfigure={() => openStorage("r2")}
-                  allowConnectionTest={false}
+                  onTestConnection={() => void testR2Connection()}
+                  secondary="备份记录"
+                  onSecondary={() => setActiveTab("records")}
                 />
                 <StorageRow
                   name="七牛云 Kodo（国内冷备）"
-                  subtitle="标准存储；只上传保存，不下载、不取回、不在线预览"
+                  subtitle="每天完整恢复点；内容按 SHA256 去重，只上传新增或变化内容；只存不取"
                   tone="blue"
                   state={kodoLoading ? "读取配置" : kodoConfig?.configured ? (kodoConfig.enabled ? "已配置" : "已配置 · 停用") : "待填写密钥"}
                   stateTone={kodoConfig?.configured && kodoConfig.enabled ? "green" : "amber"}
                   onConfigure={() => openStorage("kodo")}
-                  allowConnectionTest={false}
                 />
                 <StorageRow
                   name="本地 NAS（可选）"
@@ -912,6 +922,7 @@ export default function BackupSettingsPage() {
               retention="最近 30 个本地恢复点 + R2 模块快照"
               status={r2Config?.configured && r2Config.enabled ? "R2 自动执行" : "R2 待配置"}
               onEdit={() => openStorage("r2")}
+              onViewLog={() => setActiveTab("records")}
             />
             <ConfigCard
               title="全量备份 · 容灾级"
@@ -923,6 +934,7 @@ export default function BackupSettingsPage() {
               retention="独立完整容灾恢复点"
               status={r2Config?.configured && r2Config.enabled ? "R2 自动执行" : "R2 待配置"}
               onEdit={() => openStorage("r2")}
+              onViewLog={() => setActiveTab("records")}
             />
           </div>
 
@@ -931,7 +943,7 @@ export default function BackupSettingsPage() {
               <div>
                 <div className="text-[12px] font-semibold text-amber-700">冷备份 · 每日恢复点</div>
                 <div className="mt-1 text-[10px] leading-5 text-slate-500">
-                  每天生成应用、运行配置、数据库、业务文件等完整容灾恢复点，再上传到七牛云 Kodo 标准存储；冷备通道只写入，不执行下载、取回、在线预览或远端恢复。
+                  每天生成一个完整冷备恢复点；内容对象按 SHA256 去重，相同内容直接复用本地成功回执，只上传新增或变化内容。冷备通道只写入，不执行下载、取回、在线预览或远端恢复。
                 </div>
               </div>
               <Pill tone={kodoConfig?.configured && kodoConfig.enabled ? "green" : "amber"}>{kodoConfig?.configured && kodoConfig.enabled ? "已启用" : "待配置"}</Pill>
@@ -940,7 +952,7 @@ export default function BackupSettingsPage() {
               {[
                 ["执行时间", "每天 04:00"],
                 ["默认目标", "七牛云 Kodo"],
-                ["启用条件", "填写密钥后启用"],
+                ["存储方式", "内容去重 · 增量上传"],
                 ["访问规则", "只写入 · 禁止取回"],
               ].map(([label, value]) => (
                 <div key={label} className="rounded-lg bg-slate-50 px-3 py-3">
@@ -1029,7 +1041,7 @@ export default function BackupSettingsPage() {
               {(backupStatus?.records || []).map((row) => (
                 <div key={`${row.type}-${row.timestamp}-${row.target}`} className="grid grid-cols-[1.1fr_.9fr_.8fr_1.2fr_.7fr] items-center px-4 py-3 text-[11px]">
                   <span className="text-slate-600">{backupTime(row.time)}</span>
-                  <span className="font-medium text-slate-700">{row.type === "r2_full" ? "全量容灾" : row.type === "r2_daily" ? "日常模块化" : row.type === "kodo_full" ? "冷备全量" : "本地基础"}</span>
+                  <span className="font-medium text-slate-700">{row.type === "r2_full" ? "全量容灾" : row.type === "r2_daily" ? "日常模块化" : row.type === "kodo_full" ? "冷备恢复点" : "本地基础"}</span>
                   <span className="text-slate-600">{row.target}</span>
                   <span className="text-slate-500">{row.detail}</span>
                   <span className="text-emerald-700">成功</span>
@@ -1156,7 +1168,7 @@ export default function BackupSettingsPage() {
                   <div className="border-b border-slate-100 px-4 py-3">
                     <div className="text-[10px] font-semibold text-slate-700">Kodo 上传配置</div>
                     <div className="mt-1 text-[9px] leading-4 text-slate-400">
-                      后续只需要把 Bucket、上传域名、Access Key、Secret Key 填进来即可。密钥保存后加密存储，不会在页面回显；Mac 原生运行会自动维护每日 04:00 的冷备计划。
+                      填写 Bucket、上传域名、Access Key、Secret Key 后即可启用。每天 04:00 生成完整冷备恢复点，内容按 SHA256 在本地回执中去重，只上传新增或变化内容；密钥加密存储且不回显。
                     </div>
                   </div>
                   <div className="grid gap-3 p-4 md:grid-cols-2">
@@ -1226,7 +1238,7 @@ export default function BackupSettingsPage() {
                 </div>
 
                 <div className="mt-4 rounded-lg border border-amber-100 bg-amber-50 px-3 py-2.5 text-[9px] leading-5 text-amber-700">
-                  只存不取：不会调用 GET、List、Head、下载、在线预览、远端校验或远端恢复。备份完整性在本地完成校验后再上传。Kodo 空间请保持“标准存储”，不要配置自动转低频/归档的生命周期规则。
+                  只存不取：不会调用 GET、List、HEAD、下载、在线预览、远端校验或远端恢复。去重只读取本地成功回执；当天 snapshot 会完整引用所需内容对象。Kodo 空间请保持“标准存储”，不要配置自动转低频/归档的生命周期规则。
                 </div>
 
                 <div className="mt-4 flex flex-wrap items-center gap-2">
@@ -1259,12 +1271,9 @@ export default function BackupSettingsPage() {
                   {STORAGE_DETAILS[selectedStorage].note}
                 </div>
 
-                <div className="mt-4 flex flex-wrap gap-2">
-                  <button type="button" onClick={() => showNotice("该扩展存储尚未接入真实执行器。")} className="app-button-primary rounded-lg px-4 py-2 text-[10px] font-medium">
-                    保存配置
-                  </button>
-                  <button type="button" onClick={() => showNotice("该扩展存储当前尚未接入真实连接器。")} className="app-button-secondary rounded-lg px-4 py-2 text-[10px] font-medium">
-                    测试连接
+                <div className="mt-4">
+                  <button type="button" disabled className="rounded-lg border border-slate-200 bg-slate-50 px-4 py-2 text-[10px] font-medium text-slate-400">
+                    接口尚未接入
                   </button>
                 </div>
               </>

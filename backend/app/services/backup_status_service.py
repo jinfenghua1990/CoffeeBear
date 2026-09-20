@@ -89,7 +89,7 @@ def _kodo_records(directory: Path) -> list[dict[str, Any]]:
                 "type": "kodo_full",
                 "target": "七牛云 Kodo",
                 "status": "success",
-                "detail": "每日全量冷备 · 只写入",
+                "detail": "每日完整恢复点 · 内容去重增量 · 只写入",
             }
         )
     return records

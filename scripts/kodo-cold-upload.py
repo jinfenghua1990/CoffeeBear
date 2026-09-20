@@ -6,7 +6,8 @@
 - 只读取本地 BACKUP_DIR。
 - 只向 Kodo 上传域名发送上传请求。
 - 不调用下载、GET Object、List、Head、Stat、远端校验或恢复接口。
-- 完整性校验在本地完成，manifest 最后上传作为远端恢复点提交标记。
+- 完整性校验在本地完成；内容对象按 SHA256 去重上传，每日 snapshot 最后上传作为恢复点提交标记。
+- 去重判断只读取本地成功回执，不读取 Kodo；本地回执丢失时用 insertOnly 内容键安全重试。
 
 默认关闭。优先读取系统里加密保存的 Kodo 配置；也保留 KODO_COLD_* 环境变量作为部署级兜底。
 """
@@ -127,6 +128,36 @@ def parse_manifest(path: Path) -> dict[str, str]:
     return values
 
 
+def load_known_objects(receipt_dir: Path) -> dict[str, str]:
+    """只从本地成功回执恢复 SHA256 -> 远端对象键映射，不访问 Kodo。"""
+    known: dict[str, str] = {}
+    if not receipt_dir.is_dir():
+        return known
+    for receipt in sorted(receipt_dir.glob("*.json")):
+        try:
+            payload = json.loads(receipt.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        rows = payload.get("objects") or payload.get("files") or []
+        if not isinstance(rows, list):
+            continue
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            digest = str(row.get("sha256") or "").lower()
+            object_key = str(row.get("objectKey") or row.get("object_key") or "")
+            if len(digest) == 64 and all(ch in "0123456789abcdef" for ch in digest) and object_key:
+                known.setdefault(digest, object_key)
+    return known
+
+
+def content_object_key(prefix: str, digest: str) -> str:
+    digest = digest.lower().strip()
+    if len(digest) != 64 or any(ch not in "0123456789abcdef" for ch in digest):
+        raise ValueError("非法 SHA256")
+    return f"{prefix}/objects/sha256/{digest[:2]}/{digest}"
+
+
 def qiniu_b64(data: bytes) -> str:
     return base64.urlsafe_b64encode(data).decode("ascii")
 
@@ -167,6 +198,10 @@ def upload_one(
             files={"file": (source.name, stream, "application/octet-stream")},
             timeout=(15, 3600),
         )
+    # insertOnly + 内容寻址键：如果本地回执丢失，重传同 SHA 对象可能收到“已存在”。
+    # 这是上传请求的冲突响应，不是远端读取；可安全视为该内容对象已经保存。
+    if response.status_code in {409, 614}:
+        return {"already_exists": True, "status": response.status_code}
     if response.status_code < 200 or response.status_code >= 300:
         body = response.text[:800].replace("\n", " ")
         raise RuntimeError(f"上传失败 HTTP {response.status_code}: {body}")
@@ -258,7 +293,7 @@ def main() -> int:
         ("config", "config_sha256"),
         ("docker_image", "docker_image_sha256"),
     ]
-    upload_files: list[Path] = []
+    upload_files: list[tuple[str, Path, str]] = []
     for name_key, hash_key in specs:
         name = values.get(name_key, "")
         expected = values.get(hash_key, "")
@@ -275,10 +310,10 @@ def main() -> int:
         if expected and actual != expected:
             print(f"本地 SHA256 校验失败：{source}", file=sys.stderr)
             return 2
-        upload_files.append(source)
+        upload_files.append((name_key, source, actual))
 
-    # full manifest 必须最后上传，作为“这一组本地校验已完成”的远端提交标记。
-    upload_files.append(manifest)
+    # full manifest 自身也是内容对象；真正的“每日恢复点提交标记”是最后上传的 snapshot.json。
+    upload_files.append(("full_manifest", manifest, sha256_file(manifest)))
 
     receipt_dir = backup_dir / ".kodo-uploaded"
     receipt_dir.mkdir(parents=True, exist_ok=True)
@@ -293,44 +328,91 @@ def main() -> int:
     secret_key = str(config["secret_key"]).strip()
     prefix = str(config.get("prefix") or "ecommerce-workspace/cold").strip().strip("/")
     date_path = f"{timestamp[0:4]}/{timestamp[4:6]}/{timestamp[6:8]}" if len(timestamp) >= 8 else "undated"
-    object_root = "/".join(part for part in [prefix, "full", date_path, timestamp] if part)
+    snapshot_root = "/".join(part for part in [prefix, "snapshots", date_path, timestamp] if part)
 
-    print(f"==> Kodo upload-only 每日全量冷备：{manifest.name}")
+    print(f"==> Kodo upload-only 每日完整恢复点：{manifest.name}")
     print(f"==> 配置来源：{config.get('source', 'database')}")
-    print("==> 规则：只上传，不下载、不取回、不列目录、不做远端校验。")
+    print("==> 规则：内容按 SHA256 去重；只上传，不下载、不取回、不列目录、不做远端校验。")
 
-    uploaded: list[dict[str, Any]] = []
-    for source in upload_files:
-        object_key = f"{object_root}/{source.name}"
-        result_payload = upload_one(
+    known_objects = load_known_objects(receipt_dir)
+    objects: list[dict[str, Any]] = []
+    uploaded_count = 0
+    reused_count = 0
+
+    for role, source, digest in upload_files:
+        existing_key = known_objects.get(digest)
+        reused = bool(existing_key)
+        object_key = existing_key or content_object_key(prefix, digest)
+        result_payload: dict[str, Any] = {}
+        if not reused:
+            result_payload = upload_one(
+                upload_url=upload_url,
+                access_key=access_key,
+                secret_key=secret_key,
+                bucket=bucket,
+                object_key=object_key,
+                source=source,
+            )
+            known_objects[digest] = object_key
+            uploaded_count += 1
+            print(f"上传新内容：{source.name} -> {object_key}")
+        else:
+            reused_count += 1
+            print(f"复用已有内容：{source.name} -> {object_key}")
+
+        objects.append(
+            {
+                "role": role,
+                "localFile": source.name,
+                "objectKey": object_key,
+                "size": source.stat().st_size,
+                "sha256": digest,
+                "reused": reused,
+                "remoteHash": result_payload.get("hash"),
+                "alreadyExists": bool(result_payload.get("already_exists")),
+            }
+        )
+
+    # snapshot.json 是“今天可完整恢复”的提交标记，必须最后上传。
+    # 它引用本次所需的全部内容对象，因此即使多数对象复用，今天仍是完整恢复点。
+    snapshot_payload = {
+        "version": 1,
+        "kind": "full",
+        "timestamp": timestamp,
+        "mode": "upload-only-deduplicated-full",
+        "sourceManifest": manifest.name,
+        "objects": objects,
+        "uploadedCount": uploaded_count,
+        "reusedCount": reused_count,
+        "createdAt": int(time.time()),
+    }
+    snapshot_tmp = receipt_dir / f".{timestamp}.snapshot.json"
+    snapshot_tmp.write_text(
+        json.dumps(snapshot_payload, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    snapshot_key = f"{snapshot_root}/snapshot.json"
+    try:
+        snapshot_result = upload_one(
             upload_url=upload_url,
             access_key=access_key,
             secret_key=secret_key,
             bucket=bucket,
-            object_key=object_key,
-            source=source,
+            object_key=snapshot_key,
+            source=snapshot_tmp,
         )
-        uploaded.append(
-            {
-                "local_file": source.name,
-                "object_key": object_key,
-                "size": source.stat().st_size,
-                "sha256": sha256_file(source),
-                "remote_hash": result_payload.get("hash"),
-            }
-        )
-        print(f"上传完成：{source.name} -> {object_key}")
+    finally:
+        snapshot_tmp.unlink(missing_ok=True)
 
     receipt.write_text(
         json.dumps(
             {
-                "timestamp": timestamp,
+                **snapshot_payload,
                 "bucket": bucket,
                 "upload_url": upload_url,
-                "object_root": object_root,
-                "files": uploaded,
-                "mode": "upload-only-full",
-                "created_at": int(time.time()),
+                "snapshotObjectKey": snapshot_key,
+                "snapshotRemoteHash": snapshot_result.get("hash"),
+                "snapshotAlreadyExists": bool(snapshot_result.get("already_exists")),
             },
             ensure_ascii=False,
             indent=2,
@@ -338,7 +420,11 @@ def main() -> int:
         + "\n",
         encoding="utf-8",
     )
-    print(f"==> 完成。本地上传记录：{receipt}")
+    print(
+        f"==> 完成：新增上传 {uploaded_count} 个内容对象，复用 {reused_count} 个；"
+        f"恢复点提交标记：{snapshot_key}"
+    )
+    print(f"==> 本地上传记录：{receipt}")
     return 0
 
 
