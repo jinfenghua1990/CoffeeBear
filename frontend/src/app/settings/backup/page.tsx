@@ -354,7 +354,7 @@ const STORAGE_DETAILS: Record<StorageKey, {
   nas: {
     title: "本地 NAS",
     role: "可选冷备",
-    desc: "后续可作为第三副本或本地快速恢复来源。",
+    desc: "后续可作为第三副本或本地快速恢复来源；当前尚未接入恢复执行器。",
     fields: ["备份路径", "访问方式", "保留策略"],
     note: "不作为唯一容灾副本。",
   },
@@ -744,7 +744,7 @@ export default function BackupSettingsPage() {
                       <li>• 每日检测有更新内容</li>
                       <li>• 模块化增量备份</li>
                       <li>• 未变化内容不重复上传</li>
-                      <li>• 计划保留最近 30 个恢复点</li>
+                      <li>• 远端保留策略待配置；当前不自动删除 R2 恢复点</li>
                     </ul>
                   </StrategyOverviewCard>
 
@@ -792,7 +792,7 @@ export default function BackupSettingsPage() {
                 enabledText={r2Config?.configured && r2Config.enabled ? "已启用" : "待配置"}
                 schedule="计划：每天 03:00"
                 content={["数据库（增量 / 变化检测）", "业务文件（变更检测）", "系统配置（变更检测）"]}
-                retention="计划：最近 30 个恢复点"
+                retention="远端保留：当前不自动删除 · 后续可配置"
                 status={r2Loading ? "读取 R2 配置" : r2Config?.configured && r2Config.enabled ? "R2 已启用" : "R2 待配置"}
                 onEdit={() => setActiveTab("config")}
               />
@@ -959,14 +959,14 @@ export default function BackupSettingsPage() {
             <div className="flex flex-wrap items-start justify-between gap-3">
               <div>
                 <div className="text-[13px] font-semibold text-slate-900">恢复管理</div>
-                <p className="mt-1 text-[10px] leading-5 text-slate-400">恢复来源仅使用 R2 / NAS。七牛云 Kodo 冷备按“只存不取”执行，不提供下载、取回、预览或恢复入口。</p>
+                <p className="mt-1 text-[10px] leading-5 text-slate-400">当前恢复执行器仅接入 Cloudflare R2。NAS 为后续扩展；七牛云 Kodo 冷备按“只存不取”执行，不提供下载、取回、预览或恢复入口。</p>
               </div>
               <Pill tone={r2Config?.configured && r2Config.enabled ? "green" : "amber"}>{r2Config?.configured && r2Config.enabled ? "R2 可准备恢复" : "R2 待配置"}</Pill>
             </div>
             <div className="mt-5 grid gap-3 md:grid-cols-4">
               {[
                 ["1", "选择恢复点", "按日期选择目标版本"],
-                ["2", "选择来源", "R2 / NAS（不含 Kodo）"],
+                ["2", "选择来源", "当前仅 R2；NAS 后续接入"],
                 ["3", "自动校验", "manifest / Hash / 数据库"],
                 ["4", "确认恢复", "恢复并执行健康检查"],
               ].map(([step, title, desc]) => (
