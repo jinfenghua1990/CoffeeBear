@@ -331,7 +331,11 @@ def import_sales_file(
             .filter(SalesOrder.order_no.in_(list(cancelled_nos)))
             .all()
         )
+        from app.services import finance_projection_service
         for row in leftovers:
+            finance_projection_service.delete_projected_source(
+                db, "domestic_sales_order", str(row.id)
+            )
             db.query(SalesOrderItem).filter(SalesOrderItem.order_id == row.id).delete()
             db.delete(row)
             removed_cancelled += 1
@@ -384,6 +388,14 @@ def import_sales_file(
 
     wb.close()
 
+    # 销售业务一落库就同步财务事项，不再要求用户到月结页重复上传或手工回填。
+    db.flush()
+    from app.services import finance_projection_service
+    projected_orders = 0
+    for order in db_orders.values():
+        if order.order_no in seen:
+            finance_projection_service.project_domestic_sales_order(db, order)
+            projected_orders += 1
     db.commit()
 
     dates = [
@@ -401,6 +413,7 @@ def import_sales_file(
         "removedCancelled": removed_cancelled,
         "itemsImported": item_total,
         "itemOrderHits": item_order_hits,
+        "financeProjectedOrders": projected_orders,
         "minDate": min(dates).strftime("%Y-%m-%d") if dates else None,
         "maxDate": max(dates).strftime("%Y-%m-%d") if dates else None,
         "file": original_name,
