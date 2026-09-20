@@ -294,6 +294,12 @@ const ROUTES: RouteEntry[] = [
     load: () => import("@/app/settings/page"),
   },
   {
+    pathname: "/settings/backup",
+    title: "备份与容灾",
+    businessType: "master",
+    load: () => import("@/app/settings/backup/page"),
+  },
+  {
     pathname: "/settings/update",
     title: "系统更新",
     businessType: "master",

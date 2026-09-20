@@ -177,6 +177,7 @@ export const MODULES: ModuleDef[] = [
     match: (p) => p.startsWith("/settings") || p.startsWith("/automation"),
     items: [
       { href: "/settings", label: "基础设置", icon: "settings" },
+      { href: "/settings/backup", label: "备份与容灾", icon: "automation" },
       { href: "/settings/update", label: "系统更新", icon: "automation" },
       { href: "/automation", label: "自动化任务", icon: "flow" },
     ],
