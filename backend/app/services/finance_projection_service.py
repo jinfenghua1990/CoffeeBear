@@ -20,8 +20,10 @@ from sqlalchemy.orm import Session
 from app.config import settings
 from app.models.finance import FinanceEntry
 from app.models.foreign_trade import ForeignTradeOrder, ForeignTradeShipment
-from app.models.sales import AftersalesOrder, SalesOrder
+from app.models.jackyun import JackyunGoodsDocument, JackyunGoodsDocumentItem
+from app.models.sales import AftersalesOrder, SalesOrder, SalesOrderItem
 from app.services import finance_center_service, foreign_trade_service
+from app.services.inbound_cost_service import resolve_sales_sku_id, sales_sku_lookup, weighted_inbound_costs
 from app.services.monthly_core import month_bounds
 from app.services.sales_scope import deal_orders_condition
 
@@ -193,6 +195,53 @@ def project_domestic_sales_order(db: Session, row: SalesOrder) -> dict[str, int]
             raw={"platform": row.platform, "provider": row.source_provider},
         )
     ]
+
+    # 销售成本只在该订单所有可核算 SKU 都有入库成本时写入，避免用“部分成本”
+    # 造成利润被虚高。入库成本后续补齐后再次同步会自动生成/更新该事项。
+    items = db.scalars(
+        select(SalesOrderItem).where(SalesOrderItem.order_id == row.id)
+    ).all()
+    if items:
+        lookup = sales_sku_lookup(db)
+        resolved: list[tuple[SalesOrderItem, int | None]] = [
+            (item, resolve_sales_sku_id(item.sku_id, item.sku_code, lookup))
+            for item in items
+        ]
+        sku_ids = {sku_id for _, sku_id in resolved if sku_id is not None}
+        _, month = _period(event)
+        year, _ = _period(event)
+        _, period_end = month_bounds(year, month)
+        costs = weighted_inbound_costs(db, as_of=period_end, sku_ids=sku_ids)
+        missing = [
+            item.sku_code or item.goods_name or f"line-{item.id}"
+            for item, sku_id in resolved
+            if sku_id is None or sku_id not in costs
+        ]
+        if not missing:
+            cost_total = sum(
+                (_money(item.quantity) * costs[int(sku_id)] for item, sku_id in resolved if sku_id is not None),
+                Decimal("0"),
+            )
+            specs.append(EntrySpec(
+                legal_entity_id=entity.id,
+                business_scope="domestic",
+                source_type="domestic_sales_order",
+                source_id=str(row.id),
+                source_no=row.order_no,
+                category="sales_cost",
+                direction="expense",
+                currency="CNY",
+                amount=cost_total,
+                value_type="actual",
+                settlement_status="closed",
+                invoice_status="not_required",
+                occurred_at=event,
+                cash_effect=False,
+                profit_effect=True,
+                note="销售成本 · 按账期截止前采购入库加权成本",
+                raw={"costComplete": True, "itemCount": len(items)},
+            ))
+
     return _reconcile_source(
         db,
         source_type="domestic_sales_order",
@@ -229,6 +278,63 @@ def project_domestic_refund(db: Session, row: AftersalesOrder) -> dict[str, int]
     return _reconcile_source(
         db,
         source_type="domestic_aftersales",
+        source_id=str(row.id),
+        specs=specs,
+    )
+
+
+def project_inbound_document(db: Session, row: JackyunGoodsDocument) -> dict[str, int]:
+    """采购入库作为库存采购/应付事实进入财务事项池，但不直接影响利润或现金。"""
+    if row.document_type != "inbound":
+        return {"created": 0, "updated": 0, "deleted": 0}
+
+    entity = finance_center_service.resolve_entity(db)
+    amount = _money(row.total_amount)
+    if amount <= 0:
+        items = db.scalars(
+            select(JackyunGoodsDocumentItem).where(
+                JackyunGoodsDocumentItem.document_id == row.id
+            )
+        ).all()
+        amount = sum(
+            (
+                _money(item.amount_tax)
+                if item.amount_tax is not None
+                else _money(item.quantity) * _money(item.unit_price_tax)
+                for item in items
+            ),
+            Decimal("0"),
+        )
+
+    event = row.document_at or _event(row)
+    specs = [
+        EntrySpec(
+            legal_entity_id=entity.id,
+            business_scope="domestic",
+            source_type="domestic_inbound",
+            source_id=str(row.id),
+            source_no=row.goodsdoc_no,
+            category="inventory_purchase",
+            direction="expense",
+            currency="CNY",
+            amount=amount,
+            value_type="actual",
+            settlement_status="pending",
+            invoice_status="pending",
+            occurred_at=event,
+            cash_effect=False,
+            profit_effect=False,
+            note=f"采购入库 / 应付事实 · {row.supplier_name or '供应商未填写'}",
+            raw={
+                "supplierName": row.supplier_name,
+                "warehouseName": row.warehouse_name,
+                "source": (row.raw or {}).get("source", ""),
+            },
+        )
+    ]
+    return _reconcile_source(
+        db,
+        source_type="domestic_inbound",
         source_id=str(row.id),
         specs=specs,
     )
@@ -516,7 +622,13 @@ def sync_business_period(
 ) -> dict[str, Any]:
     start, end = month_bounds(year, month)
     totals = {"created": 0, "updated": 0, "deleted": 0}
-    sources = {"domesticOrders": 0, "domesticRefunds": 0, "foreignOrders": 0, "shipments": 0}
+    sources = {
+        "domesticOrders": 0,
+        "domesticRefunds": 0,
+        "inboundDocuments": 0,
+        "foreignOrders": 0,
+        "shipments": 0,
+    }
 
     def merge(result: dict[str, int]) -> None:
         for key in totals:
@@ -544,6 +656,26 @@ def sync_business_period(
         for row in refunds:
             merge(project_domestic_refund(db, row))
         sources["domesticRefunds"] = len(refunds)
+
+        inbound_documents = db.scalars(
+            select(JackyunGoodsDocument).where(
+                JackyunGoodsDocument.document_type == "inbound",
+                or_(
+                    and_(
+                        JackyunGoodsDocument.document_at >= start,
+                        JackyunGoodsDocument.document_at < end,
+                    ),
+                    and_(
+                        JackyunGoodsDocument.document_at.is_(None),
+                        JackyunGoodsDocument.created_at >= start,
+                        JackyunGoodsDocument.created_at < end,
+                    ),
+                ),
+            )
+        ).all()
+        for row in inbound_documents:
+            merge(project_inbound_document(db, row))
+        sources["inboundDocuments"] = len(inbound_documents)
 
     if business_scope in {"all", "foreign_trade"}:
         foreign_orders = db.scalars(
