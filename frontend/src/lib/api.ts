@@ -1544,8 +1544,10 @@ export type TaxInvoiceRow = {
   totalAmount: string | null;
   currency: string;
   /** 兼容字段；新页面使用 businessMatchStatus。 */
-  matchStatus: "matched" | "unmatched" | "needs_review";
-  businessMatchStatus: "matched" | "unmatched" | "needs_review";
+  matchStatus: "matched" | "partial" | "unmatched" | "needs_review";
+  businessMatchStatus: "matched" | "partial" | "unmatched" | "needs_review";
+  businessMatchedAmount: string;
+  businessRemainingAmount: string;
   matchNote: string;
   businessMatchNote: string;
   /** 进项发票独立的银行付款核对状态，与 businessMatchStatus 完全无关。 */

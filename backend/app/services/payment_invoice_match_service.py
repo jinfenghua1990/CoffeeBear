@@ -76,19 +76,23 @@ def _active_bank_links(db: Session, *, invoice_id: int | None = None, txn_id: in
 
 
 def _invoice_bank_allocated(db: Session, invoice_id: int, *, exclude_link_id: int | None = None) -> Decimal:
+    links = _active_bank_links(db, invoice_id=invoice_id, exclude_link_id=exclude_link_id)
+    invoice = db.get(TaxInvoice, invoice_id)
     return sum(
-        (_dec(row.allocated_amount) for row in _active_bank_links(
-            db, invoice_id=invoice_id, exclude_link_id=exclude_link_id
-        )),
+        (_link_amount(row, invoice) for row in links),
         Decimal("0.0000"),
     )
 
 
 def _txn_bank_allocated(db: Session, txn_id: int, *, exclude_link_id: int | None = None) -> Decimal:
+    links = _active_bank_links(db, txn_id=txn_id, exclude_link_id=exclude_link_id)
+    invoice_ids = {row.invoice_id for row in links if row.allocated_amount is None}
+    invoice_map = {
+        row.id: row
+        for row in db.query(TaxInvoice).filter(TaxInvoice.id.in_(invoice_ids)).all()
+    } if invoice_ids else {}
     return sum(
-        (_dec(row.allocated_amount) for row in _active_bank_links(
-            db, txn_id=txn_id, exclude_link_id=exclude_link_id
-        )),
+        (_link_amount(row, invoice_map.get(row.invoice_id)) for row in links),
         Decimal("0.0000"),
     )
 
@@ -407,9 +411,11 @@ def pending_invoices(db: Session, limit: int = 500) -> list[dict[str, Any]]:
             )
             .all()
         )
+        invoice_map = {row.id: row for row in rows}
         for link in links:
             allocated_by_invoice[link.invoice_id] = (
-                allocated_by_invoice.get(link.invoice_id, Decimal("0")) + _dec(link.allocated_amount)
+                allocated_by_invoice.get(link.invoice_id, Decimal("0"))
+                + _link_amount(link, invoice_map.get(link.invoice_id))
             )
 
     result: list[dict[str, Any]] = []
@@ -612,10 +618,15 @@ def auto_match(db: Session, year: int, month: int, actor: str = "system") -> dic
     )
     allocated_by_txn: dict[int, Decimal] = {}
     allocated_by_invoice: dict[int, Decimal] = {}
+    existing_invoice_ids = {link.invoice_id for link in existing_links if link.allocated_amount is None}
+    existing_invoice_map = {
+        row.id: row
+        for row in db.query(TaxInvoice).filter(TaxInvoice.id.in_(existing_invoice_ids)).all()
+    } if existing_invoice_ids else {}
     for link in existing_links:
         if not link.confirmed:
             continue
-        amount = _dec(link.allocated_amount)
+        amount = _link_amount(link, existing_invoice_map.get(link.invoice_id))
         allocated_by_txn[link.target_id] = allocated_by_txn.get(link.target_id, Decimal("0")) + amount
         allocated_by_invoice[link.invoice_id] = allocated_by_invoice.get(link.invoice_id, Decimal("0")) + amount
     txn_amount_by_id = {txn.id: _dec(txn.amount) for txn in txns}

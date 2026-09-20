@@ -650,6 +650,7 @@ def _invoice_business_context(db: Session, rows: list[TaxInvoice]) -> dict[int, 
             TaxInvoiceLink.invoice_id.in_(invoice_ids),
             TaxInvoiceLink.target_type.in_(business_target_types),
             TaxInvoiceLink.match_method != "rejected",
+            TaxInvoiceLink.confirmed.is_(True),
         )
         .order_by(TaxInvoiceLink.id)
         .all()
@@ -725,9 +726,19 @@ def _invoice_business_context(db: Session, rows: list[TaxInvoice]) -> dict[int, 
         "jackyun_purchase_order": jackyun,
         "sales_order": sales,
     }
+    invoice_row_map = {row.id: row for row in rows}
     result: dict[int, dict] = {}
     for invoice_id in invoice_ids:
-        invoice_links = links_by_invoice.get(invoice_id, [])
+        invoice = invoice_row_map[invoice_id]
+        domain_types = (
+            (SALES_LINK_TARGET_TYPE,)
+            if invoice.direction == "output"
+            else PURCHASE_LINK_TARGET_TYPES
+        )
+        invoice_links = [
+            link for link in links_by_invoice.get(invoice_id, [])
+            if link.target_type in domain_types
+        ]
         purchase_nos: list[str] = []
         inbound_nos: list[str] = []
         link_rows: list[dict] = []
@@ -763,10 +774,39 @@ def _invoice_business_context(db: Session, rows: list[TaxInvoice]) -> dict[int, 
                 "confirmed": bool(link.confirmed),
                 "note": link.note or "",
             })
+        invoice_total = quantize(to_decimal(invoice.total_amount))
+        explicit_allocated = sum(
+            (
+                quantize(to_decimal(link.allocated_amount))
+                for link in invoice_links
+                if link.allocated_amount is not None
+            ),
+            Decimal("0"),
+        )
+        has_unknown_allocation = any(link.allocated_amount is None for link in invoice_links)
+        if invoice_total > 0:
+            business_matched = min(max(explicit_allocated, Decimal("0")), invoice_total)
+            business_remaining = max(invoice_total - business_matched, Decimal("0"))
+            if has_unknown_allocation:
+                business_status = "needs_review"
+            elif business_matched <= Decimal("0"):
+                business_status = "needs_review" if invoice.match_status == "needs_review" else "unmatched"
+            elif business_remaining <= Decimal("0.01"):
+                business_status = "matched"
+            else:
+                business_status = "partial"
+        else:
+            business_matched = Decimal("0")
+            business_remaining = Decimal("0")
+            business_status = invoice.match_status
+
         result[invoice_id] = {
             "links": link_rows,
             "purchaseOrderNos": list(dict.fromkeys(purchase_nos)),
             "inboundNos": list(dict.fromkeys(inbound_nos)),
+            "businessMatchStatus": business_status,
+            "businessMatchedAmount": str(quantize(business_matched)),
+            "businessRemainingAmount": str(quantize(business_remaining)),
         }
     return result
 
@@ -1132,6 +1172,7 @@ def list_invoices(
 def summary(db: Session) -> dict:
     rows = filter_visible_invoices(db.query(TaxInvoice)).all()
     red_context = _red_trace_context(rows)
+    business_context = _invoice_business_context(db, rows)
     active_import_ids = [
         row.id for row in db.query(TaxInvoiceImport.id).filter(TaxInvoiceImport.lifecycle == "active").all()
     ]
@@ -1170,7 +1211,7 @@ def summary(db: Session) -> dict:
         "duplicateRowCount": max(source_row_count - len(rows), 0),
         "byDirection": {"input": 0, "output": 0, "unknown": 0},
         "byStatus": {"issued": 0, "void": 0, "red": 0, "unknown": 0},
-        "byMatchStatus": {"matched": 0, "unmatched": 0, "needs_review": 0},
+        "byMatchStatus": {"matched": 0, "partial": 0, "unmatched": 0, "needs_review": 0},
         "byProcessing": {"pending": 0, "required": 0, "not_required": 0},
         "byCategory": {key: 0 for key in CATEGORY_V2_KEYS} | {"": 0},
         "byCategoryGroup": {"operating": 0, "reimburse": 0, "excluded": 0, "pending": 0},
@@ -1183,7 +1224,10 @@ def summary(db: Session) -> dict:
     for row in rows:
         out["byDirection"][row.direction] = out["byDirection"].get(row.direction, 0) + 1
         out["byStatus"][row.status] = out["byStatus"].get(row.status, 0) + 1
-        out["byMatchStatus"][row.match_status] = out["byMatchStatus"].get(row.match_status, 0) + 1
+        business_status = business_context.get(row.id, {}).get(
+            "businessMatchStatus", row.match_status
+        )
+        out["byMatchStatus"][business_status] = out["byMatchStatus"].get(business_status, 0) + 1
         if row.direction == "input":
             processing_status = _effective_processing_status(row)
             out["byProcessing"][processing_status] = out["byProcessing"].get(processing_status, 0) + 1
@@ -1552,6 +1596,7 @@ def _purchase_link_occupancy(db: Session) -> dict[tuple[str, int], tuple[int, st
         .filter(
             TaxInvoiceLink.target_type.in_(ALLOWED_LINK_TARGET_TYPES),
             TaxInvoiceLink.match_method != "rejected",
+            TaxInvoiceLink.confirmed.is_(True),
         )
         .all()
     )
@@ -1832,6 +1877,7 @@ def link_purchase_order(
                 TaxInvoiceLink.invoice_id == invoice.id,
                 TaxInvoiceLink.target_type.in_(domain_types),
                 TaxInvoiceLink.match_method != "rejected",
+                TaxInvoiceLink.confirmed.is_(True),
                 TaxInvoiceLink.id != (link.id if link is not None else -1),
             ).all()
         ),
@@ -1850,6 +1896,7 @@ def link_purchase_order(
                 TaxInvoiceLink.target_type == target_type,
                 TaxInvoiceLink.target_id == target_id,
                 TaxInvoiceLink.match_method != "rejected",
+                TaxInvoiceLink.confirmed.is_(True),
                 TaxInvoiceLink.id != (link.id if link is not None else -1),
             ).all()
         ),
@@ -1887,11 +1934,12 @@ def link_purchase_order(
     link.confirmed = True
     link.note = note or default_note
 
-    # 只有业务维度累计覆盖整张发票时才推进 matched；部分分摊不能伪装成已配平。
-    if invoice.match_status == "unmatched" and invoice_total - (other_invoice_alloc + amount) <= Decimal("0.01"):
-        invoice.match_status = "matched"
-        msg = f"{default_note} {order_no}"
-        invoice.match_note = f"{invoice.match_note}；{msg}" if invoice.match_note else msg
+    # 发票业务匹配只看采购/销售域自身的 confirmed 分摊，银行付款链接完全不参与。
+    business_allocated = other_invoice_alloc + amount
+    business_remaining = invoice_total - business_allocated
+    invoice.match_status = "matched" if business_remaining <= Decimal("0.01") else "partial"
+    msg = f"{default_note} {order_no}"
+    invoice.match_note = f"{invoice.match_note}；{msg}" if invoice.match_note else msg
 
     db.commit()
     audit(
@@ -1913,7 +1961,7 @@ def unlink_purchase(db: Session, link_id: int, actor: str = "system") -> dict:
     row.note = "解除销售订单关联" if is_sales else "解除采购单关联"
 
     invoice = db.get(TaxInvoice, row.invoice_id)
-    if invoice is not None and invoice.match_status == "matched":
+    if invoice is not None:
         domain_types = (SALES_LINK_TARGET_TYPE,) if is_sales else PURCHASE_LINK_TARGET_TYPES
         remaining_allocated = sum(
             (
@@ -1925,15 +1973,22 @@ def unlink_purchase(db: Session, link_id: int, actor: str = "system") -> dict:
                     TaxInvoiceLink.confirmed.is_(True),
                     TaxInvoiceLink.id != row.id,
                 ).all()
+                if link.allocated_amount is not None
             ),
             Decimal("0"),
         )
         invoice_total = quantize(to_decimal(invoice.total_amount))
-        # 状态按业务域内的实际剩余覆盖金额重算；银行付款链接不参与采购/销售匹配状态。
-        if remaining_allocated <= 0 or invoice_total - remaining_allocated > Decimal("0.01"):
+        # 状态按业务域内的真实覆盖金额重算；银行付款链接不参与。
+        if invoice_total > 0 and remaining_allocated > 0:
+            invoice.match_status = (
+                "matched"
+                if invoice_total - remaining_allocated <= Decimal("0.01")
+                else "partial"
+            )
+        else:
             invoice.match_status = "unmatched"
-            msg = "已解除人工销售订单关联" if is_sales else "已解除人工采购关联"
-            invoice.match_note = f"{invoice.match_note}；{msg}" if invoice.match_note else msg
+        msg = "已解除人工销售订单关联" if is_sales else "已解除人工采购关联"
+        invoice.match_note = f"{invoice.match_note}；{msg}" if invoice.match_note else msg
 
     db.commit()
     audit(

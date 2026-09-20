@@ -246,7 +246,7 @@ def test_unlink_purchase_recalculates_only_business_domain(db_session):
 
     tax_invoice_service.unlink_purchase(db_session, second["id"], actor="pytest")
     db_session.refresh(invoice)
-    assert invoice.match_status == "unmatched"
+    assert invoice.match_status == "partial"
 
     active_purchase = db_session.query(TaxInvoiceLink).filter(
         TaxInvoiceLink.invoice_id == invoice.id,
@@ -372,3 +372,96 @@ def test_invoice_partial_bank_payment_does_not_change_business_match(db_session)
     assert Decimal(row["bankPaidAmount"]) == Decimal("40.00")
     assert Decimal(row["bankRemainingAmount"]) == Decimal("60.00")
     assert row["paymentMethod"] == "corporate"
+
+
+
+def test_invoice_business_partial_status_has_own_amounts_and_ignores_bank_links(db_session):
+    po = ExternalPurchaseOrder(
+        external_order_id="DOMAIN-BUSINESS-PARTIAL",
+        platform="other",
+        paid_amount=Decimal("60"),
+        order_amount=Decimal("60"),
+    )
+    invoice = TaxInvoice(
+        invoice_key="DOMAIN-BUSINESS-PARTIAL-INV",
+        direction="input",
+        invoice_number="DOMAIN-BUSINESS-PARTIAL-INV",
+        status="issued",
+        total_amount=Decimal("100"),
+        match_status="unmatched",
+    )
+    txn = BankTransaction(
+        txn_date=date(2026, 9, 20),
+        direction="out",
+        amount=Decimal("100"),
+        counterparty_name="业务银行隔离供应商",
+        fingerprint="domain-business-partial-bank",
+    )
+    db_session.add_all([po, invoice, txn])
+    db_session.flush()
+    db_session.add_all([
+        TaxInvoiceLink(
+            invoice_id=invoice.id,
+            target_type="external_purchase_order",
+            target_id=po.id,
+            allocated_amount=Decimal("60"),
+            match_method="manual",
+            confirmed=True,
+        ),
+        TaxInvoiceLink(
+            invoice_id=invoice.id,
+            target_type="bank_transaction",
+            target_id=txn.id,
+            allocated_amount=Decimal("100"),
+            match_method="manual",
+            confirmed=True,
+        ),
+    ])
+    db_session.commit()
+
+    row = next(
+        item for item in tax_invoice_service.list_invoices(db_session, direction="input", limit=500)
+        if item["id"] == invoice.id
+    )
+    assert row["businessMatchStatus"] == "partial"
+    assert Decimal(row["businessMatchedAmount"]) == Decimal("60.00")
+    assert Decimal(row["businessRemainingAmount"]) == Decimal("40.00")
+    assert row["bankPaymentStatus"] == "matched"
+    assert Decimal(row["bankPaidAmount"]) == Decimal("100.00")
+    assert Decimal(row["bankRemainingAmount"]) == Decimal("0.00")
+
+
+def test_unconfirmed_business_link_does_not_count_as_business_match(db_session):
+    po = ExternalPurchaseOrder(
+        external_order_id="DOMAIN-BUSINESS-UNCONFIRMED",
+        platform="other",
+        paid_amount=Decimal("100"),
+        order_amount=Decimal("100"),
+    )
+    invoice = TaxInvoice(
+        invoice_key="DOMAIN-BUSINESS-UNCONFIRMED-INV",
+        direction="input",
+        invoice_number="DOMAIN-BUSINESS-UNCONFIRMED-INV",
+        status="issued",
+        total_amount=Decimal("100"),
+        match_status="unmatched",
+    )
+    db_session.add_all([po, invoice])
+    db_session.flush()
+    db_session.add(TaxInvoiceLink(
+        invoice_id=invoice.id,
+        target_type="external_purchase_order",
+        target_id=po.id,
+        allocated_amount=Decimal("100"),
+        match_method="manual",
+        confirmed=False,
+    ))
+    db_session.commit()
+
+    row = next(
+        item for item in tax_invoice_service.list_invoices(db_session, direction="input", limit=500)
+        if item["id"] == invoice.id
+    )
+    assert row["businessMatchStatus"] == "unmatched"
+    assert Decimal(row["businessMatchedAmount"]) == Decimal("0.00")
+    assert row["links"] == []

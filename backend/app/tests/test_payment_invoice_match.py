@@ -348,3 +348,43 @@ def test_unlink_keeps_business_status_untouched_and_rejects_double_unlink(db_ses
 
     with pytest.raises(ValueError, match="已解除"):
         pm.unlink(db_session, link_row.id)
+
+
+
+def test_legacy_bank_link_without_allocated_amount_uses_same_full_amount_everywhere(db_session):
+    txn = _txn(db_session, amount="1000.00")
+    inv = _invoice(db_session, amount="1000.00")
+    db_session.add(TaxInvoiceLink(
+        invoice_id=inv.id,
+        target_type="bank_transaction",
+        target_id=txn.id,
+        allocated_amount=None,
+        match_method="manual",
+        confirmed=True,
+    ))
+    db_session.commit()
+
+    status = pm.txn_reconciliation_statuses(db_session, [txn.id])[txn.id]
+    assert status["status"] == "matched"
+    assert status["allocatedAmount"] == "1000.00"
+    assert status["remainingAmount"] == "0.00"
+
+    pending_ids = {row["id"] for row in pm.pending_invoices(db_session)}
+    assert inv.id not in pending_ids
+
+    # 同一 invoice/txn 的历史 NULL 分摊链接再次确认时，应该复用原 link 并规范化为明确金额，
+    # 不能新建重复链接，也不能错误提示“无剩余额度”。
+    normalized = pm.link(db_session, txn_id=txn.id, invoice_id=inv.id)
+    legacy_link = db_session.get(TaxInvoiceLink, normalized["id"])
+    assert legacy_link is not None
+    assert legacy_link.allocated_amount == Decimal("1000.0000")
+    assert db_session.query(TaxInvoiceLink).filter_by(
+        invoice_id=inv.id,
+        target_type="bank_transaction",
+        target_id=txn.id,
+    ).count() == 1
+
+    # 但这笔付款已被完整占用，不能再分摊给另一张发票。
+    other = _invoice(db_session, seller="另一供应商", amount="100.00")
+    with pytest.raises(ValueError, match="分摊金额必须大于 0"):
+        pm.link(db_session, txn_id=txn.id, invoice_id=other.id)

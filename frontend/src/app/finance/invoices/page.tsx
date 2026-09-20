@@ -6,7 +6,7 @@ import { taxInvoiceApi, type TaxInvoiceCategoryOutput, type TaxInvoiceCategoryV2
 import { useTabActive, useTabScopedState } from "@/lib/workspace/tab-store";
 
 type FilterValue = "input" | "output";
-type MatchFilter = "all" | "matched" | "unmatched" | "needs_review" | "pending";
+type MatchFilter = "all" | "matched" | "partial" | "unmatched" | "needs_review" | "pending";
 type InvoiceStatusFilter = "all" | "issued" | "red" | "void" | "unknown";
 /** v2 分类筛选：6 个分类 + ""=待判断 + 派生组伪值（计入运营成本） */
 type TypeFilter = "all" | TaxInvoiceCategoryV2 | TaxInvoiceCategoryOutput | "" | "group:operating";
@@ -42,7 +42,13 @@ function directionClass(value: string) {
 }
 
 function matchLabel(value: string) {
-  return value === "matched" ? "已匹配" : value === "needs_review" ? "待核对" : "未匹配";
+  return value === "matched"
+    ? "已匹配"
+    : value === "partial"
+      ? "部分匹配"
+      : value === "needs_review"
+        ? "待核对"
+        : "未匹配";
 }
 
 function businessMatchStatus(row: TaxInvoiceRow) {
@@ -66,9 +72,11 @@ function bankPaymentClass(row: TaxInvoiceRow) {
 function matchClass(value: string) {
   return value === "matched"
     ? "bg-emerald-50 text-emerald-700"
-    : value === "needs_review"
-      ? "bg-amber-50 text-amber-700"
-      : "bg-slate-100 text-slate-500";
+    : value === "partial"
+      ? "bg-blue-50 text-blue-700"
+      : value === "needs_review"
+        ? "bg-amber-50 text-amber-700"
+        : "bg-slate-100 text-slate-500";
 }
 
 /** 派生态（由 v2 分类派生，仅作展示与统计）：计入运营成本 / 计入报销成本 / 不计入 / 待判断 */
@@ -253,7 +261,7 @@ export default function InvoiceManagementPage() {
       if (row.direction !== direction) return false;
       if (invoiceStatus !== "all" && row.status !== invoiceStatus) return false;
       if (matchStatus === "pending") {
-        if (businessMatchStatus(row) !== "unmatched" && businessMatchStatus(row) !== "needs_review") return false;
+        if (!["unmatched", "partial", "needs_review"].includes(businessMatchStatus(row))) return false;
       } else if (matchStatus !== "all" && businessMatchStatus(row) !== matchStatus) return false;
       if (typeFilter !== "all" && !matchCategoryFilter(rowCategoryValue(row), typeFilter)) return false;
       if (!needle) return true;
@@ -420,7 +428,7 @@ export default function InvoiceManagementPage() {
             <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="关键词即时筛选：发票号 / 开票方 / 税号 / 货物明细 / 采购单 / 入库单，可空格分隔多词" className="w-full rounded-lg border border-slate-200 bg-white py-1.5 pl-8 pr-8 text-xs outline-none focus:border-indigo-400" />
             {query && <button type="button" onClick={() => setQuery("")} title="清空关键词" className="absolute right-2 top-1/2 -translate-y-1/2 rounded px-1 text-slate-400 transition hover:text-slate-700">✕</button>}
           </div>
-          <select value={matchStatus} onChange={(event) => setMatchStatus(event.target.value as MatchFilter)} className="rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs text-slate-600 outline-none"><option value="all">全部业务匹配</option><option value="pending">业务待匹配（未匹配+待核对）</option><option value="matched">已匹配</option><option value="unmatched">未匹配</option><option value="needs_review">待核对</option></select>
+          <select value={matchStatus} onChange={(event) => setMatchStatus(event.target.value as MatchFilter)} className="rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs text-slate-600 outline-none"><option value="all">全部业务匹配</option><option value="pending">业务待匹配（未匹配+部分匹配+待核对）</option><option value="matched">已匹配</option><option value="partial">部分匹配</option><option value="unmatched">未匹配</option><option value="needs_review">待核对</option></select>
           <select value={invoiceStatus} onChange={(event) => setInvoiceStatus(event.target.value as InvoiceStatusFilter)} className="rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs text-slate-600 outline-none"><option value="all">全部票据状态</option><option value="issued">有效</option><option value="red">红冲相关</option><option value="void">作废</option><option value="unknown">待确认</option></select>
           {direction === "input" && !!summary?.byStatus?.red && (
             <button type="button" onClick={() => setInvoiceStatus(invoiceStatus === "red" ? "all" : "red")} title={`蓝字票和红字票都保留展示并按净额核算；未识别到对应红字票的已红冲蓝字金额 ${money(String(summary.excludedRedAmount ?? 0))} 暂不计入有效进项金额`} className={`rounded-full border px-2.5 py-1 text-[11px] transition ${invoiceStatus === "red" ? "border-rose-300 bg-rose-50 font-medium text-rose-700 ring-1 ring-rose-200" : "border-rose-200 bg-white text-rose-600 hover:bg-rose-50"}`}>红冲相关 <span className="tabular-nums">{summary.byStatus.red}</span></button>
@@ -530,7 +538,7 @@ export default function InvoiceManagementPage() {
                   </td>
                   <td className="max-w-[210px] px-3 py-2.5 text-slate-600">{row.purchaseOrderNos.length ? <span title={row.purchaseOrderNos.join("、")}>{row.purchaseOrderNos.slice(0, 2).join("、")}{row.purchaseOrderNos.length > 2 ? ` 等 ${row.purchaseOrderNos.length} 单` : ""}</span> : <span className="text-slate-400">未匹配</span>}</td>
                   <td className="max-w-[190px] px-3 py-2.5 text-slate-600">{row.inboundNos.length ? <span title={row.inboundNos.join("、")}>{row.inboundNos.slice(0, 2).join("、")}{row.inboundNos.length > 2 ? ` 等 ${row.inboundNos.length} 单` : ""}</span> : <span className="text-slate-400">—</span>}</td>
-                  <td className="px-3 py-2.5"><span className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${matchClass(businessMatchStatus(row))}`}>{matchLabel(businessMatchStatus(row))}</span></td>
+                  <td className="px-3 py-2.5"><span title={`业务已匹配 ${money(row.businessMatchedAmount)} / 剩余 ${money(row.businessRemainingAmount)}`} className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${matchClass(businessMatchStatus(row))}`}>{matchLabel(businessMatchStatus(row))}</span></td>
                   <td className="px-3 py-2.5">
                     {row.direction === "input" ? (
                       <span
