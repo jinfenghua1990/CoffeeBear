@@ -366,6 +366,37 @@ export function runR2Backup(mode: "auto" | "daily" | "full" = "auto"): Promise<{
   });
 }
 
+export type BackupRecord = {
+  timestamp: string;
+  time: string | null;
+  type: "local" | "r2_daily" | "r2_full" | "kodo_full" | string;
+  target: string;
+  status: string;
+  detail: string;
+};
+
+export type BackupStatus = {
+  backupDir: string;
+  records: BackupRecord[];
+  lastLocal: BackupRecord | null;
+  lastR2: BackupRecord | null;
+  lastR2Full: BackupRecord | null;
+  lastKodo: BackupRecord | null;
+};
+
+export function getBackupStatus(limit = 50): Promise<BackupStatus> {
+  return jsonFetch<BackupStatus>(`/api/v1/integrations/backup-status?limit=${limit}`);
+}
+
+export function prepareR2Restore(): Promise<{
+  started: boolean;
+  target: "r2";
+  action: "prepare_restore";
+  log: string;
+}> {
+  return jsonFetch("/api/v1/integrations/r2-backup/prepare-restore", { method: "POST" });
+}
+
 export type KodoColdBackupConfig = {
   configured: boolean;
   enabled: boolean;
