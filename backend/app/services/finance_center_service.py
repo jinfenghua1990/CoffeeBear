@@ -17,6 +17,9 @@ DEFAULT_ENTITY_NAME = "浙江柴本网络科技有限公司"
 CATEGORY_LABELS = {
     "sales_income": "销售收入",
     "purchase_cost": "采购成本",
+    "shipment_goods_cost": "出运货品成本",
+    "cargo_insurance": "货运保险",
+    "port_fee": "港杂 / 码头费",
     "platform_fee": "平台费用",
     "domestic_logistics": "国内物流",
     "international_freight": "国际物流",
@@ -112,6 +115,8 @@ def entry_dict(row: FinanceEntry, entity: FinanceLegalEntity | None = None) -> d
         "category": row.category,
         "categoryLabel": CATEGORY_LABELS.get(row.category, row.category),
         "direction": row.direction,
+        "cashEffect": bool(row.cash_effect),
+        "profitEffect": bool(row.profit_effect),
         "currency": row.currency,
         "amount": str(row.amount or 0),
         "taxAmount": str(row.tax_amount or 0),
@@ -187,6 +192,13 @@ def center_overview(
         "anomalies": 0,
     }
 
+    # 同一来源/类别存在“预计 + 实际”时，经营预测用实际替代预计，避免重复计算。
+    actual_keys = {
+        (row.source_type, row.source_id, row.category)
+        for row in rows
+        if row.value_type == "actual"
+    }
+
     for row in rows:
         bucket = totals.setdefault(
             row.currency,
@@ -195,16 +207,33 @@ def center_overview(
                 "actualExpense": Decimal("0"),
                 "estimatedIncome": Decimal("0"),
                 "estimatedExpense": Decimal("0"),
+                "actualCashInflow": Decimal("0"),
+                "actualCashOutflow": Decimal("0"),
+                "forecastCashInflow": Decimal("0"),
+                "forecastCashOutflow": Decimal("0"),
             },
         )
-        key = ("estimated" if row.value_type == "estimated" else "actual") + (
-            "Income" if row.direction == "income" else "Expense"
-        )
-        bucket[key] += _decimal(row.amount)
+        identity = (row.source_type, row.source_id, row.category)
+        superseded_estimate = row.value_type == "estimated" and identity in actual_keys
+
+        if row.profit_effect and not superseded_estimate:
+            key = ("estimated" if row.value_type == "estimated" else "actual") + (
+                "Income" if row.direction == "income" else "Expense"
+            )
+            bucket[key] += _decimal(row.amount)
+
+        if row.cash_effect:
+            cash_direction = "Inflow" if row.direction == "income" else "Outflow"
+            settled_cash = row.value_type == "actual" and row.settlement_status in {"settled", "closed"}
+            if settled_cash:
+                bucket[f"actualCash{cash_direction}"] += _decimal(row.amount)
+            elif not superseded_estimate:
+                # 未结算的实际金额和仍有效的预计金额都属于未来现金需求/流入。
+                bucket[f"forecastCash{cash_direction}"] += _decimal(row.amount)
 
         scope = scopes.setdefault(row.business_scope, {"count": 0, "estimated": 0, "pending": 0})
         scope["count"] += 1
-        if row.value_type == "estimated":
+        if row.value_type == "estimated" and not superseded_estimate:
             scope["estimated"] += 1
             todo["estimated"] += 1
         if row.settlement_status not in {"settled", "closed"}:
@@ -231,6 +260,11 @@ def center_overview(
             **{key: str(value) for key, value in values.items()},
             "actualProfit": str(actual_profit),
             "estimatedProfit": str(estimated_profit),
+            "actualNetCash": str(values["actualCashInflow"] - values["actualCashOutflow"]),
+            "forecastNetCash": str(
+                values["actualCashInflow"] + values["forecastCashInflow"]
+                - values["actualCashOutflow"] - values["forecastCashOutflow"]
+            ),
         })
 
     return {
@@ -303,6 +337,8 @@ def save_entry(
     accounting_month: int,
     occurred_at: datetime | None,
     note: str,
+    cash_effect: bool = True,
+    profit_effect: bool = True,
 ) -> FinanceEntry:
     if business_scope not in {"domestic", "foreign_trade"}:
         raise ValueError("业务范围必须是内销或外贸")
@@ -326,6 +362,8 @@ def save_entry(
     row.source_no = source_no.strip()
     row.category = category.strip() or "other"
     row.direction = direction
+    row.cash_effect = bool(cash_effect)
+    row.profit_effect = bool(profit_effect)
     row.currency = currency.strip().upper() or entity.base_currency
     row.amount = _decimal(amount)
     row.tax_amount = _decimal(tax_amount)

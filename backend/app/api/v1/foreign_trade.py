@@ -19,6 +19,8 @@ from app.models.foreign_trade import (
     ForeignTradeShipment,
     ForeignTradeSkuMapping,
 )
+from app.services import finance_center_service
+from app.services import finance_projection_service
 from app.services import foreign_trade_service as service
 
 router = APIRouter(prefix="/foreign-trade", tags=["外贸工作台"])
@@ -171,6 +173,7 @@ class OrderBody(BaseModel):
     procurement_status: str = Field(default="pending", max_length=24)
     fulfillment_status: str = Field(default="pending", max_length=24)
     payment_status: str = Field(default="unpaid", max_length=24)
+    seller_legal_entity_id: int | None = None
     customer_name: str = Field(default="", max_length=128)
     customer_email: str = Field(default="", max_length=256)
     ship_to: str = ""
@@ -196,6 +199,11 @@ def _apply_order(db: Session, row: ForeignTradeOrder, body: OrderBody) -> Foreig
             raise HTTPException(status_code=400, detail="B2B 订单只能绑定启用中的经销商")
     else:
         values["dealer_id"] = None
+
+    if body.seller_legal_entity_id is None:
+        values["seller_legal_entity_id"] = finance_center_service.resolve_entity(db).id
+    else:
+        finance_center_service.resolve_entity(db, body.seller_legal_entity_id)
 
     for key in (
         "gross_amount", "discount_amount", "shipping_income", "paid_amount", "refund_amount",
@@ -234,6 +242,8 @@ def create_order(body: OrderBody, db: Session = Depends(get_db)) -> dict:
     dealer = _apply_order(db, row, body)
     db.add(row)
     try:
+        db.flush()
+        finance_projection_service.project_foreign_order(db, row)
         db.commit()
     except IntegrityError as exc:
         db.rollback()
@@ -249,6 +259,7 @@ def update_order(order_id: int, body: OrderBody, db: Session = Depends(get_db)) 
         raise HTTPException(status_code=404, detail="外贸订单不存在")
     dealer = _apply_order(db, row, body)
     try:
+        finance_projection_service.project_foreign_order(db, row)
         db.commit()
     except IntegrityError as exc:
         db.rollback()
@@ -262,6 +273,7 @@ def delete_order(order_id: int, db: Session = Depends(get_db)) -> dict:
     row = db.get(ForeignTradeOrder, order_id)
     if not row:
         raise HTTPException(status_code=404, detail="外贸订单不存在")
+    finance_projection_service.delete_projected_source(db, "foreign_order", str(row.id))
     db.delete(row)
     db.commit()
     return {"ok": True}
@@ -415,6 +427,9 @@ class ShipmentBody(BaseModel):
     transport_mode: str = Field(default="sea", max_length=24)
     incoterm: str = Field(default="FOB", max_length=16)
     status: str = Field(default="preparing", max_length=32)
+    exporter_legal_entity_id: int | None = None
+    importer_kind: Literal["external_customer", "dealer", "own_entity", "agent"] = "external_customer"
+    importer_legal_entity_id: int | None = None
 
     carrier: str = Field(default="", max_length=128)
     booking_no: str = Field(default="", max_length=128)
@@ -458,6 +473,7 @@ class ShipmentBody(BaseModel):
     export_refund_rate: str = "0"
     actual_export_refund_cny: str = "0"
     export_refund_status: str = Field(default="pending", max_length=24)
+    export_refund_received_at: datetime | None = None
     eur_to_cny: str = "1"
 
     etd: datetime | None = None
@@ -495,8 +511,19 @@ _SHIPMENT_DECIMAL_FIELDS = {
 }
 
 
-def _apply_shipment(row: ForeignTradeShipment, body: ShipmentBody) -> None:
+def _apply_shipment(db: Session, row: ForeignTradeShipment, body: ShipmentBody) -> None:
     values = body.model_dump()
+    if body.exporter_legal_entity_id is None:
+        values["exporter_legal_entity_id"] = finance_center_service.resolve_entity(db).id
+    else:
+        finance_center_service.resolve_entity(db, body.exporter_legal_entity_id)
+
+    if body.importer_kind == "own_entity":
+        if body.importer_legal_entity_id is None:
+            raise HTTPException(status_code=400, detail="进口责任方为我方主体时，必须选择进口公司主体")
+        finance_center_service.resolve_entity(db, body.importer_legal_entity_id)
+    else:
+        values["importer_legal_entity_id"] = None
     for key in _SHIPMENT_DECIMAL_FIELDS:
         values[key] = _money(values[key])
     if values["quantity"] < 0:
@@ -521,9 +548,11 @@ def shipments(
 @router.post("/shipments", status_code=201)
 def create_shipment(body: ShipmentBody, db: Session = Depends(get_db)) -> dict:
     row = ForeignTradeShipment(shipment_no=body.shipment_no)
-    _apply_shipment(row, body)
+    _apply_shipment(db, row, body)
     db.add(row)
     try:
+        db.flush()
+        finance_projection_service.project_foreign_shipment(db, row)
         db.commit()
     except IntegrityError as exc:
         db.rollback()
@@ -537,8 +566,9 @@ def update_shipment(shipment_id: int, body: ShipmentBody, db: Session = Depends(
     row = db.get(ForeignTradeShipment, shipment_id)
     if row is None:
         raise HTTPException(status_code=404, detail="出运单不存在")
-    _apply_shipment(row, body)
+    _apply_shipment(db, row, body)
     try:
+        finance_projection_service.project_foreign_shipment(db, row)
         db.commit()
     except IntegrityError as exc:
         db.rollback()
@@ -552,6 +582,7 @@ def delete_shipment(shipment_id: int, db: Session = Depends(get_db)) -> dict:
     row = db.get(ForeignTradeShipment, shipment_id)
     if row is None:
         raise HTTPException(status_code=404, detail="出运单不存在")
+    finance_projection_service.delete_projected_source(db, "foreign_shipment", str(row.id))
     db.delete(row)
     db.commit()
     return {"ok": True}
@@ -609,6 +640,7 @@ def add_shipment_milestone(
         row.customs_cleared_at = occurred
     elif body.code == "delivered":
         row.delivered_at = occurred
+    finance_projection_service.project_foreign_shipment(db, row)
     db.commit()
     db.refresh(row)
     return service.shipment_dict(row)
