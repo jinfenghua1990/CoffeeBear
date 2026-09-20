@@ -85,63 +85,37 @@ def _invoice_purchase_map(db: Session, invoices: list[TaxInvoice]) -> dict[int, 
 
 
 def build_report(db: Session, year: int, month: int, company: str = "") -> dict[str, Any]:
+    """按“当月收到的进项发票”组织财务核对清单。
+
+    发票是月度交付的主维度；银行付款、采购订单和商品明细都挂在发票下面。
+    已收票但尚未匹配银行付款的发票也必须进入清单，不能因为未付款而被漏掉。
+    """
     start, end = _month_range(year, month)
 
-    txns = (
-        db.query(BankTransaction)
-        .filter(
-            BankTransaction.txn_date >= start,
-            BankTransaction.txn_date < end,
-            BankTransaction.direction == "out",
-        )
-        .order_by(BankTransaction.txn_date, BankTransaction.id)
-        .all()
-    )
-    txn_map = {row.id: row for row in txns}
-    if not txn_map:
-        return {
-            "year": year,
-            "month": month,
-            "company": company,
-            "summary": {
-                "paymentCount": 0,
-                "invoiceCount": 0,
-                "paymentTotal": "0.00",
-                "allocatedTotal": "0.00",
-                "invoiceTotal": "0.00",
-                "outstandingTotal": "0.00",
-                "productRowCount": 0,
-            },
-            "rows": [],
-            "productDetails": [],
-        }
-
-    links = (
-        db.query(TaxInvoiceLink)
-        .filter(
-            TaxInvoiceLink.target_type == TARGET_TYPE,
-            TaxInvoiceLink.target_id.in_(txn_map),
-            TaxInvoiceLink.confirmed.is_(True),
-            TaxInvoiceLink.match_method != "rejected",
-        )
-        .order_by(TaxInvoiceLink.id)
-        .all()
-    )
-    invoice_ids = sorted({row.invoice_id for row in links})
     invoices = (
         db.query(TaxInvoice)
-        .filter(TaxInvoice.id.in_(invoice_ids), TaxInvoice.direction == "input")
+        .filter(
+            TaxInvoice.direction == "input",
+            TaxInvoice.issue_date >= start,
+            TaxInvoice.issue_date < end,
+        )
+        .order_by(TaxInvoice.issue_date, TaxInvoice.id)
         .all()
-        if invoice_ids
+    )
+    invoices = [inv for inv in invoices if _company_matches(inv, company)]
+    invoice_map = {inv.id: inv for inv in invoices}
+    invoice_ids = sorted(invoice_map)
+
+    links = _active_bank_links(db, invoice_ids=invoice_ids) if invoice_ids else []
+    txn_ids = sorted({link.target_id for link in links})
+    txns = (
+        db.query(BankTransaction)
+        .filter(BankTransaction.id.in_(txn_ids), BankTransaction.direction == "out")
+        .all()
+        if txn_ids
         else []
     )
-    invoice_map = {
-        inv.id: inv
-        for inv in invoices
-        if _company_matches(inv, company)
-    }
-    links = [link for link in links if link.invoice_id in invoice_map]
-    invoice_ids = sorted(invoice_map)
+    txn_map = {row.id: row for row in txns}
 
     account_ids = sorted({txn.account_id for txn in txns if txn.account_id})
     accounts = (
@@ -151,13 +125,14 @@ def build_report(db: Session, year: int, month: int, company: str = "") -> dict[
     )
     account_map = {row.id: row for row in accounts}
 
-    all_invoice_links = _active_bank_links(db, invoice_ids=invoice_ids) if invoice_ids else []
     invoice_bank_total: dict[int, Decimal] = defaultdict(Decimal)
     txn_bank_total: dict[int, Decimal] = defaultdict(Decimal)
-    for link in all_invoice_links:
+    links_by_invoice: dict[int, list[TaxInvoiceLink]] = defaultdict(list)
+    for link in links:
         amount = _dec(link.allocated_amount)
         invoice_bank_total[link.invoice_id] += amount
         txn_bank_total[link.target_id] += amount
+        links_by_invoice[link.invoice_id].append(link)
 
     supplier_tax: dict[str, str] = {}
     for supplier in db.query(Supplier).all():
@@ -165,7 +140,7 @@ def build_report(db: Session, year: int, month: int, company: str = "") -> dict[
         if key and supplier.tax_no:
             supplier_tax.setdefault(key, supplier.tax_no)
 
-    purchase_map = _invoice_purchase_map(db, list(invoice_map.values())) if invoice_map else {}
+    purchase_map = _invoice_purchase_map(db, invoices) if invoices else {}
     order_ids = sorted({
         int(order["orderId"])
         for covered in purchase_map.values()
@@ -190,48 +165,77 @@ def build_report(db: Session, year: int, month: int, company: str = "") -> dict[
     for item in items:
         items_by_order[item.po_id].append(item)
 
-    rows: list[dict[str, Any]] = []
-    for link in links:
-        txn = txn_map.get(link.target_id)
-        inv = invoice_map.get(link.invoice_id)
-        if txn is None or inv is None:
-            continue
-        account = account_map.get(txn.account_id)
-        allocated = _dec(link.allocated_amount)
+    invoice_rows: list[dict[str, Any]] = []
+    flat_rows: list[dict[str, Any]] = []
+    for inv in invoices:
         inv_total = _dec(inv.total_amount)
         paid_total = invoice_bank_total.get(inv.id, Decimal("0"))
-        txn_total = _dec(txn.amount)
-        txn_allocated = txn_bank_total.get(txn.id, Decimal("0"))
+        outstanding = max(inv_total - paid_total, Decimal("0"))
+        status = "paid" if outstanding <= TOLERANCE else ("partial" if paid_total > TOLERANCE else "unpaid")
         covered = purchase_map.get(inv.id, [])
         order_nos = [str(x.get("orderNo") or "") for x in covered if x.get("orderNo")]
-        rows.append({
-            "linkId": link.id,
-            "paymentId": txn.id,
-            "paymentDate": txn.txn_date.isoformat(),
-            "paymentAccount": account.account_no if account else "",
-            "paymentAccountName": account.account_name if account else "",
-            "supplierName": inv.seller_name or txn.counterparty_name,
+        payments: list[dict[str, Any]] = []
+
+        for link in sorted(links_by_invoice.get(inv.id, []), key=lambda row: row.id):
+            txn = txn_map.get(link.target_id)
+            if txn is None:
+                continue
+            account = account_map.get(txn.account_id)
+            allocated = _dec(link.allocated_amount)
+            txn_total = _dec(txn.amount)
+            txn_allocated = txn_bank_total.get(txn.id, Decimal("0"))
+            payment = {
+                "linkId": link.id,
+                "paymentId": txn.id,
+                "paymentDate": txn.txn_date.isoformat(),
+                "paymentAccount": account.account_no if account else "",
+                "paymentAccountName": account.account_name if account else "",
+                "counterpartyAccount": txn.counterparty_account or "",
+                "voucherNo": txn.voucher_no or "",
+                "summary": txn.summary or "",
+                "paymentAmount": str(txn_total),
+                "allocatedAmount": str(allocated),
+                "paymentMatchedTotal": str(txn_allocated),
+                "paymentStatus": "matched" if txn_total - txn_allocated <= TOLERANCE else "partial",
+            }
+            payments.append(payment)
+            flat_rows.append({
+                **payment,
+                "supplierName": inv.seller_name or txn.counterparty_name,
+                "supplierTaxId": inv.seller_tax_id or supplier_tax.get(
+                    invoice_reconciliation.normalize_supplier(inv.seller_name), ""
+                ),
+                "paymentAllocatedAmount": str(allocated),
+                "invoiceId": inv.id,
+                "invoiceNumber": inv.invoice_number,
+                "invoiceDate": inv.issue_date.strftime("%Y-%m-%d") if inv.issue_date else "",
+                "invoiceType": inv.invoice_type,
+                "invoiceAmountExclTax": str(_dec(inv.amount_excl_tax)),
+                "invoiceTaxAmount": str(_dec(inv.tax_amount)),
+                "invoiceTotalAmount": str(inv_total),
+                "invoiceCorporatePaidTotal": str(paid_total),
+                "invoiceOutstandingAmount": str(outstanding),
+                "invoiceStatus": status,
+                "purchaseOrderNos": order_nos,
+            })
+
+        invoice_rows.append({
+            "invoiceId": inv.id,
+            "invoiceNumber": inv.invoice_number or "",
+            "invoiceDate": inv.issue_date.strftime("%Y-%m-%d") if inv.issue_date else "",
+            "invoiceType": inv.invoice_type or "",
+            "supplierName": inv.seller_name or "",
             "supplierTaxId": inv.seller_tax_id or supplier_tax.get(
                 invoice_reconciliation.normalize_supplier(inv.seller_name), ""
             ),
-            "counterpartyAccount": txn.counterparty_account,
-            "voucherNo": txn.voucher_no,
-            "summary": txn.summary,
-            "paymentAmount": str(txn_total),
-            "paymentAllocatedAmount": str(allocated),
-            "paymentMatchedTotal": str(txn_allocated),
-            "paymentStatus": "matched" if txn_total - txn_allocated <= TOLERANCE else "partial",
-            "invoiceId": inv.id,
-            "invoiceNumber": inv.invoice_number,
-            "invoiceDate": inv.issue_date.strftime("%Y-%m-%d") if inv.issue_date else "",
-            "invoiceType": inv.invoice_type,
             "invoiceAmountExclTax": str(_dec(inv.amount_excl_tax)),
             "invoiceTaxAmount": str(_dec(inv.tax_amount)),
             "invoiceTotalAmount": str(inv_total),
             "invoiceCorporatePaidTotal": str(paid_total),
-            "invoiceOutstandingAmount": str(max(inv_total - paid_total, Decimal("0"))),
-            "invoiceStatus": "paid" if inv_total - paid_total <= TOLERANCE else "partial",
+            "invoiceOutstandingAmount": str(outstanding),
+            "invoiceStatus": status,
             "purchaseOrderNos": order_nos,
+            "payments": payments,
         })
 
     product_details: list[dict[str, Any]] = []
@@ -262,16 +266,11 @@ def build_report(db: Session, year: int, month: int, company: str = "") -> dict[
                     "itemAmount": str(_dec(item.amount)) if item else "",
                 })
 
-    unique_txns = {row["paymentId"] for row in rows}
-    unique_invoices = {row["invoiceId"] for row in rows}
-    payment_total = sum((_dec(txn_map[i].amount) for i in unique_txns), Decimal("0"))
-    allocated_total = sum((_dec(row["paymentAllocatedAmount"]) for row in rows), Decimal("0"))
-    invoice_total = sum((_dec(invoice_map[i].total_amount) for i in unique_invoices), Decimal("0"))
-    outstanding_total = sum(
-        (max(_dec(invoice_map[i].total_amount) - invoice_bank_total.get(i, Decimal("0")), Decimal("0"))
-         for i in unique_invoices),
-        Decimal("0"),
-    )
+    unique_txns = {payment["paymentId"] for row in invoice_rows for payment in row["payments"]}
+    payment_total = sum((_dec(txn_map[i].amount) for i in unique_txns if i in txn_map), Decimal("0"))
+    invoice_total = sum((_dec(row["invoiceTotalAmount"]) for row in invoice_rows), Decimal("0"))
+    allocated_total = sum((_dec(row["invoiceCorporatePaidTotal"]) for row in invoice_rows), Decimal("0"))
+    outstanding_total = sum((_dec(row["invoiceOutstandingAmount"]) for row in invoice_rows), Decimal("0"))
 
     return {
         "year": year,
@@ -279,17 +278,20 @@ def build_report(db: Session, year: int, month: int, company: str = "") -> dict[
         "company": company,
         "summary": {
             "paymentCount": len(unique_txns),
-            "invoiceCount": len(unique_invoices),
+            "invoiceCount": len(invoice_rows),
             "paymentTotal": str(payment_total),
             "allocatedTotal": str(allocated_total),
             "invoiceTotal": str(invoice_total),
             "outstandingTotal": str(outstanding_total),
+            "paidInvoiceCount": sum(1 for row in invoice_rows if row["invoiceStatus"] == "paid"),
+            "partialInvoiceCount": sum(1 for row in invoice_rows if row["invoiceStatus"] == "partial"),
+            "unpaidInvoiceCount": sum(1 for row in invoice_rows if row["invoiceStatus"] == "unpaid"),
             "productRowCount": len(product_details),
         },
-        "rows": rows,
+        "invoiceRows": invoice_rows,
+        "rows": flat_rows,
         "productDetails": product_details,
     }
-
 
 def _style_sheet(ws) -> None:
     ws.freeze_panes = "A2"
@@ -307,60 +309,36 @@ def _style_sheet(ws) -> None:
 def corporate_payment_xlsx(report: dict[str, Any]) -> bytes:
     wb = Workbook()
     ws = wb.active
-    ws.title = "对公付款汇总"
+    ws.title = "已收票对公核对"
     headers = [
-        "付款日期", "供应商/对方", "供应商税号", "我方付款账号", "我方账户名", "对方账号",
-        "银行流水/凭证号", "付款摘要", "付款金额", "已匹配发票金额", "未对账差额",
-        "付款对账状态", "已匹配发票号码", "发票张数", "关联采购订单",
+        "发票日期", "供应商", "供应商税号", "发票号码", "发票类型",
+        "不含税金额", "税额", "价税合计", "对公已核对金额", "未核对/未付金额", "状态",
+        "付款日期", "我方付款账号", "银行流水/凭证号", "本次分摊金额", "关联采购订单",
     ]
     ws.append(headers)
 
-    payments: dict[int, dict[str, Any]] = {}
-    for row in report.get("rows", []):
-        payment_id = int(row["paymentId"])
-        group = payments.setdefault(payment_id, {
-            "paymentDate": row["paymentDate"],
-            "supplierNames": [],
-            "supplierTaxIds": [],
-            "paymentAccount": row["paymentAccount"],
-            "paymentAccountName": row["paymentAccountName"],
-            "counterpartyAccount": row["counterpartyAccount"],
-            "voucherNo": row["voucherNo"],
-            "summary": row["summary"],
-            "paymentAmount": _dec(row["paymentAmount"]),
-            "paymentMatchedTotal": _dec(row["paymentMatchedTotal"]),
-            "paymentStatus": row["paymentStatus"],
-            "invoiceNumbers": [],
-            "purchaseOrderNos": [],
-        })
-        if row["supplierName"] and row["supplierName"] not in group["supplierNames"]:
-            group["supplierNames"].append(row["supplierName"])
-        if row["supplierTaxId"] and row["supplierTaxId"] not in group["supplierTaxIds"]:
-            group["supplierTaxIds"].append(row["supplierTaxId"])
-        if row["invoiceNumber"] and row["invoiceNumber"] not in group["invoiceNumbers"]:
-            group["invoiceNumbers"].append(row["invoiceNumber"])
-        for order_no in row["purchaseOrderNos"]:
-            if order_no and order_no not in group["purchaseOrderNos"]:
-                group["purchaseOrderNos"].append(order_no)
-
-    for group in payments.values():
-        remaining = max(group["paymentAmount"] - group["paymentMatchedTotal"], Decimal("0"))
+    for row in report.get("invoiceRows", []):
+        payments = row.get("payments") or []
         ws.append([
-            group["paymentDate"],
-            "、".join(group["supplierNames"]),
-            "、".join(group["supplierTaxIds"]),
-            group["paymentAccount"],
-            group["paymentAccountName"],
-            group["counterpartyAccount"],
-            group["voucherNo"],
-            group["summary"],
-            float(group["paymentAmount"]),
-            float(group["paymentMatchedTotal"]),
-            float(remaining),
-            "已对清" if group["paymentStatus"] == "matched" else "部分对账",
-            "、".join(group["invoiceNumbers"]),
-            len(group["invoiceNumbers"]),
-            "、".join(group["purchaseOrderNos"]),
+            row["invoiceDate"],
+            row["supplierName"],
+            row["supplierTaxId"],
+            row["invoiceNumber"],
+            row["invoiceType"],
+            float(_dec(row["invoiceAmountExclTax"])),
+            float(_dec(row["invoiceTaxAmount"])),
+            float(_dec(row["invoiceTotalAmount"])),
+            float(_dec(row["invoiceCorporatePaidTotal"])),
+            float(_dec(row["invoiceOutstandingAmount"])),
+            "已核对" if row["invoiceStatus"] == "paid" else ("部分核对" if row["invoiceStatus"] == "partial" else "待核对银行"),
+            "、".join(str(payment.get("paymentDate") or "") for payment in payments),
+            "、".join(
+                str(payment.get("paymentAccount") or payment.get("paymentAccountName") or "")
+                for payment in payments
+            ),
+            "、".join(str(payment.get("voucherNo") or "") for payment in payments),
+            "、".join(str(_dec(payment.get("allocatedAmount"))) for payment in payments),
+            "、".join(row.get("purchaseOrderNos") or []),
         ])
     _style_sheet(ws)
 
@@ -383,12 +361,14 @@ def corporate_payment_xlsx(report: dict[str, Any]) -> bytes:
     summary = wb.create_sheet("月度汇总", 0)
     s = report.get("summary", {})
     summary.append(["指标", "数值"])
-    summary.append(["对公付款笔数", s.get("paymentCount", 0)])
     summary.append(["进项发票张数", s.get("invoiceCount", 0)])
-    summary.append(["对公付款总额", float(_dec(s.get("paymentTotal")))])
-    summary.append(["已关联发票金额", float(_dec(s.get("allocatedTotal")))])
     summary.append(["发票价税合计", float(_dec(s.get("invoiceTotal")))])
-    summary.append(["发票未付余额", float(_dec(s.get("outstandingTotal")))])
+    summary.append(["已核对对公付款", float(_dec(s.get("allocatedTotal")))])
+    summary.append(["未核对/未付金额", float(_dec(s.get("outstandingTotal")))])
+    summary.append(["已核对发票张数", s.get("paidInvoiceCount", 0)])
+    summary.append(["部分核对发票张数", s.get("partialInvoiceCount", 0)])
+    summary.append(["待核对银行发票张数", s.get("unpaidInvoiceCount", 0)])
+    summary.append(["关联银行付款笔数", s.get("paymentCount", 0)])
     summary.append(["商品明细行数", s.get("productRowCount", 0)])
     _style_sheet(summary)
 
