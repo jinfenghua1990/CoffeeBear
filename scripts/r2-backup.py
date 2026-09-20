@@ -304,6 +304,22 @@ def run_daily(config: dict[str, Any], directory: Path, state: dict[str, Any]) ->
     modules_state = state.setdefault("modules", {})
     refs: dict[str, Any] = {}
 
+    base_name = values.get("base_manifest", "")
+    base_hash = values.get("base_manifest_sha256", "")
+    if base_name:
+        if "/" in base_name or "\\" in base_name:
+            raise RuntimeError(f"base manifest 文件名非法：{base_name}")
+        base_source = directory / base_name
+        if not base_source.is_file() or (base_hash and sha256_file(base_source) != base_hash):
+            raise RuntimeError(f"base manifest 本地校验失败：{base_source}")
+        base_object_key = f"{root_key}/{base_source.name}"
+        put_file(config, base_object_key, base_source)
+        refs["base_manifest"] = {
+            "sha256": base_hash or sha256_file(base_source),
+            "objectKey": base_object_key,
+            "name": base_source.name,
+        }
+
     for module, source, digest in component_paths(directory, values):
         if module == "docker_image":
             continue
