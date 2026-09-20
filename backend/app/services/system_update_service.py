@@ -168,6 +168,18 @@ def _git(*args: str, timeout: int = 60) -> str:
     return result.stdout.strip()
 
 
+def _version_from_time(value: str) -> str:
+    """使用项目时区把提交时间转成可读版本号，例如 2026.09.20.1830。"""
+    try:
+        dt = datetime.fromisoformat(value)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=ZoneInfo(settings.TZ))
+        local = dt.astimezone(ZoneInfo(settings.TZ))
+        return local.strftime("%Y.%m.%d.%H%M")
+    except (TypeError, ValueError):
+        return ""
+
+
 def _commit_info(sha: str) -> dict[str, Any] | None:
     if not _SHA_RE.fullmatch(sha):
         return None
@@ -178,7 +190,13 @@ def _commit_info(sha: str) -> dict[str, Any] | None:
     if result.returncode != 0 or "\x1f" not in result.stdout:
         return None
     commit_sha, subject, committed_at = result.stdout.strip().split("\x1f", 2)
-    return {"sha": commit_sha, "shortSha": commit_sha[:10], "subject": subject, "committedAt": committed_at}
+    return {
+        "sha": commit_sha,
+        "shortSha": commit_sha[:10],
+        "subject": subject,
+        "committedAt": committed_at,
+        "version": _version_from_time(committed_at),
+    }
 
 
 def _changes(current_sha: str, latest_sha: str) -> list[dict[str, Any]]:
