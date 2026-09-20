@@ -17,8 +17,8 @@
 原生部署建议：
 
 ```text
-/Users/<user>/ecommerce-dashboard/          # 代码，可替换
-/Users/<user>/ecommerce-dashboard-data/
+/Users/<user>/ecommerce-workspace/          # 代码，可替换
+/Users/<user>/ecommerce-workspace-data/
   production/
     data/
     backups/
