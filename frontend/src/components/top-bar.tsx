@@ -66,7 +66,7 @@ export default function TopBar() {
   const topModules = MODULES.filter(
     (module) => module.showInTop !== false && moduleWorkspace(module) === activeWorkspace,
   );
-  const [openMenu, setOpenMenu] = useState<"workspace" | "sync" | "settings" | "account" | null>(null);
+  const [openMenu, setOpenMenu] = useState<"workspace" | "sync" | "account" | null>(null);
   const [keyword, setKeyword] = useState("");
   const [groups, setGroups] = useState<SearchGroups>(EMPTY_GROUPS);
   const [searchOpen, setSearchOpen] = useState(false);
@@ -343,52 +343,43 @@ export default function TopBar() {
           )}
         </Link>
 
-        <div className="relative">
-          <button
-            type="button"
-            onClick={() => setOpenMenu((menu) => (menu === "settings" ? null : "settings"))}
-            className={`flex h-8 w-8 items-center justify-center rounded-lg transition-colors ${openMenu === "settings" || active.key === "system" ? "bg-slate-100 text-slate-800" : "text-slate-500 hover:bg-slate-100"}`}
-            aria-label="系统设置"
-            title="系统设置"
-          >
-            <svg viewBox="0 0 20 20" fill="none" className="h-[18px] w-[18px]" aria-hidden="true">
-              <circle cx="10" cy="10" r="2.4" stroke="currentColor" strokeWidth="1.5" />
-              <path d="M10 2.8v2m0 10.4v2M2.8 10h2m10.4 0h2M4.9 4.9l1.4 1.4m7.4 7.4 1.4 1.4m0-10.2-1.4 1.4M6.3 13.7l-1.4 1.4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
-            </svg>
-          </button>
-          {openMenu === "settings" && (
-            <div className="absolute right-0 top-full z-dropdown mt-1.5 w-52 app-popover rounded-xl border p-1.5 shadow-lg">
-              <div className="px-3 py-1.5 text-[10px] font-medium tracking-wide text-slate-400">系统管理</div>
-              <Link
-                href="/settings"
-                prefetch={false}
-                onClick={() => setOpenMenu(null)}
-                className="block rounded-lg px-3 py-2 text-[13px] text-slate-700 hover:bg-slate-50"
-              >
-                <span className="block font-medium">系统设置</span>
-                <span className="mt-0.5 block text-[10px] text-slate-400">账号、安全与基础设施集成</span>
-              </Link>
-              <Link
-                href="/settings/update"
-                prefetch={false}
-                onClick={() => setOpenMenu(null)}
-                className="block rounded-lg px-3 py-2 text-[13px] text-slate-700 hover:bg-slate-50"
-              >
-                <span className="block font-medium">系统更新</span>
-                <span className="mt-0.5 block text-[10px] text-slate-400">检查、安装与更新历史</span>
-              </Link>
-              <Link
-                href="/automation"
-                prefetch={false}
-                onClick={() => setOpenMenu(null)}
-                className="block rounded-lg px-3 py-2 text-[13px] text-slate-700 hover:bg-slate-50"
-              >
-                <span className="block font-medium">自动化任务</span>
-                <span className="mt-0.5 block text-[10px] text-slate-400">定时同步与运行日志</span>
-              </Link>
-            </div>
-          )}
-        </div>
+        <Link
+          href="/settings/update"
+          prefetch={false}
+          className={`flex h-8 items-center gap-1.5 rounded-lg px-2 text-[12px] font-medium transition-colors ${
+            pathname.startsWith("/settings/update")
+              ? "bg-slate-100 text-slate-800"
+              : "text-slate-600 hover:bg-slate-100 hover:text-slate-900"
+          }`}
+          aria-label="系统更新"
+          title="系统更新"
+        >
+          <svg viewBox="0 0 20 20" fill="none" className="h-[17px] w-[17px] shrink-0" aria-hidden="true">
+            <path d="M15.8 7A6.2 6.2 0 0 0 5.2 4.6L3.8 6" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+            <path d="M3.8 3.7V6h2.3" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+            <path d="M4.2 13A6.2 6.2 0 0 0 14.8 15.4l1.4-1.4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+            <path d="M16.2 16.3V14h-2.3" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+          </svg>
+          <span>系统更新</span>
+        </Link>
+
+        <Link
+          href="/settings"
+          prefetch={false}
+          className={`flex h-8 items-center gap-1.5 rounded-lg px-2 text-[12px] font-medium transition-colors ${
+            pathname === "/settings"
+              ? "bg-slate-100 text-slate-800"
+              : "text-slate-600 hover:bg-slate-100 hover:text-slate-900"
+          }`}
+          aria-label="系统设置"
+          title="系统设置"
+        >
+          <svg viewBox="0 0 20 20" fill="none" className="h-[17px] w-[17px] shrink-0" aria-hidden="true">
+            <circle cx="10" cy="10" r="2.4" stroke="currentColor" strokeWidth="1.5" />
+            <path d="M10 2.8v2m0 10.4v2M2.8 10h2m10.4 0h2M4.9 4.9l1.4 1.4m7.4 7.4 1.4 1.4m0-10.2-1.4 1.4M6.3 13.7l-1.4 1.4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+          </svg>
+          <span>系统设置</span>
+        </Link>
 
         <ThemeToggle />
 
