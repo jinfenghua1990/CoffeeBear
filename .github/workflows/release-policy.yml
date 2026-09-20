@@ -3,10 +3,12 @@ name: Release Policy
 on:
   pull_request:
     branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review]
 
 jobs:
   production-source-policy:
     name: Production source branch policy
+    if: github.event.pull_request.draft == false
     runs-on: ubuntu-latest
     steps:
       - name: Require develop or hotfix branch
