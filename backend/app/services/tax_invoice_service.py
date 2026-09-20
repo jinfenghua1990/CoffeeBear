@@ -429,52 +429,101 @@ def _normalize_row(
     }, ""
 
 
+def _deactivate_source_ref_links(db: Session, invoice: TaxInvoice, reason: str) -> None:
+    """来源订单号失去唯一/有效依据时，只撤销系统 source_ref 确认；人工关联保持不动。"""
+    rows = (
+        db.query(TaxInvoiceLink)
+        .filter(
+            TaxInvoiceLink.invoice_id == invoice.id,
+            TaxInvoiceLink.match_method == "source_ref",
+            TaxInvoiceLink.confirmed.is_(True),
+        )
+        .all()
+    )
+    for link in rows:
+        link.confirmed = False
+        link.confidence = None
+        link.note = reason
+
+
 def _auto_link(db: Session, invoice: TaxInvoice, related_ref: str, direction: str) -> bool:
-    """只按清单明确给出的订单号自动关联，不按金额/名称猜测。"""
+    """按税务清单明确订单号自动关联。
+
+    保持历史布尔返回契约：True=已自动关联，False=未关联；
+    是否需要人工确认由 invoice.match_status == "needs_review" 表达。
+    只有整张发票金额和状态最终确定后才能调用。
+    """
     ref = related_ref.strip()
     if not ref:
         return False
+
     candidates: list[tuple[str, int]] = []
     if direction in ("input", "unknown"):
         # 税务清单只给订单号时，必须把所有渠道同号采购单都纳入候选。
         # 不能用 .first() 猜一个，否则 1688 / 拼多多 / 淘宝同号时会错误自动关联。
         for external in db.query(ExternalPurchaseOrder).filter_by(external_order_id=ref).all():
             candidates.append(("external_purchase_order", external.id))
-        jpo = db.query(JackyunPurchaseOrder).filter_by(purch_no=ref).first()
-        if jpo:
+        for jpo in db.query(JackyunPurchaseOrder).filter_by(purch_no=ref).all():
             candidates.append(("jackyun_purchase_order", jpo.id))
     if direction in ("output", "unknown"):
-        sales = db.query(SalesOrder).filter_by(order_no=ref).first()
-        if sales:
+        for sales in db.query(SalesOrder).filter_by(order_no=ref).all():
             candidates.append(("sales_order", sales.id))
+
     if len(candidates) != 1:
-        if candidates:
-            invoice.match_status = "needs_review"
-            invoice.match_note = "同一关联单号命中多个业务对象或多个采购渠道，待人工确认"
+        reason = (
+            f"关联单号 {ref} 未找到业务对象，待人工确认"
+            if not candidates
+            else f"关联单号 {ref} 命中多个采购渠道或业务对象，待人工确认"
+        )
+        _deactivate_source_ref_links(db, invoice, reason)
+        invoice.match_status = "needs_review"
+        invoice.match_note = reason
         return False
+
+    invoice_total = quantize(to_decimal(invoice.total_amount))
+    if invoice.status != "issued" or invoice_total <= 0:
+        # 红冲、作废、待确认和非正数票不参与采购/销售订单金额匹配；
+        # 若历史版本曾自动挂过 source_ref，要撤销自动确认，避免旧链接继续计入业务匹配。
+        reason = (
+            "票据状态待确认，不执行来源订单自动关联"
+            if invoice.status == "unknown"
+            else "票据已非有效正数发票，撤销来源订单自动关联"
+        )
+        _deactivate_source_ref_links(db, invoice, reason)
+        invoice.match_status = "needs_review" if invoice.status == "unknown" else "unmatched"
+        invoice.match_note = reason
+        return False
+
     target_type, target_id = candidates[0]
     exists = (
         db.query(TaxInvoiceLink)
         .filter_by(invoice_id=invoice.id, target_type=target_type, target_id=target_id)
         .first()
     )
+    if exists is not None and exists.match_method == "rejected":
+        invoice.match_status = "needs_review"
+        invoice.match_note = f"关联单号 {ref} 曾被人工解除，待人工确认后重新关联"
+        return False
+
     if exists:
-        exists.allocated_amount = invoice.total_amount
+        exists.allocated_amount = invoice_total
         exists.match_method = "source_ref"
         exists.confidence = Decimal("1.0000")
         exists.confirmed = True
+        exists.note = "税务官方清单明确提供关联单号"
     else:
         db.add(TaxInvoiceLink(
             invoice_id=invoice.id,
             target_type=target_type,
             target_id=target_id,
-            allocated_amount=invoice.total_amount,
+            allocated_amount=invoice_total,
             match_method="source_ref",
             confidence=Decimal("1.0000"),
             confirmed=True,
             note="税务官方清单明确提供关联单号",
         ))
-    invoice.match_status = "matched"
+    db.flush()
+    _sync_business_match_status(db, invoice, target_type)
     invoice.match_note = f"按清单关联单号自动匹配：{target_type}"
     return True
 
@@ -883,6 +932,8 @@ def _ingest_rows(
     # 会把发票总额覆盖成负数，误判为红冲。按 invoice_key 累计不含税金额、税额、价税合计。
     amounts_by_invoice: dict[str, dict] = {}
     processed_invoices: dict[str, TaxInvoice] = {}
+    row_indices_by_invoice: dict[str, list[int]] = {}
+    related_refs_by_invoice: dict[str, set[str]] = {}
     for row_index, raw in enumerate(parsed.rows, start=1):
         normalized, error = _normalize_row(
             raw, parsed, direction_override=direction_overrides.get(row_index - 1, "")
@@ -969,8 +1020,10 @@ def _ingest_rows(
         invoice.raw = raw
         invoice.match_status = invoice.match_status or "unmatched"
         processed_invoices[invoice_key] = invoice
-        if _auto_link(db, invoice, normalized["related_order_ref"], normalized["direction"]):
-            matched += 1
+        row_indices_by_invoice.setdefault(invoice_key, []).append(row_index)
+        related_ref = str(normalized.get("related_order_ref") or "").strip()
+        if related_ref:
+            related_refs_by_invoice.setdefault(invoice_key, set()).add(related_ref)
         record.invoice_id = invoice.id
         recognized += 1
 
@@ -991,6 +1044,37 @@ def _ingest_rows(
         is_positive = raw.get("是否正数发票") or raw.get("是否正数")
         remark = raw.get("备注") or raw.get("remark") or ""
         invoice.status = _status(raw_status, invoice.total_amount, is_positive, remark)
+
+    # 金额与票据状态全部最终确定后，才允许按清单订单号自动关联。
+    # 同一发票多行只处理一次；多行出现多个不同订单号时严禁逐行乱挂。
+    for invoice_key, invoice in processed_invoices.items():
+        row_indices = row_indices_by_invoice.get(invoice_key, [])
+        refs = related_refs_by_invoice.get(invoice_key, set())
+        outcome = "skipped"
+        review_reason = ""
+        if len(refs) > 1:
+            review_reason = "同一张发票的多行出现多个不同关联订单号，待人工确认"
+            _deactivate_source_ref_links(db, invoice, review_reason)
+            invoice.match_status = "needs_review"
+            invoice.match_note = review_reason
+            outcome = "needs_review"
+        elif len(refs) == 1:
+            linked = _auto_link(db, invoice, next(iter(refs)), invoice.direction)
+            if linked:
+                outcome = "matched"
+            elif invoice.match_status == "needs_review":
+                outcome = "needs_review"
+                review_reason = invoice.match_note or "关联订单待人工确认"
+
+        if outcome == "matched":
+            matched += len(row_indices)
+        elif outcome == "needs_review":
+            needs_review += len(row_indices)
+            for row_index in row_indices:
+                record = records_by_index.get(row_index)
+                if record is not None:
+                    record.recognition_status = "needs_review"
+                    record.error_summary = review_reason
 
     batch.sheet_name = parsed.sheet_name
     batch.headers = parsed.headers
@@ -1949,6 +2033,51 @@ def purchase_link_candidates(
     return [{key: item[key] for key in keys} for item in candidates[: min(max(limit, 1), 100)]]
 
 
+def _sync_business_match_status(
+    db: Session,
+    invoice: TaxInvoice,
+    target_type: str,
+) -> str:
+    """按采购/销售业务域的真实 confirmed 分摊重算缓存状态。"""
+    domain_types = (
+        PURCHASE_LINK_TARGET_TYPES
+        if target_type in PURCHASE_LINK_TARGET_TYPES
+        else (SALES_LINK_TARGET_TYPE,)
+    )
+    links = (
+        db.query(TaxInvoiceLink)
+        .filter(
+            TaxInvoiceLink.invoice_id == invoice.id,
+            TaxInvoiceLink.target_type.in_(domain_types),
+            TaxInvoiceLink.match_method != "rejected",
+            TaxInvoiceLink.confirmed.is_(True),
+        )
+        .all()
+    )
+    invoice_total = quantize(to_decimal(invoice.total_amount))
+    has_unknown = any(link.allocated_amount is None for link in links)
+    allocated = sum(
+        (
+            quantize(to_decimal(link.allocated_amount))
+            for link in links
+            if link.allocated_amount is not None
+        ),
+        Decimal("0"),
+    )
+    if invoice_total <= 0:
+        status = "unmatched"
+    elif has_unknown:
+        status = "needs_review"
+    elif allocated <= 0:
+        status = "unmatched"
+    elif invoice_total - allocated <= Decimal("0.01"):
+        status = "matched"
+    else:
+        status = "partial"
+    invoice.match_status = status
+    return status
+
+
 def link_purchase_order(
     db: Session,
     invoice_id: int,
@@ -2064,10 +2193,9 @@ def link_purchase_order(
     link.confirmed = True
     link.note = note or default_note
 
-    # 发票业务匹配只看采购/销售域自身的 confirmed 分摊，银行付款链接完全不参与。
-    business_allocated = other_invoice_alloc + amount
-    business_remaining = invoice_total - business_allocated
-    invoice.match_status = "matched" if business_remaining <= Decimal("0.01") else "partial"
+    db.flush()
+    # 发票业务匹配缓存统一从业务域 confirmed 链接重算，避免 link/unlink 各写一套规则。
+    _sync_business_match_status(db, invoice, target_type)
     msg = f"{default_note} {order_no}"
     invoice.match_note = f"{invoice.match_note}；{msg}" if invoice.match_note else msg
 
@@ -2089,34 +2217,12 @@ def unlink_purchase(db: Session, link_id: int, actor: str = "system") -> dict:
     row.confirmed = False
     row.confidence = None
     row.note = "解除销售订单关联" if is_sales else "解除采购单关联"
+    # 先把解除状态写入数据库，再按 active confirmed 链接重算；避免查询读到旧行。
+    db.flush()
 
     invoice = db.get(TaxInvoice, row.invoice_id)
     if invoice is not None:
-        domain_types = (SALES_LINK_TARGET_TYPE,) if is_sales else PURCHASE_LINK_TARGET_TYPES
-        remaining_allocated = sum(
-            (
-                quantize(to_decimal(link.allocated_amount))
-                for link in db.query(TaxInvoiceLink).filter(
-                    TaxInvoiceLink.invoice_id == row.invoice_id,
-                    TaxInvoiceLink.target_type.in_(domain_types),
-                    TaxInvoiceLink.match_method != "rejected",
-                    TaxInvoiceLink.confirmed.is_(True),
-                    TaxInvoiceLink.id != row.id,
-                ).all()
-                if link.allocated_amount is not None
-            ),
-            Decimal("0"),
-        )
-        invoice_total = quantize(to_decimal(invoice.total_amount))
-        # 状态按业务域内的真实覆盖金额重算；银行付款链接不参与。
-        if invoice_total > 0 and remaining_allocated > 0:
-            invoice.match_status = (
-                "matched"
-                if invoice_total - remaining_allocated <= Decimal("0.01")
-                else "partial"
-            )
-        else:
-            invoice.match_status = "unmatched"
+        _sync_business_match_status(db, invoice, row.target_type)
         msg = "已解除人工销售订单关联" if is_sales else "已解除人工采购关联"
         invoice.match_note = f"{invoice.match_note}；{msg}" if invoice.match_note else msg
 

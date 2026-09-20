@@ -47,6 +47,22 @@ def _month_range(year: int, month: int) -> tuple[date, date]:
     return date(year, month, 1), date(year, month, last)
 
 
+def _offset_month(year: int, month: int, offset: int) -> tuple[int, int]:
+    index = year * 12 + (month - 1) + offset
+    target_year, zero_based_month = divmod(index, 12)
+    return target_year, zero_based_month + 1
+
+
+def _invoice_candidate_window(year: int, month: int) -> tuple[date, date]:
+    """当前账期银行流水可匹配的发票日期窗口：前后各 3 个完整自然月。"""
+    start_year, start_month = _offset_month(year, month, -MATCH_WINDOW_MONTHS)
+    end_year, end_month = _offset_month(year, month, MATCH_WINDOW_MONTHS)
+    return (
+        date(start_year, start_month, 1),
+        date(end_year, end_month, calendar.monthrange(end_year, end_month)[1]),
+    )
+
+
 def _dec(value: Decimal | int | str | None) -> Decimal:
     return quantize(to_decimal(value), MONEY_QUANT)
 
@@ -594,17 +610,15 @@ def auto_match(db: Session, year: int, month: int, actor: str = "system") -> dic
     不改变发票台账的采购/销售 match_status。已有 manual 链路不会被覆盖。
     """
     start, end = _month_range(year, month)
+    invoice_window_start, invoice_window_end = _invoice_candidate_window(year, month)
 
-    # 扩展窗口：发票前后 ±3 个月都算（避免用户上传延迟/账期错位）
-    from datetime import timedelta
-    win_start = date(start.year, start.month, 1) - timedelta(days=MATCH_WINDOW_MONTHS * 31)
-    win_end = date(end.year, end.month, 1) + timedelta(days=MATCH_WINDOW_MONTHS * 31)
-    # 当月 ±3 月支出流水
+    # 操作边界必须锁定当前账期：点“8 月自动匹配”只能修改 8 月银行支出。
+    # 为兼容开票/付款跨月，只有候选发票允许向前后各扩 3 个完整自然月。
     txns = (
         db.query(BankTransaction)
         .filter(
-            BankTransaction.txn_date >= win_start,
-            BankTransaction.txn_date <= win_end,
+            BankTransaction.txn_date >= start,
+            BankTransaction.txn_date <= end,
             BankTransaction.direction == "out",
         )
         .all()
@@ -612,13 +626,13 @@ def auto_match(db: Session, year: int, month: int, actor: str = "system") -> dic
     if not txns:
         return {"year": year, "month": month, "matched": 0, "skipped": 0, "details": []}
 
-    # 进项发票池：同样扩展窗口
+    # 候选进项发票允许跨月，但自动落库的银行流水仍严格属于当前账期。
     invoices = (
         db.query(TaxInvoice)
         .filter(
             TaxInvoice.direction == "input",
-            TaxInvoice.issue_date >= win_start,
-            TaxInvoice.issue_date <= win_end,
+            TaxInvoice.issue_date >= invoice_window_start,
+            TaxInvoice.issue_date <= invoice_window_end,
         )
         .all()
     )
@@ -626,15 +640,14 @@ def auto_match(db: Session, year: int, month: int, actor: str = "system") -> dic
     if not invoices:
         return {"year": year, "month": month, "matched": 0, "skipped": 0, "details": []}
 
-    # 已存在的 link（避免重复创建）
-    existing_links = (
+    # 所有历史 pair 都要读取：rejected 不参与金额，但必须阻止自动复活。
+    # 只有人工 link() 才允许用户明确把 rejected pair 重新启用。
+    all_existing_links = (
         db.query(TaxInvoiceLink)
-        .filter(
-            TaxInvoiceLink.target_type == TARGET_TYPE,
-            TaxInvoiceLink.match_method != "rejected",
-        )
+        .filter(TaxInvoiceLink.target_type == TARGET_TYPE)
         .all()
     )
+    existing_links = [link for link in all_existing_links if link.match_method != "rejected"]
     allocated_by_txn: dict[int, Decimal] = {}
     allocated_by_invoice: dict[int, Decimal] = {}
     existing_invoice_ids = {link.invoice_id for link in existing_links if link.allocated_amount is None}
@@ -653,7 +666,9 @@ def auto_match(db: Session, year: int, month: int, actor: str = "system") -> dic
         txn_id for txn_id, allocated in allocated_by_txn.items()
         if allocated >= txn_amount_by_id.get(txn_id, Decimal("0")) - TOLERANCE
     }
-    existing_invoice_txn: set[tuple[int, int]] = {(link.invoice_id, link.target_id) for link in existing_links}
+    existing_invoice_txn: set[tuple[int, int]] = {
+        (link.invoice_id, link.target_id) for link in all_existing_links
+    }
 
     matched = 0
     skipped = 0
@@ -752,7 +767,8 @@ def auto_match(db: Session, year: int, month: int, actor: str = "system") -> dic
                     break
                 needed_txns.append(t)
                 running += txn_remaining
-            if running >= inv_remaining - TOLERANCE and needed_txns:
+            # 自动拆分必须“组合金额精确对上”；只因为同名且金额够大，不能自动切一部分。
+            if abs(running - inv_remaining) <= TOLERANCE and needed_txns:
                 cnt, allocated = _split_match_invoice_to_txns(
                     db, inv, needed_txns, actor,
                     allocated_by_invoice=allocated_by_invoice,
@@ -778,13 +794,25 @@ def auto_match(db: Session, year: int, month: int, actor: str = "system") -> dic
         norm = _normalize_name(txn.counterparty_name)
         if norm not in inv_groups:
             continue
-        candidates = [
-            inv for inv in inv_groups[norm]
-            if _dec(inv.total_amount) - allocated_by_invoice.get(inv.id, Decimal("0")) > TOLERANCE
-        ]
-        if len(candidates) >= 2:
+        candidates = sorted(
+            [
+                inv for inv in inv_groups[norm]
+                if _dec(inv.total_amount) - allocated_by_invoice.get(inv.id, Decimal("0")) > TOLERANCE
+            ],
+            key=lambda inv: (inv.issue_date or date.min, inv.id),
+        )
+        txn_remaining = _dec(txn.amount) - allocated_by_txn.get(txn.id, Decimal("0"))
+        selected: list[TaxInvoice] = []
+        selected_total = Decimal("0.0000")
+        for inv in candidates:
+            if selected_total >= txn_remaining - TOLERANCE:
+                break
+            selected.append(inv)
+            selected_total += _dec(inv.total_amount) - allocated_by_invoice.get(inv.id, Decimal("0"))
+        # 同名多票只有合计金额精确等于当前流水剩余金额时才允许自动拆分。
+        if len(selected) >= 2 and abs(selected_total - txn_remaining) <= TOLERANCE:
             cnt, allocated = _split_match_txn_to_invoices(
-                db, txn, candidates, actor,
+                db, txn, selected, actor,
                 allocated_by_invoice=allocated_by_invoice,
                 allocated_by_txn=allocated_by_txn,
             )
@@ -793,7 +821,7 @@ def auto_match(db: Session, year: int, month: int, actor: str = "system") -> dic
                 split_details.append({
                     "txnId": txn.id,
                     "txnAmount": str(_dec(txn.amount)),
-                    "invoiceIds": [c.id for c in candidates[:cnt]],
+                    "invoiceIds": [c.id for c in selected[:cnt]],
                 })
 
     # 第四轮：通过 Supplier 银行账户强匹配

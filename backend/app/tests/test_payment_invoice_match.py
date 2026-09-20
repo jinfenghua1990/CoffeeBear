@@ -418,3 +418,91 @@ def test_transaction_api_legacy_matched_follows_direction_specific_domain(client
     assert row["settlementMatchedAt"] is None
     assert row["invoicePaymentMatchedAt"]
     assert row["matchedAt"] == row["invoicePaymentMatchedAt"]
+
+
+
+def test_auto_match_only_mutates_selected_month_payments(db_session):
+    """8 月自动匹配不能顺手修改 7 月银行流水。"""
+    july_txn = _txn(
+        db_session, year=2026, month=7, day=20,
+        amount="500.00", name="跨月边界供应商",
+    )
+    inv = _invoice(
+        db_session, year=2026, month=8, day=5,
+        amount="500.00", seller="跨月边界供应商",
+    )
+    db_session.commit()
+
+    result = pm.auto_match(db_session, 2026, 8)
+    assert result["matched"] == 0
+    assert db_session.query(TaxInvoiceLink).filter_by(
+        invoice_id=inv.id,
+        target_type="bank_transaction",
+        target_id=july_txn.id,
+    ).count() == 0
+
+
+def test_auto_match_respects_rejected_pair(db_session):
+    """人工拒绝过的 pair 不得被自动匹配复活，也不能撞唯一约束。"""
+    txn = _txn(db_session, amount="888.00", name="拒绝测试供应商")
+    inv = _invoice(db_session, amount="888.00", seller="拒绝测试供应商")
+    rejected = TaxInvoiceLink(
+        invoice_id=inv.id,
+        target_type="bank_transaction",
+        target_id=txn.id,
+        allocated_amount=Decimal("888.00"),
+        match_method="rejected",
+        confirmed=False,
+    )
+    db_session.add(rejected)
+    db_session.commit()
+
+    result = pm.auto_match(db_session, 2026, 8)
+    assert result["matched"] == 0
+    rows = db_session.query(TaxInvoiceLink).filter_by(
+        invoice_id=inv.id,
+        target_type="bank_transaction",
+        target_id=txn.id,
+    ).all()
+    assert len(rows) == 1
+    assert rows[0].match_method == "rejected"
+    assert rows[0].confirmed is False
+
+
+def test_auto_split_does_not_partially_allocate_non_exact_same_name_group(db_session):
+    """同名只能作为候选；组合金额不精确相等时不能自动切一部分付款。"""
+    txn = _txn(db_session, amount="5000.00", name="拆分安全供应商")
+    inv_a = _invoice(db_session, amount="1000.00", seller="拆分安全供应商", day=8)
+    inv_b = _invoice(db_session, amount="1000.00", seller="拆分安全供应商", day=9)
+    db_session.commit()
+
+    result = pm.auto_match(db_session, 2026, 8)
+    assert result["matched"] == 0
+    assert result["splitMatched"] == 0
+    assert result["bigTxnSplitMatched"] == 0
+    assert db_session.query(TaxInvoiceLink).filter(
+        TaxInvoiceLink.invoice_id.in_([inv_a.id, inv_b.id]),
+        TaxInvoiceLink.target_type == "bank_transaction",
+    ).count() == 0
+    status = pm.txn_reconciliation_statuses(db_session, [txn.id])[txn.id]
+    assert status["status"] == "unmatched"
+
+
+def test_auto_split_allows_exact_multi_invoice_total(db_session):
+    """一笔付款拆多票时，只有多票剩余金额合计精确等于付款剩余金额才自动落库。"""
+    txn = _txn(db_session, amount="5000.00", name="精确拆分供应商")
+    inv_a = _invoice(db_session, amount="3000.00", seller="精确拆分供应商", day=8)
+    inv_b = _invoice(db_session, amount="2000.00", seller="精确拆分供应商", day=9)
+    db_session.commit()
+
+    result = pm.auto_match(db_session, 2026, 8)
+    assert result["bigTxnSplitMatched"] == 2
+    links = db_session.query(TaxInvoiceLink).filter(
+        TaxInvoiceLink.invoice_id.in_([inv_a.id, inv_b.id]),
+        TaxInvoiceLink.target_type == "bank_transaction",
+        TaxInvoiceLink.match_method != "rejected",
+    ).all()
+    assert len(links) == 2
+    assert sum((row.allocated_amount for row in links), Decimal("0")) == Decimal("5000.0000")
+    status = pm.txn_reconciliation_statuses(db_session, [txn.id])[txn.id]
+    assert status["status"] == "matched"

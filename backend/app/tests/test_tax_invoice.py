@@ -392,3 +392,205 @@ def test_list_invoices_match_filter_uses_live_business_domain_not_cached_status(
         )
     }
     assert invoice.id in unmatched_ids
+
+
+
+def test_multiline_tax_invoice_links_only_after_final_amount(db_session, monkeypatch, tmp_path):
+    """一票多行必须先汇总整票金额，再按订单号只关联一次。"""
+    from app.models.purchase import ExternalPurchaseOrder
+    from app.models.tax import TaxInvoice, TaxInvoiceLink
+
+    monkeypatch.setattr(service.settings, "DATA_DIR", str(tmp_path))
+    token = uuid4().hex[:10]
+    invoice_no = f"INV-MULTI-{token}"
+    order_no = f"PO-MULTI-{token}"
+    content = f"""发票号码,开票日期,销售方名称,购买方名称,项目名称,金额,税额,价税合计,发票状态,进销项,关联订单号
+{invoice_no},2026-09-03,多行供应商,本公司,商品A,60,7.8,67.8,正常,进项,{order_no}
+{invoice_no},2026-09-03,多行供应商,本公司,商品B,40,5.2,45.2,正常,进项,{order_no}
+""".encode()
+    db_session.add(ExternalPurchaseOrder(
+        external_order_id=order_no,
+        platform="other",
+        paid_amount=Decimal("113"),
+        order_amount=Decimal("113"),
+    ))
+    db_session.commit()
+
+    batch, duplicate = service.import_export(
+        db_session,
+        content=content,
+        original_name=f"multi-{token}.csv",
+        actor="pytest",
+        period_year=2026,
+        period_month=9,
+    )
+    assert duplicate is False
+    assert batch.recognized_row_count == 2
+    assert batch.matched_row_count == 2
+    assert batch.needs_review_count == 0
+
+    invoice = db_session.query(TaxInvoice).filter_by(invoice_number=invoice_no).one()
+    assert invoice.total_amount == Decimal("113.0000")
+    assert invoice.match_status == "matched"
+    links = db_session.query(TaxInvoiceLink).filter_by(invoice_id=invoice.id).all()
+    assert len(links) == 1
+    assert links[0].allocated_amount == Decimal("113.0000")
+    assert links[0].match_method == "source_ref"
+    assert links[0].confirmed is True
+
+
+def test_multiline_tax_invoice_with_multiple_order_refs_requires_review(db_session, monkeypatch, tmp_path):
+    """同一张发票的不同明细行出现不同订单号时不能逐行自动挂单。"""
+    from app.models.purchase import ExternalPurchaseOrder
+    from app.models.tax import TaxInvoice, TaxInvoiceImportRecord, TaxInvoiceLink
+
+    monkeypatch.setattr(service.settings, "DATA_DIR", str(tmp_path))
+    token = uuid4().hex[:10]
+    invoice_no = f"INV-MULTI-REF-{token}"
+    order_a = f"PO-A-{token}"
+    order_b = f"PO-B-{token}"
+    content = f"""发票号码,开票日期,销售方名称,购买方名称,项目名称,金额,税额,价税合计,发票状态,进销项,关联订单号
+{invoice_no},2026-09-04,多订单供应商,本公司,商品A,60,7.8,67.8,正常,进项,{order_a}
+{invoice_no},2026-09-04,多订单供应商,本公司,商品B,40,5.2,45.2,正常,进项,{order_b}
+""".encode()
+    db_session.add_all([
+        ExternalPurchaseOrder(external_order_id=order_a, platform="other", paid_amount=Decimal("67.8"), order_amount=Decimal("67.8")),
+        ExternalPurchaseOrder(external_order_id=order_b, platform="other", paid_amount=Decimal("45.2"), order_amount=Decimal("45.2")),
+    ])
+    db_session.commit()
+
+    batch, _ = service.import_export(
+        db_session,
+        content=content,
+        original_name=f"multi-ref-{token}.csv",
+        actor="pytest",
+        period_year=2026,
+        period_month=9,
+    )
+    assert batch.status == "needs_review"
+    assert batch.recognized_row_count == 2
+    assert batch.matched_row_count == 0
+    assert batch.needs_review_count == 2
+
+    invoice = db_session.query(TaxInvoice).filter_by(invoice_number=invoice_no).one()
+    assert invoice.match_status == "needs_review"
+    assert "多个不同关联订单号" in invoice.match_note
+    assert db_session.query(TaxInvoiceLink).filter_by(invoice_id=invoice.id).count() == 0
+    records = db_session.query(TaxInvoiceImportRecord).filter_by(import_id=batch.id).all()
+    assert {row.recognition_status for row in records} == {"needs_review"}
+
+
+def test_explicit_missing_order_ref_marks_batch_for_review(db_session, monkeypatch, tmp_path):
+    """税务清单明确给了订单号但系统找不到时，不能静默当作正常解析完成。"""
+    from app.models.tax import TaxInvoice
+
+    monkeypatch.setattr(service.settings, "DATA_DIR", str(tmp_path))
+    token = uuid4().hex[:10]
+    missing_order = f"PO-MISSING-{token}"
+    invoice_no = f"INV-MISSING-{token}"
+    content = CSV.replace("PO-001", missing_order).replace("INV-001", invoice_no).encode()
+
+    batch, _ = service.import_export(
+        db_session,
+        content=content,
+        original_name=f"missing-order-{token}.csv",
+        actor="pytest",
+        period_year=2026,
+        period_month=9,
+    )
+    assert batch.status == "needs_review"
+    assert batch.needs_review_count == 1
+    assert batch.matched_row_count == 0
+    invoice = db_session.query(TaxInvoice).filter_by(invoice_number=invoice_no).one()
+    assert invoice.match_status == "needs_review"
+    assert missing_order in invoice.match_note
+
+
+
+def test_source_ref_ambiguity_deactivates_stale_auto_link(db_session):
+    """来源订单号后来变成歧义时，历史自动关联不能继续假装已确认。"""
+    from app.models.purchase import ExternalPurchaseOrder
+    from app.models.tax import TaxInvoice, TaxInvoiceLink
+
+    token = uuid4().hex[:10]
+    order_no = f"PO-AMB-{token}"
+    invoice = TaxInvoice(
+        invoice_key=f"INV-AMB-{token}",
+        invoice_number=f"INV-AMB-{token}",
+        direction="input",
+        status="issued",
+        total_amount=Decimal("100"),
+        match_status="matched",
+    )
+    po_a = ExternalPurchaseOrder(
+        external_order_id=order_no, platform="1688",
+        paid_amount=Decimal("100"), order_amount=Decimal("100"),
+    )
+    po_b = ExternalPurchaseOrder(
+        external_order_id=order_no, platform="pdd",
+        paid_amount=Decimal("100"), order_amount=Decimal("100"),
+    )
+    db_session.add_all([invoice, po_a, po_b])
+    db_session.flush()
+    stale = TaxInvoiceLink(
+        invoice_id=invoice.id,
+        target_type="external_purchase_order",
+        target_id=po_a.id,
+        allocated_amount=Decimal("100"),
+        match_method="source_ref",
+        confidence=Decimal("1"),
+        confirmed=True,
+    )
+    db_session.add(stale)
+    db_session.commit()
+
+    outcome = service._auto_link(db_session, invoice, order_no, "input")
+    db_session.flush()
+
+    assert outcome is False
+    assert stale.confirmed is False
+    assert stale.confidence is None
+    assert invoice.match_status == "needs_review"
+    serialized = service.serialize_invoice(invoice, db=db_session)
+    assert serialized["businessMatchStatus"] == "needs_review"
+
+
+def test_noneligible_invoice_deactivates_historical_source_ref(db_session):
+    """红冲/非正数票不能继续沿用历史 source_ref 自动匹配状态。"""
+    from app.models.purchase import ExternalPurchaseOrder
+    from app.models.tax import TaxInvoice, TaxInvoiceLink
+
+    token = uuid4().hex[:10]
+    order_no = f"PO-RED-{token}"
+    invoice = TaxInvoice(
+        invoice_key=f"INV-RED-{token}",
+        invoice_number=f"INV-RED-{token}",
+        direction="input",
+        status="red",
+        total_amount=Decimal("-100"),
+        match_status="matched",
+    )
+    po = ExternalPurchaseOrder(
+        external_order_id=order_no, platform="other",
+        paid_amount=Decimal("100"), order_amount=Decimal("100"),
+    )
+    db_session.add_all([invoice, po])
+    db_session.flush()
+    stale = TaxInvoiceLink(
+        invoice_id=invoice.id,
+        target_type="external_purchase_order",
+        target_id=po.id,
+        allocated_amount=Decimal("100"),
+        match_method="source_ref",
+        confidence=Decimal("1"),
+        confirmed=True,
+    )
+    db_session.add(stale)
+    db_session.commit()
+
+    outcome = service._auto_link(db_session, invoice, order_no, "input")
+    db_session.flush()
+
+    assert outcome is False
+    assert stale.confirmed is False
+    assert invoice.match_status == "unmatched"
