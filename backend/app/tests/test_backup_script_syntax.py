@@ -17,6 +17,7 @@ ROOT = Path(__file__).resolve().parents[3]
         "scripts/backup.sh",
         "scripts/full-backup.sh",
         "scripts/backup-schedule.sh",
+        "scripts/native-start.sh",
         "scripts/restore-check.sh",
     ],
 )

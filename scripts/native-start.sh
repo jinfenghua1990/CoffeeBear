@@ -32,6 +32,14 @@ if [[ -f "$ROOT/scripts/update-guard.sh" ]]; then
   bash "$ROOT/scripts/update-guard.sh" install "$ROOT" >/dev/null
 fi
 
+# 自动维护备份 launchd 计划。ensure 只有在计划缺失、项目路径变化或脚本版本变化时才会刷新，
+# 避免每次普通重启都 bootout 正在运行的备份任务。
+if [[ "${BACKUP_SCHEDULE_AUTO_INSTALL:-1}" == "1" && -f "$ROOT/scripts/backup-schedule.sh" ]]; then
+  if ! bash "$ROOT/scripts/backup-schedule.sh" ensure >> "$LOG_DIR/backup-schedule.log" 2>&1; then
+    echo "[native-start] 备份计划自动维护失败，请查看 $LOG_DIR/backup-schedule.log"
+  fi
+fi
+
 # ---------- 后端：api / worker / beat ----------
 source "$VENV/bin/activate"
 BACKEND_DIR="$ROOT/backend"

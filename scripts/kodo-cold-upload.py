@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import base64
+import fcntl
 import hashlib
 import hmac
 import json
@@ -201,6 +202,15 @@ def main() -> int:
         )
     ).expanduser()
     backup_dir.mkdir(parents=True, exist_ok=True)
+
+    # 与 R2 共用同一把锁，避免两个云端备份任务同时生成/覆盖同一时间点的本地全量归档。
+    cloud_lock = (backup_dir / ".cloud-backup.lock").open("w")
+    try:
+        fcntl.flock(cloud_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        cloud_lock.close()
+        print("已有 R2/Kodo 云端备份任务在运行，本次 Kodo 跳过。")
+        return 0
 
     # 冷备要求“每日全量容灾”：先在本地生成并校验完整恢复点。
     # 这里仍然只读取本地文件；后续对 Kodo 只发 POST 上传请求。

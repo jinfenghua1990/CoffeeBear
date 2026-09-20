@@ -312,10 +312,22 @@ def run_daily(config: dict[str, Any], directory: Path, state: dict[str, Any]) ->
         base_source = directory / base_name
         if not base_source.is_file() or (base_hash and sha256_file(base_source) != base_hash):
             raise RuntimeError(f"base manifest 本地校验失败：{base_source}")
-        base_object_key = f"{root_key}/{base_source.name}"
-        put_file(config, base_object_key, base_source)
+        base_digest = base_hash or sha256_file(base_source)
+        previous = modules_state.get("base_manifest") if isinstance(modules_state, dict) else None
+        if isinstance(previous, dict) and previous.get("sha256") == base_digest and previous.get("object_key"):
+            base_object_key = str(previous["object_key"])
+            print(f"模块未变化，跳过上传：base_manifest -> {base_object_key}")
+        else:
+            base_object_key = f"{prefix}/modules/base_manifest/{base_digest}/{base_source.name}"
+            print(f"上传变化模块：base_manifest -> {base_object_key}")
+            put_file(config, base_object_key, base_source)
+            modules_state["base_manifest"] = {
+                "sha256": base_digest,
+                "object_key": base_object_key,
+                "name": base_source.name,
+            }
         refs["base_manifest"] = {
-            "sha256": base_hash or sha256_file(base_source),
+            "sha256": base_digest,
             "objectKey": base_object_key,
             "name": base_source.name,
         }
@@ -403,12 +415,13 @@ def main() -> int:
     directory = backup_dir()
     directory.mkdir(parents=True, exist_ok=True)
 
-    lock_path = directory / ".r2-backup.lock"
+    # R2 与 Kodo 共用云端备份锁，避免同时读写同一恢复点文件。
+    lock_path = directory / ".cloud-backup.lock"
     with lock_path.open("w") as lock:
         try:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
-            print("已有 R2 备份任务在运行，本次跳过。")
+            print("已有 R2/Kodo 云端备份任务在运行，本次 R2 跳过。")
             return 0
 
         try:

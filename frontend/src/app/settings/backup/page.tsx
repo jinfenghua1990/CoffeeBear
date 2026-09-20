@@ -187,6 +187,7 @@ function StrategyOverviewCard({
 function ConfigCard({
   title,
   tone,
+  enabled,
   enabledText,
   schedule,
   content,
@@ -196,6 +197,7 @@ function ConfigCard({
 }: {
   title: string;
   tone: "green" | "blue";
+  enabled: boolean;
   enabledText: string;
   schedule: string;
   content: string[];
@@ -213,8 +215,8 @@ function ConfigCard({
       <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-100 pb-3">
         <div className={"text-[12px] font-semibold " + titleCls}>{title}</div>
         <div className="flex items-center gap-2">
-          <span className={"relative inline-flex h-5 w-9 items-center rounded-full " + (tone === "green" ? "bg-emerald-500" : "bg-blue-600")}>
-            <span className="absolute right-0.5 h-4 w-4 rounded-full bg-white shadow-sm" />
+          <span className={"relative inline-flex h-5 w-9 items-center rounded-full transition " + (enabled ? (tone === "green" ? "bg-emerald-500" : "bg-blue-600") : "bg-slate-200")}>
+            <span className={"absolute h-4 w-4 rounded-full bg-white shadow-sm transition-all " + (enabled ? "right-0.5" : "left-0.5")} />
           </span>
           <span className="text-[10px] font-medium text-slate-600">{enabledText}</span>
         </div>
@@ -254,7 +256,7 @@ function ConfigCard({
           <div>
             <div className="text-[10px] font-medium text-slate-600">状态</div>
             <div className="mt-1 flex items-center gap-2 text-[10px] text-slate-500">
-              <StatusDot tone="amber" />
+              <StatusDot tone={enabled ? "green" : "amber"} />
               {status}
             </div>
           </div>
@@ -730,8 +732,18 @@ export default function BackupSettingsPage() {
               <div className="rounded-xl border border-amber-100 bg-amber-50/35 p-3">
                 <div className="mb-3 text-center text-[11px] font-semibold text-slate-800">存储目标</div>
                 <div className="space-y-2">
-                  <ArchitectureItem icon="cloud" title="Cloudflare R2（主存储）" desc="S3 兼容对象存储 · 待配置" tone="amber" />
-                  <ArchitectureItem icon="box" title="七牛云 Kodo（国内冷备）" desc="标准存储 · 只写入 · 待密钥" tone="blue" />
+                  <ArchitectureItem
+                    icon="cloud"
+                    title="Cloudflare R2（主存储）"
+                    desc={r2Loading ? "正在读取配置" : r2Config?.configured && r2Config.enabled ? "每日模块化 + 周期全量 · 已启用" : r2Config?.configured ? "已配置 · 当前停用" : "S3 兼容对象存储 · 待配置"}
+                    tone={r2Config?.configured && r2Config.enabled ? "green" : "amber"}
+                  />
+                  <ArchitectureItem
+                    icon="box"
+                    title="七牛云 Kodo（国内冷备）"
+                    desc={kodoLoading ? "正在读取配置" : kodoConfig?.configured && kodoConfig.enabled ? "标准存储 · 只写入 · 已启用" : kodoConfig?.configured ? "已配置 · 当前停用" : "标准存储 · 只写入 · 待密钥"}
+                    tone={kodoConfig?.configured && kodoConfig.enabled ? "green" : "amber"}
+                  />
                   <ArchitectureItem icon="nas" title="本地 NAS（可选）" desc="本地冷备 / 第三副本" tone="slate" />
                   <ArchitectureItem icon="box" title="其他存储（可扩展）" desc="AWS S3 / 阿里云 / 本地硬盘等" tone="slate" />
                 </div>
@@ -745,7 +757,8 @@ export default function BackupSettingsPage() {
               <ConfigCard
                 title="日常备份 · 模块化"
                 tone="green"
-                enabledText="策略已定义"
+                enabled={Boolean(r2Config?.configured && r2Config.enabled)}
+                enabledText={r2Config?.configured && r2Config.enabled ? "已启用" : "待配置"}
                 schedule="计划：每天 03:00"
                 content={["数据库（增量 / 变化检测）", "业务文件（变更检测）", "系统配置（变更检测）"]}
                 retention="计划：最近 30 个恢复点"
@@ -755,6 +768,7 @@ export default function BackupSettingsPage() {
               <ConfigCard
                 title="全量备份 · 容灾级"
                 tone="blue"
+                enabled={Boolean(r2Config?.configured && r2Config.enabled)}
                 enabledText={r2Config?.configured && r2Config.enabled ? "已启用" : "待配置"}
                 schedule={`计划：每 ${r2Config?.fullIntervalDays || 10} 天 03:00`}
                 content={["完整数据库", "全部业务文件", "系统配置", "应用程序 / Docker 配置 / 必要文件", "恢复脚本 / 完整性清单"]}
@@ -854,6 +868,7 @@ export default function BackupSettingsPage() {
             <ConfigCard
               title="日常备份 · 模块化"
               tone="green"
+              enabled={Boolean(r2Config?.configured && r2Config.enabled)}
               enabledText={r2Config?.configured && r2Config.enabled ? "已启用" : "待配置"}
               schedule="每天 03:00"
               content={["数据库：内容 Hash 变化检测", "业务文件：文件变化检测", "系统配置：Hash 变化检测", "应用未更新时不重复上传"]}
@@ -864,6 +879,7 @@ export default function BackupSettingsPage() {
             <ConfigCard
               title="全量备份 · 容灾级"
               tone="blue"
+              enabled={Boolean(r2Config?.configured && r2Config.enabled)}
               enabledText={r2Config?.configured && r2Config.enabled ? "已启用" : "待配置"}
               schedule={`每 ${r2Config?.fullIntervalDays || 10} 天 03:00`}
               content={["应用源码 / 锁定依赖", "可用时 Docker 镜像", "完整 PostgreSQL", "全部业务文件", "运行配置 / manifest / Hash 校验"]}
@@ -1025,7 +1041,7 @@ export default function BackupSettingsPage() {
                   <div className="border-b border-slate-100 px-4 py-3">
                     <div className="text-[11px] font-semibold text-slate-700">R2 主备份配置</div>
                     <div className="mt-1 text-[11px] leading-5 text-slate-400">
-                      密钥加密保存在服务端，不回显到页面。每日 03:00 自动执行模块化备份，并按全量间隔自动生成完整容灾恢复点。
+                      密钥加密保存在服务端，不回显到页面。每日 03:00 自动执行模块化备份，并按全量间隔自动生成完整容灾恢复点；Mac 原生运行会自动维护对应 launchd 计划。
                     </div>
                   </div>
                   <div className="grid gap-3 p-4 md:grid-cols-2">
@@ -1074,7 +1090,7 @@ export default function BackupSettingsPage() {
                   <div className="border-b border-slate-100 px-4 py-3">
                     <div className="text-[10px] font-semibold text-slate-700">Kodo 上传配置</div>
                     <div className="mt-1 text-[9px] leading-4 text-slate-400">
-                      后续只需要把 Bucket、上传域名、Access Key、Secret Key 填进来即可。密钥保存后加密存储，不会在页面回显。
+                      后续只需要把 Bucket、上传域名、Access Key、Secret Key 填进来即可。密钥保存后加密存储，不会在页面回显；Mac 原生运行会自动维护每日 04:00 的冷备计划。
                     </div>
                   </div>
                   <div className="grid gap-3 p-4 md:grid-cols-2">

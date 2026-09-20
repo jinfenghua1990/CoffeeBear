@@ -15,6 +15,7 @@ BACKUP_PLIST="$LAUNCH_DIR/$BACKUP_LABEL.plist"
 RESTORE_PLIST="$LAUNCH_DIR/$RESTORE_LABEL.plist"
 R2_PLIST="$LAUNCH_DIR/$R2_LABEL.plist"
 KODO_PLIST="$LAUNCH_DIR/$KODO_LABEL.plist"
+SCHEDULE_STAMP="$LAUNCH_DIR/.ecommerce-dashboard.backup-schedule.sha256"
 
 # 可通过环境变量覆盖，但默认避开白天业务时间。
 BACKUP_HOUR="${BACKUP_HOUR:-2}"
@@ -126,6 +127,21 @@ bootout_if_loaded() {
   launchctl bootout "gui/$UID_NOW/$label" >/dev/null 2>&1 || true
 }
 
+schedule_signature() {
+  {
+    printf '%s\n' "$ROOT"
+    cat "$0"
+  } | shasum -a 256 | awk '{print $1}'
+}
+
+all_schedules_loaded() {
+  local label
+  for label in "$BACKUP_LABEL" "$RESTORE_LABEL" "$R2_LABEL" "$KODO_LABEL"; do
+    launchctl print "gui/$UID_NOW/$label" >/dev/null 2>&1 || return 1
+  done
+  return 0
+}
+
 case "$ACTION" in
   install)
     mkdir -p "$LAUNCH_DIR"
@@ -145,6 +161,7 @@ case "$ACTION" in
     launchctl bootstrap "gui/$UID_NOW" "$RESTORE_PLIST"
     launchctl bootstrap "gui/$UID_NOW" "$R2_PLIST"
     launchctl bootstrap "gui/$UID_NOW" "$KODO_PLIST"
+    schedule_signature > "$SCHEDULE_STAMP"
     echo "已安装本地基础备份：每天 $(printf '%02d:%02d' "$BACKUP_HOUR" "$BACKUP_MINUTE")"
     echo "已安装 R2 主备份：每天 $(printf '%02d:%02d' "$R2_HOUR" "$R2_MINUTE")（每日模块化，默认每 10 天全量）"
     echo "已安装 Kodo 每日全量冷备上传：每天 $(printf '%02d:%02d' "$KODO_HOUR" "$KODO_MINUTE")（KODO_COLD_ENABLED=0 时仅跳过，不上传）"
@@ -154,9 +171,21 @@ case "$ACTION" in
   uninstall)
     bootout_if_loaded "$BACKUP_LABEL"
     bootout_if_loaded "$RESTORE_LABEL"
+    bootout_if_loaded "$R2_LABEL"
     bootout_if_loaded "$KODO_LABEL"
-    rm -f "$BACKUP_PLIST" "$RESTORE_PLIST" "$R2_PLIST" "$KODO_PLIST"
+    rm -f "$BACKUP_PLIST" "$RESTORE_PLIST" "$R2_PLIST" "$KODO_PLIST" "$SCHEDULE_STAMP"
     echo "已卸载本地基础备份、R2 主备份、Kodo 冷备上传与恢复演练计划。"
+    ;;
+  ensure)
+    mkdir -p "$LAUNCH_DIR"
+    wanted_signature="$(schedule_signature)"
+    current_signature="$(cat "$SCHEDULE_STAMP" 2>/dev/null || true)"
+    if [[ "$current_signature" != "$wanted_signature" ]] || ! all_schedules_loaded; then
+      echo "备份计划缺失或已变更，自动刷新 launchd 配置。"
+      "$0" install
+    else
+      echo "备份计划已安装且为当前版本，无需刷新。"
+    fi
     ;;
   status)
     echo "==> $BACKUP_LABEL"
@@ -169,7 +198,7 @@ case "$ACTION" in
     launchctl print "gui/$UID_NOW/$KODO_LABEL" 2>/dev/null | sed -n '1,25p' || echo "未安装/未加载"
     ;;
   *)
-    echo "用法：$0 {install|uninstall|status}"
+    echo "用法：$0 {install|ensure|uninstall|status}"
     exit 2
     ;;
 esac
