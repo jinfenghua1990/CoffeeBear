@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   systemUpdateApi,
   type SystemUpdateMode,
+  type SystemUpdateLevel,
   type SystemUpdateReadiness,
   type SystemUpdateSettings,
   type SystemUpdateStatus,
@@ -20,7 +21,25 @@ const MODE_COPY: Record<SystemUpdateMode, { title: string; desc: string }> = {
   },
   auto_update: {
     title: "自动安装",
-    desc: "后台定时检查，并在维护窗口内自动备份、更新、重启和验证。",
+    desc: "后台定时检查，并只对符合“自动安装范围”的版本在维护窗口内自动更新。",
+  },
+};
+
+const LEVEL_COPY: Record<SystemUpdateLevel, { label: string; desc: string; tone: string }> = {
+  patch: {
+    label: "小版本",
+    desc: "UI、文案、普通 Bug 与低风险调整；默认允许自动安装。",
+    tone: "bg-emerald-50 text-emerald-700 ring-emerald-200",
+  },
+  feature: {
+    label: "功能版本",
+    desc: "新功能、数据模型或数据库迁移；默认等待人工确认。",
+    tone: "bg-blue-50 text-blue-700 ring-blue-200",
+  },
+  major: {
+    label: "重大版本",
+    desc: "部署、安全或应用核心结构变化；默认必须人工确认。",
+    tone: "bg-rose-50 text-rose-700 ring-rose-200",
   },
 };
 
@@ -184,7 +203,8 @@ export default function SystemUpdatePage() {
       || source.mode !== draft.mode
       || source.checkIntervalMinutes !== draft.checkIntervalMinutes
       || source.autoUpdateHour !== draft.autoUpdateHour
-      || source.autoUpdateWindowMinutes !== draft.autoUpdateWindowMinutes;
+      || source.autoUpdateWindowMinutes !== draft.autoUpdateWindowMinutes
+      || source.autoInstallLevel !== draft.autoInstallLevel;
   }, [draft, status]);
 
   async function refreshRuntime() {
@@ -259,6 +279,7 @@ export default function SystemUpdatePage() {
         checkIntervalMinutes: draft.checkIntervalMinutes,
         autoUpdateHour: draft.autoUpdateHour,
         autoUpdateWindowMinutes: draft.autoUpdateWindowMinutes,
+        autoInstallLevel: draft.autoInstallLevel,
       });
       setDraft(result.settings);
       setNotice("更新策略已保存并立即生效。");
@@ -304,6 +325,9 @@ export default function SystemUpdatePage() {
   const installDisabled = Boolean(reason);
   const latestSubject = status.latestCommit?.subject || status.changes?.[0]?.subject || "";
   const readinessTone = readiness?.ready ? "text-emerald-700 bg-emerald-50" : "text-rose-700 bg-rose-50";
+  const updateLevel = (status.updateLevel || "patch") as SystemUpdateLevel;
+  const levelMeta = LEVEL_COPY[updateLevel];
+  const autoInstallLevelMeta = LEVEL_COPY[draft.autoInstallLevel || "patch"];
 
   return (
     <div className="pb-10">
@@ -321,6 +345,11 @@ export default function SystemUpdatePage() {
               <span className={`inline-flex rounded-full px-2.5 py-1 text-[10px] font-medium ring-1 ring-inset ${state.tone}`}>
                 {state.label}
               </span>
+              {status.updateAvailable && (
+                <span className={`inline-flex rounded-full px-2.5 py-1 text-[10px] font-medium ring-1 ring-inset ${levelMeta.tone}`}>
+                  {levelMeta.label}
+                </span>
+              )}
               {!isContainer && (
                 <span className="text-[10px] text-slate-400">
                   {status.settings.remote}/{status.settings.branch}
@@ -341,8 +370,38 @@ export default function SystemUpdatePage() {
             <div className="mt-4 flex flex-wrap gap-x-5 gap-y-1 text-[10px] text-slate-400">
               <span>最后检查：{fmtDate(status.lastCheckAt)}</span>
               {status.updateAvailable && <span>待更新：{changeCount || 1} 项</span>}
+              {status.changedFileCount ? <span>文件变化：{status.changedFileCount} 个</span> : null}
+              {status.hasMigration && <span className="font-medium text-amber-600">包含数据库迁移</span>}
               {status.lastInstallAt && <span>上次安装：{fmtDate(status.lastInstallAt)}</span>}
             </div>
+
+            {status.updateAvailable && (
+              <div className="mt-4 rounded-xl border border-slate-100 bg-slate-50/70 p-3">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div>
+                    <div className="text-[11px] font-semibold text-slate-700">影响模块</div>
+                    <div className="mt-1 text-[9px] text-slate-400">
+                      系统按变更文件自动识别；安装仍按整套系统原子更新，避免模块版本不一致。
+                    </div>
+                  </div>
+                  <span className={`rounded-full px-2 py-0.5 text-[9px] font-medium ${status.autoInstallEligible ? "bg-emerald-50 text-emerald-700" : "bg-amber-50 text-amber-700"}`}>
+                    {status.autoInstallEligible ? "符合自动安装策略" : "等待人工确认"}
+                  </span>
+                </div>
+                <div className="mt-2 flex flex-wrap gap-1.5">
+                  {(status.impactedModules?.length ? status.impactedModules : ["其他 / 公共代码"]).map((module) => (
+                    <span key={module} className="rounded-md bg-white px-2 py-1 text-[10px] font-medium text-slate-600 ring-1 ring-inset ring-slate-200">
+                      {module}
+                    </span>
+                  ))}
+                </div>
+                {status.classificationReasons?.length ? (
+                  <div className="mt-2 text-[9px] leading-4 text-slate-400">
+                    判定依据：{status.classificationReasons.join("；")}
+                  </div>
+                ) : null}
+              </div>
+            )}
 
             {status.running && (
               <div className="mt-4 rounded-xl border border-blue-100 bg-blue-50/60 p-3">
@@ -532,6 +591,44 @@ export default function SystemUpdatePage() {
 
             <div className="mt-2 min-h-[42px] rounded-lg bg-slate-50 px-3 py-2 text-[10px] leading-5 text-slate-500">
               {MODE_COPY[draft.mode].desc}
+            </div>
+
+            <div className="mt-3 rounded-xl border border-slate-100 p-3">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <div className="text-[11px] font-semibold text-slate-700">自动安装范围</div>
+                  <div className="mt-0.5 text-[9px] leading-4 text-slate-400">
+                    当前：{autoInstallLevelMeta.label}及以下。建议保持“小版本”，功能版本与重大版本由你确认。
+                  </div>
+                </div>
+                <select
+                  value={draft.autoInstallLevel}
+                  onChange={(event) => patchDraft({ autoInstallLevel: event.target.value as SystemUpdateLevel })}
+                  className="app-input-control h-9 rounded-lg px-3 text-[11px]"
+                  disabled={draft.mode !== "auto_update"}
+                >
+                  <option value="patch">仅小版本自动安装</option>
+                  <option value="feature">小版本 + 功能版本</option>
+                  <option value="major">所有版本</option>
+                </select>
+              </div>
+              <div className="mt-2 grid gap-2 sm:grid-cols-3">
+                {(Object.keys(LEVEL_COPY) as SystemUpdateLevel[]).map((level) => {
+                  const meta = LEVEL_COPY[level];
+                  const auto = ["patch", "feature", "major"].indexOf(level) <= ["patch", "feature", "major"].indexOf(draft.autoInstallLevel);
+                  return (
+                    <div key={level} className="rounded-lg bg-slate-50 px-3 py-2">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-[10px] font-semibold text-slate-700">{meta.label}</span>
+                        <span className={"text-[9px] " + (draft.mode === "auto_update" && auto ? "text-emerald-600" : "text-slate-400")}>
+                          {draft.mode === "auto_update" && auto ? "自动安装" : "人工确认"}
+                        </span>
+                      </div>
+                      <div className="mt-1 text-[9px] leading-4 text-slate-400">{meta.desc}</div>
+                    </div>
+                  );
+                })}
+              </div>
             </div>
 
             <div className="mt-3 grid gap-3 sm:grid-cols-3">
