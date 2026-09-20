@@ -278,10 +278,13 @@ async def upload_file(
     # 银行交易明细上传即解析入流水表（指纹幂等，重复上传无害）；
     # 回单详情同为 category=bank，必须用 original_name 区分，避免误解析。
     display_name = original_name.strip() or file.filename or ""
+    company_name = company or finance_service.DEFAULT_COMPANY
+    can_parse_zjrc = company_name == finance_service.DEFAULT_COMPANY
     if (
         category == "bank"
         and "交易明细" in display_name
         and display_name.lower().endswith(".xlsx")
+        and can_parse_zjrc
     ):
         try:
             bank_result = reconciliation_service.import_bank_xlsx(
@@ -294,6 +297,10 @@ async def upload_file(
         except (ValueError, RuntimeError) as exc:
             # 原件归档已成功，解析失败不让上传整体失败，仅提示
             result["bankImportError"] = str(exc)
+    elif category == "bank" and "交易明细" in display_name and not can_parse_zjrc:
+        result["bankImportSkipped"] = (
+            "当前主体尚未配置独立银行账户解析规则；原件已归档，未写入浙江农信流水。"
+        )
     return result
 
 
