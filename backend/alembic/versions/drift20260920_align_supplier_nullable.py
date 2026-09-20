@@ -23,6 +23,7 @@ def _ensure_fk(
     target_columns: list[str],
     *,
     ondelete: str | None = None,
+    operations=op,
 ) -> None:
     """Create the expected FK and tolerate a pre-existing identical constraint.
 
@@ -38,7 +39,7 @@ def _ensure_fk(
     target_column = target_columns[0]
     delete_sql = f" ON DELETE {ondelete}" if ondelete else ""
 
-    op.execute(
+    operations.execute(
         sa.text(
             f"""
             DO $$
@@ -58,7 +59,7 @@ def _ensure_fk(
         )
     )
 
-    row = op.get_bind().execute(
+    row = operations.get_bind().execute(
         sa.text(
             """
             SELECT
