@@ -119,14 +119,28 @@ type PaymentMatchRow = {
   id: number;
   txnDate: string;
   counterpartyName: string;
+  counterpartyAccount?: string;
   amount: string;
   voucherNo: string;
   summary: string;
+  accountNo?: string;
+  accountName?: string;
   invoices: PaymentMatchInvoice[];
   matchedAmount: string;
   remaining: string;
   status: "matched" | "partial" | "unmatched" | string;
   suggestedInvoiceIds: number[];
+};
+type PaymentMatchPoolInvoiceLink = PaymentMatchInvoice & {
+  txnId: number | null;
+  txnDate: string;
+  txnAmount: string;
+  counterpartyName: string;
+  counterpartyAccount: string;
+  voucherNo: string;
+  summary: string;
+  accountNo: string;
+  accountName: string;
 };
 type PaymentMatchPoolInvoice = {
   id: number;
@@ -136,8 +150,11 @@ type PaymentMatchPoolInvoice = {
   totalAmount: string;
   bankLinkedAmount: string;
   remaining: string;
+  bankMatchStatus: "matched" | "partial" | "unmatched" | string;
   matchStatus: string;
+  links: PaymentMatchPoolInvoiceLink[];
   suggested: boolean;
+  suggestedPaymentIds: number[];
 };
 type PaymentMatchOverview = {
   year: number;
@@ -152,6 +169,13 @@ type PaymentMatchOverview = {
     matchedCount: number;
     partialCount: number;
     unmatchedCount: number;
+    invoiceTotal: string;
+    invoiceMatchedTotal: string;
+    invoiceOutstandingTotal: string;
+    invoiceCount: number;
+    invoiceMatchedCount: number;
+    invoicePartialCount: number;
+    invoiceUnmatchedCount: number;
   };
 };
 
@@ -182,6 +206,36 @@ type CorporatePaymentRow = {
   invoiceStatus: string;
   purchaseOrderNos: string[];
 };
+type CorporateInvoicePayment = {
+  linkId: number;
+  paymentId: number;
+  paymentDate: string;
+  paymentAccount: string;
+  paymentAccountName: string;
+  counterpartyAccount: string;
+  voucherNo: string;
+  summary: string;
+  paymentAmount: string;
+  allocatedAmount: string;
+  paymentMatchedTotal: string;
+  paymentStatus: string;
+};
+type CorporateInvoiceRow = {
+  invoiceId: number;
+  invoiceNumber: string;
+  invoiceDate: string;
+  invoiceType: string;
+  supplierName: string;
+  supplierTaxId: string;
+  invoiceAmountExclTax: string;
+  invoiceTaxAmount: string;
+  invoiceTotalAmount: string;
+  invoiceCorporatePaidTotal: string;
+  invoiceOutstandingAmount: string;
+  invoiceStatus: "paid" | "partial" | "unpaid" | string;
+  purchaseOrderNos: string[];
+  payments: CorporateInvoicePayment[];
+};
 type CorporatePaymentProductDetail = {
   invoiceId: number;
   invoiceNumber: string;
@@ -209,7 +263,11 @@ type CorporatePaymentReport = {
     invoiceTotal: string;
     outstandingTotal: string;
     productRowCount: number;
+    paidInvoiceCount?: number;
+    partialInvoiceCount?: number;
+    unpaidInvoiceCount?: number;
   };
+  invoiceRows: CorporateInvoiceRow[];
   rows: CorporatePaymentRow[];
   productDetails: CorporatePaymentProductDetail[];
 };
@@ -321,6 +379,7 @@ export default function MonthlySendPage() {
   const [corporatePayment, setCorporatePayment] = useState<CorporatePaymentReport | null>(null);
   const [matchLoading, setMatchLoading] = useState(false);
   const [pickerTxn, setPickerTxn] = useState<PaymentMatchRow | null>(null);
+  const [pickerInvoice, setPickerInvoice] = useState<PaymentMatchPoolInvoice | null>(null);
   const [pickerQuery, setPickerQuery] = useState("");
   const [pickerScope, setPickerScope] = useState<"month" | "all">("month");
   const [allInvoices, setAllInvoices] = useState<PickerInvoice[]>([]);
@@ -341,52 +400,7 @@ export default function MonthlySendPage() {
   const pickerRequestSeq = useRef(0);
   const uploadKind = useRef<"交易明细" | "回单详情">("交易明细");
 
-  const corporatePaymentGroups = useMemo(() => {
-    const grouped = new Map<number, {
-      paymentId: number;
-      paymentDate: string;
-      paymentAccount: string;
-      paymentAccountName: string;
-      counterpartyAccount: string;
-      voucherNo: string;
-      summary: string;
-      paymentAmount: string;
-      paymentMatchedTotal: string;
-      paymentStatus: string;
-      supplierNames: string[];
-      purchaseOrderNos: string[];
-      invoices: CorporatePaymentRow[];
-    }>();
-    for (const row of corporatePayment?.rows || []) {
-      let group = grouped.get(row.paymentId);
-      if (!group) {
-        group = {
-          paymentId: row.paymentId,
-          paymentDate: row.paymentDate,
-          paymentAccount: row.paymentAccount,
-          paymentAccountName: row.paymentAccountName,
-          counterpartyAccount: row.counterpartyAccount,
-          voucherNo: row.voucherNo,
-          summary: row.summary,
-          paymentAmount: row.paymentAmount,
-          paymentMatchedTotal: row.paymentMatchedTotal,
-          paymentStatus: row.paymentStatus,
-          supplierNames: [],
-          purchaseOrderNos: [],
-          invoices: [],
-        };
-        grouped.set(row.paymentId, group);
-      }
-      group.invoices.push(row);
-      if (row.supplierName && !group.supplierNames.includes(row.supplierName)) group.supplierNames.push(row.supplierName);
-      for (const orderNo of row.purchaseOrderNos) {
-        if (orderNo && !group.purchaseOrderNos.includes(orderNo)) group.purchaseOrderNos.push(orderNo);
-      }
-    }
-    return Array.from(grouped.values()).sort((a, b) =>
-      a.paymentDate.localeCompare(b.paymentDate) || a.paymentId - b.paymentId
-    );
-  }, [corporatePayment]);
+  const corporateInvoices = corporatePayment?.invoiceRows || [];
 
   const selectedEntity = entities.find((row) => row.id === entityId) ?? null;
   const companyName = selectedEntity?.name ?? "";
@@ -622,6 +636,30 @@ export default function MonthlySendPage() {
       loadMatch();
     } catch (e) {
       setMsg(`标记失败：${e instanceof Error ? e.message : String(e)}`);
+    } finally { setBusy(false); }
+  }
+
+  async function matchInvoiceToPayment(invoice: PaymentMatchPoolInvoice, txn: PaymentMatchRow) {
+    const invoiceRemain = Number(invoice.remaining) || 0;
+    const paymentRemain = Number(txn.remaining) || 0;
+    const alloc = Math.min(invoiceRemain, paymentRemain);
+    if (alloc <= 0) { setMsg("当前发票或付款已没有可核对金额"); return; }
+    setBusy(true); setMsg("");
+    try {
+      const res = await authenticatedFetch("/api/v1/finance/payment-invoice-match/link", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ txn_id: txn.id, invoice_id: invoice.id, allocated_amount: alloc.toFixed(2) }),
+      });
+      const d = await res.json();
+      if (!res.ok) throw new Error(d.detail || "核对失败");
+      setMsg(`已核对：发票 ${invoice.invoiceNumber || "未记录号码"} ↔ ${txn.txnDate} 银行付款 ${money(alloc)}`);
+      setPickerInvoice(null);
+      setPickerQuery("");
+      await loadMatch();
+      await loadCorporatePayment();
+    } catch (e) {
+      setMsg(`核对失败：${e instanceof Error ? e.message : String(e)}`);
     } finally { setBusy(false); }
   }
 
