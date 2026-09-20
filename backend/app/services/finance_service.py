@@ -282,6 +282,30 @@ def _delivery_filename(year: int, month: int, f: ArchiveFile) -> str | None:
     return None
 
 
+def require_business_cost_ready(
+    db: Session, *, company: str, year: int, month: int
+) -> dict[str, Any]:
+    """校验月结销售成本是否能由业务库完整计算，不再依赖月结页上传源文件。"""
+    from app.services import finance_sales_report_service as sales_report_service
+
+    template = sales_report_service.get_or_create_template(db, company)
+    report = sales_report_service.build_report(db, year, month, template)
+    summary = report.get("summary") or {}
+    if summary.get("costIncomplete"):
+        missing = summary.get("costMissingDetail") or []
+        codes = "、".join(
+            str(item.get("skuCode") or item.get("skuName") or "未知SKU")
+            for item in missing[:12]
+        )
+        suffix = "…" if len(missing) > 12 else ""
+        raise ValueError(
+            "销售成本数据不完整，请先在采购/入库模块补齐以下 SKU 的入库成本："
+            + (codes or "存在缺失成本的销售 SKU")
+            + suffix
+        )
+    return summary
+
+
 def package_period(db: Session, company: str, year: int, month: int,
                    actor: str = "system", include: list[str] | None = None) -> FinanceDeliveryPackage:
     """打包账期交付 ZIP；每次生成新版本号，ZIP 落 output/V{n}，绝不覆盖。
@@ -336,9 +360,13 @@ def package_period(db: Session, company: str, year: int, month: int,
     if want_receipt and not any("回单详情" in name for _, name in selected):
         raise ValueError("缺少「银行回单详情」文件，请先上传")
 
-    # 无票收入 = 销售总金额 − 已开票金额，勾选时打包动态生成。
+    # 无票收入直接由销售中心 + 采购入库成本事实动态生成。
+    # 缺销售成本时禁止生成错误交付包，但不再要求月结页重复上传业务源文件。
     unbilled_content: bytes | None = None
     if want_unbilled:
+        require_business_cost_ready(
+            db, company=company, year=year, month=month
+        )
         from app.services import finance_sales_report_service as sales_report_service
         unbilled_content = sales_report_service.unbilled_income_xlsx(
             sales_report_service.build_unbilled_income_report(db, year, month, company=company)
