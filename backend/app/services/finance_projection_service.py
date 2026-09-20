@@ -340,6 +340,48 @@ def project_inbound_document(db: Session, row: JackyunGoodsDocument) -> dict[str
     )
 
 
+def project_domestic_logistics_period(
+    db: Session, *, year: int, month: int
+) -> dict[str, int]:
+    from app.services import logistics_service
+
+    entity = finance_center_service.resolve_entity(db)
+    payload = logistics_service.monthly_finance_cost(db, year, month)
+    amount = _money(payload.get("amount"))
+    event = datetime(year, month, 1, tzinfo=ZoneInfo(settings.TZ))
+    specs = [
+        EntrySpec(
+            legal_entity_id=entity.id,
+            business_scope="domestic",
+            source_type="domestic_logistics_period",
+            source_id=f"{year:04d}-{month:02d}",
+            source_no=f"{year:04d}-{month:02d}",
+            category="domestic_logistics",
+            direction="expense",
+            currency="CNY",
+            amount=amount,
+            value_type=str(payload.get("valueType") or "estimated"),
+            settlement_status="settled" if payload.get("valueType") == "actual" else "pending",
+            invoice_status="unknown",
+            occurred_at=event,
+            cash_effect=False,
+            profit_effect=True,
+            note=(
+                "物流实际账单成本"
+                if payload.get("valueType") == "actual"
+                else "物流预估成本"
+            ),
+            raw=payload,
+        )
+    ]
+    return _reconcile_source(
+        db,
+        source_type="domestic_logistics_period",
+        source_id=f"{year:04d}-{month:02d}",
+        specs=specs,
+    )
+
+
 def project_foreign_order(db: Session, row: ForeignTradeOrder) -> dict[str, int]:
     entity = finance_center_service.resolve_entity(db, row.seller_legal_entity_id)
     if row.seller_legal_entity_id is None:
@@ -626,6 +668,7 @@ def sync_business_period(
         "domesticOrders": 0,
         "domesticRefunds": 0,
         "inboundDocuments": 0,
+        "logisticsPeriods": 0,
         "foreignOrders": 0,
         "shipments": 0,
     }
@@ -676,6 +719,8 @@ def sync_business_period(
         for row in inbound_documents:
             merge(project_inbound_document(db, row))
         sources["inboundDocuments"] = len(inbound_documents)
+        merge(project_domestic_logistics_period(db, year=year, month=month))
+        sources["logisticsPeriods"] = 1
 
     if business_scope in {"all", "foreign_trade"}:
         foreign_orders = db.scalars(

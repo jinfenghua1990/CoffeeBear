@@ -6,6 +6,15 @@ import { authenticatedFetch } from "@/lib/api";
 import { useTabScopedState, useTabTitle } from "@/lib/workspace/tab-store";
 
 type Pkg = { id: number; version: number; status: string; sha256: string; createdAt: string | null };
+type LegalEntity = {
+  id: number;
+  code: string;
+  name: string;
+  countryCode: string;
+  baseCurrency: string;
+  isDefault: boolean;
+  businessScopes: string[];
+};
 type Period = {
   company: string;
   year: number;
@@ -75,6 +84,20 @@ type BusinessStatus = {
   costIncomplete: boolean;
   costMissingCount: number;
   costMissingDetail: Array<{ skuCode: string; skuName: string; quantity: string }>;
+  legalEntityId: number;
+  company: string;
+  businessScopes: string[];
+  domesticSupported: boolean;
+  foreignEntryCount: number;
+  foreignTotalsByCurrency: Array<{
+    currency: string;
+    income: number;
+    expense: number;
+    profit: number;
+    cashIn: number;
+    cashOut: number;
+    netCash: number;
+  }>;
   sync: {
     created: number;
     updated: number;
@@ -208,6 +231,8 @@ export default function MonthlySendPage() {
   }, [sendMonth]);
   useTabTitle(sel ? `月度资料 · ${sendMonth}` : null);
 
+  const [entities, setEntities] = useState<LegalEntity[]>([]);
+  const [entityId, setEntityId] = useTabScopedState<number | null>("monthly.entity", () => null);
   const [template, setTemplate] = useState<SalesTemplate | null>(null);
   const [toText, setToText] = useState("");
   const [ccText, setCcText] = useState("");
@@ -241,6 +266,11 @@ export default function MonthlySendPage() {
   const pickerRequestSeq = useRef(0);
   const uploadKind = useRef<"交易明细" | "回单详情">("交易明细");
 
+  const selectedEntity = entities.find((row) => row.id === entityId) ?? null;
+  const companyName = selectedEntity?.name ?? "";
+  const domesticSupportedByEntity = Boolean(
+    selectedEntity?.isDefault && selectedEntity.businessScopes.includes("domestic")
+  );
   const period = periods.find((p) => sel && p.year === sel.year && p.month === sel.month) || null;
   const latest = useCallback(
     (keyword: string) =>
@@ -252,35 +282,48 @@ export default function MonthlySendPage() {
   const otherFiles = files.filter((f) => !f.originalName.includes("交易明细") && !f.originalName.includes("回单详情"));
   const salesFile = [...otherFiles].filter((f) => f.category === "sales_summary").sort((a, b) => b.version - a.version)[0] || null;
 
+  const loadEntities = useCallback(async () => {
+    const res = await authenticatedFetch("/api/v1/finance/entities", { cache: "no-store" });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || "公司主体加载失败");
+    const rows = (data.items || []) as LegalEntity[];
+    setEntities(rows);
+    setEntityId((current) => current && rows.some((row) => row.id === current)
+      ? current
+      : (rows.find((row) => row.isDefault)?.id ?? rows[0]?.id ?? null));
+  }, [setEntityId]);
+
   const loadTemplate = useCallback(async () => {
-    const res = await authenticatedFetch("/api/v1/finance/sales-report/template", { cache: "no-store" });
+    if (!companyName) return;
+    const res = await authenticatedFetch(`/api/v1/finance/sales-report/template?company=${encodeURIComponent(companyName)}`, { cache: "no-store" });
     const data = await res.json();
     if (!res.ok) throw new Error(data.detail || "加载失败");
     setTemplate(data);
     setToText((data.toAddrs || []).join(", "));
     setCcText((data.ccAddrs || []).join(", "));
-  }, []);
+  }, [companyName]);
 
   const loadPeriods = useCallback(() => {
-    authenticatedFetch("/api/v1/finance/periods", { cache: "no-store" })
+    if (!companyName) return;
+    authenticatedFetch(`/api/v1/finance/periods?company=${encodeURIComponent(companyName)}`, { cache: "no-store" })
       .then((r) => r.json())
       .then(setPeriods)
       .catch(() => {});
-  }, []);
+  }, [companyName]);
 
   const loadFiles = useCallback(() => {
-    if (!sel) return;
+    if (!sel || !companyName) return;
     const seq = ++filesRequestSeq.current;
-    authenticatedFetch(`/api/v1/finance/${sel.year}/${sel.month}/files`, { cache: "no-store" })
+    authenticatedFetch(`/api/v1/finance/${sel.year}/${sel.month}/files?company=${encodeURIComponent(companyName)}`, { cache: "no-store" })
       .then((r) => r.json())
       .then((rows) => { if (seq === filesRequestSeq.current) setFiles(rows); })
       .catch(() => {});
-  }, [sel]);
+  }, [companyName, sel]);
 
   const loadBusiness = useCallback(() => {
-    if (!sel) return;
+    if (!sel || !companyName || !entityId) return;
     const seq = ++businessRequestSeq.current;
-    authenticatedFetch(`/api/v1/finance/${sel.year}/${sel.month}/refresh-business`, {
+    authenticatedFetch(`/api/v1/finance/${sel.year}/${sel.month}/refresh-business?company=${encodeURIComponent(companyName)}&legal_entity_id=${entityId}`, {
       method: "POST",
       cache: "no-store",
     })
@@ -291,16 +334,19 @@ export default function MonthlySendPage() {
       })
       .then((data) => { if (seq === businessRequestSeq.current) setBusinessStatus(data); })
       .catch(() => { if (seq === businessRequestSeq.current) setBusinessStatus(null); });
-  }, [sel]);
+  }, [companyName, entityId, sel]);
 
   const loadUnbilled = useCallback(() => {
-    if (!sel) return;
+    if (!sel || !companyName || !domesticSupportedByEntity) {
+      setUnbilled(null);
+      return;
+    }
     const seq = ++unbilledRequestSeq.current;
-    authenticatedFetch(`/api/v1/finance/unbilled/preview?year=${sel.year}&month=${sel.month}`, { cache: "no-store" })
+    authenticatedFetch(`/api/v1/finance/unbilled/preview?year=${sel.year}&month=${sel.month}&company=${encodeURIComponent(companyName)}`, { cache: "no-store" })
       .then((r) => (r.ok ? r.json() : null))
       .then((data) => { if (seq === unbilledRequestSeq.current) setUnbilled(data); })
       .catch(() => {});
-  }, [sel]);
+  }, [companyName, domesticSupportedByEntity, sel]);
 
   const loadMatch = useCallback(() => {
     if (!sel) return;
@@ -321,12 +367,29 @@ export default function MonthlySendPage() {
   }, []);
 
   useEffect(() => {
+    void loadEntities().catch((e) => setMsg(String(e)));
+    void loadMailStatus();
+  }, [loadEntities, loadMailStatus]);
+  useEffect(() => {
+    if (!companyName) return;
+    setTemplate(null);
+    setPeriods([]);
+    setFiles([]);
+    setBusinessStatus(null);
+    setUnbilled(null);
     void loadTemplate().catch((e) => setMsg(String(e)));
     void loadPeriods();
-    void loadMailStatus();
-  }, [loadTemplate, loadPeriods, loadMailStatus]);
+  }, [companyName, loadPeriods, loadTemplate]);
+  useEffect(() => {
+    setIncludeSel(domesticSupportedByEntity
+      ? ["交易明细", "回单详情", "无票收入"]
+      : ["交易明细", "回单详情"]);
+    if (!domesticSupportedByEntity && (financeTab === "ledger" || financeTab === "match")) {
+      setFinanceTab("monthly");
+    }
+  }, [domesticSupportedByEntity, entityId, financeTab, setFinanceTab]);
   useEffect(() => { loadFiles(); loadBusiness(); loadUnbilled(); }, [loadFiles, loadBusiness, loadUnbilled]);
-  useEffect(() => { if (financeTab === "match") loadMatch(); }, [financeTab, loadMatch]);
+  useEffect(() => { if (financeTab === "match" && domesticSupportedByEntity) loadMatch(); }, [domesticSupportedByEntity, financeTab, loadMatch]);
   // 弹层切"全部未配发票"时拉取全量未匹配进项票（端点上限 500，靠搜索缩小范围）
   useEffect(() => {
     if (!pickerTxn || pickerScope !== "all") return;
@@ -365,7 +428,7 @@ export default function MonthlySendPage() {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          company: template.company, enabled: template.enabled, fields: template.fields, rules: template.rules,
+          company: companyName || template.company, enabled: template.enabled, fields: template.fields, rules: template.rules,
           to_addrs: emails(toText), cc_addrs: emails(ccText),
           auto_send: template.autoSend, send_day: template.sendDay, send_hour: template.sendHour,
         }),
@@ -388,6 +451,7 @@ export default function MonthlySendPage() {
     fd.append("period_month", String(sel.month));
     fd.append("category", "bank");
     fd.append("original_name", `银行${uploadKind.current}${ext}`);
+    fd.append("company", companyName);
     setBusy(true); setMsg("");
     try {
       const res = await authenticatedFetch("/api/v1/finance/files", { method: "POST", body: fd });
@@ -451,7 +515,7 @@ export default function MonthlySendPage() {
     }
     setBusy(true); setMsg("");
     try {
-      const pkgRes = await authenticatedFetch(`/api/v1/finance/${sel.year}/${sel.month}/package`, {
+      const pkgRes = await authenticatedFetch(`/api/v1/finance/${sel.year}/${sel.month}/package?company=${encodeURIComponent(companyName)}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ include: includeSel }),
@@ -475,7 +539,7 @@ export default function MonthlySendPage() {
     if (!sel) return;
     setBusy(true); setMsg("");
     try {
-      const res = await authenticatedFetch(`/api/v1/finance/sales-report/generate?year=${sel.year}&month=${sel.month}`, { method: "POST" });
+      const res = await authenticatedFetch(`/api/v1/finance/sales-report/generate?year=${sel.year}&month=${sel.month}&company=${encodeURIComponent(companyName)}`, { method: "POST" });
       const data = await res.json();
       if (!res.ok) throw new Error(data.detail || "生成失败");
       setMsg(`销售汇总已生成并归档 v${data.version}`);
@@ -488,7 +552,7 @@ export default function MonthlySendPage() {
     if (!sel) return;
     setBusy(true); setMsg("");
     try {
-      const res = await authenticatedFetch(`/api/v1/finance/sales-report/preview?year=${sel.year}&month=${sel.month}&limit=30`, { cache: "no-store" });
+      const res = await authenticatedFetch(`/api/v1/finance/sales-report/preview?year=${sel.year}&month=${sel.month}&limit=30&company=${encodeURIComponent(companyName)}`, { cache: "no-store" });
       const data = await res.json();
       if (!res.ok) throw new Error(data.detail || "预览失败");
       setPreview(data);
@@ -512,7 +576,7 @@ export default function MonthlySendPage() {
     if (!sel || !unbilled) return;
     setBusy(true); setMsg("");
     try {
-      const res = await authenticatedFetch(`/api/v1/finance/unbilled/adjustment?year=${sel.year}&month=${sel.month}`, {
+      const res = await authenticatedFetch(`/api/v1/finance/unbilled/adjustment?year=${sel.year}&month=${sel.month}&company=${encodeURIComponent(companyName)}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ selected_keys: unbilledSelectedKeys }),
@@ -577,8 +641,11 @@ export default function MonthlySendPage() {
   }
 
   const businessReady = Boolean(businessStatus?.ready);
-  const ready = Boolean(businessReady && bankTx && bankReceipt && unbilled);
-  const readyCount = [bankTx, bankReceipt, unbilled].filter(Boolean).length;
+  const needsUnbilled = Boolean(businessStatus?.domesticSupported ?? domesticSupportedByEntity);
+  const ready = Boolean(businessReady && bankTx && bankReceipt && (!needsUnbilled || unbilled));
+  const readyCount = [bankTx, bankReceipt, ...(needsUnbilled ? [unbilled] : [])].filter(Boolean).length;
+  const requiredDeliveryCount = needsUnbilled ? 3 : 2;
+  const hasForeignSummary = (businessStatus?.foreignEntryCount ?? 0) > 0;
   const latestPkg = period?.packages.length ? period.packages[period.packages.length - 1] : null;
   const latestSentPkg = [...(period?.packages || [])].reverse().find((pkg) => pkg.status === "SENT") || null;
   const attachmentSize = (bankTx?.size || 0) + (bankReceipt?.size || 0);
@@ -672,17 +739,17 @@ export default function MonthlySendPage() {
 
   return (
     <div className="mx-auto w-full max-w-[1500px] space-y-4 pb-8">
-      <nav aria-label="月度资料入库导航" className="sticky top-0 z-20 -mx-2 flex min-h-12 items-center gap-1 overflow-x-auto border-b border-slate-200 bg-white px-2 shadow-[0_1px_0_rgba(15,23,42,0.02)] sm:-mx-4 sm:px-4">
-        <Link href="/finance/monthly-send" className="mr-2 inline-flex shrink-0 items-center gap-2 px-1 py-3 text-sm font-semibold text-slate-800"><span className="inline-flex h-6 w-6 items-center justify-center rounded-md bg-blue-600 text-white"><svg viewBox="0 0 24 24" className="h-4 w-4" fill="none"><path d="M7 4h10v16H7V4Zm3 3h4M10 11h4M10 15h3" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" /></svg></span>月度资料入库</Link>
+      <nav aria-label="月结中心导航" className="sticky top-0 z-20 -mx-2 flex min-h-12 items-center gap-1 overflow-x-auto border-b border-slate-200 bg-white px-2 shadow-[0_1px_0_rgba(15,23,42,0.02)] sm:-mx-4 sm:px-4">
+        <Link href="/finance/monthly-send" className="mr-2 inline-flex shrink-0 items-center gap-2 px-1 py-3 text-sm font-semibold text-slate-800"><span className="inline-flex h-6 w-6 items-center justify-center rounded-md bg-blue-600 text-white"><svg viewBox="0 0 24 24" className="h-4 w-4" fill="none"><path d="M7 4h10v16H7V4Zm3 3h4M10 11h4M10 15h3" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" /></svg></span>月结中心</Link>
         <span className="shrink-0 px-1 text-slate-300">›</span>
         {([
-          ["monthly", "本月入库与发送"],
+          ["monthly", "本月月结与发送"],
           ["match", "付款发票匹配"],
           ["records", "发送记录"],
           ["archive", "资料归档"],
           ["ledger", "销售汇总台账"],
         ] as const).map(([key, label]) => (
-          <button key={key} type="button" onClick={() => setFinanceTab(key)} className={`relative shrink-0 px-4 py-3 text-sm font-medium transition-colors ${financeTab === key ? "text-blue-600" : "text-slate-600 hover:text-blue-600"}`}>
+          <button key={key} type="button" disabled={!domesticSupportedByEntity && (key === "match" || key === "ledger")} onClick={() => setFinanceTab(key)} className={`relative shrink-0 px-4 py-3 text-sm font-medium transition-colors disabled:cursor-not-allowed disabled:text-slate-300 ${financeTab === key ? "text-blue-600" : "text-slate-600 hover:text-blue-600"}`}>
             {label}{financeTab === key && <span className="absolute inset-x-3 bottom-0 h-0.5 rounded-full bg-blue-600" />}
           </button>
         ))}
@@ -690,7 +757,7 @@ export default function MonthlySendPage() {
       </nav>
 
       <header className="flex flex-wrap items-end justify-between gap-3 px-1">
-        <div><h1 className="text-2xl font-bold tracking-tight text-slate-900">月度资料入库</h1><p className="mt-1 text-sm text-slate-500">每月在这里上传业务源文件、完成校验计算，再统一整理并发送财务资料</p></div>
+        <div><h1 className="text-2xl font-bold tracking-tight text-slate-900">月结中心</h1><p className="mt-1 text-sm text-slate-500">按公司主体读取业务结果，核对交付资料，生成月度财务包并发送。</p></div>
         <button type="button" onClick={() => { setMailOpen(true); void loadMailStatus(); }} className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3.5 py-2 text-sm font-medium text-slate-700 shadow-sm hover:border-blue-300 hover:text-blue-600">
           <svg viewBox="0 0 24 24" className="h-4 w-4" fill="none" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="2" stroke="currentColor" strokeWidth="1.8" /><path d="m3 7 9 6 9-6" stroke="currentColor" strokeWidth="1.8" /></svg>
           设置邮箱{mailStatus && !mailStatus.configured && <span title="SMTP 未配置" className="h-1.5 w-1.5 rounded-full bg-rose-500" />}
@@ -698,6 +765,18 @@ export default function MonthlySendPage() {
       </header>
 
       <section className={`${CARD} flex flex-wrap items-center gap-3 px-3 py-3 sm:px-4`}>
+        <label className="min-w-[260px]">
+          <span className="sr-only">公司主体</span>
+          <select
+            value={entityId ?? ""}
+            onChange={(e) => setEntityId(Number(e.target.value) || null)}
+            className="h-9 w-full rounded-lg border border-slate-200 bg-white px-3 text-xs font-medium text-slate-700 shadow-sm"
+          >
+            {entities.map((row) => (
+              <option key={row.id} value={row.id}>{row.name}{row.isDefault ? " · 默认" : ""}</option>
+            ))}
+          </select>
+        </label>
         <div className="flex items-center rounded-lg border border-slate-200 bg-white shadow-sm">
           <button type="button" aria-label="上一个账期" onClick={() => setSendMonth(shiftMonthValue(sendMonth, -1))} className="px-3 py-2 text-lg leading-none text-slate-500 hover:bg-slate-50 hover:text-blue-600">‹</button>
           <label className="border-x border-slate-200 px-3 text-sm font-semibold text-slate-800"><span className="sr-only">账期</span><input type="month" value={sendMonth} onChange={(e) => setSendMonth(e.target.value)} className="w-[118px] border-0 bg-transparent p-0 text-sm font-semibold outline-none" /></label>
@@ -714,7 +793,7 @@ export default function MonthlySendPage() {
       {financeTab === "monthly" && <div className="grid items-start gap-4 xl:grid-cols-[minmax(0,1fr)_360px]">
         <section className={`${CARD} min-w-0 overflow-hidden`}>
           <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 px-4 py-4">
-            <div><h2 className="text-base font-semibold text-slate-900">本月处理清单 <span className="ml-1 text-slate-500">({readyCount}/3)</span></h2><p className="mt-1 text-xs text-slate-400">业务数据从销售中心与采购入库自动读取；这里仅整理银行资料、无票收入并发送给财务</p></div>
+            <div><h2 className="text-base font-semibold text-slate-900">本月处理清单 <span className="ml-1 text-slate-500">({readyCount}/{requiredDeliveryCount})</span></h2><p className="mt-1 text-xs text-slate-400">业务数据自动读取；这里按主体整理银行资料、系统生成资料并发送给财务</p></div>
             <div className="flex items-center gap-2"><button type="button" onClick={() => { uploadKind.current = "交易明细"; fileRef.current?.click(); }} disabled={busy} className="inline-flex items-center gap-1 rounded-lg border border-blue-200 bg-white px-3 py-2 text-xs font-medium text-blue-600 hover:bg-blue-50 disabled:opacity-50">＋ 新增资料</button><button type="button" onClick={() => { loadFiles(); loadPeriods(); loadBusiness(); loadUnbilled(); }} className="rounded-lg border border-slate-200 px-3 py-2 text-xs text-slate-600 hover:bg-slate-50">刷新</button></div>
           </div>
           <div className="hidden items-center gap-3 bg-slate-50 px-4 py-2 text-[11px] font-medium text-slate-500 md:grid md:grid-cols-[28px_minmax(180px,1.2fr)_minmax(150px,1fr)_58px_112px_88px_minmax(150px,1fr)_auto]">
@@ -725,16 +804,27 @@ export default function MonthlySendPage() {
               <span className={`font-medium ${businessReady ? "text-emerald-700" : "text-amber-700"}`}>
                 {businessStatus ? (businessReady ? "✓ 业务数据已接通" : "⚠ 业务成本待补齐") : "正在读取业务数据…"}
               </span>
-              <span className="text-slate-500">销售订单 {businessStatus?.salesOrderCount ?? "—"} 笔</span>
-              <span className="text-slate-500">销售额 {money(businessStatus?.salesAmount)}</span>
-              <span className="text-slate-500">销售成本 {money(businessStatus?.costAmount)}</span>
-              {businessStatus?.costIncomplete && (
-                <span className="text-amber-700">缺 {businessStatus.costMissingCount} 个 SKU 成本</span>
+              {businessStatus?.domesticSupported ? (
+                <>
+                  <span className="text-slate-500">销售订单 {businessStatus.salesOrderCount} 笔</span>
+                  <span className="text-slate-500">销售额 {money(businessStatus.salesAmount)}</span>
+                  <span className="text-slate-500">销售成本 {money(businessStatus.costAmount)}</span>
+                  {businessStatus.costIncomplete && (
+                    <span className="text-amber-700">缺 {businessStatus.costMissingCount} 个 SKU 成本</span>
+                  )}
+                </>
+              ) : (
+                <span className="text-slate-500">当前主体无国内销售月结口径</span>
               )}
-              <span className="ml-auto flex gap-3">
-                <Link href="/sales?tab=analytics" className="font-medium text-blue-600 hover:underline">销售中心</Link>
-                <Link href="/supply-chain/receiving" className="font-medium text-blue-600 hover:underline">采购入库</Link>
-              </span>
+              {(businessStatus?.foreignEntryCount ?? 0) > 0 && (
+                <span className="font-medium text-violet-700">外贸财务事项 {businessStatus?.foreignEntryCount} 条</span>
+              )}
+              {domesticSupportedByEntity && (
+                <span className="ml-auto flex gap-3">
+                  <Link href="/sales?tab=analytics" className="font-medium text-blue-600 hover:underline">销售中心</Link>
+                  <Link href="/supply-chain/receiving" className="font-medium text-blue-600 hover:underline">采购入库</Link>
+                </span>
+              )}
             </div>
             {businessStatus?.costIncomplete && businessStatus.costMissingDetail.length > 0 && (
               <div className="mt-1 truncate text-[10px] text-amber-700">
@@ -745,25 +835,33 @@ export default function MonthlySendPage() {
           </div>
           <ItemRow kind="bank" title={`${sel?.month || ""}月-银行交易明细`} state={{ ok: Boolean(bankTx), text: bankTx ? "已核对" : "待上传" }} summary={bankTx ? <>全部账户 · 已导入<br />{formatBytes(bankTx.size)}</> : <>等待上传原始银行流水<br /><span className="text-amber-600">上传后自动归档</span></>} updatedAt={bankTx?.uploadedAt} version={bankTx?.version} parameter={bankTx ? "账期内 · 全部账户" : "待补充资料"} selected={includeSel.includes("交易明细")} onToggle={() => setIncludeSel((s) => s.includes("交易明细") ? s.filter((x) => x !== "交易明细") : [...s, "交易明细"])} actions={<>{bankTx && <button type="button" onClick={() => void downloadFile(bankTx)} disabled={busy} className="rounded-md border border-slate-200 px-2.5 py-1.5 text-[11px] text-slate-600 hover:bg-slate-50 disabled:opacity-50">下载</button>}<button type="button" onClick={() => { uploadKind.current = "交易明细"; fileRef.current?.click(); }} disabled={busy} className="rounded-md bg-blue-600 px-2.5 py-1.5 text-[11px] font-medium text-white hover:bg-blue-700 disabled:opacity-50">{bankTx ? "替换" : "上传"}</button></>} />
           <ItemRow kind="receipt" title={`${sel?.month || ""}月-银行回单详情`} state={{ ok: Boolean(bankReceipt), text: bankReceipt ? "已核对" : "待上传" }} summary={bankReceipt ? <>全部账户 · 已导入<br />{formatBytes(bankReceipt.size)}</> : <>等待上传银行回单<br /><span className="text-amber-600">上传后自动归档</span></>} updatedAt={bankReceipt?.uploadedAt} version={bankReceipt?.version} parameter={bankReceipt ? "账期内 · 全部账户" : "待补充资料"} selected={includeSel.includes("回单详情")} onToggle={() => setIncludeSel((s) => s.includes("回单详情") ? s.filter((x) => x !== "回单详情") : [...s, "回单详情"])} actions={<>{bankReceipt && <button type="button" onClick={() => void downloadFile(bankReceipt)} disabled={busy} className="rounded-md border border-slate-200 px-2.5 py-1.5 text-[11px] text-slate-600 hover:bg-slate-50 disabled:opacity-50">下载</button>}<button type="button" onClick={() => { uploadKind.current = "回单详情"; fileRef.current?.click(); }} disabled={busy} className="rounded-md bg-blue-600 px-2.5 py-1.5 text-[11px] font-medium text-white hover:bg-blue-700 disabled:opacity-50">{bankReceipt ? "替换" : "上传"}</button></>} />
-          <ItemRow kind="sales" title={`${sel?.month || ""}月-销售出库-无票收入`} state={{ ok: Boolean(unbilled), text: unbilled ? (unbilled.adjusted ? "已调整" : "已生成") : "计算中" }} summary={unbilled ? <>销售总额 {money(unbilled.salesAmount)}<br />无票收入 {money(unbilled.unbilledAmount)}</> : <>正在读取销售出库数据<br /><span className="text-slate-400">按当前账期自动计算</span></>} updatedAt={unbilled?.updatedAt || salesFile?.uploadedAt} version={unbilled?.version || salesFile?.version} parameter={unbilled?.adjusted ? `已选择 ${unbilled.selectedCount || 0}/${unbilled.sourceCount || 0} 条` : "出库时间 · 全部渠道"} selected={includeSel.includes("无票收入")} onToggle={() => setIncludeSel((s) => s.includes("无票收入") ? s.filter((x) => x !== "无票收入") : [...s, "无票收入"])} actions={<><button type="button" onClick={() => setShowUnbilledDetail(true)} disabled={!unbilled} className="rounded-md border border-slate-200 px-2.5 py-1.5 text-[11px] text-slate-600 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-40">调整明细</button><button type="button" onClick={() => { setFinanceTab("ledger"); void previewSales(); }} disabled={busy} className="rounded-md border border-blue-200 px-2.5 py-1.5 text-[11px] text-blue-600 hover:bg-blue-50 disabled:opacity-50">预览</button></>} />
+          {needsUnbilled && (<ItemRow kind="sales" title={`${sel?.month || ""}月-销售出库-无票收入`} state={{ ok: Boolean(unbilled), text: unbilled ? (unbilled.adjusted ? "已调整" : "已生成") : "计算中" }} summary={unbilled ? <>销售总额 {money(unbilled.salesAmount)}<br />无票收入 {money(unbilled.unbilledAmount)}</> : <>正在读取销售出库数据<br /><span className="text-slate-400">按当前账期自动计算</span></>} updatedAt={unbilled?.updatedAt || salesFile?.uploadedAt} version={unbilled?.version || salesFile?.version} parameter={unbilled?.adjusted ? `已选择 ${unbilled.selectedCount || 0}/${unbilled.sourceCount || 0} 条` : "出库时间 · 全部渠道"} selected={includeSel.includes("无票收入")} onToggle={() => setIncludeSel((s) => s.includes("无票收入") ? s.filter((x) => x !== "无票收入") : [...s, "无票收入"])} actions={<><button type="button" onClick={() => setShowUnbilledDetail(true)} disabled={!unbilled} className="rounded-md border border-slate-200 px-2.5 py-1.5 text-[11px] text-slate-600 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-40">调整明细</button><button type="button" onClick={() => { setFinanceTab("ledger"); void previewSales(); }} disabled={busy} className="rounded-md border border-blue-200 px-2.5 py-1.5 text-[11px] text-blue-600 hover:bg-blue-50 disabled:opacity-50">预览</button></>} />)}
           <input ref={fileRef} type="file" accept=".xlsx,.xls,.csv,.pdf" className="hidden" onChange={(e) => { const file = e.target.files?.[0]; if (file) handleUploadSelection(file); }} />
         </section>
 
         <aside className={`${CARD} h-fit overflow-hidden xl:sticky xl:top-4`}>
-          <div className="flex items-center justify-between border-b border-slate-200 px-4 py-4"><div><h2 className="text-base font-semibold text-slate-900">本次发送</h2><p className="mt-1 text-xs text-slate-400">已选择 {includeSel.length} 项资料（共 3 个附件）</p></div><button type="button" onClick={() => { setFinanceTab("ledger"); void previewSales(); }} className="inline-flex items-center gap-1 rounded-lg border border-blue-200 px-2.5 py-1.5 text-xs font-medium text-blue-600 hover:bg-blue-50">◉ 发送前预览</button></div>
+          <div className="flex items-center justify-between border-b border-slate-200 px-4 py-4"><div><h2 className="text-base font-semibold text-slate-900">本次发送</h2><p className="mt-1 text-xs text-slate-400">已选择 {includeSel.length} 项资料{hasForeignSummary ? " + 外贸汇总" : ""}（预计 {includeSel.length + (hasForeignSummary ? 1 : 0)} 个附件）</p></div><button type="button" onClick={() => { setFinanceTab("ledger"); void previewSales(); }} disabled={!domesticSupportedByEntity} className="inline-flex items-center gap-1 rounded-lg border border-blue-200 px-2.5 py-1.5 text-xs font-medium text-blue-600 hover:bg-blue-50 disabled:cursor-not-allowed disabled:border-slate-200 disabled:text-slate-300">◉ 发送前预览</button></div>
           <div className="space-y-2 bg-slate-50/70 p-3">
             {([
               ["交易明细", `${sel?.month || ""}月-银行交易明细`, bankTx, "bank"],
               ["回单详情", `${sel?.month || ""}月-银行回单详情`, bankReceipt, "receipt"],
               ["无票收入", `${sel?.month || ""}月-销售出库-无票收入`, unbilled, "sales"],
-            ] as const).map(([key, label, item, kind]) => <label key={key} className="flex cursor-pointer items-center gap-2 rounded-lg bg-white px-2.5 py-2 shadow-sm ring-1 ring-slate-100"><input type="checkbox" checked={includeSel.includes(key)} onChange={() => setIncludeSel((s) => s.includes(key) ? s.filter((x) => x !== key) : [...s, key])} className="h-4 w-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500" /><DataIcon kind={kind} /><span className="min-w-0 flex-1 truncate text-xs font-medium text-slate-700">{label}</span><span className={`h-2 w-2 shrink-0 rounded-full ${item ? "bg-emerald-500" : "bg-amber-400"}`} /></label>)}
+            ] as const).filter(([key]) => key !== "无票收入" || needsUnbilled).map(([key, label, item, kind]) => <label key={key} className="flex cursor-pointer items-center gap-2 rounded-lg bg-white px-2.5 py-2 shadow-sm ring-1 ring-slate-100"><input type="checkbox" checked={includeSel.includes(key)} onChange={() => setIncludeSel((s) => s.includes(key) ? s.filter((x) => x !== key) : [...s, key])} className="h-4 w-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500" /><DataIcon kind={kind} /><span className="min-w-0 flex-1 truncate text-xs font-medium text-slate-700">{label}</span><span className={`h-2 w-2 shrink-0 rounded-full ${item ? "bg-emerald-500" : "bg-amber-400"}`} /></label>)}
+            {hasForeignSummary && (
+              <div className="flex items-center gap-2 rounded-lg bg-violet-50 px-2.5 py-2 ring-1 ring-violet-100">
+                <input type="checkbox" checked readOnly disabled className="h-4 w-4 rounded border-violet-300 text-violet-600" />
+                <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-white text-violet-600">€</span>
+                <span className="min-w-0 flex-1 truncate text-xs font-medium text-violet-800">{sel?.month || ""}月-外贸财务汇总</span>
+                <span className="text-[9px] text-violet-500">系统生成</span>
+              </div>
+            )}
           </div>
           <div className="grid grid-cols-2 gap-3 border-b border-slate-100 px-4 py-3 text-xs"><div><div className="text-slate-400">附件总大小</div><div className="mt-1 font-semibold text-slate-800">{formatBytes(attachmentSize)}</div></div><div><div className="text-slate-400">预计发送时间</div><div className="mt-1 font-semibold text-slate-800">约 1 分钟</div></div></div>
           <div className="space-y-3 px-4 py-4">
             <label className="block text-xs font-medium text-slate-600">收件人 <span className="text-rose-500">*</span><input value={toText} onChange={(e) => setToText(e.target.value)} placeholder="请输入财务邮箱" className="mt-1.5 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-100" /></label>
             <label className="block text-xs font-medium text-slate-600">抄送（可选）<input value={ccText} onChange={(e) => setCcText(e.target.value)} placeholder="可填写多个邮箱，用逗号分隔" className="mt-1.5 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-100" /></label>
             <div><div className="mb-1.5 text-xs font-medium text-slate-600">发送时间设置</div><div className="flex flex-wrap items-center gap-2 rounded-lg bg-slate-50 px-2.5 py-2"><label className="inline-flex items-center gap-1.5 text-xs text-slate-600"><input type="checkbox" checked={template?.autoSend ?? false} onChange={(e) => setTemplate((t) => t ? { ...t, autoSend: e.target.checked } : t)} className="h-4 w-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500" />自动发送</label><span className="text-xs text-slate-500">每月 <input type="number" min={1} max={28} value={template?.sendDay ?? 3} onChange={(e) => setTemplate((t) => t ? { ...t, sendDay: Number(e.target.value) } : t)} className="mx-1 w-10 rounded border border-slate-200 bg-white px-1.5 py-1 text-xs" /> 日</span><select value={template?.sendHour ?? 10} onChange={(e) => setTemplate((t) => t ? { ...t, sendHour: Number(e.target.value) } : t)} className="rounded border border-slate-200 bg-white px-1.5 py-1 text-xs">{Array.from({ length: 24 }, (_, i) => <option key={i} value={i}>{String(i).padStart(2, "0")}:00</option>)}</select><button type="button" onClick={saveTemplate} disabled={busy || !template} className="ml-auto rounded border border-slate-200 bg-white px-2 py-1 text-[11px] font-medium text-slate-600 hover:bg-white disabled:opacity-40">保存设置</button></div></div>
-            <div><div className="mb-1.5 text-xs font-medium text-slate-600">发送条件</div><div className="space-y-1.5 text-xs text-slate-500"><label className="flex items-center gap-2"><input type="checkbox" checked={businessReady} disabled className="h-4 w-4 rounded border-slate-300 text-blue-600" />业务数据已从销售中心 / 采购入库读取，销售成本完整</label><label className="flex items-center gap-2"><input type="checkbox" checked={Boolean(bankTx && bankReceipt)} disabled className="h-4 w-4 rounded border-slate-300 text-blue-600" />银行交易明细和回单已齐全</label><label className="flex items-center gap-2"><input type="checkbox" checked={Boolean(unbilled)} disabled className="h-4 w-4 rounded border-slate-300 text-blue-600" />无票收入已生成</label><label className="flex items-center gap-2"><input type="checkbox" checked={!mailStatus || mailStatus.configured} disabled className="h-4 w-4 rounded border-slate-300 text-blue-600" />邮件通道可用</label></div></div>
+            <div><div className="mb-1.5 text-xs font-medium text-slate-600">发送条件</div><div className="space-y-1.5 text-xs text-slate-500"><label className="flex items-center gap-2"><input type="checkbox" checked={businessReady} disabled className="h-4 w-4 rounded border-slate-300 text-blue-600" />业务数据已按当前公司主体同步，必要成本完整</label><label className="flex items-center gap-2"><input type="checkbox" checked={Boolean(bankTx && bankReceipt)} disabled className="h-4 w-4 rounded border-slate-300 text-blue-600" />银行交易明细和回单已齐全</label>{needsUnbilled && <label className="flex items-center gap-2"><input type="checkbox" checked={Boolean(unbilled)} disabled className="h-4 w-4 rounded border-slate-300 text-blue-600" />无票收入已生成</label>}<label className="flex items-center gap-2"><input type="checkbox" checked={!mailStatus || mailStatus.configured} disabled className="h-4 w-4 rounded border-slate-300 text-blue-600" />邮件通道可用</label></div></div>
             <button type="button" onClick={packageAndSend} disabled={busy || !sel || !ready || !emails(toText).length || !includeSel.length} className="flex w-full items-center justify-center gap-2 rounded-lg bg-emerald-600 px-4 py-3 text-sm font-semibold text-white shadow-sm hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-40">➤ 确认并发送给财务</button>
             <div className="text-[11px] leading-4 text-slate-400">{latestPkg ? <>最新包 V{latestPkg.version} · {latestPkg.status === "SENT" ? "已发送" : "已打包"} · {formatDate(latestPkg.createdAt)}</> : "该账期还没有打包记录"}{mailStatus && !mailStatus.configured && <span className="ml-1.5 rounded bg-rose-50 px-1.5 py-0.5 font-medium text-rose-600 ring-1 ring-inset ring-rose-200">SMTP 未配置</span>}</div>
           </div>
