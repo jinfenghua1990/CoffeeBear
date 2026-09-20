@@ -242,6 +242,8 @@ class FinanceEntry(Base, PkMixin, TimestampMixin):
     source_no: Mapped[str] = mapped_column(String(128), default="", index=True)
     category: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
     direction: Mapped[str] = mapped_column(String(24), default="expense", index=True)
+    cash_effect: Mapped[bool] = mapped_column(Boolean, default=True)
+    profit_effect: Mapped[bool] = mapped_column(Boolean, default=True)
     currency: Mapped[str] = mapped_column(String(8), default="CNY")
     amount: Mapped[Decimal] = mapped_column(MONEY, default=0)
     tax_amount: Mapped[Decimal] = mapped_column(MONEY, default=0)
