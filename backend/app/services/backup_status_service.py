@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import json
 import os
-from datetime import datetime, timezone
+from datetime import datetime
+from zoneinfo import ZoneInfo
 from pathlib import Path
 from typing import Any
 
@@ -18,7 +19,7 @@ def _backup_dir() -> Path:
 
 def _iso_from_timestamp(value: str) -> str | None:
     try:
-        parsed = datetime.strptime(value[:15], "%Y%m%d_%H%M%S").replace(tzinfo=timezone.utc)
+        parsed = datetime.strptime(value[:15], "%Y%m%d_%H%M%S").replace(tzinfo=ZoneInfo(os.getenv("TZ") or "Asia/Shanghai"))
         return parsed.isoformat()
     except Exception:
         return None
