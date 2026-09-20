@@ -314,3 +314,79 @@ def test_invoice_business_match_and_bank_payment_status_are_independent(db_sessi
     assert payload["businessMatchedAmount"] == "600.0000"
     assert payload["bankPaymentStatus"] == "unmatched"
     assert payload["bankPaidAmount"] == "0.00"
+
+
+
+def test_list_invoices_match_filter_uses_live_business_domain_not_cached_status(db_session):
+    """服务端筛选必须与页面实时 businessMatchStatus 完全一致，银行链接不得参与。"""
+    from app.models.tax import TaxInvoice, TaxInvoiceLink
+
+    invoice = TaxInvoice(
+        invoice_key=f"pytest-filter-domain-{uuid4().hex}",
+        invoice_number=f"FILTER-{uuid4().hex[:10]}",
+        direction="input",
+        status="issued",
+        seller_name="筛选口径供应商",
+        total_amount=Decimal("1000.00"),
+        match_status="unmatched",  # 故意保留旧缓存值
+        raw={},
+    )
+    db_session.add(invoice)
+    db_session.flush()
+    db_session.add_all([
+        TaxInvoiceLink(
+            invoice_id=invoice.id,
+            target_type="external_purchase_order",
+            target_id=777001,
+            allocated_amount=Decimal("600.00"),
+            match_method="manual",
+            confirmed=True,
+        ),
+        TaxInvoiceLink(
+            invoice_id=invoice.id,
+            target_type="bank_transaction",
+            target_id=777002,
+            allocated_amount=Decimal("1000.00"),
+            match_method="manual",
+            confirmed=True,
+        ),
+    ])
+    db_session.flush()
+
+    partial_ids = {
+        row["id"]
+        for row in service.list_invoices(
+            db_session, direction="input", match_status="partial", limit=500
+        )
+    }
+    matched_ids = {
+        row["id"]
+        for row in service.list_invoices(
+            db_session, direction="input", match_status="matched", limit=500
+        )
+    }
+    unmatched_ids = {
+        row["id"]
+        for row in service.list_invoices(
+            db_session, direction="input", match_status="unmatched", limit=500
+        )
+    }
+
+    assert invoice.id in partial_ids
+    assert invoice.id not in matched_ids
+    assert invoice.id not in unmatched_ids
+
+    # 未确认业务链接不计入业务匹配；银行已付清也不能改变业务筛选结果。
+    business_link = db_session.query(TaxInvoiceLink).filter_by(
+        invoice_id=invoice.id, target_type="external_purchase_order"
+    ).one()
+    business_link.confirmed = False
+    db_session.flush()
+
+    unmatched_ids = {
+        row["id"]
+        for row in service.list_invoices(
+            db_session, direction="input", match_status="unmatched", limit=500
+        )
+    }
+    assert invoice.id in unmatched_ids

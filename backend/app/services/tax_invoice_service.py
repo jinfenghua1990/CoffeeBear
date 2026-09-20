@@ -31,7 +31,7 @@ from app.services.import_lifecycle import (
     transition_row_status,
 )
 from app.utils.money import quantize, to_decimal
-from sqlalchemy import and_, cast, or_, String
+from sqlalchemy import and_, case, cast, func, or_, String
 from sqlalchemy.orm import aliased
 
 
@@ -1175,7 +1175,75 @@ def list_invoices(
     if status:
         query = query.filter(TaxInvoice.status == status)
     if match_status:
-        query = query.filter(TaxInvoice.match_status == match_status)
+        if match_status not in {"matched", "partial", "unmatched", "needs_review"}:
+            raise ValueError("无效的业务匹配状态")
+
+        def _business_stats(target_types: tuple[str, ...]):
+            return (
+                db.query(
+                    TaxInvoiceLink.invoice_id.label("invoice_id"),
+                    func.coalesce(
+                        func.sum(TaxInvoiceLink.allocated_amount), Decimal("0")
+                    ).label("allocated"),
+                    func.coalesce(
+                        func.sum(
+                            case(
+                                (TaxInvoiceLink.allocated_amount.is_(None), 1),
+                                else_=0,
+                            )
+                        ),
+                        0,
+                    ).label("unknown_count"),
+                )
+                .filter(
+                    TaxInvoiceLink.target_type.in_(target_types),
+                    TaxInvoiceLink.match_method != "rejected",
+                    TaxInvoiceLink.confirmed.is_(True),
+                )
+                .group_by(TaxInvoiceLink.invoice_id)
+                .subquery()
+            )
+
+        purchase_stats = _business_stats(PURCHASE_LINK_TARGET_TYPES)
+        sales_stats = _business_stats((SALES_LINK_TARGET_TYPE,))
+        query = (
+            query.outerjoin(
+                purchase_stats, purchase_stats.c.invoice_id == TaxInvoice.id
+            )
+            .outerjoin(
+                sales_stats, sales_stats.c.invoice_id == TaxInvoice.id
+            )
+        )
+
+        purchase_allocated = func.coalesce(
+            purchase_stats.c.allocated, Decimal("0")
+        )
+        sales_allocated = func.coalesce(
+            sales_stats.c.allocated, Decimal("0")
+        )
+        allocated = case(
+            (TaxInvoice.direction == "output", sales_allocated),
+            else_=purchase_allocated,
+        )
+        purchase_unknown = func.coalesce(purchase_stats.c.unknown_count, 0)
+        sales_unknown = func.coalesce(sales_stats.c.unknown_count, 0)
+        unknown_count = case(
+            (TaxInvoice.direction == "output", sales_unknown),
+            else_=purchase_unknown,
+        )
+        invoice_total = func.coalesce(TaxInvoice.total_amount, Decimal("0"))
+        zero_status = case(
+            (TaxInvoice.match_status == "needs_review", "needs_review"),
+            else_="unmatched",
+        )
+        business_status = case(
+            (invoice_total <= 0, TaxInvoice.match_status),
+            (unknown_count > 0, "needs_review"),
+            (allocated <= 0, zero_status),
+            (invoice_total - allocated <= Decimal("0.01"), "matched"),
+            else_="partial",
+        )
+        query = query.filter(business_status == match_status)
     if processing_status:
         query = query.filter(TaxInvoice.processing_status == processing_status)
     if category is not None:

@@ -170,7 +170,7 @@ CATEGORY_V2_PATTERN = r"^(goods|platform_fee|operating_other|reimburse_advance|r
 def get_invoices(
     direction: str | None = Query(None, pattern="^(input|output|unknown)$"),
     status: str | None = Query(None, pattern="^(issued|void|red|unknown)$"),
-    match_status: str | None = Query(None, pattern="^(matched|unmatched|needs_review)$"),
+    match_status: str | None = Query(None, pattern="^(matched|partial|unmatched|needs_review)$"),
     processing_status: str | None = Query(None, pattern="^(pending|required|not_required)$"),
     category: str | None = Query(None, pattern=CATEGORY_V2_PATTERN, description="v2 分类（空=待判断）"),
     verified: bool | None = Query(None, description="true=仅已认证 / false=仅未认证"),

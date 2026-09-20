@@ -171,6 +171,13 @@ def test_tax_invoice_ledger_shape(client):
     assert summary.json()["total"] == len(rows.json())
 
 
+def test_tax_invoice_partial_business_filter_is_supported(client):
+    """部分业务匹配是正式状态，API 不得再用旧正则拒绝。"""
+    response = client.get("/api/v1/tax-invoices", params={"match_status": "partial", "limit": 500})
+    assert response.status_code == 200
+    assert isinstance(response.json(), list)
+
+
 def test_finance_periods(client):
     """/finance/periods 是 2N+1 修复后的端点，空表返回 [] 不报错。"""
     r = client.get("/api/v1/finance/periods")
