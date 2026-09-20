@@ -140,6 +140,7 @@ def overview(db: Session, year: int, month: int) -> dict[str, Any]:
             .filter(
                 TaxInvoiceLink.target_type == TARGET_TYPE,
                 TaxInvoiceLink.target_id.in_(txn_ids),
+                TaxInvoiceLink.confirmed.is_(True),
                 TaxInvoiceLink.match_method != "rejected",
             )
             .all()
@@ -213,6 +214,7 @@ def overview(db: Session, year: int, month: int) -> dict[str, Any]:
             .filter(
                 TaxInvoiceLink.target_type == TARGET_TYPE,
                 TaxInvoiceLink.invoice_id.in_(pool_ids),
+                TaxInvoiceLink.confirmed.is_(True),
                 TaxInvoiceLink.match_method != "rejected",
             )
             .all()
@@ -224,6 +226,11 @@ def overview(db: Session, year: int, month: int) -> dict[str, Any]:
         else []
     )
     pool_txn_map = {row.id: row for row in pool_link_txns}
+    linked_account_ids = {row.account_id for row in pool_link_txns if row.account_id is not None}
+    missing_account_ids = linked_account_ids.difference(account_map)
+    if missing_account_ids:
+        for account in db.query(BankAccount).filter(BankAccount.id.in_(missing_account_ids)).all():
+            account_map[account.id] = account
     linked_by_invoice: dict[int, list[TaxInvoiceLink]] = {}
     for link in pool_links:
         linked_by_invoice.setdefault(link.invoice_id, []).append(link)
