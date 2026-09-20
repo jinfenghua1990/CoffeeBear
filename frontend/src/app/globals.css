@@ -61,8 +61,8 @@
   --app-border-strong: #34445a;
   --app-text: #e8edf5;
   --app-text-strong: #c7d2e0;
-  --app-text-muted: #95a3b6;
-  --app-text-soft: #6f7d91;
+  --app-text-muted: #aeb9c9;
+  --app-text-soft: #8d9cb0;
   --app-accent: #6ea8fe;
   --app-accent-hover: #8bb9ff;
   --app-accent-soft: #15284a;
@@ -73,7 +73,7 @@
   --app-header: rgb(11 16 24 / 92%);
   --app-header-border: rgb(38 50 68 / 78%);
   --app-sidebar: #0b1625;
-  --app-sidebar-muted: #8293aa;
+  --app-sidebar-muted: #9aabc0;
   --app-sidebar-active: #2f6fed;
   --app-input: #151f2f;
   --app-table-head: #141e2e;
@@ -406,8 +406,8 @@ html.global-column-resizing * {
 .dark .text-slate-800 { color: var(--app-text); }
 .dark .text-slate-700 { color: var(--app-text-strong); }
 .dark .text-slate-600 { color: var(--app-text-muted); }
-.dark .text-slate-500 { color: #8494ab; }
-.dark .text-slate-400 { color: #64748b; }
+.dark .text-slate-500 { color: #aeb9c9; }
+.dark .text-slate-400 { color: #8d9cb0; }
 .dark .text-slate-300 { color: #cbd5e1; }
 
 /* 状态彩色标签 —— 提亮底色，增强可读性 */
@@ -480,6 +480,7 @@ html.global-column-resizing * {
 .dark .text-indigo-500 { color: #818cf8; }
 .dark .text-blue-700 { color: #93c5fd; }
 .dark .text-blue-600 { color: #93c5fd; }
+.dark .text-amber-800 { color: #fde68a; }
 .dark .text-amber-700 { color: #fcd34d; }
 .dark .text-amber-600 { color: #fbbf24; }
 .dark .text-rose-700 { color: #fda4af; }
@@ -572,8 +573,8 @@ html.global-column-resizing * {
 .dark .text-gray-800 { color: #e2e8f0; }
 .dark .text-gray-700 { color: #cbd5e1; }
 .dark .text-gray-600 { color: #a8b4c6; }
-.dark .text-gray-500 { color: #94a3b8; }
-.dark .text-gray-400 { color: #77869d; }
+.dark .text-gray-500 { color: #aeb9c9; }
+.dark .text-gray-400 { color: #8d9cb0; }
 .dark .text-gray-300 { color: #94a3b8; }
 
 .dark .ring-gray-100 { --tw-ring-color: #2a3550; }
