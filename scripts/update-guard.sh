@@ -112,7 +112,32 @@ install_hook() {
 hook_main() {
   local phase="${1:-}"
   [[ "$phase" == "prepared" ]] || exit 0
-  guard_check ""
+
+  local root
+  root="$(resolve_root "")"
+  local lock_dir
+  lock_dir="$(lock_dir_for_root "$root" 2>/dev/null || true)"
+
+  # 更新执行器持锁期间，只有同一个 runId 可以写 Git refs。
+  if [[ -n "$lock_dir" && -d "$lock_dir" ]] && ! cleanup_stale_lock "$lock_dir"; then
+    guard_check "$root"
+    exit $?
+  fi
+
+  # 更新中心的“检查 GitHub”允许 fetch refs，但不会改工作区。
+  if [[ "${ECOMMERCE_UPDATE_SERVICE_GIT:-}" == "1" ]]; then
+    exit 0
+  fi
+
+  # 紧急人工恢复才使用；正常更新不应设置这个变量。
+  if [[ "${ECOMMERCE_ALLOW_MANUAL_GIT:-}" == "1" ]]; then
+    exit 0
+  fi
+
+  echo "当前运行仓库由“系统设置 → 系统更新”统一托管。" >&2
+  echo "已阻止手工 Git ref 修改（包括 git pull / fetch / reset / checkout 的分支写入）。" >&2
+  echo "正常更新请使用系统更新中心；紧急恢复才显式设置 ECOMMERCE_ALLOW_MANUAL_GIT=1。" >&2
+  exit 74
 }
 
 case "$(basename "$0")" in
