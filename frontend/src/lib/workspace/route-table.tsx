@@ -252,14 +252,8 @@ const ROUTES: RouteEntry[] = [
     load: () => import("@/app/finance/monthly-send/page"),
   },
   {
-    pathname: "/finance/bank-summary",
-    title: "银行汇总",
-    businessType: "master",
-    load: () => import("@/app/finance/bank-summary/page"),
-  },
-  {
     pathname: "/finance/bank-transactions",
-    title: "银行流水",
+    title: "银行",
     businessType: "master",
     load: () => import("@/app/finance/bank-transactions/page"),
   },
@@ -321,6 +315,7 @@ const IN_PAGE_REDIRECTS: Record<string, string> = {
   "/payments": "/finance/monthly-send",
   "/profit": "/finance/monthly-send",
   "/tax-invoices": "/finance/invoices",
+  "/finance/bank-summary": "/finance/bank-transactions?view=summary",
   "/settings/warehouses": "/supply-chain/warehouses",
   "/finance/tax-accounting/categories": "/products?productTab=tax-rules",
   "/products/inventory-goods": "/inventory?tab=goods",

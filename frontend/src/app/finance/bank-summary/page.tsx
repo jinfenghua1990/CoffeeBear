@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { authenticatedFetch } from "@/lib/api";
-import { useTabScopedState, useTabTitle } from "@/lib/workspace/tab-store";
+import { useTabScopedState } from "@/lib/workspace/tab-store";
 
 type BankAccountSummary = {
   accountId: number | null;
@@ -60,8 +60,16 @@ function accountLabel(row: BankAccountSummary) {
   return row.accountName || row.accountNo || "未归属账户";
 }
 
-export default function BankSummaryPage() {
-  const [period, setPeriod] = useTabScopedState("bank-summary.period", previousMonthValue);
+export function BankSummaryPanel({
+  period: controlledPeriod,
+  onPeriodChange,
+}: {
+  period?: string;
+  onPeriodChange?: (value: string) => void;
+} = {}) {
+  const [storedPeriod, setStoredPeriod] = useTabScopedState("bank.period", previousMonthValue);
+  const period = controlledPeriod ?? storedPeriod;
+  const setPeriod = onPeriodChange ?? setStoredPeriod;
   const [data, setData] = useState<BankSummary | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -71,7 +79,6 @@ export default function BankSummaryPage() {
     return year && month ? { year, month } : null;
   }, [period]);
 
-  useTabTitle(selected ? `银行汇总 · ${period}` : "银行汇总");
 
   const load = useCallback(async () => {
     if (!selected) return;
@@ -98,7 +105,7 @@ export default function BankSummaryPage() {
 
   const matchHref = `/finance/monthly-send?tab=match&month=${encodeURIComponent(period)}`;
   const transactionHref = (row?: BankAccountSummary) => {
-    const params = new URLSearchParams({ period });
+    const params = new URLSearchParams({ view: "transactions", period });
     if (row?.accountNo) params.set("account", row.accountNo);
     return `/finance/bank-transactions?${params.toString()}`;
   };
@@ -108,8 +115,8 @@ export default function BankSummaryPage() {
       <header className="app-page-header -mx-1 bg-[#f4f7fb]/95 pb-2 backdrop-blur">
         <div className="flex flex-wrap items-end justify-between gap-3">
           <div>
-            <div className="mb-1 text-[11px] font-medium tracking-wide text-blue-600">财务中心 / 银行汇总</div>
-            <h1 className="text-xl font-semibold tracking-tight text-slate-900">银行汇总</h1>
+            <div className="mb-1 text-[11px] font-medium tracking-wide text-blue-600">财务中心 / 银行</div>
+            <h1 className="text-xl font-semibold tracking-tight text-slate-900">账户汇总</h1>
             <p className="mt-1 text-xs text-slate-500">这里按银行账户看资金结果和流水；月度财务核对仍以进项发票为主，再核对对应银行付款。</p>
           </div>
           <div className="flex flex-wrap items-center gap-2">
@@ -163,7 +170,7 @@ export default function BankSummaryPage() {
           <div className="px-4 py-16 text-center">
             <div className="text-sm font-medium text-slate-600">暂无银行账户数据</div>
             <div className="mt-2 text-xs text-slate-400">先上传银行交易明细，系统会自动建立账户与流水。</div>
-            <Link href="/finance/bank-transactions" className="mt-4 inline-flex rounded-lg bg-blue-600 px-3.5 py-2 text-xs font-medium text-white hover:bg-blue-700">去银行流水</Link>
+            <Link href="/finance/bank-transactions?view=transactions" className="mt-4 inline-flex rounded-lg bg-blue-600 px-3.5 py-2 text-xs font-medium text-white hover:bg-blue-700">去银行流水</Link>
           </div>
         ) : (
           <div className="overflow-x-auto">
@@ -219,4 +226,8 @@ export default function BankSummaryPage() {
       </section>
     </div>
   );
+}
+
+export default function BankSummaryPage() {
+  return <BankSummaryPanel />;
 }

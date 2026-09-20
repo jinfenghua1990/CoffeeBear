@@ -3,7 +3,8 @@
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { authenticatedFetch, type ReconTxn } from "@/lib/api";
-import { useTabRuntime, useTabScopedState, useWorkspace } from "@/lib/workspace/tab-store";
+import { BankSummaryPanel } from "@/app/finance/bank-summary/page";
+import { useTabRuntime, useTabScopedState, useTabTitle, useWorkspace } from "@/lib/workspace/tab-store";
 
 type DirectionFilter = "all" | "in" | "out";
 type MatchFilter = "all" | "matched" | "unmatched";
@@ -44,6 +45,11 @@ export default function BankTransactionsPage() {
   const workspace = useWorkspace();
   const ownTab = runtime?.tabId ? workspace.tabs.find((tab) => tab.id === runtime.tabId) : null;
   const ownSearch = ownTab?.search || "";
+  const bankView = useMemo<"summary" | "transactions">(() => {
+    const params = new URLSearchParams(ownSearch);
+    return params.get("view") === "summary" ? "summary" : "transactions";
+  }, [ownSearch]);
+  useTabTitle("银行");
 
   const [rows, setRows] = useState<ReconTxn[]>([]);
   const [direction, setDirection] = useTabScopedState<DirectionFilter>("bank.direction", "all");
@@ -56,6 +62,12 @@ export default function BankTransactionsPage() {
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
   const fileRef = useRef<HTMLInputElement>(null);
+
+  const bankViewHref = (view: "summary" | "transactions") => {
+    const params = new URLSearchParams({ view, period });
+    if (view === "transactions" && accountFilter) params.set("account", accountFilter);
+    return `/finance/bank-transactions?${params.toString()}`;
+  };
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -84,14 +96,14 @@ export default function BankTransactionsPage() {
   }, [period]);
 
   useEffect(() => {
-    void load();
-  }, [load]);
+    if (bankView === "transactions") void load();
+  }, [bankView, load]);
 
   useEffect(() => {
     const params = new URLSearchParams(ownSearch);
     const requestedPeriod = params.get("period") || "";
     if (/^\d{4}-\d{2}$/.test(requestedPeriod)) setPeriod(requestedPeriod);
-    setAccountFilter(params.get("account") || "");
+    if (params.get("view") !== "summary") setAccountFilter(params.get("account") || "");
   }, [ownSearch, setAccountFilter, setPeriod]);
 
   const periodRows = useMemo(
@@ -191,12 +203,36 @@ export default function BankTransactionsPage() {
     }
   }
 
+  const bankTabs = (
+    <div className="mx-auto w-full max-w-[1600px] pb-3">
+      <div className="inline-flex overflow-hidden rounded-lg border border-slate-200 bg-white p-0.5 text-xs shadow-sm" role="tablist" aria-label="银行模块视图">
+        <Link href={bankViewHref("summary")} role="tab" aria-selected={bankView === "summary"} className={`rounded-md px-4 py-2 font-medium transition ${bankView === "summary" ? "bg-blue-600 text-white" : "text-slate-600 hover:bg-slate-50"}`}>
+          账户汇总
+        </Link>
+        <Link href={bankViewHref("transactions")} role="tab" aria-selected={bankView === "transactions"} className={`rounded-md px-4 py-2 font-medium transition ${bankView === "transactions" ? "bg-blue-600 text-white" : "text-slate-600 hover:bg-slate-50"}`}>
+          银行流水
+        </Link>
+      </div>
+    </div>
+  );
+
+  if (bankView === "summary") {
+    return (
+      <>
+        {bankTabs}
+        <BankSummaryPanel period={period} onPeriodChange={setPeriod} />
+      </>
+    );
+  }
+
   return (
-    <div className="mx-auto w-full max-w-[1600px] space-y-4 pb-8">
+    <>
+      {bankTabs}
+      <div className="mx-auto w-full max-w-[1600px] space-y-4 pb-8">
       <header className="app-page-header -mx-1 bg-[#f4f7fb]/95 pb-2 backdrop-blur">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div>
-            <div className="mb-1 text-[11px] font-medium tracking-wide text-blue-600">财务中心 / 银行流水</div>
+            <div className="mb-1 text-[11px] font-medium tracking-wide text-blue-600">财务中心 / 银行</div>
             <h1 className="text-xl font-semibold tracking-tight text-slate-900">银行流水</h1>
             <p className="mt-1 text-xs text-slate-500">查看账户收入与支出流水；收入用于回款对账，支出用于进项发票匹配。</p>
           </div>
@@ -249,8 +285,7 @@ export default function BankTransactionsPage() {
             <option value="matched">已匹配</option>
             <option value="unmatched">待匹配</option>
           </select>
-          <Link href="/finance/bank-summary" className="ml-auto rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-medium text-slate-600 hover:bg-slate-50">银行汇总</Link>
-          <Link href={`/finance/monthly-send?tab=match&month=${encodeURIComponent(period)}`} className="rounded-lg border border-blue-200 px-3 py-1.5 text-xs font-medium text-blue-600 hover:bg-blue-50">发起对账</Link>
+          <Link href={`/finance/monthly-send?tab=match&month=${encodeURIComponent(period)}`} className="ml-auto rounded-lg border border-blue-200 px-3 py-1.5 text-xs font-medium text-blue-600 hover:bg-blue-50">发起对账</Link>
         </div>
 
         <div className="flex items-center justify-between border-b border-slate-100 bg-slate-50/50 px-4 py-2 text-[11px] text-slate-400">
@@ -297,6 +332,7 @@ export default function BankTransactionsPage() {
           </div>
         )}
       </section>
-    </div>
+      </div>
+    </>
   );
 }
