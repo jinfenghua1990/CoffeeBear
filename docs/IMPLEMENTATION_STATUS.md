@@ -5,7 +5,7 @@
 ## 当前结论
 
 - 本仓库为**按规格 MD 原栈（FastAPI + Next.js + Celery）的重写版**；此前的 TS monorepo（`~/Documents/ChatGPT/电商工作平台/`）Phase 0 已验证可用，用户决策于 2026-09-01 改回规格原栈重写，TS 版保留未删除。
-- 实际运行仓库：`/Users/gino/ecommerce-dashboard`，通过 LaunchAgent 原生运行于 **8000** 端口；不再依赖 Docker。
+- 实际运行仓库：`/Users/gino/ecommerce-workspace`，通过 LaunchAgent 原生运行于 **8000** 端口；不再依赖 Docker。
 - 当前为**局域网 Web 访问 + 账号密码登录**：默认登录 12 小时，勾选“记住登录”后同一浏览器 30 天免重复输入；改密/退出立即撤销旧令牌。viewer 只读，operator/admin 可写。8000 不得端口转发到公网。
 - 吉客云销售订单已统一为 **Web → Windows RPA → OpenAPI/MCP** 可配置故障切换：三个通道共用规范化、身份识别、去重、幂等写库和同步日志；运行入口为 `/api/v1/jky-orders/*`，订单来源与来源历史写入 `sales_orders`。当前生产仍为 `JACKYUN_SYNC_MODE=manual`，未验证的外部通道不会被显示为成功。
 
