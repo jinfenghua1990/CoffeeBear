@@ -124,7 +124,11 @@ export default function SystemUpdatePage() {
       const next = await systemUpdateApi.status();
       setStatus(next);
       if (!preserveDraft) setDraft(next.settings);
-      setError(next.lastCheckError || next.lastAutoError || next.error || "");
+      const activeError =
+        next.lastCheckError ||
+        next.lastAutoError ||
+        (next.phase === "failed" ? next.error || "" : "");
+      setError(activeError);
       return next;
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : String(caught));

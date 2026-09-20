@@ -191,6 +191,11 @@ def test_check_preserves_last_install_result(monkeypatch, tmp_path: Path):
     service._atomic_json(
         status_file,
         {
+            "phase": "failed",
+            "error": "旧安装失败错误",
+            "lastAutoError": "旧自动更新错误",
+            "lastAutoErrorAt": "2026-09-19T00:30:00+08:00",
+            "rollbackErrors": ["旧回滚错误"],
             "lastInstallResult": "success",
             "lastInstallAt": "2026-09-19T01:00:00+08:00",
             "lastInstallFromSha": "a" * 40,
@@ -234,6 +239,11 @@ def test_check_preserves_last_install_result(monkeypatch, tmp_path: Path):
     assert result["lastInstallAt"] == "2026-09-19T01:00:00+08:00"
     assert result["lastInstallFromSha"] == "a" * 40
     assert result["lastInstallToSha"] == "b" * 40
+    assert result["phase"] == "idle"
+    assert result["error"] == ""
+    assert result["lastAutoError"] == ""
+    assert result["lastAutoErrorAt"] == ""
+    assert result["rollbackErrors"] == []
 
 
 
