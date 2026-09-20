@@ -9,6 +9,7 @@ from app.models.catalog import ProductSku
 from app.models.finance import FinanceEntry, FinanceLegalEntity
 from app.models.foreign_trade import ForeignTradeShipment
 from app.models.jackyun import JackyunGoodsDocument, JackyunGoodsDocumentItem
+from app.models.logistics import LogisticsBill
 from app.models.sales import SalesOrder, SalesOrderItem
 from app.services import finance_center_service
 from app.services import finance_projection_service as projection
@@ -294,3 +295,63 @@ def test_inbound_projects_inventory_payable_without_profit_or_cash_effect(db_ses
     assert entry.invoice_status == "pending"
     assert entry.cash_effect is False
     assert entry.profit_effect is False
+
+
+
+def test_logistics_projection_replaces_estimate_with_actual_bill(db_session):
+    outbound = JackyunGoodsDocument(
+        document_type="outbound",
+        goodsdoc_no="PY-FIN-OUTBOUND-LOG-1",
+        document_at=_dt(year=2026, month=8, day=15),
+        total_quantity=Decimal("1"),
+    )
+    db_session.add(outbound)
+    db_session.flush()
+
+    first = projection.project_domestic_logistics_period(
+        db_session, year=2026, month=8
+    )
+    db_session.flush()
+    rows = db_session.scalars(
+        select(FinanceEntry).where(
+            FinanceEntry.source_type == "domestic_logistics_period",
+            FinanceEntry.source_id == "2026-08",
+        )
+    ).all()
+    assert first["created"] == 1
+    assert len(rows) == 1
+    assert rows[0].category == "domestic_logistics"
+    assert rows[0].value_type == "estimated"
+    assert rows[0].amount == Decimal("5.0000")
+    assert rows[0].cash_effect is False
+    assert rows[0].profit_effect is True
+
+    bill = LogisticsBill(
+        period_label="2026-08",
+        period_start=_dt(year=2026, month=8, day=1),
+        period_end=_dt(year=2026, month=8, day=31),
+        carrier="测试物流",
+        waybill_count=1,
+        estimated_amount=Decimal("5"),
+        actual_amount=Decimal("8.40"),
+        actual_unit_price=Decimal("8.40"),
+        status="settled",
+        invoice_status="invoiced",
+    )
+    db_session.add(bill)
+    db_session.flush()
+
+    projection.project_domestic_logistics_period(
+        db_session, year=2026, month=8
+    )
+    db_session.flush()
+    rows = db_session.scalars(
+        select(FinanceEntry).where(
+            FinanceEntry.source_type == "domestic_logistics_period",
+            FinanceEntry.source_id == "2026-08",
+        )
+    ).all()
+    assert len(rows) == 1
+    assert rows[0].value_type == "actual"
+    assert rows[0].amount == Decimal("8.4000")
+    assert rows[0].settlement_status == "settled"
