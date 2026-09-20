@@ -351,6 +351,9 @@ def run_daily(config: dict[str, Any], directory: Path, state: dict[str, Any]) ->
         "kind": "daily",
         "timestamp": timestamp,
         "gitSha": values.get("git_sha", ""),
+        "configEncryption": values.get("config_encryption", ""),
+        "configKeyFingerprint": values.get("config_key_fingerprint", ""),
+        "configKeyExternalRequired": values.get("config_key_external_required", "") == "1",
         "modules": refs,
         "sourceManifest": manifest.name,
     }
@@ -384,6 +387,9 @@ def run_full(config: dict[str, Any], directory: Path, state: dict[str, Any]) -> 
         "kind": "full",
         "timestamp": timestamp,
         "gitSha": values.get("git_sha", ""),
+        "configEncryption": values.get("config_encryption", ""),
+        "configKeyFingerprint": values.get("config_key_fingerprint", ""),
+        "configKeyExternalRequired": values.get("config_key_external_required", "") == "1",
         "manifest": {"name": manifest.name, "objectKey": manifest_key, "sha256": sha256_file(manifest)},
         "modules": refs,
     }

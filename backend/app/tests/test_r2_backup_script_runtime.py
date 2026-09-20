@@ -26,7 +26,7 @@ def test_r2_daily_deduplicates_base_manifest_and_modules(tmp_path, monkeypatch):
         f"db_{timestamp}.dump": b"db",
         f"data_{timestamp}.tar.gz": b"data",
         f"app_{timestamp}.tar.gz": b"app",
-        f"config_{timestamp}.tar.gz": b"config",
+        f"config_{timestamp}.tar.gz.fernet": b"config",
         f"full_{timestamp}.manifest": b"full-manifest",
     }.items():
         path = tmp_path / name
@@ -47,8 +47,11 @@ def test_r2_daily_deduplicates_base_manifest_and_modules(tmp_path, monkeypatch):
         "data_sha256": digest(files[f"data_{timestamp}.tar.gz"]),
         "app": f"app_{timestamp}.tar.gz",
         "app_sha256": digest(files[f"app_{timestamp}.tar.gz"]),
-        "config": f"config_{timestamp}.tar.gz",
-        "config_sha256": digest(files[f"config_{timestamp}.tar.gz"]),
+        "config": f"config_{timestamp}.tar.gz.fernet",
+        "config_sha256": digest(files[f"config_{timestamp}.tar.gz.fernet"]),
+        "config_encryption": "fernet",
+        "config_key_fingerprint": "0123456789abcdef",
+        "config_key_external_required": "1",
         "docker_image": "",
         "docker_image_sha256": "",
     }
@@ -79,6 +82,9 @@ def test_r2_daily_deduplicates_base_manifest_and_modules(tmp_path, monkeypatch):
         "ecommerce-workspace/backup/modules/base_manifest/"
     )
     assert snapshot["modules"]["base_manifest"]["objectKey"] == base_state["object_key"]
+    assert snapshot["configEncryption"] == "fernet"
+    assert snapshot["configKeyFingerprint"] == "0123456789abcdef"
+    assert snapshot["configKeyExternalRequired"] is True
     assert len(uploaded_files) == 5
     assert any(key.endswith("/latest-daily.json") for key in uploaded_indexes)
 

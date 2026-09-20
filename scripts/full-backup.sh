@@ -15,9 +15,38 @@ fi
 [[ -n "$RUNTIME_BACKUP_DIR" ]] && export BACKUP_DIR="$RUNTIME_BACKUP_DIR"
 
 PERSIST_ROOT="${PERSIST_ROOT:-$ROOT}"
+DATA_DIR="${DATA_DIR:-$PERSIST_ROOT/data}"
 BACKUP_DIR="${BACKUP_DIR:-$PERSIST_ROOT/backups}"
 FULL_KEEP="${FULL_KEEP:-12}"
+RECOVERY_KEY_FILE="${BACKUP_RECOVERY_KEY_FILE:-$PERSIST_ROOT/keys/backup-recovery.key}"
 mkdir -p "$BACKUP_DIR"
+
+PYTHON_BIN="$ROOT/backend/.venv/bin/python"
+if [[ ! -x "$PYTHON_BIN" ]]; then
+  PYTHON_BIN="$(command -v python3 || true)"
+fi
+if [[ -z "$PYTHON_BIN" ]] || ! "$PYTHON_BIN" -c 'import cryptography' >/dev/null 2>&1; then
+  echo "缺少可用 Python/cryptography，无法安全加密容灾配置包。" >&2
+  exit 2
+fi
+
+resolve_path() {
+  "$PYTHON_BIN" - "$1" <<'PY'
+from pathlib import Path
+import sys
+print(Path(sys.argv[1]).expanduser().resolve())
+PY
+}
+
+KEY_ABS="$(resolve_path "$RECOVERY_KEY_FILE")"
+DATA_ABS="$(resolve_path "$DATA_DIR")"
+BACKUP_ABS="$(resolve_path "$BACKUP_DIR")"
+case "$KEY_ABS/" in
+  "$DATA_ABS/"*|"$BACKUP_ABS/"*)
+    echo "BACKUP_RECOVERY_KEY_FILE 不能位于 data/ 或 backups/ 内，否则密钥会和密文一起进入备份。" >&2
+    exit 2
+    ;;
+esac
 
 sha256_file() {
   local file="$1"
@@ -67,17 +96,19 @@ if [[ -z "$TS" || -z "$DB_NAME" || -z "$DB_HASH" ]]; then
 fi
 
 APP_FINAL="$BACKUP_DIR/app_$TS.tar.gz"
-CONFIG_FINAL="$BACKUP_DIR/config_$TS.tar.gz"
+CONFIG_FINAL="$BACKUP_DIR/config_$TS.tar.gz.fernet"
 IMAGE_FINAL="$BACKUP_DIR/docker_image_$TS.tar.gz"
 FULL_FINAL="$BACKUP_DIR/full_$TS.manifest"
 TMP_APP="$BACKUP_DIR/.app_$TS.tar.gz.tmp"
-TMP_CONFIG="$BACKUP_DIR/.config_$TS.tar.gz.tmp"
+TMP_CONFIG_RAW="$BACKUP_DIR/.config_$TS.tar.gz.raw"
+TMP_CONFIG="$BACKUP_DIR/.config_$TS.tar.gz.fernet.tmp"
+TMP_CONFIG_VERIFY="$BACKUP_DIR/.config_$TS.verify.tar.gz"
 TMP_IMAGE="$BACKUP_DIR/.docker_image_$TS.tar.gz.tmp"
 TMP_FULL="$BACKUP_DIR/.full_$TS.manifest.tmp"
 COMMITTED=0
 
 cleanup() {
-  rm -f "$TMP_APP" "$TMP_CONFIG" "$TMP_IMAGE" "$TMP_FULL"
+  rm -f "$TMP_APP" "$TMP_CONFIG_RAW" "$TMP_CONFIG" "$TMP_CONFIG_VERIFY" "$TMP_IMAGE" "$TMP_FULL"
   if [[ "$COMMITTED" != "1" ]]; then
     rm -f "$APP_FINAL" "$CONFIG_FINAL" "$IMAGE_FINAL" "$FULL_FINAL"
   fi
@@ -94,23 +125,63 @@ git -C "$ROOT" archive --format=tar.gz --prefix="ecommerce-workspace/" HEAD > "$
 tar -tzf "$TMP_APP" >/dev/null
 [[ -s "$TMP_APP" ]] || { echo "应用归档为空" >&2; exit 2; }
 
-echo "==> [3/5] 归档运行配置 ..."
+echo "==> [3/5] 归档并加密运行配置 ..."
 CONFIG_FILES=()
-[[ -f "$ROOT/.env" ]] && CONFIG_FILES+=(".env")
+for candidate in   ".env"   ".env.production"   "compose.yaml"   "compose.yml"   "docker-compose.override.yml"   "docker-compose.override.yaml"
+do
+  [[ -f "$ROOT/$candidate" ]] && CONFIG_FILES+=("$candidate")
+done
 while IFS= read -r file; do
   rel="${file#"$ROOT/"}"
-  [[ "$rel" == ".env" ]] && continue
-  CONFIG_FILES+=("$rel")
-done < <(find "$ROOT/deploy" -maxdepth 4 -type f -name '.env' 2>/dev/null | sort || true)
+  duplicate=0
+  for existing in "${CONFIG_FILES[@]:-}"; do
+    [[ "$existing" == "$rel" ]] && duplicate=1 && break
+  done
+  [[ "$duplicate" == "0" ]] && CONFIG_FILES+=("$rel")
+done < <(
+  find "$ROOT/deploy" -maxdepth 5 -type f \
+    \( -name '.env' -o -name '.env.*' -o -name 'compose*.yml' -o -name 'compose*.yaml' \) \
+    2>/dev/null | sort || true
+)
+
 if (( ${#CONFIG_FILES[@]} > 0 )); then
-  tar -czf "$TMP_CONFIG" -C "$ROOT" "${CONFIG_FILES[@]}"
-  tar -tzf "$TMP_CONFIG" >/dev/null
+  tar -czf "$TMP_CONFIG_RAW" -C "$ROOT" "${CONFIG_FILES[@]}"
+  tar -tzf "$TMP_CONFIG_RAW" >/dev/null
 else
   TMP_NOTE="$BACKUP_DIR/.config_note_$TS.txt"
-  printf '%s\n' "No runtime .env files existed when this recovery point was created." > "$TMP_NOTE"
-  tar -czf "$TMP_CONFIG" -C "$BACKUP_DIR" "$(basename "$TMP_NOTE")"
+  printf '%s\n' "No runtime .env / compose files existed when this recovery point was created." > "$TMP_NOTE"
+  tar -czf "$TMP_CONFIG_RAW" -C "$BACKUP_DIR" "$(basename "$TMP_NOTE")"
   rm -f "$TMP_NOTE"
 fi
+
+KEY_CREATED=0
+[[ -f "$KEY_ABS" ]] || KEY_CREATED=1
+CRYPTO_OUTPUT="$("$PYTHON_BIN" "$ROOT/scripts/backup-config-crypto.py" encrypt \
+  --key-file "$KEY_ABS" \
+  --input "$TMP_CONFIG_RAW" \
+  --output "$TMP_CONFIG" \
+  --create-key)"
+KEY_FINGERPRINT="$(printf '%s\n' "$CRYPTO_OUTPUT" | sed -n 's/^KEY_FINGERPRINT=//p' | tail -1)"
+[[ -n "$KEY_FINGERPRINT" && -s "$TMP_CONFIG" ]] || {
+  echo "运行配置加密失败，拒绝提交容灾恢复点。" >&2
+  exit 2
+}
+
+# 提交前立即做一次本地解密 + tar 完整性校验，避免生成无法恢复的密文包。
+"$PYTHON_BIN" "$ROOT/scripts/backup-config-crypto.py" decrypt \
+  --key-file "$KEY_ABS" \
+  --input "$TMP_CONFIG" \
+  --output "$TMP_CONFIG_VERIFY" >/dev/null
+tar -tzf "$TMP_CONFIG_VERIFY" >/dev/null
+rm -f "$TMP_CONFIG_RAW" "$TMP_CONFIG_VERIFY"
+
+if [[ "$KEY_CREATED" == "1" ]]; then
+  echo "     已生成独立恢复密钥：$KEY_ABS"
+  echo "     请把该密钥复制到独立安全位置；R2/Kodo 不会备份此密钥。"
+else
+  echo "     使用现有独立恢复密钥：$KEY_ABS"
+fi
+echo "     恢复密钥指纹：$KEY_FINGERPRINT"
 
 DOCKER_NAME=""
 DOCKER_HASH=""
@@ -146,6 +217,9 @@ app=$(basename "$APP_FINAL")
 app_sha256=$APP_HASH
 config=$(basename "$CONFIG_FINAL")
 config_sha256=$CONFIG_HASH
+config_encryption=fernet
+config_key_fingerprint=$KEY_FINGERPRINT
+config_key_external_required=1
 docker_image=$DOCKER_NAME
 docker_image_sha256=$DOCKER_HASH
 EOF
@@ -175,4 +249,5 @@ done < <(ls -1t "$BACKUP_DIR"/full_*.manifest 2>/dev/null || true)
 
 FULL_ABS="$(cd "$BACKUP_DIR" && pwd)/$(basename "$FULL_FINAL")"
 echo "==> 完成。完整容灾恢复点：$FULL_ABS"
+echo "==> 配置包已客户端加密；恢复时需要独立密钥（指纹 $KEY_FINGERPRINT）。"
 echo "FULL_BACKUP_MANIFEST=$FULL_ABS"

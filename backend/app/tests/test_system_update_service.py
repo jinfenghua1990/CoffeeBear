@@ -534,3 +534,53 @@ def test_reference_transaction_hook_blocks_manual_git_and_allows_updater(tmp_pat
         env=updater_env,
         check=True,
     )
+
+
+
+def test_runner_rejects_target_sha_different_from_locked_target(tmp_path: Path):
+    """同一个 runId 也不能把服务端锁定的目标 SHA 偷换成另一个 SHA。"""
+    from argparse import Namespace
+    from importlib.util import module_from_spec, spec_from_file_location
+
+    repo_root = Path(__file__).resolve().parents[3]
+    runner_path = repo_root / "scripts" / "system_update_runner.py"
+    spec = spec_from_file_location("system_update_runner_test_module", runner_path)
+    assert spec is not None and spec.loader is not None
+    module = module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    fake_root = tmp_path / "repo"
+    (fake_root / ".git" / "ecommerce-system-update.lock").mkdir(parents=True)
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+
+    locked_target = "a" * 40
+    requested_target = "b" * 40
+    owner_file = fake_root / ".git" / "ecommerce-system-update.lock" / "owner.json"
+    owner_file.write_text(
+        json.dumps({
+            "runId": "run-locked",
+            "pid": os.getpid(),
+            "targetSha": locked_target,
+            "actor": "pytest",
+        }),
+        encoding="utf-8",
+    )
+
+    args = Namespace(
+        root=str(fake_root),
+        data_dir=str(data_dir),
+        target=requested_target,
+        branch="develop",
+        remote="origin",
+        actor="pytest",
+        run_id="run-locked",
+        health_url="http://127.0.0.1:8000/healthz",
+    )
+    runner = module.Runner(args)
+
+    with pytest.raises(RuntimeError, match="目标版本与全局锁不一致"):
+        runner.claim_update_lock()
+
+    owner = json.loads(owner_file.read_text(encoding="utf-8"))
+    assert owner["targetSha"] == locked_target

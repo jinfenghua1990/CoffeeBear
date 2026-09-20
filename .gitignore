@@ -5,6 +5,7 @@
 data/
 *.pem
 *.key
+keys/
 
 # Python
 __pycache__/

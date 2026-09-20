@@ -118,6 +118,9 @@ class Runner:
         owner = self.read_lock_owner()
         if owner.get("runId") != self.args.run_id:
             raise RuntimeError("系统更新全局锁已由其他任务持有")
+        locked_target = str(owner.get("targetSha") or "")
+        if locked_target != self.args.target:
+            raise RuntimeError("系统更新目标版本与全局锁不一致，拒绝执行")
         owner.update({
             "runId": self.args.run_id,
             "pid": os.getpid(),

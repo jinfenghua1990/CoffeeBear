@@ -342,7 +342,7 @@ const STORAGE_DETAILS: Record<StorageKey, {
     role: "主存储",
     desc: "用于日常模块化备份与每 10 天一次的全量容灾备份。",
     fields: ["Endpoint", "Bucket", "Access Key ID", "Secret Access Key"],
-    note: "凭据只保存到部署环境，不写入 GitHub。",
+    note: "运行配置进入云端前先做客户端加密；独立恢复密钥不上传 R2/Kodo，需另行安全保存。",
   },
   kodo: {
     title: "七牛云 Kodo",
@@ -752,6 +752,7 @@ export default function BackupSettingsPage() {
                     <ul className="space-y-0.5 text-[9px] leading-4 text-slate-500">
                       <li>• 每 10 天执行一次</li>
                       <li>• 完整系统备份（软件 + 数据 + 配置）</li>
+                      <li>• 运行配置客户端加密，恢复密钥独立保存</li>
                       <li>• 用于灾难恢复</li>
                       <li>• 不依赖 GitHub 即可重建</li>
                     </ul>
@@ -801,7 +802,7 @@ export default function BackupSettingsPage() {
                 enabled={Boolean(r2Config?.configured && r2Config.enabled)}
                 enabledText={r2Config?.configured && r2Config.enabled ? "已启用" : "待配置"}
                 schedule={`计划：每 ${r2Config?.fullIntervalDays || 10} 天 03:00`}
-                content={["完整数据库", "全部业务文件", "系统配置", "应用程序 / Docker 配置 / 必要文件", "恢复脚本 / 完整性清单"]}
+                content={["完整数据库", "全部业务文件", "系统配置（客户端加密）", "应用程序 / Docker 配置 / 必要文件", "恢复脚本 / 完整性清单", "独立恢复密钥不进入云端备份"]}
                 retention="计划：保留容灾恢复点"
                 status={r2Loading ? "读取 R2 配置" : r2Config?.configured && r2Config.enabled ? "R2 已启用" : "R2 待配置"}
                 onEdit={() => setActiveTab("config")}
@@ -854,10 +855,16 @@ export default function BackupSettingsPage() {
               <div className="mb-3 text-[13px] font-semibold text-slate-900">备份状态</div>
               <div className="rounded-lg bg-slate-50 px-3 py-3">
                 <div className="flex items-center gap-3">
-                  <span className="flex h-8 w-8 items-center justify-center rounded-full bg-emerald-100 text-emerald-700">✓</span>
+                  <span className={`flex h-8 w-8 items-center justify-center rounded-full ${backupStatus?.lastLocal ? "bg-emerald-100 text-emerald-700" : "bg-amber-100 text-amber-700"}`}>
+                    {backupStatus?.lastLocal ? "✓" : "!"}
+                  </span>
                   <div>
-                    <div className="text-[11px] font-semibold text-slate-800">本地基础备份可用</div>
-                    <div className="mt-0.5 text-[9px] text-slate-400">PostgreSQL + data/ 恢复演练已通过</div>
+                    <div className="text-[11px] font-semibold text-slate-800">
+                      {backupStatus?.lastLocal ? "本地基础备份已有成功恢复点" : "等待首次本地基础备份"}
+                    </div>
+                    <div className="mt-0.5 text-[9px] text-slate-400">
+                      {backupStatus?.lastLocal ? `最近成功：${backupTime(backupStatus.lastLocal.time)} · PostgreSQL + data/` : "尚未发现成功 manifest；不预判恢复演练结果"}
+                    </div>
                   </div>
                 </div>
               </div>
@@ -1001,7 +1008,7 @@ export default function BackupSettingsPage() {
                 </button>
               </div>
               <div className="mt-3 rounded-lg bg-slate-50 px-3 py-2 text-[9px] leading-5 text-slate-500">
-                安全流程：下载到 staging → SHA256 校验 → 临时数据库恢复演练。这里不会直接覆盖 PostgreSQL、data/、应用代码或 .env；Kodo 冷备不参与取回。
+                安全流程：下载到 staging → SHA256 校验 → 临时数据库恢复演练。运行配置为客户端加密密文，真正恢复配置时必须提供独立恢复密钥；这里不会直接覆盖 PostgreSQL、data/、应用代码或 .env，Kodo 冷备不参与取回。
               </div>
             </div>
           </section>

@@ -310,7 +310,10 @@ def main() -> int:
             "validated": not args.skip_restore_check,
             "directory": str(target_dir),
             "modules": downloaded,
-            "note": "仅准备到 staging；尚未覆盖生产环境。",
+            "configEncryption": str(index.get("configEncryption") or ""),
+            "configKeyFingerprint": str(index.get("configKeyFingerprint") or ""),
+            "configKeyExternalRequired": bool(index.get("configKeyExternalRequired")),
+            "note": "仅准备到 staging；尚未覆盖生产环境。运行配置若已加密，需另行提供独立恢复密钥。",
         }
         (target_dir / "READY.json").write_text(json.dumps(ready, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     except subprocess.CalledProcessError as exc:
