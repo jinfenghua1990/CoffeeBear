@@ -243,3 +243,74 @@ def test_output_invoice_category_enum_and_direction_guard(db_session):
     service.set_invoice_categories(db_session, [output.id], "", actor="pytest")
     assert db_session.get(TaxInvoice, output.id).category == ""
     assert service.serialize_invoice(db_session.get(TaxInvoice, output.id))["categoryLabel"] == "待判断"
+
+
+
+def test_invoice_business_match_and_bank_payment_status_are_independent(db_session):
+    """同一张进项发票的业务匹配与银行付款核对必须各算各的，互不污染。"""
+    from datetime import datetime, timezone
+
+    from app.models.tax import TaxInvoice, TaxInvoiceLink
+
+    invoice = TaxInvoice(
+        invoice_key=f"pytest-domain-{uuid4().hex}",
+        invoice_number=f"DOMAIN-{uuid4().hex[:10]}",
+        direction="input",
+        status="issued",
+        issue_date=datetime(2026, 9, 20, tzinfo=timezone.utc),
+        seller_name="独立域供应商",
+        total_amount=Decimal("1000.00"),
+        match_status="unmatched",  # 故意放旧缓存值，序列化必须以真实业务链接为准。
+        match_note="",
+        raw={},
+    )
+    db_session.add(invoice)
+    db_session.flush()
+
+    business_link = TaxInvoiceLink(
+        invoice_id=invoice.id,
+        target_type="external_purchase_order",
+        target_id=987654321,
+        allocated_amount=Decimal("600.00"),
+        match_method="manual",
+        confirmed=True,
+        note="采购业务匹配",
+    )
+    bank_link = TaxInvoiceLink(
+        invoice_id=invoice.id,
+        target_type="bank_transaction",
+        target_id=123456789,
+        allocated_amount=Decimal("400.00"),
+        match_method="manual",
+        confirmed=True,
+        note="银行付款核对",
+    )
+    db_session.add_all([business_link, bank_link])
+    db_session.flush()
+
+    payload = service.serialize_invoice(invoice, db=db_session)
+    assert payload["businessMatchStatus"] == "partial"
+    assert payload["businessMatchedAmount"] == "600.0000"
+    assert payload["businessRemainingAmount"] == "400.0000"
+    assert payload["bankPaymentStatus"] == "partial"
+    assert payload["bankPaidAmount"] == "400.00"
+    assert payload["bankRemainingAmount"] == "600.00"
+
+    # 银行核对改成付清，发票业务匹配仍然只能保持 600/1000 的 partial。
+    bank_link.allocated_amount = Decimal("1000.00")
+    db_session.flush()
+    payload = service.serialize_invoice(invoice, db=db_session)
+    assert payload["businessMatchStatus"] == "partial"
+    assert payload["businessMatchedAmount"] == "600.0000"
+    assert payload["bankPaymentStatus"] == "matched"
+    assert payload["bankPaidAmount"] == "1000.00"
+
+    # 解除银行核对也不能改变发票业务匹配。
+    bank_link.match_method = "rejected"
+    bank_link.confirmed = False
+    db_session.flush()
+    payload = service.serialize_invoice(invoice, db=db_session)
+    assert payload["businessMatchStatus"] == "partial"
+    assert payload["businessMatchedAmount"] == "600.0000"
+    assert payload["bankPaymentStatus"] == "unmatched"
+    assert payload["bankPaidAmount"] == "0.00"

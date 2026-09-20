@@ -587,7 +587,45 @@ def _serialize_invoice(row: TaxInvoice, context: dict | None = None, db: Session
 
 
 def serialize_invoice(row: TaxInvoice, db: Session | None = None) -> dict:
-    return _serialize_invoice(row, db=db)
+    """序列化单张发票时也实时计算两个独立域，避免返回数据库旧缓存状态。
+
+    - businessMatchStatus：只来自采购/销售业务链接；
+    - bankPaymentStatus：只来自 bank_transaction 付款链接。
+    """
+    if db is None:
+        return _serialize_invoice(row)
+
+    context = {
+        **_invoice_business_context(db, [row]).get(row.id, {
+            "links": [],
+            "purchaseOrderNos": [],
+            "inboundNos": [],
+            "businessMatchStatus": row.match_status,
+            "businessMatchedAmount": "0.00",
+            "businessRemainingAmount": str(quantize(to_decimal(row.total_amount))),
+        }),
+        **_red_trace_context([row]).get(row.id, {}),
+        **invoice_line_summaries(db, [row]).get(row.id, {"lineItems": [], "lineItemCount": 0}),
+        **_invoice_bank_payment_context(db, [row]).get(row.id, {
+            "bankPaymentStatus": "not_applicable",
+            "bankPaidAmount": "0.00",
+            "bankRemainingAmount": "0.00",
+        }),
+    }
+    if row.direction == "input":
+        context["paymentMethod"] = (
+            "corporate"
+            if context["bankPaymentStatus"] in {"partial", "matched"}
+            else ""
+        )
+        if not row.category:
+            context["category"] = classify_category_from_items(
+                [str(item.get("goodsName") or "") for item in context.get("lineItems", [])]
+            )
+    elif row.direction == "output":
+        context["paymentMethod"] = row.payment_method or ""
+
+    return _serialize_invoice(row, context, db=db)
 
 
 def _invoice_bank_payment_context(db: Session, rows: list[TaxInvoice]) -> dict[int, dict]:

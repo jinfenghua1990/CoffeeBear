@@ -52,7 +52,8 @@ function matchLabel(value: string) {
 }
 
 function businessMatchStatus(row: TaxInvoiceRow) {
-  return row.businessMatchStatus || row.matchStatus;
+  // 发票自己的业务匹配只认采购/销售域的显式状态；禁止回退到旧 matchStatus。
+  return row.businessMatchStatus;
 }
 
 function bankPaymentLabel(row: TaxInvoiceRow) {

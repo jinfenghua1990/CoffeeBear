@@ -29,11 +29,13 @@ function dateText(value: string) {
 }
 
 function settlementMatchStatus(row: ReconTxn) {
-  return row.settlementMatchStatus || (row.matched ? "matched" : "unmatched");
+  // 银行收入只认回款 settlement 域；旧 matched 不参与页面判断。
+  return row.settlementMatchStatus || "unmatched";
 }
 
 function expenseMatchStatus(row: ReconTxn) {
-  return row.invoicePaymentMatchStatus || row.invoiceMatchStatus || (row.invoiceMatched ? "matched" : "unmatched");
+  // 银行支出只认付款核对域；旧 invoiceMatchStatus / invoiceMatched 不参与页面判断。
+  return row.invoicePaymentMatchStatus || "unmatched";
 }
 
 function matchText(row: ReconTxn) {
