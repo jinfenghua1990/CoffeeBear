@@ -46,6 +46,14 @@ def _user_payload(user: User) -> dict:
     }
 
 
+@router.get("/config")
+def auth_config() -> dict:
+    """前端运行时读取真实鉴权模式，避免静态构建时环境变量与后端不一致。"""
+    from app.config import settings
+
+    return {"accessMode": settings.ACCESS_MODE}
+
+
 @router.post("/login")
 def login(body: LoginBody, db: Session = Depends(get_db)):
     user = db.scalar(select(User).where(User.username == body.username))
