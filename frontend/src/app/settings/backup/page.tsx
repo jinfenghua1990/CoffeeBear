@@ -3,8 +3,12 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import {
   getKodoColdBackupConfig,
+  getR2BackupConfig,
+  runR2Backup,
   saveKodoColdBackupConfig,
+  saveR2BackupConfig,
   type KodoColdBackupConfig,
+  type R2BackupConfig,
 } from "@/lib/api";
 
 type TabKey = "overview" | "config" | "restore" | "records" | "storage";
@@ -362,6 +366,19 @@ export default function BackupSettingsPage() {
   const [selectedStorage, setSelectedStorage] = useState<StorageKey>("r2");
   const [notice, setNotice] = useState("");
   const [menuOpen, setMenuOpen] = useState(false);
+  const [r2Config, setR2Config] = useState<R2BackupConfig | null>(null);
+  const [r2Loading, setR2Loading] = useState(true);
+  const [r2Saving, setR2Saving] = useState(false);
+  const [r2Running, setR2Running] = useState(false);
+  const [r2Form, setR2Form] = useState({
+    endpointUrl: "",
+    bucket: "",
+    prefix: "ecommerce-workspace/backup",
+    accessKey: "",
+    secretKey: "",
+    enabled: true,
+    fullIntervalDays: 10,
+  });
   const [kodoConfig, setKodoConfig] = useState<KodoColdBackupConfig | null>(null);
   const [kodoLoading, setKodoLoading] = useState(true);
   const [kodoSaving, setKodoSaving] = useState(false);
@@ -393,6 +410,34 @@ export default function BackupSettingsPage() {
 
   useEffect(() => {
     let cancelled = false;
+    getR2BackupConfig()
+      .then((config) => {
+        if (cancelled) return;
+        setR2Config(config);
+        setR2Form((current) => ({
+          ...current,
+          endpointUrl: config.endpointUrl || "",
+          bucket: config.bucket || "",
+          prefix: config.prefix || "ecommerce-workspace/backup",
+          enabled: config.configured ? config.enabled : true,
+          fullIntervalDays: config.fullIntervalDays || 10,
+          accessKey: "",
+          secretKey: "",
+        }));
+      })
+      .catch(() => {
+        if (!cancelled) setR2Config(null);
+      })
+      .finally(() => {
+        if (!cancelled) setR2Loading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
     getKodoColdBackupConfig()
       .then((config) => {
         if (cancelled) return;
@@ -419,6 +464,66 @@ export default function BackupSettingsPage() {
       cancelled = true;
     };
   }, []);
+
+  async function saveR2Config() {
+    if (!r2Form.endpointUrl.trim() || !r2Form.bucket.trim()) {
+      showNotice("请填写 R2 Endpoint 和 Bucket。");
+      return;
+    }
+    if (!r2Config?.configured && (!r2Form.accessKey.trim() || !r2Form.secretKey.trim())) {
+      showNotice("首次配置 R2 需要填写 Access Key ID 和 Secret Access Key。");
+      return;
+    }
+    if (Boolean(r2Form.accessKey.trim()) !== Boolean(r2Form.secretKey.trim())) {
+      showNotice("R2 Access Key ID 与 Secret Access Key 需要同时填写。");
+      return;
+    }
+    setR2Saving(true);
+    try {
+      const saved = await saveR2BackupConfig({
+        endpointUrl: r2Form.endpointUrl.trim(),
+        bucket: r2Form.bucket.trim(),
+        prefix: r2Form.prefix.trim() || "ecommerce-workspace/backup",
+        accessKey: r2Form.accessKey.trim(),
+        secretKey: r2Form.secretKey.trim(),
+        enabled: r2Form.enabled,
+        fullIntervalDays: Math.max(1, Math.min(365, Number(r2Form.fullIntervalDays) || 10)),
+      });
+      setR2Config(saved);
+      setR2Form((current) => ({
+        ...current,
+        endpointUrl: saved.endpointUrl,
+        bucket: saved.bucket,
+        prefix: saved.prefix,
+        enabled: saved.enabled,
+        fullIntervalDays: saved.fullIntervalDays,
+        accessKey: "",
+        secretKey: "",
+      }));
+      showNotice(saved.enabled ? "R2 主备份配置已保存并启用。" : "R2 配置已保存，当前保持停用。");
+    } catch (error) {
+      showNotice("保存失败：" + (error instanceof Error ? error.message : String(error)));
+    } finally {
+      setR2Saving(false);
+    }
+  }
+
+  async function runR2(mode: "auto" | "daily" | "full" = "auto") {
+    if (!r2Config?.configured || !r2Config.enabled) {
+      openStorage("r2");
+      showNotice("请先配置并启用 Cloudflare R2。");
+      return;
+    }
+    setR2Running(true);
+    try {
+      await runR2Backup(mode);
+      showNotice(mode === "full" ? "R2 全量容灾备份已启动。" : mode === "daily" ? "R2 日常模块化备份已启动。" : "R2 自动备份已启动。");
+    } catch (error) {
+      showNotice("启动失败：" + (error instanceof Error ? error.message : String(error)));
+    } finally {
+      setR2Running(false);
+    }
+  }
 
   async function saveKodoConfig() {
     if (!kodoForm.bucket.trim() || !kodoForm.uploadUrl.trim()) {
@@ -480,11 +585,12 @@ export default function BackupSettingsPage() {
           <div className="relative flex items-center gap-2">
             <button
               type="button"
-              onClick={() => showNotice("云端执行器尚未接入，当前不会触发真实 R2/Kodo 备份。")}
-              className="app-button-primary inline-flex h-9 items-center gap-2 rounded-lg px-4 text-[11px] font-medium"
+              onClick={() => void runR2("auto")}
+              disabled={r2Running || r2Loading}
+              className="app-button-primary inline-flex h-9 items-center gap-2 rounded-lg px-4 text-[11px] font-medium disabled:cursor-wait disabled:opacity-50"
             >
-              <span className="text-[9px]">▶</span>
-              立即备份
+              <span className="text-[11px]">▶</span>
+              {r2Running ? "启动中…" : "立即备份"}
             </button>
             <button
               type="button"
@@ -597,17 +703,17 @@ export default function BackupSettingsPage() {
                 schedule="计划：每天 03:00"
                 content={["数据库（增量 / 变化检测）", "业务文件（变更检测）", "系统配置（变更检测）"]}
                 retention="计划：最近 30 个恢复点"
-                status="云端执行器待接入"
+                status={r2Loading ? "读取 R2 配置" : r2Config?.configured && r2Config.enabled ? "R2 已启用" : "R2 待配置"}
                 onEdit={() => setActiveTab("config")}
               />
               <ConfigCard
                 title="全量备份 · 容灾级"
                 tone="blue"
-                enabledText="策略已定义"
-                schedule="计划：每 10 天 03:00"
+                enabledText={r2Config?.configured && r2Config.enabled ? "已启用" : "待配置"}
+                schedule={`计划：每 ${r2Config?.fullIntervalDays || 10} 天 03:00`}
                 content={["完整数据库", "全部业务文件", "系统配置", "应用程序 / Docker 配置 / 必要文件", "恢复脚本 / 完整性清单"]}
                 retention="计划：保留容灾恢复点"
-                status="R2 待接入"
+                status={r2Loading ? "读取 R2 配置" : r2Config?.configured && r2Config.enabled ? "R2 已启用" : "R2 待配置"}
                 onEdit={() => setActiveTab("config")}
               />
             </div>
@@ -619,12 +725,12 @@ export default function BackupSettingsPage() {
               <div className="space-y-2">
                 <StorageRow
                   name="Cloudflare R2（主存储）"
-                  subtitle="S3 兼容对象存储，用于日常备份和全量容灾"
+                  subtitle="每日模块化 + 周期全量容灾；支持恢复读取"
                   tone="amber"
-                  state="待配置"
-                  stateTone="amber"
+                  state={r2Loading ? "读取配置" : r2Config?.configured ? (r2Config.enabled ? "已配置" : "已配置 · 停用") : "待配置"}
+                  stateTone={r2Config?.configured && r2Config.enabled ? "green" : "amber"}
                   onConfigure={() => openStorage("r2")}
-                  secondary="查看文件"
+                  allowConnectionTest={false}
                 />
                 <StorageRow
                   name="七牛云 Kodo（国内冷备）"
@@ -667,20 +773,20 @@ export default function BackupSettingsPage() {
               </div>
               <div className="mt-3 divide-y divide-slate-100 text-[10px]">
                 <div className="flex items-center justify-between gap-3 py-2">
-                  <span className="text-slate-500">最近一次日常备份</span>
-                  <span className="font-medium text-slate-500">云端尚未执行</span>
+                  <span className="text-slate-500">R2 主备份</span>
+                  <span className="font-medium text-slate-700">{r2Loading ? "读取配置" : r2Config?.configured ? (r2Config.enabled ? "已启用" : "已停用") : "待配置"}</span>
                 </div>
                 <div className="flex items-center justify-between gap-3 py-2">
-                  <span className="text-slate-500">最近一次全量备份</span>
-                  <span className="font-medium text-slate-500">云端尚未执行</span>
+                  <span className="text-slate-500">Kodo 国内冷备</span>
+                  <span className="font-medium text-slate-700">{kodoLoading ? "读取配置" : kodoConfig?.configured ? (kodoConfig.enabled ? "已启用 · 只写" : "已停用") : "待配置"}</span>
                 </div>
                 <div className="flex items-center justify-between gap-3 py-2">
-                  <span className="text-slate-500">下次日常备份</span>
-                  <span className="font-medium text-slate-700">接入后 · 03:00</span>
+                  <span className="text-slate-500">R2 日常计划</span>
+                  <span className="font-medium text-slate-700">{r2Config?.configured && r2Config.enabled ? "每天 03:00" : "配置后启用"}</span>
                 </div>
                 <div className="flex items-center justify-between gap-3 py-2">
-                  <span className="text-slate-500">下次全量备份</span>
-                  <span className="font-medium text-slate-700">接入后 · 每 10 天 03:00</span>
+                  <span className="text-slate-500">R2 全量周期</span>
+                  <span className="font-medium text-slate-700">{r2Config?.configured && r2Config.enabled ? `每 ${r2Config.fullIntervalDays || 10} 天 · 03:00` : "配置后启用"}</span>
                 </div>
               </div>
               <button type="button" onClick={() => setActiveTab("records")} className="app-button-secondary mt-4 w-full rounded-lg px-3 py-2 text-[10px] font-medium">
@@ -695,29 +801,29 @@ export default function BackupSettingsPage() {
         <div className="mt-4 max-w-7xl space-y-4">
           <section className="app-card rounded-xl p-4">
             <div className="mb-1 text-[13px] font-semibold text-slate-900">备份配置</div>
-            <p className="text-[10px] leading-5 text-slate-400">这里集中管理三个备份业务策略；当前先展示已确认方案，执行器接入后开放真实保存。</p>
+            <p className="text-[10px] leading-5 text-slate-400">这里集中管理三个备份业务策略；R2 与 Kodo 已接入真实配置和执行器，NAS 保留扩展口。</p>
           </section>
 
           <div className="grid gap-4 xl:grid-cols-2">
             <ConfigCard
               title="日常备份 · 模块化"
               tone="green"
-              enabledText="计划启用"
+              enabledText={r2Config?.configured && r2Config.enabled ? "已启用" : "待配置"}
               schedule="每天 03:00"
-              content={["数据库：增量 / 变化检测", "业务文件：文件变化检测", "系统配置：Hash 变化检测", "软件未更新时不重复备份"]}
-              retention="最近 30 个恢复点"
-              status="等待 R2 执行器"
-              onEdit={() => showNotice("真实参数保存将在 R2 执行器接入后开放。")}
+              content={["数据库：内容 Hash 变化检测", "业务文件：文件变化检测", "系统配置：Hash 变化检测", "应用未更新时不重复上传"]}
+              retention="最近 30 个本地恢复点 + R2 模块快照"
+              status={r2Config?.configured && r2Config.enabled ? "R2 自动执行" : "R2 待配置"}
+              onEdit={() => openStorage("r2")}
             />
             <ConfigCard
               title="全量备份 · 容灾级"
               tone="blue"
-              enabledText="计划启用"
-              schedule="每 10 天 03:00"
-              content={["应用程序 / Docker", "完整 PostgreSQL", "全部业务文件", "系统配置", "恢复脚本 / manifest / Hash 校验"]}
+              enabledText={r2Config?.configured && r2Config.enabled ? "已启用" : "待配置"}
+              schedule={`每 ${r2Config?.fullIntervalDays || 10} 天 03:00`}
+              content={["应用源码 / 锁定依赖", "可用时 Docker 镜像", "完整 PostgreSQL", "全部业务文件", "运行配置 / manifest / Hash 校验"]}
               retention="独立完整容灾恢复点"
-              status="等待 R2 执行器"
-              onEdit={() => showNotice("真实参数保存将在 R2 执行器接入后开放。")}
+              status={r2Config?.configured && r2Config.enabled ? "R2 自动执行" : "R2 待配置"}
+              onEdit={() => openStorage("r2")}
             />
           </div>
 
@@ -726,10 +832,10 @@ export default function BackupSettingsPage() {
               <div>
                 <div className="text-[12px] font-semibold text-amber-700">冷备份 · 每日恢复点</div>
                 <div className="mt-1 text-[10px] leading-5 text-slate-500">
-                  每天把本地已完成校验的恢复点上传到七牛云 Kodo 标准存储；冷备通道只写入，不执行下载、取回、在线预览或远端恢复。
+                  每天生成应用、运行配置、数据库、业务文件等完整容灾恢复点，再上传到七牛云 Kodo 标准存储；冷备通道只写入，不执行下载、取回、在线预览或远端恢复。
                 </div>
               </div>
-              <Pill tone="amber">计划启用</Pill>
+              <Pill tone={kodoConfig?.configured && kodoConfig.enabled ? "green" : "amber"}>{kodoConfig?.configured && kodoConfig.enabled ? "已启用" : "待配置"}</Pill>
             </div>
             <div className="mt-4 grid gap-3 md:grid-cols-4">
               {[
@@ -825,20 +931,81 @@ export default function BackupSettingsPage() {
                 <div className="mt-1 text-[10px] font-medium text-blue-600">{STORAGE_DETAILS[selectedStorage].role}</div>
                 <p className="mt-2 text-[10px] leading-5 text-slate-500">{STORAGE_DETAILS[selectedStorage].desc}</p>
               </div>
-              <Pill tone={selectedStorage === "kodo" && kodoConfig?.configured && kodoConfig.enabled ? "green" : selectedStorage === "kodo" || selectedStorage === "r2" ? "amber" : "slate"}>
-                {selectedStorage === "kodo"
-                  ? kodoLoading
+              <Pill tone={
+                selectedStorage === "r2" && r2Config?.configured && r2Config.enabled
+                  ? "green"
+                  : selectedStorage === "kodo" && kodoConfig?.configured && kodoConfig.enabled
+                    ? "green"
+                    : selectedStorage === "r2" || selectedStorage === "kodo"
+                      ? "amber"
+                      : "slate"
+              }>
+                {selectedStorage === "r2"
+                  ? r2Loading
                     ? "读取配置"
-                    : kodoConfig?.configured
-                      ? kodoConfig.enabled
-                        ? "已配置"
-                        : "已配置 · 停用"
-                      : "待填写密钥"
-                  : "待配置"}
+                    : r2Config?.configured
+                      ? r2Config.enabled ? "已配置" : "已配置 · 停用"
+                      : "待配置"
+                  : selectedStorage === "kodo"
+                    ? kodoLoading
+                      ? "读取配置"
+                      : kodoConfig?.configured
+                        ? kodoConfig.enabled ? "已配置" : "已配置 · 停用"
+                        : "待填写密钥"
+                    : "待配置"}
               </Pill>
             </div>
 
-            {selectedStorage === "kodo" ? (
+            {selectedStorage === "r2" ? (
+              <>
+                <div className="mt-5 rounded-xl border border-slate-100">
+                  <div className="border-b border-slate-100 px-4 py-3">
+                    <div className="text-[11px] font-semibold text-slate-700">R2 主备份配置</div>
+                    <div className="mt-1 text-[11px] leading-5 text-slate-400">
+                      密钥加密保存在服务端，不回显到页面。每日 03:00 自动执行模块化备份，并按全量间隔自动生成完整容灾恢复点。
+                    </div>
+                  </div>
+                  <div className="grid gap-3 p-4 md:grid-cols-2">
+                    <label className="space-y-1.5 md:col-span-2">
+                      <span className="text-[11px] font-medium text-slate-600">Endpoint</span>
+                      <input value={r2Form.endpointUrl} onChange={(event) => setR2Form((current) => ({ ...current, endpointUrl: event.target.value }))} placeholder="https://<account-id>.r2.cloudflarestorage.com" className="h-9 w-full rounded-lg border border-slate-200 bg-white px-3 text-[11px] text-slate-700 outline-none focus:border-blue-400" />
+                    </label>
+                    <label className="space-y-1.5">
+                      <span className="text-[11px] font-medium text-slate-600">Bucket</span>
+                      <input value={r2Form.bucket} onChange={(event) => setR2Form((current) => ({ ...current, bucket: event.target.value }))} placeholder="R2 Bucket 名称" className="h-9 w-full rounded-lg border border-slate-200 bg-white px-3 text-[11px] text-slate-700 outline-none focus:border-blue-400" />
+                    </label>
+                    <label className="space-y-1.5">
+                      <span className="text-[11px] font-medium text-slate-600">对象前缀</span>
+                      <input value={r2Form.prefix} onChange={(event) => setR2Form((current) => ({ ...current, prefix: event.target.value }))} placeholder="ecommerce-workspace/backup" className="h-9 w-full rounded-lg border border-slate-200 bg-white px-3 text-[11px] text-slate-700 outline-none focus:border-blue-400" />
+                    </label>
+                    <label className="space-y-1.5">
+                      <span className="text-[11px] font-medium text-slate-600">Access Key ID {r2Config?.accessKeyHint ? <span className="font-normal text-slate-400">（已保存 {r2Config.accessKeyHint}）</span> : null}</span>
+                      <input type="password" autoComplete="new-password" value={r2Form.accessKey} onChange={(event) => setR2Form((current) => ({ ...current, accessKey: event.target.value }))} placeholder={r2Config?.configured ? "留空保持现有密钥" : "待填写"} className="h-9 w-full rounded-lg border border-slate-200 bg-white px-3 text-[11px] text-slate-700 outline-none focus:border-blue-400" />
+                    </label>
+                    <label className="space-y-1.5">
+                      <span className="text-[11px] font-medium text-slate-600">Secret Access Key</span>
+                      <input type="password" autoComplete="new-password" value={r2Form.secretKey} onChange={(event) => setR2Form((current) => ({ ...current, secretKey: event.target.value }))} placeholder={r2Config?.configured ? "已保存且不回显；留空保持" : "待填写"} className="h-9 w-full rounded-lg border border-slate-200 bg-white px-3 text-[11px] text-slate-700 outline-none focus:border-blue-400" />
+                    </label>
+                    <label className="space-y-1.5">
+                      <span className="text-[11px] font-medium text-slate-600">全量容灾间隔（天）</span>
+                      <input type="number" min={1} max={365} value={r2Form.fullIntervalDays} onChange={(event) => setR2Form((current) => ({ ...current, fullIntervalDays: Number(event.target.value) || 10 }))} className="h-9 w-full rounded-lg border border-slate-200 bg-white px-3 text-[11px] text-slate-700 outline-none focus:border-blue-400" />
+                    </label>
+                  </div>
+                  <div className="flex flex-wrap items-center justify-between gap-3 border-t border-slate-100 px-4 py-3">
+                    <label className="flex items-center gap-2 text-[11px] text-slate-600">
+                      <input type="checkbox" checked={r2Form.enabled} onChange={(event) => setR2Form((current) => ({ ...current, enabled: event.target.checked }))} />
+                      保存后启用每日 03:00 自动备份
+                    </label>
+                    <span className="text-[11px] text-slate-400">全量周期：每 {r2Form.fullIntervalDays || 10} 天</span>
+                  </div>
+                </div>
+                <div className="mt-4 flex flex-wrap items-center gap-2">
+                  <button type="button" disabled={r2Saving || r2Loading} onClick={() => void saveR2Config()} className="app-button-primary rounded-lg px-4 py-2 text-[11px] font-medium disabled:cursor-not-allowed disabled:opacity-50">{r2Saving ? "保存中…" : "保存 R2 配置"}</button>
+                  <button type="button" disabled={r2Running || !r2Config?.configured || !r2Config.enabled} onClick={() => void runR2("daily")} className="app-button-secondary rounded-lg px-4 py-2 text-[11px] font-medium disabled:opacity-40">立即日常备份</button>
+                  <button type="button" disabled={r2Running || !r2Config?.configured || !r2Config.enabled} onClick={() => void runR2("full")} className="app-button-secondary rounded-lg px-4 py-2 text-[11px] font-medium disabled:opacity-40">立即全量容灾</button>
+                </div>
+              </>
+            ) : selectedStorage === "kodo" ? (
               <>
                 <div className="mt-5 rounded-xl border border-slate-100">
                   <div className="border-b border-slate-100 px-4 py-3">
@@ -948,10 +1115,10 @@ export default function BackupSettingsPage() {
                 </div>
 
                 <div className="mt-4 flex flex-wrap gap-2">
-                  <button type="button" onClick={() => showNotice("真实配置保存将在存储执行器接入后开放。")} className="app-button-primary rounded-lg px-4 py-2 text-[10px] font-medium">
+                  <button type="button" onClick={() => showNotice("该扩展存储尚未接入真实执行器。")} className="app-button-primary rounded-lg px-4 py-2 text-[10px] font-medium">
                     保存配置
                   </button>
-                  <button type="button" onClick={() => showNotice("当前尚未接入真实存储连接器。")} className="app-button-secondary rounded-lg px-4 py-2 text-[10px] font-medium">
+                  <button type="button" onClick={() => showNotice("该扩展存储当前尚未接入真实连接器。")} className="app-button-secondary rounded-lg px-4 py-2 text-[10px] font-medium">
                     测试连接
                   </button>
                 </div>
