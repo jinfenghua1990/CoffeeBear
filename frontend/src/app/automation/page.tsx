@@ -2,7 +2,6 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { automationApi, jkyOrderApi, JkyOrderStatus, ScheduleItem, SyncJobRow, SyncLogRow } from "@/lib/api";
-import SystemSettingsTabs from "@/components/system-settings-tabs";
 
 const STATUS_STYLE: Record<string, string> = {
   running: "bg-indigo-50 text-indigo-700",
@@ -90,7 +89,6 @@ export default function AutomationPage() {
         </p>
       </header>
 
-      <SystemSettingsTabs />
 
       {err && <div className="mt-4 rounded-lg bg-red-50 p-3 text-sm text-red-700">{err}</div>}
       {message && <div className="mt-4 rounded-lg bg-indigo-50 p-3 text-sm text-indigo-700">{message}</div>}
