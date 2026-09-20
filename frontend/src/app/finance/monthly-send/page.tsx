@@ -436,9 +436,7 @@ export default function MonthlySendPage() {
   const corporateInvoices = corporatePayment?.invoiceRows || [];
   const corporateDeliveryState = !corporatePayment
     ? { ok: false, text: "计算中" }
-    : Number(corporatePayment.summary.outstandingTotal || 0) > 0
-      ? { ok: false, text: "待调整" }
-      : { ok: true, text: "已就绪" };
+    : { ok: true, text: corporatePayment.adjusted ? "已调整" : "已生成" };
 
   const corporateReviewSummary = corporatePayment
     ? `${corporatePayment.adjusted ? `已选择 ${corporatePayment.selectedCount || 0}/${corporatePayment.sourceCount || 0} 张发票 · ` : ""}${
@@ -748,7 +746,7 @@ export default function MonthlySendPage() {
   async function packageAndSend() {
     if (!sel) return;
     if (!ready) {
-      setMsg("请先补齐业务成本、银行资料和无票收入校验，再发送给财务。");
+      setMsg("请先补齐业务成本、银行资料、无票收入和已收票对公付款资料，再发送给财务。");
       return;
     }
     setBusy(true); setMsg("");
@@ -810,7 +808,7 @@ export default function MonthlySendPage() {
     } finally { setBusy(false); }
   }
 
-  async function saveUnbilledAdjustment(generateVersion: boolean) {
+  async function saveUnbilledAdjustment() {
     if (!sel || !unbilled) return;
     setBusy(true); setMsg("");
     try {
@@ -822,14 +820,14 @@ export default function MonthlySendPage() {
       const data = await res.json();
       if (!res.ok) throw new Error(data.detail || "保存失败");
       setShowUnbilledDetail(false);
-      setMsg(generateVersion ? `无票收入明细已保存，并生成新版 v${data.version}` : `无票收入明细调整已保存 v${data.version}`);
+      setMsg(`无票收入明细已保存并生成新版 v${data.version}`);
       loadUnbilled(); loadFiles(); loadPeriods();
     } catch (e) {
       setMsg(`保存调整失败：${e instanceof Error ? e.message : String(e)}`);
     } finally { setBusy(false); }
   }
 
-  async function saveCorporateAdjustment(generateVersion: boolean) {
+  async function saveCorporateAdjustment() {
     if (!sel || !corporatePayment) return;
     setBusy(true); setMsg("");
     try {
@@ -841,7 +839,7 @@ export default function MonthlySendPage() {
       const data = await res.json();
       if (!res.ok) throw new Error(data.detail || "保存失败");
       setShowCorporateDetail(false);
-      setMsg(generateVersion ? `已收票对公付款明细已保存，并生成新版 v${data.version}` : `已收票对公付款明细调整已保存 v${data.version}`);
+      setMsg(`已收票对公付款明细已保存并生成新版 v${data.version}`);
       loadCorporatePayment(); loadFiles(); loadPeriods();
     } catch (e) {
       setMsg(`保存调整失败：${e instanceof Error ? e.message : String(e)}`);
@@ -1221,7 +1219,7 @@ export default function MonthlySendPage() {
             <label className="block text-xs font-medium text-slate-600">收件人 <span className="text-rose-500">*</span><input value={toText} onChange={(e) => setToText(e.target.value)} placeholder="请输入财务邮箱" className="mt-1.5 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-100" /></label>
             <label className="block text-xs font-medium text-slate-600">抄送（可选）<input value={ccText} onChange={(e) => setCcText(e.target.value)} placeholder="可填写多个邮箱，用逗号分隔" className="mt-1.5 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-100" /></label>
             <div><div className="mb-1.5 text-xs font-medium text-slate-600">发送时间设置</div><div className="flex flex-wrap items-center gap-2 rounded-lg bg-slate-50 px-2.5 py-2"><label className="inline-flex items-center gap-1.5 text-xs text-slate-600"><input type="checkbox" checked={template?.autoSend ?? false} onChange={(e) => setTemplate((t) => t ? { ...t, autoSend: e.target.checked } : t)} className="h-4 w-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500" />自动发送</label><span className="text-xs text-slate-500">每月 <input type="number" min={1} max={28} value={template?.sendDay ?? 3} onChange={(e) => setTemplate((t) => t ? { ...t, sendDay: Number(e.target.value) } : t)} className="mx-1 w-10 rounded border border-slate-200 bg-white px-1.5 py-1 text-xs" /> 日</span><select value={template?.sendHour ?? 10} onChange={(e) => setTemplate((t) => t ? { ...t, sendHour: Number(e.target.value) } : t)} className="rounded border border-slate-200 bg-white px-1.5 py-1 text-xs">{Array.from({ length: 24 }, (_, i) => <option key={i} value={i}>{String(i).padStart(2, "0")}:00</option>)}</select><button type="button" onClick={saveTemplate} disabled={busy || !template} className="ml-auto rounded border border-slate-200 bg-white px-2 py-1 text-[11px] font-medium text-slate-600 hover:bg-white disabled:opacity-40">保存设置</button></div></div>
-            <div><div className="mb-1.5 text-xs font-medium text-slate-600">发送条件</div><div className="space-y-1.5 text-xs text-slate-500"><label className="flex items-center gap-2"><input type="checkbox" checked={businessReady} disabled className="h-4 w-4 rounded border-slate-300 text-blue-600" />业务数据已按当前公司主体同步，必要成本完整</label><label className="flex items-center gap-2"><input type="checkbox" checked={Boolean(bankTx && bankReceipt)} disabled className="h-4 w-4 rounded border-slate-300 text-blue-600" />银行交易明细和回单已齐全</label>{needsUnbilled && <label className="flex items-center gap-2"><input type="checkbox" checked={Boolean(unbilled)} disabled className="h-4 w-4 rounded border-slate-300 text-blue-600" />无票收入已生成</label>}<label className="flex items-center gap-2"><input type="checkbox" checked={!mailStatus || mailStatus.configured} disabled className="h-4 w-4 rounded border-slate-300 text-blue-600" />邮件通道可用</label></div></div>
+            <div><div className="mb-1.5 text-xs font-medium text-slate-600">发送条件</div><div className="space-y-1.5 text-xs text-slate-500"><label className="flex items-center gap-2"><input type="checkbox" checked={businessReady} disabled className="h-4 w-4 rounded border-slate-300 text-blue-600" />业务数据已按当前公司主体同步，必要成本完整</label><label className="flex items-center gap-2"><input type="checkbox" checked={Boolean(bankTx && bankReceipt)} disabled className="h-4 w-4 rounded border-slate-300 text-blue-600" />银行交易明细和回单已齐全</label>{needsUnbilled && <><label className="flex items-center gap-2"><input type="checkbox" checked={Boolean(unbilled)} disabled className="h-4 w-4 rounded border-slate-300 text-blue-600" />无票收入已生成</label><label className="flex items-center gap-2"><input type="checkbox" checked={Boolean(corporatePayment)} disabled className="h-4 w-4 rounded border-slate-300 text-blue-600" />已收票对公付款明细已生成</label></>}<label className="flex items-center gap-2"><input type="checkbox" checked={!mailStatus || mailStatus.configured} disabled className="h-4 w-4 rounded border-slate-300 text-blue-600" />邮件通道可用</label></div></div>
             <button type="button" onClick={packageAndSend} disabled={busy || !sel || !ready || !emails(toText).length || !includeSel.length} className="flex w-full items-center justify-center gap-2 rounded-lg bg-emerald-600 px-4 py-3 text-sm font-semibold text-white shadow-sm hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-40">➤ 确认并发送给财务</button>
             <div className="text-[11px] leading-4 text-slate-400">{latestPkg ? <>最新包 V{latestPkg.version} · {latestPkg.status === "SENT" ? "已发送" : "已打包"} · {formatDate(latestPkg.createdAt)}</> : "该账期还没有打包记录"}{mailStatus && !mailStatus.configured && <span className="ml-1.5 rounded bg-rose-50 px-1.5 py-0.5 font-medium text-rose-600 ring-1 ring-inset ring-rose-200">SMTP 未配置</span>}</div>
           </div>
@@ -1509,8 +1507,7 @@ export default function MonthlySendPage() {
               </div>
               {unbilledDetailMode === "adjust" ? <>
                 <button type="button" onClick={closeUnbilledDetail} className="rounded-lg border border-slate-200 bg-white px-4 py-2 text-xs text-slate-600">取消</button>
-                <button type="button" onClick={() => void saveUnbilledAdjustment(false)} disabled={busy || !unbilled || unbilledSelectedKeys.length === 0} className="rounded-lg border border-blue-200 bg-white px-4 py-2 text-xs font-medium text-blue-600 disabled:cursor-not-allowed disabled:opacity-50">保存调整</button>
-                <button type="button" onClick={() => void saveUnbilledAdjustment(true)} disabled={busy || !unbilled || unbilledSelectedKeys.length === 0} className="rounded-lg bg-blue-600 px-4 py-2 text-xs font-medium text-white disabled:cursor-not-allowed disabled:opacity-50">保存并生成新版</button>
+                <button type="button" onClick={() => void saveUnbilledAdjustment()} disabled={busy || !unbilled || unbilledSelectedKeys.length === 0} className="rounded-lg bg-blue-600 px-4 py-2 text-xs font-medium text-white disabled:cursor-not-allowed disabled:opacity-50">保存并生成新版</button>
               </> : <>
                 <button type="button" onClick={closeUnbilledDetail} className="rounded-lg border border-slate-200 bg-white px-4 py-2 text-xs text-slate-600">关闭</button>
                 <span className={`rounded-full px-2.5 py-1 text-[11px] font-medium ${includeSel.includes("无票收入") ? "bg-emerald-50 text-emerald-700 ring-1 ring-emerald-200" : "bg-amber-50 text-amber-700 ring-1 ring-amber-200"}`}>{includeSel.includes("无票收入") ? "已纳入本次发送" : "未纳入本次发送"}</span>
@@ -1557,8 +1554,7 @@ export default function MonthlySendPage() {
             <div className="flex flex-wrap items-center justify-end gap-2 border-t border-slate-200 bg-slate-50/70 px-4 py-3">
               <div className="mr-auto text-xs text-slate-500">已选择 {corporateSelectedKeys.length} / {corporatePayment?.sourceCount ?? corporateInvoices.length} 张发票</div>
               <button type="button" onClick={() => setShowCorporateDetail(false)} className="rounded-lg border border-slate-200 bg-white px-4 py-2 text-xs text-slate-600">取消</button>
-              <button type="button" onClick={() => void saveCorporateAdjustment(false)} disabled={busy || !corporatePayment || corporateSelectedKeys.length === 0} className="rounded-lg border border-blue-200 bg-white px-4 py-2 text-xs font-medium text-blue-600 disabled:cursor-not-allowed disabled:opacity-50">保存调整</button>
-              <button type="button" onClick={() => void saveCorporateAdjustment(true)} disabled={busy || !corporatePayment || corporateSelectedKeys.length === 0} className="rounded-lg bg-blue-600 px-4 py-2 text-xs font-medium text-white disabled:cursor-not-allowed disabled:opacity-50">保存并生成新版</button>
+              <button type="button" onClick={() => void saveCorporateAdjustment()} disabled={busy || !corporatePayment || corporateSelectedKeys.length === 0} className="rounded-lg bg-blue-600 px-4 py-2 text-xs font-medium text-white disabled:cursor-not-allowed disabled:opacity-50">保存并生成新版</button>
             </div>
           </div>
         </div>
