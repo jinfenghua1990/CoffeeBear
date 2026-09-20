@@ -13,6 +13,7 @@ from app.models.bank import BankTransaction
 from app.models.tax import TaxInvoice
 from app.services import finance_sales_report_service as sales_report_service
 from app.services import finance_center_service
+from app.services import bank_summary_service
 from app.services import finance_corporate_payment_report_service as corporate_payment_report_service
 from app.services import finance_closing_service
 from app.services import finance_projection_service
@@ -303,6 +304,19 @@ async def upload_file(
             "当前主体尚未配置独立银行账户解析规则；原件已归档，未写入浙江农信流水。"
         )
     return result
+
+
+@router.get("/bank-summary")
+def bank_summary(
+    year: int = Query(..., ge=1900, le=2999),
+    month: int = Query(..., ge=1, le=12),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    """银行账户汇总：账户余额、本月收支与待对账数量。"""
+    try:
+        return bank_summary_service.build_summary(db, year=year, month=month)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @router.get("/corporate-payment-report")
