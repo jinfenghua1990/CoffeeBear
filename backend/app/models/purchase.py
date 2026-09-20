@@ -25,10 +25,10 @@ class Supplier(Base, PkMixin, TimestampMixin):
     notes: Mapped[str] = mapped_column(String(512), default="")
     is_temp: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false", nullable=False)
     # 银行账户与税务信息（用于发票/流水自动匹配）
-    bank_name: Mapped[str] = mapped_column(String(128), default="", comment="开户行名称")
-    bank_account_no: Mapped[str] = mapped_column(String(64), default="", index=True, comment="银行账号")
-    bank_account_name: Mapped[str] = mapped_column(String(256), default="", comment="银行账户名（对方户名）")
-    tax_invoice_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0", comment="关联进项发票数（缓存）")
+    bank_name: Mapped[str] = mapped_column(String(128), default="", nullable=False, comment="开户行名称")
+    bank_account_no: Mapped[str] = mapped_column(String(64), default="", nullable=False, index=True, comment="银行账号")
+    bank_account_name: Mapped[str] = mapped_column(String(256), default="", nullable=False, comment="银行账户名（对方户名）")
+    tax_invoice_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0", nullable=False, comment="关联进项发票数（缓存）")
 
 
 class ExternalPurchaseOrder(Base, PkMixin, TimestampMixin):
