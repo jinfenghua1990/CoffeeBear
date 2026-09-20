@@ -6,6 +6,15 @@ import { authenticatedFetch } from "@/lib/api";
 import { useTabScopedState, useTabTitle } from "@/lib/workspace/tab-store";
 
 type Pkg = { id: number; version: number; status: string; sha256: string; createdAt: string | null };
+type LegalEntity = {
+  id: number;
+  code: string;
+  name: string;
+  countryCode: string;
+  baseCurrency: string;
+  isDefault: boolean;
+  businessScopes: string[];
+};
 type Period = {
   company: string;
   year: number;
@@ -75,6 +84,20 @@ type BusinessStatus = {
   costIncomplete: boolean;
   costMissingCount: number;
   costMissingDetail: Array<{ skuCode: string; skuName: string; quantity: string }>;
+  legalEntityId: number;
+  company: string;
+  businessScopes: string[];
+  domesticSupported: boolean;
+  foreignEntryCount: number;
+  foreignTotalsByCurrency: Array<{
+    currency: string;
+    income: number;
+    expense: number;
+    profit: number;
+    cashIn: number;
+    cashOut: number;
+    netCash: number;
+  }>;
   sync: {
     created: number;
     updated: number;
@@ -208,6 +231,8 @@ export default function MonthlySendPage() {
   }, [sendMonth]);
   useTabTitle(sel ? `月度资料 · ${sendMonth}` : null);
 
+  const [entities, setEntities] = useState<LegalEntity[]>([]);
+  const [entityId, setEntityId] = useTabScopedState<number | null>("monthly.entity", () => null);
   const [template, setTemplate] = useState<SalesTemplate | null>(null);
   const [toText, setToText] = useState("");
   const [ccText, setCcText] = useState("");
@@ -241,6 +266,11 @@ export default function MonthlySendPage() {
   const pickerRequestSeq = useRef(0);
   const uploadKind = useRef<"交易明细" | "回单详情">("交易明细");
 
+  const selectedEntity = entities.find((row) => row.id === entityId) ?? null;
+  const companyName = selectedEntity?.name ?? "";
+  const domesticSupportedByEntity = Boolean(
+    selectedEntity?.isDefault && selectedEntity.businessScopes.includes("domestic")
+  );
   const period = periods.find((p) => sel && p.year === sel.year && p.month === sel.month) || null;
   const latest = useCallback(
     (keyword: string) =>
@@ -251,6 +281,17 @@ export default function MonthlySendPage() {
   const bankReceipt = latest("回单详情");
   const otherFiles = files.filter((f) => !f.originalName.includes("交易明细") && !f.originalName.includes("回单详情"));
   const salesFile = [...otherFiles].filter((f) => f.category === "sales_summary").sort((a, b) => b.version - a.version)[0] || null;
+
+  const loadEntities = useCallback(async () => {
+    const res = await authenticatedFetch("/api/v1/finance/entities", { cache: "no-store" });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || "公司主体加载失败");
+    const rows = (data.items || []) as LegalEntity[];
+    setEntities(rows);
+    setEntityId((current) => current && rows.some((row) => row.id === current)
+      ? current
+      : (rows.find((row) => row.isDefault)?.id ?? rows[0]?.id ?? null));
+  }, [setEntityId]);
 
   const loadTemplate = useCallback(async () => {
     const res = await authenticatedFetch("/api/v1/finance/sales-report/template", { cache: "no-store" });
