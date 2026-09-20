@@ -16,6 +16,42 @@ depends_on = None
 
 
 def upgrade() -> None:
+    # 旧模型已提升到 10 位小数，但迁移仍停在 4 位；使用 24,10 保留原有
+    # 14 位整数容量，同时获得 10 位小数精度。
+    op.alter_column(
+        "consumable_purchase_items",
+        "unit_cost",
+        existing_type=sa.Numeric(18, 4),
+        type_=sa.Numeric(24, 10),
+        existing_nullable=False,
+    )
+    op.alter_column(
+        "consumable_transactions",
+        "unit_cost",
+        existing_type=sa.Numeric(18, 4),
+        type_=sa.Numeric(24, 10),
+        existing_nullable=True,
+    )
+
+    # FinanceDeliveryFile 模型声明了两个 FK，但 phase0 迁移只建了列与索引。
+    # 正式补上约束；如果生产库存在孤儿行，迁移会明确失败而不是静默删除数据。
+    op.create_foreign_key(
+        "fk_fdf_package",
+        "finance_delivery_files",
+        "finance_delivery_packages",
+        ["package_id"],
+        ["id"],
+        ondelete="CASCADE",
+    )
+    op.create_foreign_key(
+        "fk_fdf_archive",
+        "finance_delivery_files",
+        "archive_files",
+        ["archive_file_id"],
+        ["id"],
+        ondelete="CASCADE",
+    )
+
     # 旧迁移把这些字段建成 nullable=True，而 ORM 一直按字符串/整数非空字段使用。
     # 先回填历史 NULL，再收紧约束，避免 ALTER TABLE 因存量数据失败。
     op.execute("UPDATE suppliers SET bank_name = '' WHERE bank_name IS NULL")
@@ -75,4 +111,22 @@ def downgrade() -> None:
         "bank_name",
         existing_type=sa.String(length=128),
         nullable=True,
+    )
+
+    op.drop_constraint("fk_fdf_archive", "finance_delivery_files", type_="foreignkey")
+    op.drop_constraint("fk_fdf_package", "finance_delivery_files", type_="foreignkey")
+
+    op.alter_column(
+        "consumable_transactions",
+        "unit_cost",
+        existing_type=sa.Numeric(24, 10),
+        type_=sa.Numeric(18, 4),
+        existing_nullable=True,
+    )
+    op.alter_column(
+        "consumable_purchase_items",
+        "unit_cost",
+        existing_type=sa.Numeric(24, 10),
+        type_=sa.Numeric(18, 4),
+        existing_nullable=False,
     )
