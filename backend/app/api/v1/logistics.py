@@ -9,7 +9,6 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app.db import get_db
-from app.models.logistics import LogisticsBill
 from app.services import logistics_service as service
 from app.services import logistics_import_service as import_service
 

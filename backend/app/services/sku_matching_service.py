@@ -444,7 +444,7 @@ def refresh_cost_from_inbound(db: Session, actor: str = "system") -> dict[str, A
         sku.default_cost = new_cost
         latest_item.match_note = (
             f"成本联动刷新：档案成本 {old_cost} → {new_cost}（{latest_doc.goodsdoc_no} 含税单价）"
-            + (f"；该单单价偏离全历史中位数，已取中位数兜底" if median_fallback and old_cost is not None and new_cost == med.quantize(Decimal("0.0001")) else "")
+            + ("；该单单价偏离全历史中位数，已取中位数兜底" if median_fallback and old_cost is not None and new_cost == med.quantize(Decimal("0.0001")) else "")
         )
         updated += 1
     db.commit()

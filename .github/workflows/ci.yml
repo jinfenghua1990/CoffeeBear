@@ -145,8 +145,8 @@ jobs:
           cd backend && python -m pytest app/tests -q --tb=short
       - name: Pyflakes debt budget (blocking)
         run: |
-          # 2026-09-19 baseline after removing runtime-level errors; only allow this number to decrease.
-          bash scripts/pyflakes-budget.sh 41
+          # 2026-09-20 baseline 19 (lowered from 41) after unused-import/local cleanup; only allow this number to decrease.
+          bash scripts/pyflakes-budget.sh 19
 
   frontend:
     name: Frontend (typecheck + static build)

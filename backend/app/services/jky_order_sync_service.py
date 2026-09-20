@@ -16,10 +16,9 @@ from sqlalchemy import or_
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.adapters.base import AdapterError, AdapterNotConfigured, AdapterPermissionError
+from app.adapters.base import AdapterNotConfigured, AdapterPermissionError
 from app.adapters.jackyun import finish_sync_job, load_checkpoint
 from app.adapters.jky_order_providers import (
-    JkyOrderProvider,
     JkyProviderHealth,
     build_order_providers,
 )
@@ -603,7 +602,6 @@ def sync_orders(db: Session, actor: str = "system") -> dict[str, Any]:
                     continue
 
                 upsert_stats = _upsert_orders(db, normalized)
-                selected = provider_name
                 attempt["status"] = "success"
                 result_stats.update({
                     "provider": provider_name,

@@ -13,7 +13,6 @@ from sqlalchemy.orm import Session
 from app.api.deps import current_actor
 from app.core.audit import audit
 from app.db import get_db
-from app.models.procurement_chain import ProcurementChainLink
 from app.services import procurement_chain_service as service
 
 router = APIRouter(prefix="/procurement-chain", tags=["采购全链路"])

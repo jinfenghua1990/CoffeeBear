@@ -26,7 +26,7 @@ from app.services import dashboard
 from app.services import production_service
 from app.services import procurement_workbench_service as procurement
 from app.services import tax_category_rule_service
-from app.services.procurement_chain_service import ChainPrefetch, _order_row, _source_pairs, chain_snapshot
+from app.services.procurement_chain_service import _order_row, chain_snapshot
 from app.services.production_purchase_view import list_production_purchase_rows
 from app.services.warehouse_service import list_warehouses
 

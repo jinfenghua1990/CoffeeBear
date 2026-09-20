@@ -23,7 +23,6 @@ from app.models.consumable import Consumable
 from app.models.ops import ExceptionRecord
 from app.models.purchase import ExternalPurchaseOrder
 from app.services.procurement_chain_service import (
-    ChainPrefetch,
     _order_row,
     _source_pairs,
     chain_snapshot,
@@ -355,7 +354,6 @@ def _step_states(row: dict) -> dict[str, dict]:
     """5 步骤每步的完成状态 + 简短摘要（与 7 环节口径共享 row 字段）。"""
     allocations = row.get("allocations") or []
     sku_linked = [a for a in allocations if a.get("skuId")]
-    purchase_orders = row.get("purchaseOrders") or []
     inbound = row.get("inbound") or []
     order_items = row.get("orderItems") or []
     order_item_codes = [i.get("productNumber") for i in order_items if i.get("productNumber")]

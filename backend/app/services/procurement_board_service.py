@@ -13,14 +13,11 @@ from __future__ import annotations
 
 from collections import Counter
 from datetime import date, datetime, timedelta
-from decimal import Decimal
 
 from sqlalchemy.orm import Session
 
 from app.services.procurement_chain_service import (
-    ChainPrefetch,
     _order_row,
-    _source_pairs,
     chain_snapshot,
     supplier_detail,
 )
@@ -355,7 +352,6 @@ def _payment_breakdown(row: dict) -> dict:
     extra = sum(float(item.get("amount") or 0) for item in row.get("expenses") or [])
     discount = float(row.get("discount") or 0)
     total_due = goods_total + freight + extra - discount
-    settlement = row.get("settlement") or []
     paid_amount = _paid_amount(row, cap=total_due)
     unpaid_amount = max(0, round(total_due - paid_amount, 2))
     diff_amount = 0.0

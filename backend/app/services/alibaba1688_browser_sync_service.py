@@ -38,7 +38,7 @@ from app.core.audit import audit
 from app.models.alibaba1688_import import Alibaba1688FileImport, Alibaba1688Order
 from app.models.integration import IntegrationConnection, SyncLog
 from app.services.alibaba1688_import_service import upsert_order_data
-from app.services.alibaba1688_mtop_mapper import extract_order_id, extract_orders, map_order
+from app.services.alibaba1688_mtop_mapper import extract_orders, map_order
 from app.services.integration_service import ensure_exception, get_or_create_connection
 
 PROVIDER = "alibaba_1688"

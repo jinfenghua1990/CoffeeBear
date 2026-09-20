@@ -31,7 +31,7 @@ from app.models.purchase import (
     PurchaseInvoiceLink,
     Supplier,
 )
-from app.models.tax import TaxInvoice, TaxInvoiceImport, TaxInvoiceLink
+from app.models.tax import TaxInvoice, TaxInvoiceLink
 from app.services.allocation import balance_check
 from app.services.import_lifecycle import filter_active_import, filter_active_rows
 from app.services.inbound_allocation_seed import seed_allocations_for_link
@@ -2385,7 +2385,6 @@ def _stage_states(row: dict) -> list[dict]:
     else:
         paid_detail = "未付款"
 
-    first_po_no = (purchase_orders[0].get("purchNo") if purchase_orders else "") or "—"
     # 耗材线（本平台 HC 单）：收齐即内容已确认/无需吉客云货品/不生成采购单/收货即入库
     # （与 workbench _step_states 同口径，2026-09-07）。
     consumable_received = bool((row.get("consumable") or {}).get("received"))

@@ -1,4 +1,3 @@
-from typing import Any
 
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy import or_

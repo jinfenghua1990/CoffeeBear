@@ -15,8 +15,7 @@
 from __future__ import annotations
 
 import io
-import json
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import Any
 

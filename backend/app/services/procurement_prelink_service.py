@@ -23,7 +23,6 @@ from decimal import Decimal
 from sqlalchemy.orm import Session
 
 from app.core.audit import audit
-from app.models.alibaba1688_import import Alibaba1688Order
 from app.models.jackyun import JackyunGoodsDocument, JackyunGoodsDocumentItem
 from app.models.procurement_chain import ProcurementChainLink
 from app.models.purchase import ExternalPurchaseOrder, PurchaseAllocationItem
