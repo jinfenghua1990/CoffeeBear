@@ -1,4 +1,4 @@
-# 电商经营数据平台 — 原生 macOS 运维入口
+# 电商工作平台 — 原生 macOS 运维入口
 # 用法: make <target>
 
 ROOT := $(CURDIR)
