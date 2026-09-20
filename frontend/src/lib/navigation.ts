@@ -209,7 +209,7 @@ function canonicalSidebarPath(href: string) {
     "/settings": "/settings/backup",
     "/settings/warehouses": "/supply-chain/warehouses",
     "/products/inventory-goods": "/inventory",
-    "/products/inventory-consumables": "/products",
+    "/products/inventory-consumables": "/inventory",
     "/alibaba1688-import": "/data-center-import",
     "/jackyun-import": "/data-center-import",
   };

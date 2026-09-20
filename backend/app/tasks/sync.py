@@ -324,12 +324,13 @@ def finance_auto_delivery() -> dict[str, Any]:
     """按模板自动发送财务包。
 
     每小时检查一次，但只在模板设定小时执行；从 send_day 起每天重试，直到资料齐全并发送成功。
-    已发送账期直接跳过，避免重复发送。
+    已发送账期直接跳过，避免重复发送；真正发送前始终基于当前资料生成新版本，
+    并锁定发送该版本，避免复用历史 PACKAGED 包。
     """
     from datetime import datetime
     from zoneinfo import ZoneInfo
 
-    from app.models.finance import FinanceDeliveryPackage, FinanceSalesReportTemplate
+    from app.models.finance import FinanceSalesReportTemplate
     from app.services import finance_sales_report_service as report_service
     from app.services import finance_service
 
@@ -370,20 +371,18 @@ def finance_auto_delivery() -> dict[str, Any]:
                 results.append({"company": template.company, "status": "missing_recipient"})
                 continue
 
-            latest_pkg = (
-                db.query(FinanceDeliveryPackage)
-                .filter_by(period_id=period.id)
-                .order_by(FinanceDeliveryPackage.version.desc())
-                .first()
-            )
-            if latest_pkg is None or latest_pkg.status not in {"PACKAGED", "SENT"}:
-                finance_service.package_period(db, template.company, year, month, actor="system")
             try:
+                # 发送前重新生成当前版本，确保调整后的无票收入/对公付款明细/银行资料
+                # 不会被旧的 PACKAGED 版本覆盖；随后明确发送刚生成的 version。
+                pkg = finance_service.package_period(
+                    db, template.company, year, month, actor="system"
+                )
                 sent = finance_service.send_delivery(
                     db,
                     template.company,
                     year,
                     month,
+                    version=pkg.version,
                     to_addrs=list(template.to_addrs or []),
                     cc_addrs=list(template.cc_addrs or []),
                     actor="system",

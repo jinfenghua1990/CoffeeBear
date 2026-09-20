@@ -412,7 +412,7 @@ export default function MonthlySendPage() {
   const [pickerQuery, setPickerQuery] = useState("");
   const [pickerScope, setPickerScope] = useState<"month" | "all">("month");
   const [allInvoices, setAllInvoices] = useState<PickerInvoice[]>([]);
-  /** 发送内容勾选：打包时只包含勾选的表（自动发送仍走全部 3 张）。 */
+  /** 发送内容勾选：手动打包只包含勾选项；自动发送始终重新生成当前全部月度交付表。 */
   const [includeSel, setIncludeSel] = useState<string[]>(["交易明细", "回单详情", "无票收入", "已收票对公付款明细"]);
   const [showUnbilledDetail, setShowUnbilledDetail] = useState(false);
   const [unbilledDetailMode, setUnbilledDetailMode] = useState<"adjust" | "preview">("adjust");
@@ -813,7 +813,12 @@ export default function MonthlySendPage() {
       const res = await authenticatedFetch(`/api/v1/finance/${sel.year}/${sel.month}/send`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ to_addrs: emails(toText), cc_addrs: emails(ccText) }),
+        body: JSON.stringify({
+          version: pkgData.version,
+          company: companyName,
+          to_addrs: emails(toText),
+          cc_addrs: emails(ccText),
+        }),
       });
       const d = await res.json();
       if (!res.ok) throw new Error(d.detail || `发送失败（${res.status}）`);

@@ -115,7 +115,13 @@ const ROUTES: RouteEntry[] = [
     pathname: "/inventory",
     title: "库存总览",
     businessType: "master",
-    titleFor: (search) => (search.get("tab") === "consumables" ? "耗材库存" : search.get("tab") === "goods" ? "正品库存" : null),
+    titleFor: (search) => {
+      const tab = search.get("tab");
+      if (tab === "consumables") return "耗材库存";
+      if (tab === "goods") return "正品库存";
+      if (tab === "bundle") return "虚拟组合库存";
+      return null;
+    },
     load: () => import("@/app/inventory/page"),
   },
   {
@@ -303,7 +309,7 @@ const IN_PAGE_REDIRECTS: Record<string, string> = {
   "/settings/warehouses": "/supply-chain/warehouses",
   "/finance/tax-accounting/categories": "/products?productTab=tax-rules",
   "/products/inventory-goods": "/inventory?tab=goods",
-  "/products/inventory-consumables": "/products?kind=consumable",
+  "/products/inventory-consumables": "/inventory?tab=consumables",
 };
 
 /** 把地址栏地址归一化成工作区可识别的正式地址（旧地址 → 新地址）。 */

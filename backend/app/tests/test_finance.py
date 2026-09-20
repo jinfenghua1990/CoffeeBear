@@ -103,3 +103,91 @@ def test_store_upload_enforces_maximum_size_before_database_write(monkeypatch):
             object(), company="测试公司", year=2026, month=9, category="other",
             original_name="too-large.txt", content=b"1234",
         )
+
+
+
+def test_finance_auto_delivery_repackages_and_sends_exact_new_version(db_session, monkeypatch):
+    """自动发送必须基于发送当下资料重打包，并锁定刚生成的版本。"""
+    from datetime import datetime
+    from uuid import uuid4
+    from zoneinfo import ZoneInfo
+
+    from app.config import settings
+    from app.models.finance import FinanceSalesReportTemplate
+    from app.services import finance_sales_report_service as report_service
+    from app.tasks import sync as task_sync
+
+    now = datetime.now(ZoneInfo(settings.TZ))
+    company = f"auto-delivery-{uuid4().hex}"
+    template = FinanceSalesReportTemplate(
+        company=company,
+        name="默认财务月报",
+        enabled=True,
+        fields=[],
+        rules={},
+        to_addrs=["finance@example.com"],
+        cc_addrs=[],
+        auto_send=True,
+        send_day=1,
+        send_hour=now.hour,
+    )
+    db_session.add(template)
+    db_session.flush()
+
+    class SessionProxy:
+        def __init__(self, inner):
+            self._inner = inner
+
+        def __getattr__(self, name):
+            return getattr(self._inner, name)
+
+        def close(self):
+            pass
+
+    events = []
+    monkeypatch.setattr(task_sync, "SessionLocal", lambda: SessionProxy(db_session))
+    monkeypatch.setattr(
+        report_service,
+        "generate_and_archive",
+        lambda *args, **kwargs: {"status": "exists"},
+    )
+    monkeypatch.setattr(
+        finance_service,
+        "refresh_period_status",
+        lambda *args, **kwargs: SimpleNamespace(
+            id=987654,
+            status="READY",
+            missing_summary={"missing": {}},
+        ),
+    )
+
+    def fake_package(db, selected_company, year, month, actor="system", include=None):
+        events.append(("package", selected_company, year, month, actor))
+        return SimpleNamespace(version=17)
+
+    def fake_send(
+        db,
+        selected_company,
+        year,
+        month,
+        *,
+        version=None,
+        to_addrs=None,
+        cc_addrs=None,
+        actor="system",
+    ):
+        events.append(("send", selected_company, version, tuple(to_addrs or []), actor))
+        return {"version": version, "kind": "first"}
+
+    monkeypatch.setattr(finance_service, "package_period", fake_package)
+    monkeypatch.setattr(finance_service, "send_delivery", fake_send)
+
+    result = task_sync.finance_auto_delivery.run()
+
+    assert [event[0] for event in events] == ["package", "send"]
+    assert events[0][1] == company
+    assert events[1][1] == company
+    assert events[1][2] == 17
+    assert events[1][3] == ("finance@example.com",)
+    assert result["results"][0]["status"] == "sent"
+    assert result["results"][0]["version"] == 17

@@ -269,8 +269,9 @@ def delete_delivery_package(db: Session, package_id: int, actor: str = "system")
 def _delivery_filename(year: int, month: int, f: ArchiveFile) -> str | None:
     """原始归档文件 → 发给财务的中文表名（带月份、去公司全称/版本号）。
 
-    交付包只含 3 张表：银行交易明细、银行回单详情、销售出库-无票收入。
-    不在此范围内的文件（如销售汇总/出库 CSV 的内部账期台账）不进入交付包。
+    原始归档层只映射银行交易明细、银行回单详情；另外两张月度交付表
+    “销售出库-无票收入”“已收票对公付款明细”由系统在打包时实时生成。
+    销售汇总/出库 CSV 等内部账期台账不进入交付包。
     """
     name = f.original_name or ""
     ext = Path(name).suffix or ""
