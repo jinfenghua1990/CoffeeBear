@@ -1,4 +1,6 @@
 from pathlib import Path
+import json
+import os
 import subprocess
 
 import pytest
@@ -374,3 +376,96 @@ def test_time_based_version_uses_project_timezone(monkeypatch):
     monkeypatch.setattr(service.settings, "TZ", "Asia/Shanghai")
     assert service._version_from_time("2026-09-20T10:30:00+00:00") == "2026.09.20.1830"
     assert service._version_from_time("2026-09-20T18:30:00+08:00") == "2026.09.20.1830"
+
+
+
+def test_global_update_lock_rejects_parallel_update(monkeypatch, tmp_path: Path):
+    root = tmp_path / "repo"
+    (root / ".git").mkdir(parents=True)
+    monkeypatch.setattr(service, "_repo_root", lambda: root)
+
+    service._acquire_update_lock(
+        run_id="run-a",
+        target_sha="a" * 40,
+        actor="pytest",
+    )
+    owner = json.loads((root / ".git" / "ecommerce-system-update.lock" / "owner.json").read_text())
+    assert owner["runId"] == "run-a"
+    assert owner["pid"] == os.getpid()
+
+    with pytest.raises(ValueError, match="全局更新锁"):
+        service._acquire_update_lock(
+            run_id="run-b",
+            target_sha="b" * 40,
+            actor="pytest",
+        )
+
+    service._release_update_lock(run_id="run-a")
+    assert not (root / ".git" / "ecommerce-system-update.lock").exists()
+
+
+def test_reference_transaction_hook_blocks_manual_git_and_allows_updater(tmp_path: Path):
+    repo_root = Path(__file__).resolve().parents[3]
+    guard = repo_root / "scripts" / "update-guard.sh"
+    worktree = tmp_path / "guard-repo"
+    worktree.mkdir()
+
+    subprocess.run(["git", "init", "-q", "-b", "develop"], cwd=worktree, check=True)
+    subprocess.run(["git", "config", "user.email", "pytest@example.invalid"], cwd=worktree, check=True)
+    subprocess.run(["git", "config", "user.name", "pytest"], cwd=worktree, check=True)
+    (worktree / "README").write_text("guard\n", encoding="utf-8")
+    subprocess.run(["git", "add", "README"], cwd=worktree, check=True)
+    subprocess.run(["git", "commit", "-qm", "init"], cwd=worktree, check=True)
+
+    scripts_dir = worktree / "scripts"
+    scripts_dir.mkdir()
+    local_guard = scripts_dir / "update-guard.sh"
+    local_guard.write_text(guard.read_text(encoding="utf-8"), encoding="utf-8")
+    subprocess.run(["bash", str(local_guard), "install", str(worktree)], check=True)
+
+    blocked = subprocess.run(
+        ["git", "branch", "manual-blocked", "HEAD"],
+        cwd=worktree,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert blocked.returncode != 0
+    assert "系统更新" in (blocked.stderr + blocked.stdout)
+
+    allowed_env = os.environ.copy()
+    allowed_env["ECOMMERCE_ALLOW_MANUAL_GIT"] = "1"
+    subprocess.run(
+        ["git", "branch", "emergency-allowed", "HEAD"],
+        cwd=worktree,
+        env=allowed_env,
+        check=True,
+    )
+
+    lock_dir = worktree / ".git" / "ecommerce-system-update.lock"
+    lock_dir.mkdir()
+    (lock_dir / "owner.json").write_text(
+        json.dumps({"runId": "run-123", "pid": os.getpid(), "targetSha": "c" * 40}),
+        encoding="utf-8",
+    )
+
+    service_env = os.environ.copy()
+    service_env["ECOMMERCE_UPDATE_SERVICE_GIT"] = "1"
+    blocked_during_update = subprocess.run(
+        ["git", "branch", "service-blocked-during-update", "HEAD"],
+        cwd=worktree,
+        env=service_env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert blocked_during_update.returncode != 0
+
+    updater_env = os.environ.copy()
+    updater_env["ECOMMERCE_UPDATE_RUN_ID"] = "run-123"
+    subprocess.run(
+        ["git", "branch", "updater-allowed", "HEAD"],
+        cwd=worktree,
+        env=updater_env,
+        check=True,
+    )
