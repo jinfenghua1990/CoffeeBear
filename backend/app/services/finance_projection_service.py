@@ -12,10 +12,12 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import and_, or_, select
 from sqlalchemy.orm import Session
 
+from app.config import settings
 from app.models.finance import FinanceEntry
 from app.models.foreign_trade import ForeignTradeOrder, ForeignTradeShipment
 from app.models.sales import AftersalesOrder, SalesOrder
@@ -65,6 +67,11 @@ def _event(row: Any, *names: str) -> datetime:
 
 def _period(value: datetime | None) -> tuple[int, int]:
     event = value or datetime.now(timezone.utc)
+    business_tz = ZoneInfo(settings.TZ)
+    if event.tzinfo is None:
+        event = event.replace(tzinfo=business_tz)
+    else:
+        event = event.astimezone(business_tz)
     return event.year, event.month
 
 
