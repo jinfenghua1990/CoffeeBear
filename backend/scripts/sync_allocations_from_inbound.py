@@ -13,12 +13,16 @@
   - 数量不一致 → 保留分配行数量，按明细单价重算金额（不动数量，防破坏配平）。
 只改 pending_refine 的 PO；不触碰入库单/链路/SKU 成本档案。
 
-用法：python sync_allocations_from_inbound.py [--apply]
+用法：python backend/scripts/sync_allocations_from_inbound.py [--apply]
 """
 import sys
 from decimal import Decimal, ROUND_HALF_UP
 
 from sqlalchemy import text
+
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.core.audit import audit
 from app.db import SessionLocal

@@ -13,10 +13,14 @@
   - 单据 head 用 recalc_document_amount 重算（Σ==head 时不变，保底一致）
   - 幂等：已一致的行跳过
 
-用法：python fix_zero_amount_items.py [--apply]
+用法：python backend/scripts/fix_zero_amount_items.py [--apply]
 """
 import sys
 from decimal import Decimal, ROUND_HALF_UP
+
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.core.audit import audit
 from app.db import SessionLocal

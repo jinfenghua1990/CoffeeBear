@@ -17,7 +17,7 @@ RK202603300002-1 被 10 个订单共用），入库单反填会把整套明细�
   验证：Σ分配 应 == 订单实付（配平即正确性校验）。
 不触碰入库单 / 链路 / SKU 成本档案 / 已确认(confirmed)订单。
 
-用法：python rebuild_allocations_from_excel.py [--apply]
+用法：python backend/scripts/rebuild_allocations_from_excel.py [--apply]
 """
 import sys
 from collections import defaultdict
@@ -25,6 +25,10 @@ from decimal import Decimal, ROUND_HALF_UP
 
 import openpyxl
 from sqlalchemy import text
+
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.core.audit import audit
 from app.db import SessionLocal

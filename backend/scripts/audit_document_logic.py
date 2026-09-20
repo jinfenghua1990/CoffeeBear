@@ -13,6 +13,11 @@ from __future__ import annotations
 from decimal import Decimal
 from collections import defaultdict
 
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
 from app.db import SessionLocal
 from app.models.alibaba1688_import import Alibaba1688Order, Alibaba1688FileImport
 from app.models.purchase import ExternalPurchaseOrder, PurchaseAllocationItem

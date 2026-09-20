@@ -9,12 +9,16 @@
   4) 至少有一条采购内容分配行
 不触碰入库单 / 链路 / SKU 成本档案。
 
-用法：python auto_confirm_refined.py [--apply]
+用法：python backend/scripts/auto_confirm_refined.py [--apply]
 """
 import sys
 from decimal import Decimal
 
 from sqlalchemy import text
+
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.core.audit import audit
 from app.db import SessionLocal

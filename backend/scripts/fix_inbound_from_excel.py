@@ -12,13 +12,17 @@
 （保留 manual），写 match_note，重算 doc head（Σ amount_tax）+ total_quantity。
 不触碰采购分配(allocation)/SKU 成本档案/链路。
 
-用法：python fix_inbound_from_excel.py [--apply]
+用法：python backend/scripts/fix_inbound_from_excel.py [--apply]
 """
 import sys
 from collections import defaultdict
 from decimal import Decimal, ROUND_HALF_UP
 
 import openpyxl
+
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.core.audit import audit
 from app.db import SessionLocal
