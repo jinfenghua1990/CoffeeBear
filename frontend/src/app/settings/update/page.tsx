@@ -121,6 +121,9 @@ export default function SystemUpdatePage() {
   const [notice, setNotice] = useState("");
   const [showAllChecks, setShowAllChecks] = useState(false);
   const [showChangedFiles, setShowChangedFiles] = useState(false);
+  const [updateDialogOpen, setUpdateDialogOpen] = useState(false);
+  const [updateConfirmed, setUpdateConfirmed] = useState(false);
+  const [showModalLogs, setShowModalLogs] = useState(false);
   const [activeTab, setActiveTab] = useState<"overview" | "strategy" | "logs" | "history">("overview");
   const [autoScrollLogs, setAutoScrollLogs] = useState(true);
   const logRef = useRef<HTMLPreElement | null>(null);
@@ -164,6 +167,8 @@ export default function SystemUpdatePage() {
   useEffect(() => {
     if (!status?.running) return;
     sawRunningRef.current = true;
+    setUpdateDialogOpen(true);
+    setUpdateConfirmed(true);
     const timer = window.setInterval(() => void load(true), 1800);
     return () => window.clearInterval(timer);
   }, [load, status?.running]);
@@ -185,7 +190,7 @@ export default function SystemUpdatePage() {
 
     reloadScheduledRef.current = true;
     setNotice("更新完成，正在重新载入最新页面…");
-    const timer = window.setTimeout(() => window.location.reload(), 1400);
+    const timer = window.setTimeout(() => window.location.reload(), 2400);
     return () => window.clearTimeout(timer);
   }, [status]);
 
@@ -259,25 +264,41 @@ export default function SystemUpdatePage() {
     }
   }
 
-  async function applyUpdate() {
-    if (!window.confirm("系统会先自动备份数据库和业务文件，再安装更新、升级数据库、重建前端并重启服务。失败会自动尝试回滚。确认开始？")) {
-      return;
-    }
+  function openUpdateDialog() {
+    setError("");
+    setNotice("");
+    setShowModalLogs(false);
+    setUpdateConfirmed(false);
+    setUpdateDialogOpen(true);
+  }
+
+  function closeUpdateDialog() {
+    if (status?.running || busy === "apply") return;
+    setUpdateDialogOpen(false);
+    setUpdateConfirmed(false);
+    setShowModalLogs(false);
+  }
+
+  async function startUpdate() {
     setBusy("apply");
     setError("");
     setNotice("");
+    setUpdateConfirmed(true);
     sawRunningRef.current = true;
     try {
       const next = await systemUpdateApi.apply();
       setStatus(next);
       if (next.started === false) {
         sawRunningRef.current = false;
+        setUpdateConfirmed(false);
+        setUpdateDialogOpen(false);
         setNotice("当前已经是最新版本，无需安装。");
       } else {
-        setNotice("更新任务已启动。页面会持续显示进度，完成后自动载入新版。");
+        setNotice("");
       }
     } catch (caught) {
       sawRunningRef.current = false;
+      setUpdateConfirmed(false);
       setError(caught instanceof Error ? caught.message : String(caught));
     } finally {
       setBusy("");
@@ -346,7 +367,16 @@ export default function SystemUpdatePage() {
   const visibleChanges = (status.changes || []).slice(0, 6);
   const moduleVersions = status.moduleVersions || [];
   const moduleUpdateCount = moduleVersions.filter((item) => item.status === "update").length;
-  const showProgressNumber = status.running || status.phase === "success";
+  const updateDialogProgress = Math.max(0, Math.min(100, status.running ? Math.max(progress, 4) : status.phase === "success" ? 100 : progress));
+  const updateDialogResult = status.phase === "failed"
+    ? "failed"
+    : status.phase === "rolled_back"
+      ? "rolled_back"
+      : status.phase === "success" && sawRunningRef.current
+        ? "success"
+        : status.running || busy === "apply" || updateConfirmed
+          ? "running"
+          : "confirm";
 
   const phaseStep: Record<string, number> = {
     checking: 0,
@@ -429,367 +459,262 @@ export default function SystemUpdatePage() {
       </nav>
 
       {activeTab === "overview" && (
-        <>
-      <section className="app-card overflow-hidden rounded-2xl">
-        <div className="grid xl:grid-cols-[minmax(0,1fr)_280px]">
-          <div className="min-w-0 p-5">
-            <div className="mb-4 flex flex-wrap items-center gap-2">
-              <span className={`inline-flex rounded-full px-2.5 py-1 text-[11px] font-medium ring-1 ring-inset ${state.tone} dark:bg-slate-800 dark:text-slate-100 dark:ring-slate-600`}>
-                {state.label}
-              </span>
-              {status.updateAvailable && (
-                <span className={`inline-flex rounded-full px-2.5 py-1 text-[11px] font-medium ring-1 ring-inset ${levelMeta.tone} dark:bg-blue-500/10 dark:text-blue-200 dark:ring-blue-400/40`}>
-                  {levelMeta.label}
-                </span>
-              )}
-              {!isContainer && (
-                <span className="text-[11px] text-slate-400 dark:text-slate-400">
-                  {status.settings.remote}/{status.settings.branch}
-                </span>
-              )}
-            </div>
-
-            <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_360px] 2xl:grid-cols-[minmax(520px,660px)_minmax(0,1fr)]">
-              <div className="min-w-0">
-                <div className="text-[13px] font-semibold text-slate-800 dark:text-slate-100">更新概览</div>
-                <div className="mt-1 text-[11px] text-slate-400 dark:text-slate-400">版本信息与影响范围</div>
-
-                <div className="mt-4 grid items-stretch gap-3 sm:grid-cols-[minmax(0,1fr)_32px_minmax(0,1fr)]">
-                  <VersionCard
-                    label="当前版本"
-                    version={status.currentCommit?.version}
-                    sha={currentSha}
-                    note={status.currentCommit?.subject || "当前正在运行的版本"}
-                    kind="current"
-                    updateLevel={updateLevel}
-                    hasUpdate={Boolean(status.updateAvailable)}
-                  />
-                  <div className={`hidden items-center justify-center text-xl font-medium sm:flex ${
-                    status.updateAvailable ? "text-blue-500" : "text-slate-300 dark:text-slate-600"
-                  }`}>
-                    {status.updateAvailable ? "→" : "="}
-                  </div>
-                  <VersionCard
-                    label="GitHub 最新版本"
-                    version={status.latestCommit?.version || status.currentCommit?.version}
-                    sha={targetSha || currentSha}
-                    note={latestSubject || status.currentCommit?.subject || "GitHub 最新版本"}
-                    kind="latest"
-                    updateLevel={updateLevel}
-                    hasUpdate={Boolean(status.updateAvailable)}
-                  />
-                </div>
-
-                <div className={`mt-3 rounded-lg px-3 py-2 text-[11px] leading-5 ${
-                  status.updateAvailable
-                    ? updateLevel === "major"
-                      ? "bg-rose-50 font-semibold text-rose-700 dark:bg-rose-500/10 dark:text-rose-200"
-                      : updateLevel === "feature"
-                        ? "bg-amber-50 font-medium text-amber-700 dark:bg-amber-500/10 dark:text-amber-200"
-                        : "bg-blue-50 text-blue-700 dark:bg-blue-500/10 dark:text-blue-200"
-                    : "bg-slate-50 text-slate-500 dark:bg-slate-800/60 dark:text-slate-300"
-                }`}>
-                  {status.updateAvailable
-                    ? updateLevel === "major"
-                      ? "检测到重大版本更新：建议查看影响模块和变更内容后再安装。"
-                      : updateLevel === "feature"
-                        ? "检测到功能版本更新：包含功能、模型或数据库层面的变化，请确认后安装。"
-                        : "检测到小版本更新：通常为 UI、文案或普通缺陷修复。"
-                    : "当前运行版本与 GitHub 最新版本一致，无需更新。"}
-                </div>
-
-                <div className="mt-4 flex flex-wrap items-center gap-2 border-t border-slate-100 pt-4 dark:border-slate-700/70">
-                  <span className="mr-1 text-[11px] font-semibold text-slate-600 dark:text-slate-300">影响模块</span>
-                  {(status.impactedModules?.length ? status.impactedModules : ["公共代码"]).map((module) => (
-                    <span key={module} className="rounded-lg border border-slate-200 bg-slate-50 px-2.5 py-1 text-[11px] font-medium text-slate-600 dark:border-slate-600 dark:bg-slate-800/70 dark:text-slate-200">
-                      {module}
+        <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_430px]">
+          <div className="min-w-0 space-y-4">
+            <section className="app-card overflow-hidden rounded-2xl">
+              <div className="grid xl:grid-cols-[minmax(0,1fr)_250px]">
+                <div className="min-w-0 p-5">
+                  <div className="mb-4 flex flex-wrap items-center gap-2">
+                    <span className={`inline-flex rounded-full px-2.5 py-1 text-[11px] font-medium ring-1 ring-inset ${state.tone}`}>
+                      {state.label}
                     </span>
-                  ))}
-                  {status.hasMigration && (
-                    <span className="rounded-lg border border-amber-200 bg-amber-50 px-2.5 py-1 text-[11px] font-medium text-amber-700 dark:border-amber-500/40 dark:bg-amber-500/10 dark:text-amber-200">
-                      包含数据库迁移
-                    </span>
-                  )}
-                </div>
-              </div>
-
-              <div className="min-w-0 border-t border-slate-100 pt-4 lg:border-l lg:border-t-0 lg:pl-5 lg:pt-0 dark:border-slate-700/70">
-                <div className="text-[13px] font-semibold text-slate-800 dark:text-slate-100">本次更新内容</div>
-                <div className="mt-1 text-[11px] text-slate-400 dark:text-slate-400">
-                  {status.updateAvailable ? `共 ${status.changes?.length || 1} 项变更` : "当前版本已与远端一致"}
-                </div>
-                <div className="mt-3 overflow-hidden rounded-xl border border-slate-100 dark:border-slate-700">
-                  {visibleChanges.length ? visibleChanges.map((item, index) => (
-                    <div key={item.sha} className={`flex items-start gap-3 px-3 py-2.5 ${index ? "border-t border-slate-100 dark:border-slate-700" : ""}`}>
-                      <span className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-blue-50 text-blue-600 dark:bg-blue-500/10 dark:text-blue-300">
-                        {index + 1}
+                    {status.updateAvailable && (
+                      <span className={`inline-flex rounded-full px-2.5 py-1 text-[11px] font-medium ring-1 ring-inset ${levelMeta.tone}`}>
+                        {levelMeta.label}
                       </span>
-                      <div className="min-w-0 flex-1">
-                        <div className="truncate text-[12px] font-medium text-slate-700 dark:text-slate-100" title={item.subject}>{item.subject}</div>
-                        <div className="mt-0.5 flex flex-wrap items-center gap-1.5 text-[11px] text-slate-400 dark:text-slate-400">
-                          <span>{fmtDate(item.committedAt)} · {item.shortSha}</span>
-                          {(item.modules || []).slice(0, 2).map((module) => (
-                            <span key={module} className="rounded-md bg-slate-100 px-1.5 py-0.5 text-[10px] font-medium text-slate-500 dark:bg-slate-800 dark:text-slate-300">
-                              {module}
-                            </span>
-                          ))}
+                    )}
+                    {!isContainer && (
+                      <span className="text-[11px] text-slate-400 dark:text-slate-400">
+                        {status.settings.remote}/{status.settings.branch}
+                      </span>
+                    )}
+                  </div>
+
+                  <div className="text-[13px] font-semibold text-slate-800 dark:text-slate-100">更新概览</div>
+                  <div className="mt-1 text-[11px] text-slate-400 dark:text-slate-400">当前运行版本与 GitHub 最新版本</div>
+
+                  <div className="mt-4 overflow-hidden rounded-xl border border-slate-200 dark:border-slate-700">
+                    <VersionRow
+                      label="当前版本"
+                      version={status.currentCommit?.version}
+                      sha={currentSha}
+                      note={status.currentCommit?.subject || "当前正在运行的版本"}
+                      kind="current"
+                      updateLevel={updateLevel}
+                      hasUpdate={Boolean(status.updateAvailable)}
+                    />
+                    <VersionRow
+                      label="最新版本"
+                      version={status.latestCommit?.version || status.currentCommit?.version}
+                      sha={targetSha || currentSha}
+                      note={latestSubject || status.currentCommit?.subject || "GitHub 最新版本"}
+                      kind="latest"
+                      updateLevel={updateLevel}
+                      hasUpdate={Boolean(status.updateAvailable)}
+                    />
+                  </div>
+
+                  <div className={`mt-3 rounded-lg px-3 py-2 text-[11px] leading-5 ${
+                    status.updateAvailable
+                      ? updateLevel === "major"
+                        ? "bg-rose-50 font-semibold text-rose-700 dark:bg-rose-500/10 dark:text-rose-200"
+                        : updateLevel === "feature"
+                          ? "bg-amber-50 font-medium text-amber-700 dark:bg-amber-500/10 dark:text-amber-200"
+                          : "bg-blue-50 text-blue-700 dark:bg-blue-500/10 dark:text-blue-200"
+                      : "bg-slate-50 text-slate-500 dark:bg-slate-800/60 dark:text-slate-300"
+                  }`}>
+                    {status.updateAvailable
+                      ? updateLevel === "major"
+                        ? "检测到重大版本更新：建议查看影响模块和变更内容后再安装。"
+                        : updateLevel === "feature"
+                          ? "检测到功能版本更新：包含功能、模型或数据库层面的变化，请确认后安装。"
+                          : "检测到小版本更新：通常为 UI、文案或普通缺陷修复。"
+                      : "当前版本与 GitHub 最新版本一致，无需更新。"}
+                  </div>
+
+                  <div className="mt-4 flex flex-wrap items-center gap-2 border-t border-slate-100 pt-4 dark:border-slate-700/70">
+                    <span className="mr-1 text-[11px] font-semibold text-slate-600 dark:text-slate-300">影响模块</span>
+                    {(status.impactedModules?.length ? status.impactedModules : ["公共代码"]).map((module) => (
+                      <span key={module} className="rounded-lg border border-slate-200 bg-slate-50 px-2.5 py-1 text-[11px] font-medium text-slate-600 dark:border-slate-600 dark:bg-slate-800/70 dark:text-slate-200">
+                        {module}
+                      </span>
+                    ))}
+                    {status.hasMigration && (
+                      <span className="rounded-lg border border-amber-200 bg-amber-50 px-2.5 py-1 text-[11px] font-medium text-amber-700 dark:border-amber-500/40 dark:bg-amber-500/10 dark:text-amber-200">
+                        包含数据库迁移
+                      </span>
+                    )}
+                  </div>
+
+                  <div className="mt-5 border-t border-slate-100 pt-4 dark:border-slate-700/70">
+                    <div className="flex items-center justify-between gap-3">
+                      <div>
+                        <div className="text-[13px] font-semibold text-slate-800 dark:text-slate-100">本次更新内容</div>
+                        <div className="mt-1 text-[11px] text-slate-400 dark:text-slate-400">
+                          {status.updateAvailable ? `共 ${status.changes?.length || 1} 项变更` : "当前版本已与远端一致"}
                         </div>
                       </div>
-                    </div>
-                  )) : (
-                    <div className="flex min-h-[104px] items-center px-4 py-4 text-[12px] text-slate-400 dark:text-slate-400">
-                      当前没有待安装更新。检测到新版本后，这里会直接列出本次改动。
-                    </div>
-                  )}
-                </div>
-              </div>
-            </div>
-
-            <div className="mt-4 flex flex-wrap items-center gap-x-5 gap-y-1 text-[11px] text-slate-400 dark:text-slate-400">
-              <span>最后检查：{fmtDate(status.lastCheckAt)}</span>
-              {status.changedFileCount ? (
-                <button
-                  type="button"
-                  onClick={() => setShowChangedFiles((value) => !value)}
-                  className="font-medium text-blue-600 hover:text-blue-700 dark:text-blue-300"
-                >
-                  {showChangedFiles ? "收起变更文件" : `查看变更文件 · ${status.changedFileCount}`}
-                </button>
-              ) : status.updateAvailable ? (
-                <span className="font-medium text-amber-600 dark:text-amber-300">已发现新版本，正在重新识别文件差异</span>
-              ) : null}
-              {status.lastInstallAt && <span>上次安装：{fmtDate(status.lastInstallAt)}</span>}
-            </div>
-
-            {showChangedFiles && status.changedFiles?.length ? (
-              <div className="mt-3 overflow-hidden rounded-xl border border-slate-100 bg-slate-50/60 dark:border-slate-700 dark:bg-slate-900/30">
-                <div className="flex items-center justify-between border-b border-slate-100 px-3 py-2 dark:border-slate-700">
-                  <span className="text-[11px] font-semibold text-slate-700 dark:text-slate-100">本次变更文件</span>
-                  <span className="text-[10px] text-slate-400">{status.changedFiles.length} 个</span>
-                </div>
-                <div className="max-h-52 overflow-auto py-1">
-                  {status.changedFiles.map((file) => (
-                    <div
-                      key={file}
-                      className="border-b border-slate-100/80 px-3 py-1.5 font-mono text-[10px] leading-5 text-slate-500 last:border-b-0 dark:border-slate-700/70 dark:text-slate-300"
-                    >
-                      {file}
-                    </div>
-                  ))}
-                </div>
-              </div>
-            ) : null}
-          </div>
-
-          <aside className="border-t border-slate-100 bg-slate-50/70 p-5 xl:border-l xl:border-t-0 dark:border-slate-700 dark:bg-slate-900/35">
-            <div className="text-[13px] font-semibold text-slate-800 dark:text-slate-100">更新操作</div>
-            <p className="mt-1 text-[11px] leading-5 text-slate-500 dark:text-slate-300">检查新版本并执行系统更新。</p>
-
-            <div className="mt-5 grid gap-3">
-              <button
-                type="button"
-                onClick={() => void checkNow()}
-                disabled={Boolean(busy || status.running || isContainer)}
-                className="app-button-secondary h-11 rounded-xl px-4 text-[12px] font-medium disabled:cursor-not-allowed disabled:opacity-45"
-              >
-                {busy === "check" ? "正在检查…" : "检查更新"}
-              </button>
-              <button
-                type="button"
-                onClick={() => void applyUpdate()}
-                disabled={installDisabled}
-                className="app-button-primary h-12 rounded-xl px-4 text-[13px] font-semibold shadow-sm disabled:cursor-not-allowed disabled:opacity-40"
-              >
-                {status.running ? "更新进行中…" : busy === "apply" ? "正在启动…" : status.updateAvailable ? "立即更新到最新版本" : "当前已是最新版本"}
-              </button>
-              <button
-                type="button"
-                onClick={() => void refreshRuntime()}
-                disabled={Boolean(busy)}
-                className="app-button-secondary h-11 rounded-xl px-4 text-[12px] font-medium disabled:opacity-40"
-              >
-                {busy === "refresh" ? "刷新中…" : "刷新状态"}
-              </button>
-            </div>
-
-            {reason && !status.running && (
-              <div className="mt-4 rounded-xl border border-slate-100 bg-white px-3 py-2.5 text-[11px] leading-5 text-slate-500 dark:border-slate-700 dark:bg-slate-800/70 dark:text-slate-300">
-                {reason}
-              </div>
-            )}
-          </aside>
-        </div>
-      </section>
-
-      {!isContainer && (
-        <section className="mt-4 app-card overflow-hidden rounded-2xl">
-          <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-100 px-5 py-4 dark:border-slate-700">
-            <div>
-              <div className="flex flex-wrap items-center gap-2">
-                <h2 className="text-[15px] font-semibold text-slate-900 dark:text-slate-100">模块版本总览</h2>
-                <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-medium text-slate-500 dark:bg-slate-800 dark:text-slate-300">
-                  10 个模块
-                </span>
-                {moduleUpdateCount > 0 ? (
-                  <span className="rounded-full bg-amber-50 px-2 py-0.5 text-[10px] font-medium text-amber-700 dark:bg-amber-500/10 dark:text-amber-200">
-                    {moduleUpdateCount} 个有更新
-                  </span>
-                ) : moduleVersions.length ? (
-                  <span className="rounded-full bg-emerald-50 px-2 py-0.5 text-[10px] font-medium text-emerald-700 dark:bg-emerald-500/10 dark:text-emerald-300">
-                    全部已最新
-                  </span>
-                ) : null}
-              </div>
-              <p className="mt-1 text-[11px] text-slate-400 dark:text-slate-400">
-                模块版本表示该中心最近一次代码变更所属的平台版本；系统仍按一个总版本统一安装。
-              </p>
-            </div>
-            {status.impactedModules?.includes("平台公共底层") && (
-              <span className="rounded-lg border border-blue-100 bg-blue-50 px-2.5 py-1 text-[10px] font-medium text-blue-700 dark:border-blue-500/30 dark:bg-blue-500/10 dark:text-blue-200">
-                本次涉及平台公共底层
-              </span>
-            )}
-          </div>
-
-          {moduleVersions.length ? (
-            <div className="grid sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5">
-              {moduleVersions.map((module, index) => {
-                const hasUpdate = module.status === "update";
-                const tracked = module.status !== "untracked";
-                return (
-                  <div
-                    key={module.key}
-                    className={`min-w-0 px-4 py-4 ${
-                      index % 5 ? "xl:border-l xl:border-slate-100 dark:xl:border-slate-700" : ""
-                    } ${index >= 5 ? "border-t border-slate-100 dark:border-slate-700" : ""}`}
-                  >
-                    <div className="flex items-center justify-between gap-2">
-                      <div className="truncate text-[12px] font-semibold text-slate-800 dark:text-slate-100">{module.label}</div>
-                      <span className={`shrink-0 rounded-full px-2 py-0.5 text-[10px] font-medium ${
-                        hasUpdate
-                          ? "bg-amber-50 text-amber-700 dark:bg-amber-500/10 dark:text-amber-200"
-                          : tracked
-                            ? "bg-emerald-50 text-emerald-700 dark:bg-emerald-500/10 dark:text-emerald-300"
-                            : "bg-slate-100 text-slate-500 dark:bg-slate-800 dark:text-slate-300"
-                      }`}>
-                        {hasUpdate ? "有更新" : tracked ? "已最新" : "待建立"}
-                      </span>
+                      {status.changedFileCount ? (
+                        <button
+                          type="button"
+                          onClick={() => setShowChangedFiles((value) => !value)}
+                          className="text-[11px] font-medium text-blue-600 hover:text-blue-700 dark:text-blue-300"
+                        >
+                          {showChangedFiles ? "收起变更文件" : `查看变更文件 · ${status.changedFileCount}`}
+                        </button>
+                      ) : null}
                     </div>
 
-                    <div className="mt-3 flex min-w-0 items-center gap-2">
-                      <span className="truncate font-mono text-[12px] font-semibold text-slate-700 dark:text-slate-100">
-                        {module.currentVersion || "—"}
-                      </span>
-                      {hasUpdate && (
-                        <>
-                          <span className="shrink-0 text-blue-500">→</span>
-                          <span className="truncate font-mono text-[12px] font-semibold text-amber-700 dark:text-amber-200">
-                            {module.latestVersion || "—"}
+                    <div className="mt-3 overflow-hidden rounded-xl border border-slate-100 dark:border-slate-700">
+                      {visibleChanges.length ? visibleChanges.map((item, index) => (
+                        <div key={item.sha} className={`flex items-start gap-3 px-3 py-2.5 ${index ? "border-t border-slate-100 dark:border-slate-700" : ""}`}>
+                          <span className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-blue-50 text-blue-600 dark:bg-blue-500/10 dark:text-blue-300">
+                            {index + 1}
                           </span>
-                        </>
+                          <div className="min-w-0 flex-1">
+                            <div className="truncate text-[12px] font-medium text-slate-700 dark:text-slate-100" title={item.subject}>{item.subject}</div>
+                            <div className="mt-0.5 flex flex-wrap items-center gap-1.5 text-[11px] text-slate-400 dark:text-slate-400">
+                              <span>{fmtDate(item.committedAt)} · {item.shortSha}</span>
+                              {(item.modules || []).slice(0, 2).map((module) => (
+                                <span key={module} className="rounded-md bg-slate-100 px-1.5 py-0.5 text-[10px] font-medium text-slate-500 dark:bg-slate-800 dark:text-slate-300">
+                                  {module}
+                                </span>
+                              ))}
+                            </div>
+                          </div>
+                        </div>
+                      )) : (
+                        <div className="flex min-h-[78px] items-center px-4 py-4 text-[12px] text-slate-400 dark:text-slate-400">
+                          当前没有待安装更新。检测到新版本后，这里会直接列出本次改动。
+                        </div>
                       )}
                     </div>
 
-                    <div
-                      className="mt-2 truncate text-[10px] leading-5 text-slate-400 dark:text-slate-400"
-                      title={hasUpdate ? module.latestSubject : module.currentSubject}
-                    >
-                      {hasUpdate ? module.latestSubject : module.currentSubject || "尚未识别到模块独立变更"}
-                    </div>
+                    {showChangedFiles && status.changedFiles?.length ? (
+                      <div className="mt-3 overflow-hidden rounded-xl border border-slate-100 bg-slate-50/60 dark:border-slate-700 dark:bg-slate-900/30">
+                        <div className="flex items-center justify-between border-b border-slate-100 px-3 py-2 dark:border-slate-700">
+                          <span className="text-[11px] font-semibold text-slate-700 dark:text-slate-100">本次变更文件</span>
+                          <span className="text-[10px] text-slate-400">{status.changedFiles.length} 个</span>
+                        </div>
+                        <div className="max-h-52 overflow-auto py-1">
+                          {status.changedFiles.map((file) => (
+                            <div key={file} className="border-b border-slate-100/80 px-3 py-1.5 font-mono text-[10px] leading-5 text-slate-500 last:border-b-0 dark:border-slate-700/70 dark:text-slate-300">
+                              {file}
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    ) : null}
                   </div>
-                );
-              })}
-            </div>
-          ) : (
-            <div className="px-5 py-6 text-[12px] text-slate-400 dark:text-slate-400">
-              正在生成模块版本信息；如果没有自动刷新，点击右上角“检查更新”即可重新计算。
-            </div>
-          )}
-        </section>
-      )}
 
-      {error && (
-        <div className="mt-4 rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-[12px] leading-5 text-rose-700 dark:border-rose-500/40 dark:bg-rose-500/10 dark:text-rose-200">
-          <div className="font-semibold">更新服务需要处理</div>
-          <div className="mt-1 break-all">{error}</div>
-        </div>
-      )}
-      {notice && !error && (
-        <div className="mt-4 rounded-xl border border-blue-100 bg-blue-50 px-4 py-3 text-[12px] text-blue-700 dark:border-blue-500/30 dark:bg-blue-500/10 dark:text-blue-200">
-          {notice}
-        </div>
-      )}
+                  <div className="mt-4 flex flex-wrap gap-x-5 gap-y-1 text-[11px] text-slate-400 dark:text-slate-400">
+                    <span>最后检查：{fmtDate(status.lastCheckAt)}</span>
+                    {status.changedFileCount ? <span>文件变化：{status.changedFileCount} 个</span> : null}
+                    {status.lastInstallAt && <span>上次安装：{fmtDate(status.lastInstallAt)}</span>}
+                  </div>
+                </div>
 
-      {!isContainer && (
-        <section className="mt-4 app-card overflow-hidden rounded-2xl">
-          <div className="flex flex-wrap items-center justify-between gap-4 border-b border-slate-100 px-5 py-4 dark:border-slate-700">
-            <div>
-              <h2 className="text-[15px] font-semibold text-slate-900 dark:text-slate-100">更新进度</h2>
-              <p className="mt-1 text-[11px] text-slate-400 dark:text-slate-400">
-                {status.running ? "正在执行更新任务，请勿关闭页面。" : status.updateAvailable ? "准备完成后点击“立即更新”开始执行。" : "当前没有正在执行的更新任务。"}
-              </p>
-            </div>
-            <div className="flex flex-wrap items-center justify-end gap-3">
-              <div className="flex min-w-[280px] items-center gap-3">
-                <div className="h-2 flex-1 overflow-hidden rounded-full bg-slate-100 dark:bg-slate-700">
-                  <div className="h-full rounded-full bg-blue-500 transition-all duration-500" style={{ width: `${status.running ? Math.max(progress, 4) : status.phase === "success" ? 100 : 0}%` }} />
-                </div>
-                <span className="min-w-11 text-right font-mono text-[14px] font-semibold text-slate-700 dark:text-slate-100">
-                  {showProgressNumber ? (status.running ? `${progress}%` : "100%") : "待命"}
-                </span>
-                <div className="hidden border-l border-slate-200 pl-4 text-right sm:block dark:border-slate-700">
-                  <div className="text-[11px] text-slate-400">当前阶段</div>
-                  <div className="mt-0.5 text-[12px] font-semibold text-slate-700 dark:text-slate-100">{stageMessage}</div>
-                </div>
+                <aside className="border-t border-slate-100 bg-slate-50/70 p-5 xl:border-l xl:border-t-0 dark:border-slate-700 dark:bg-slate-900/35">
+                  <div className="text-[13px] font-semibold text-slate-800 dark:text-slate-100">更新操作</div>
+                  <p className="mt-1 text-[11px] leading-5 text-slate-500 dark:text-slate-300">检查版本或开始安全更新。</p>
+                  <div className="mt-5 grid gap-3">
+                    <button
+                      type="button"
+                      onClick={() => void checkNow()}
+                      disabled={Boolean(busy || status.running || isContainer)}
+                      className="app-button-secondary h-11 rounded-xl px-4 text-[12px] font-medium disabled:cursor-not-allowed disabled:opacity-45"
+                    >
+                      {busy === "check" ? "正在检查…" : "检查更新"}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={openUpdateDialog}
+                      disabled={installDisabled}
+                      className="app-button-primary h-12 rounded-xl px-4 text-[13px] font-semibold shadow-sm disabled:cursor-not-allowed disabled:opacity-40"
+                    >
+                      {status.running ? "更新进行中…" : status.updateAvailable ? "立即更新到最新版本" : "当前已是最新版本"}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => void refreshRuntime()}
+                      disabled={Boolean(busy)}
+                      className="app-button-secondary h-11 rounded-xl px-4 text-[12px] font-medium disabled:opacity-40"
+                    >
+                      {busy === "refresh" ? "刷新中…" : "刷新状态"}
+                    </button>
+                  </div>
+                  {reason && !status.running && (
+                    <div className="mt-4 rounded-xl border border-slate-100 bg-white px-3 py-2.5 text-[11px] leading-5 text-slate-500 dark:border-slate-700 dark:bg-slate-800/70 dark:text-slate-300">
+                      {reason}
+                    </div>
+                  )}
+                </aside>
               </div>
-              <button
-                type="button"
-                onClick={() => setActiveTab("logs")}
-                className="app-button-secondary h-9 rounded-lg px-3 text-[11px] font-medium"
-              >
-                查看日志{status.logs?.length ? ` · ${status.logs.length}` : ""}
-              </button>
-            </div>
-          </div>
+            </section>
 
-          <div className="grid md:grid-cols-4">
-            <UpdateStep index={1} title="环境检查" desc="系统环境、依赖版本" status={stageStatus(0)} time={stageStatus(0) === "done" ? fmtDate(readiness?.checkedAt) : ""} />
-            <UpdateStep index={2} title="自动备份" desc="数据库与业务文件" status={stageStatus(1)} time={status.backupDb ? "备份已生成" : ""} />
-            <UpdateStep index={3} title="安装升级" desc={status.phase === "building" ? "正在构建前端资源" : "代码、依赖、数据库迁移"} status={stageStatus(2)} time={status.running && activeStep === 2 ? status.message : ""} />
-            <UpdateStep index={4} title="验证 / 回滚" desc="健康检查与服务重启" status={stageStatus(3)} time={status.running && activeStep === 3 ? status.message : ""} last />
-          </div>
-
-          <div className="flex flex-wrap items-center justify-between gap-3 border-t border-slate-100 px-5 py-3 dark:border-slate-700">
-            <div className="text-[11px] text-slate-500 dark:text-slate-300">
-              {readiness ? (readiness.ready ? "环境检查已通过，可以安全更新。" : `环境自检有 ${readiness.blockingCount} 项阻塞。`) : "正在读取环境自检结果…"}
-            </div>
-            {checks.length > 0 && (
-              <button type="button" onClick={() => setShowAllChecks((value) => !value)} className="text-[11px] font-medium text-blue-600 hover:text-blue-700 dark:text-blue-300">
-                {showAllChecks ? "收起环境明细" : "查看环境明细"}
-              </button>
+            {error && (
+              <div className="rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-[12px] leading-5 text-rose-700 dark:border-rose-500/40 dark:bg-rose-500/10 dark:text-rose-200">
+                <div className="font-semibold">更新服务需要处理</div>
+                <div className="mt-1 break-all">{error}</div>
+              </div>
+            )}
+            {notice && !error && (
+              <div className="rounded-xl border border-blue-100 bg-blue-50 px-4 py-3 text-[12px] text-blue-700 dark:border-blue-500/30 dark:bg-blue-500/10 dark:text-blue-200">
+                {notice}
+              </div>
             )}
           </div>
 
-          {showAllChecks && (
-            <div className="grid gap-px border-t border-slate-100 bg-slate-100 sm:grid-cols-2 xl:grid-cols-3 dark:border-slate-700 dark:bg-slate-700">
-              {checks.map((item) => (
-                <div key={item.key} className="bg-white px-4 py-3 dark:bg-slate-900">
-                  <div className="flex items-center justify-between gap-3">
-                    <span className="text-[11px] font-medium text-slate-700 dark:text-slate-100">{item.label}</span>
-                    <span className={`rounded-full px-2 py-0.5 text-[11px] font-medium ${item.status === "ok" ? "bg-emerald-50 text-emerald-700 dark:bg-emerald-500/10 dark:text-emerald-300" : item.status === "warn" ? "bg-amber-50 text-amber-700 dark:bg-amber-500/10 dark:text-amber-200" : "bg-rose-50 text-rose-700 dark:bg-rose-500/10 dark:text-rose-200"}`}>
-                      {item.status === "ok" ? "正常" : item.status === "warn" ? "提醒" : "阻塞"}
+          {!isContainer && (
+            <aside className="app-card self-start overflow-hidden rounded-2xl">
+              <div className="border-b border-slate-100 px-4 py-4 dark:border-slate-700">
+                <div className="flex items-center justify-between gap-3">
+                  <h2 className="text-[15px] font-semibold text-slate-900 dark:text-slate-100">模块版本总览</h2>
+                  {moduleUpdateCount > 0 ? (
+                    <span className="rounded-full bg-amber-50 px-2 py-0.5 text-[10px] font-medium text-amber-700 dark:bg-amber-500/10 dark:text-amber-200">
+                      {moduleUpdateCount} 个有更新
                     </span>
-                  </div>
-                  <div className="mt-1 break-all text-[11px] leading-5 text-slate-400 dark:text-slate-400">{item.detail}</div>
+                  ) : moduleVersions.length ? (
+                    <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-medium text-slate-500 dark:bg-slate-800 dark:text-slate-300">
+                      全部最新
+                    </span>
+                  ) : null}
                 </div>
-              ))}
-            </div>
+                <p className="mt-1 text-[11px] text-slate-400 dark:text-slate-400">10 个中心 · 当前版本 / GitHub 最新版本</p>
+              </div>
+
+              <div className="grid grid-cols-[106px_minmax(0,1fr)_minmax(0,1fr)_58px] gap-2 border-b border-slate-100 bg-slate-50/70 px-4 py-2 text-[10px] font-medium text-slate-400 dark:border-slate-700 dark:bg-slate-800/50">
+                <span>模块</span><span>当前</span><span>GitHub</span><span className="text-right">状态</span>
+              </div>
+
+              {moduleVersions.length ? (
+                <div className="divide-y divide-slate-100 dark:divide-slate-700">
+                  {moduleVersions.map((module, index) => {
+                    const hasUpdate = module.status === "update";
+                    const tracked = module.status !== "untracked";
+                    const severityClass = !hasUpdate
+                      ? "bg-slate-100 text-slate-500 dark:bg-slate-800 dark:text-slate-300"
+                      : updateLevel === "major"
+                        ? "bg-rose-50 font-semibold text-rose-700 dark:bg-rose-500/10 dark:text-rose-200"
+                        : updateLevel === "feature"
+                          ? "bg-amber-50 font-semibold text-amber-700 dark:bg-amber-500/10 dark:text-amber-200"
+                          : "bg-blue-50 text-blue-700 dark:bg-blue-500/10 dark:text-blue-200";
+                    return (
+                      <div key={module.key} className="grid grid-cols-[106px_minmax(0,1fr)_minmax(0,1fr)_58px] items-center gap-2 px-4 py-3">
+                        <div className="truncate text-[11px] font-semibold text-slate-800 dark:text-slate-100">{index + 1}. {module.label}</div>
+                        <div className="truncate font-mono text-[10px] text-slate-500 dark:text-slate-300" title={module.currentVersion}>{module.currentVersion || "—"}</div>
+                        <div className={`truncate font-mono text-[10px] ${hasUpdate ? "font-semibold text-slate-800 dark:text-slate-100" : "text-slate-500 dark:text-slate-300"}`} title={module.latestVersion}>
+                          {module.latestVersion || module.currentVersion || "—"}
+                        </div>
+                        <div className="text-right">
+                          <span className={`inline-flex rounded-full px-1.5 py-0.5 text-[9px] font-medium ${severityClass}`}>
+                            {hasUpdate ? (updateLevel === "major" ? "重大" : updateLevel === "feature" ? "功能" : "更新") : tracked ? "最新" : "待建"}
+                          </span>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              ) : (
+                <div className="px-4 py-8 text-center text-[11px] text-slate-400 dark:text-slate-400">正在生成模块版本信息…</div>
+              )}
+
+              <div className="border-t border-slate-100 bg-slate-50/60 px-4 py-3 text-[10px] leading-5 text-slate-400 dark:border-slate-700 dark:bg-slate-800/40">
+                模块版本表示该中心最近一次代码变更所属的平台版本，不是独立安装包。
+              </div>
+            </aside>
           )}
-        </section>
-      )}
-
-
-        </>
+        </div>
       )}
 
       {activeTab === "strategy" && (
@@ -920,11 +845,162 @@ export default function SystemUpdatePage() {
           </section>
         </section>
       )}
+      {updateDialogOpen && !isContainer && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-slate-950/45 p-5 backdrop-blur-sm">
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-label="系统更新"
+            className="flex max-h-[calc(100vh-40px)] w-full max-w-5xl flex-col overflow-hidden rounded-[24px] border border-white/50 bg-white shadow-2xl dark:border-slate-700 dark:bg-slate-900"
+          >
+            <div className="flex items-start justify-between gap-4 border-b border-slate-100 px-7 py-5 dark:border-slate-700">
+              <div>
+                <div className="flex items-center gap-2">
+                  <span className={`flex h-9 w-9 items-center justify-center rounded-xl ${
+                    updateDialogResult === "failed" || updateDialogResult === "rolled_back"
+                      ? "bg-rose-50 text-rose-600 dark:bg-rose-500/10 dark:text-rose-300"
+                      : updateDialogResult === "success"
+                        ? "bg-emerald-50 text-emerald-600 dark:bg-emerald-500/10 dark:text-emerald-300"
+                        : "bg-blue-50 text-blue-600 dark:bg-blue-500/10 dark:text-blue-300"
+                  }`}>
+                    {updateDialogResult === "success" ? "✓" : updateDialogResult === "failed" || updateDialogResult === "rolled_back" ? "!" : "↻"}
+                  </span>
+                  <div>
+                    <h2 className="text-[19px] font-semibold tracking-tight text-slate-900 dark:text-slate-100">
+                      {updateDialogResult === "confirm"
+                        ? "准备安装系统更新"
+                        : updateDialogResult === "success"
+                          ? "更新完成"
+                          : updateDialogResult === "failed"
+                            ? "更新失败"
+                            : updateDialogResult === "rolled_back"
+                              ? "更新未完成，已回滚"
+                              : "正在更新系统"}
+                    </h2>
+                    <p className="mt-1 text-[11px] text-slate-400 dark:text-slate-400">
+                      {updateDialogResult === "confirm"
+                        ? "开始后系统会依次备份、安装、迁移并验证新版本。"
+                        : status.message || "系统正在执行安全更新流程。"}
+                    </p>
+                  </div>
+                </div>
+              </div>
+              {updateDialogResult !== "running" && (
+                <button
+                  type="button"
+                  onClick={closeUpdateDialog}
+                  className="flex h-8 w-8 items-center justify-center rounded-lg text-slate-400 hover:bg-slate-100 hover:text-slate-700 dark:hover:bg-slate-800 dark:hover:text-slate-100"
+                  aria-label="关闭"
+                >
+                  ×
+                </button>
+              )}
+            </div>
+
+            <div className="overflow-auto px-7 py-6">
+              <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_36px_minmax(0,1fr)]">
+                <div className="rounded-xl border border-slate-200 px-4 py-3 dark:border-slate-700">
+                  <div className="text-[10px] text-slate-400">当前版本</div>
+                  <div className="mt-1 font-mono text-[17px] font-semibold text-slate-800 dark:text-slate-100">{status.currentCommit?.version || shortSha(currentSha)}</div>
+                </div>
+                <div className="hidden items-center justify-center text-lg text-slate-300 sm:flex">→</div>
+                <div className="rounded-xl border border-blue-200 bg-blue-50/50 px-4 py-3 dark:border-blue-500/30 dark:bg-blue-500/5">
+                  <div className="text-[10px] text-blue-500 dark:text-blue-300">目标版本</div>
+                  <div className="mt-1 font-mono text-[17px] font-semibold text-slate-800 dark:text-slate-100">{status.latestCommit?.version || shortSha(targetSha)}</div>
+                </div>
+              </div>
+
+              {updateDialogResult === "confirm" ? (
+                <div className="mt-6">
+                  <div className="rounded-2xl border border-slate-100 bg-slate-50/70 p-5 dark:border-slate-700 dark:bg-slate-800/50">
+                    <div className="text-[13px] font-semibold text-slate-800 dark:text-slate-100">更新前确认</div>
+                    <div className="mt-3 grid gap-3 text-[11px] text-slate-500 sm:grid-cols-3 dark:text-slate-300">
+                      <div><span className="block text-slate-400">变更级别</span><strong className="mt-1 block font-semibold text-slate-700 dark:text-slate-100">{levelMeta.label}</strong></div>
+                      <div><span className="block text-slate-400">变更文件</span><strong className="mt-1 block font-semibold text-slate-700 dark:text-slate-100">{status.changedFileCount || 0} 个</strong></div>
+                      <div><span className="block text-slate-400">影响模块</span><strong className="mt-1 block truncate font-semibold text-slate-700 dark:text-slate-100">{status.impactedModules?.join("、") || "公共代码"}</strong></div>
+                    </div>
+                    <p className="mt-4 text-[11px] leading-5 text-slate-400">
+                      系统会先备份数据库和业务文件，再更新代码、执行数据库迁移、重建前端并进行健康检查；失败时自动尝试回滚。
+                    </p>
+                  </div>
+
+                  {error && (
+                    <div className="mt-4 rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-[11px] text-rose-700 dark:border-rose-500/40 dark:bg-rose-500/10 dark:text-rose-200">{error}</div>
+                  )}
+
+                  <div className="mt-6 flex justify-end gap-3">
+                    <button type="button" onClick={closeUpdateDialog} className="app-button-secondary h-11 rounded-xl px-5 text-[12px] font-medium">取消</button>
+                    <button type="button" onClick={() => void startUpdate()} disabled={busy === "apply"} className="app-button-primary h-11 rounded-xl px-6 text-[12px] font-semibold disabled:opacity-50">
+                      {busy === "apply" ? "正在启动更新…" : "确认并开始更新"}
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <>
+                  <div className="mt-7 text-center">
+                    <div className={`font-mono text-[54px] font-semibold tracking-[-0.04em] ${
+                      updateDialogResult === "failed" || updateDialogResult === "rolled_back"
+                        ? "text-rose-600 dark:text-rose-300"
+                        : updateDialogResult === "success"
+                          ? "text-emerald-600 dark:text-emerald-300"
+                          : "text-slate-900 dark:text-slate-100"
+                    }`}>
+                      {updateDialogProgress}%
+                    </div>
+                    <div className="mx-auto mt-4 h-3 max-w-3xl overflow-hidden rounded-full bg-slate-100 dark:bg-slate-800">
+                      <div
+                        className={`h-full rounded-full transition-all duration-700 ${
+                          updateDialogResult === "failed" || updateDialogResult === "rolled_back"
+                            ? "bg-rose-500"
+                            : updateDialogResult === "success"
+                              ? "bg-emerald-500"
+                              : "bg-blue-600"
+                        }`}
+                        style={{ width: `${updateDialogProgress}%` }}
+                      />
+                    </div>
+                    <div className="mt-3 text-[13px] font-semibold text-slate-700 dark:text-slate-100">{stageMessage}</div>
+                    <div className="mt-1 text-[11px] text-slate-400">{status.message || "正在执行更新任务…"}</div>
+                  </div>
+
+                  <div className="mt-7 grid overflow-hidden rounded-2xl border border-slate-100 md:grid-cols-4 dark:border-slate-700">
+                    <UpdateStep index={1} title="环境检查" desc="环境、依赖、版本" status={stageStatus(0)} time={stageStatus(0) === "done" ? "已通过" : ""} />
+                    <UpdateStep index={2} title="自动备份" desc="数据库与业务文件" status={stageStatus(1)} time={status.backupDb ? "备份已生成" : ""} />
+                    <UpdateStep index={3} title="安装升级" desc="代码、依赖、数据库" status={stageStatus(2)} time={status.running && activeStep === 2 ? status.message : ""} />
+                    <UpdateStep index={4} title="验证 / 回滚" desc="健康检查与服务重启" status={stageStatus(3)} time={status.running && activeStep === 3 ? status.message : ""} last />
+                  </div>
+
+                  <div className="mt-5 flex flex-wrap items-center justify-between gap-3">
+                    <div className="text-[10px] text-slate-400">
+                      {status.running ? "更新任务已进入后台执行器；请勿手动重启 API / Worker / 数据库。" : updateDialogResult === "success" ? "验证通过，页面即将自动载入新版。" : "可查看日志定位本次更新结果。"}
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <button type="button" onClick={() => setShowModalLogs((value) => !value)} className="app-button-secondary h-9 rounded-lg px-3 text-[11px] font-medium">
+                        {showModalLogs ? "收起日志" : `查看日志${status.logs?.length ? ` · ${status.logs.length}` : ""}`}
+                      </button>
+                      {updateDialogResult !== "running" && updateDialogResult !== "success" && (
+                        <button type="button" onClick={closeUpdateDialog} className="app-button-primary h-9 rounded-lg px-4 text-[11px] font-medium">返回更新页面</button>
+                      )}
+                    </div>
+                  </div>
+
+                  {showModalLogs && (
+                    <pre className="mt-4 max-h-48 overflow-auto whitespace-pre-wrap break-all rounded-xl bg-slate-950 px-4 py-3 font-mono text-[10px] leading-5 text-slate-300">
+                      {(status.logs || []).slice(-60).join("\n") || "暂时还没有更新日志。"}
+                    </pre>
+                  )}
+                </>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
     </div>
   );
 }
 
-function VersionCard({
+function VersionRow({
   label,
   version,
   sha,
@@ -942,54 +1018,44 @@ function VersionCard({
   hasUpdate: boolean;
 }) {
   const latest = kind === "latest";
-
-  let cardTone = "border-slate-200 bg-white dark:border-slate-700 dark:bg-slate-900";
-  let labelTone = "text-slate-500 dark:text-slate-300";
-  let badgeTone = "bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-300";
+  let rowTone = "bg-white dark:bg-slate-900";
   let versionTone = "text-slate-900 dark:text-slate-100";
-  let badgeText = latest ? "与当前一致" : "当前运行中";
-  let versionWeight = "font-semibold";
+  let badgeTone = "bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-300";
+  let badgeText = latest ? "最新版本" : "当前运行中";
+  let weight = "font-semibold";
 
   if (latest && hasUpdate) {
     if (updateLevel === "major") {
-      cardTone = "border-rose-300 bg-rose-50/70 ring-1 ring-rose-200 dark:border-rose-500/60 dark:bg-rose-500/10 dark:ring-rose-500/20";
-      labelTone = "text-rose-700 dark:text-rose-200";
-      badgeTone = "bg-rose-100 font-semibold text-rose-700 dark:bg-rose-400/15 dark:text-rose-200";
+      rowTone = "bg-rose-50/70 dark:bg-rose-500/10";
       versionTone = "text-rose-800 dark:text-rose-100";
+      badgeTone = "bg-rose-100 font-semibold text-rose-700 dark:bg-rose-400/15 dark:text-rose-200";
       badgeText = "重大版本";
-      versionWeight = "font-bold";
+      weight = "font-bold";
     } else if (updateLevel === "feature") {
-      cardTone = "border-amber-300 bg-amber-50/70 dark:border-amber-500/60 dark:bg-amber-500/10";
-      labelTone = "text-amber-700 dark:text-amber-200";
-      badgeTone = "bg-amber-100 font-semibold text-amber-700 dark:bg-amber-400/15 dark:text-amber-200";
+      rowTone = "bg-amber-50/70 dark:bg-amber-500/10";
       versionTone = "text-amber-800 dark:text-amber-100";
+      badgeTone = "bg-amber-100 font-semibold text-amber-700 dark:bg-amber-400/15 dark:text-amber-200";
       badgeText = "功能版本";
-      versionWeight = "font-bold";
+      weight = "font-bold";
     } else {
-      cardTone = "border-blue-300 bg-blue-50/60 dark:border-blue-500/50 dark:bg-blue-500/10";
-      labelTone = "text-blue-700 dark:text-blue-200";
-      badgeTone = "bg-blue-100 text-blue-700 dark:bg-blue-400/15 dark:text-blue-200";
+      rowTone = "bg-blue-50/60 dark:bg-blue-500/10";
       versionTone = "text-blue-800 dark:text-blue-100";
+      badgeTone = "bg-blue-100 text-blue-700 dark:bg-blue-400/15 dark:text-blue-200";
       badgeText = "小版本";
-      versionWeight = "font-semibold";
     }
   }
 
   return (
-    <div className={`rounded-xl border p-4 transition-colors ${cardTone}`}>
-      <div className="flex items-center justify-between gap-2">
-        <div className={`text-[11px] font-medium ${labelTone}`}>{label}</div>
-        <span className={`rounded-full px-2 py-0.5 text-[11px] font-medium ${badgeTone}`}>
-          {badgeText}
-        </span>
+    <div className={`grid grid-cols-[86px_minmax(0,1fr)_auto] items-center gap-x-4 px-4 py-3.5 first:border-b first:border-slate-100 dark:first:border-slate-700 ${rowTone}`}>
+      <div className="text-[11px] font-medium text-slate-500 dark:text-slate-300">{label}</div>
+      <div className="min-w-0">
+        <div className={`font-mono text-[17px] tracking-tight ${weight} ${versionTone}`}>{version || shortSha(sha)}</div>
+        <div className="mt-0.5 flex min-w-0 items-center gap-2 text-[10px] text-slate-400">
+          <span className="shrink-0 font-mono">{shortSha(sha)}</span>
+          <span className="truncate" title={note}>{note}</span>
+        </div>
       </div>
-      <div className={`mt-2 font-mono text-[19px] tracking-tight ${versionWeight} ${versionTone}`}>
-        {version || shortSha(sha)}
-      </div>
-      <div className="mt-2 flex min-w-0 items-center gap-2 text-[11px] text-slate-500 dark:text-slate-300">
-        <span className="shrink-0 font-mono text-slate-400">{shortSha(sha)}</span>
-        <span className="truncate" title={note}>{note}</span>
-      </div>
+      <span className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${badgeTone}`}>{badgeText}</span>
     </div>
   );
 }
