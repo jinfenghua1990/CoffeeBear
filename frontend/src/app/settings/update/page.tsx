@@ -88,7 +88,7 @@ function updateState(status: SystemUpdateStatus) {
   if (status.updateAvailable) {
     return { label: "有新版本", tone: "bg-amber-50 text-amber-700 ring-amber-200" };
   }
-  return { label: "已是最新", tone: "bg-emerald-50 text-emerald-700 ring-emerald-200" };
+  return { label: "版本一致", tone: "bg-slate-100 text-slate-600 ring-slate-200 dark:bg-slate-800 dark:text-slate-300 dark:ring-slate-700" };
 }
 
 function blockerReason(
@@ -454,41 +454,49 @@ export default function SystemUpdatePage() {
                 <div className="text-[13px] font-semibold text-slate-800 dark:text-slate-100">更新概览</div>
                 <div className="mt-1 text-[11px] text-slate-400 dark:text-slate-400">版本信息与影响范围</div>
 
-                {status.updateAvailable ? (
-                  <div className="mt-4 grid items-stretch gap-3 sm:grid-cols-[minmax(0,1fr)_32px_minmax(0,1fr)]">
-                    <VersionCard
-                      label="当前版本"
-                      version={status.currentCommit?.version}
-                      sha={currentSha}
-                      note={status.currentCommit?.subject || "当前正在运行的版本"}
-                      tone="current"
-                    />
-                    <div className="hidden items-center justify-center text-2xl font-light text-blue-500 sm:flex">→</div>
-                    <VersionCard
-                      label="待更新版本"
-                      version={status.latestCommit?.version}
-                      sha={targetSha}
-                      note={latestSubject || "已检测到新版本"}
-                      tone="target"
-                    />
+                <div className="mt-4 grid items-stretch gap-3 sm:grid-cols-[minmax(0,1fr)_32px_minmax(0,1fr)]">
+                  <VersionCard
+                    label="当前版本"
+                    version={status.currentCommit?.version}
+                    sha={currentSha}
+                    note={status.currentCommit?.subject || "当前正在运行的版本"}
+                    kind="current"
+                    updateLevel={updateLevel}
+                    hasUpdate={Boolean(status.updateAvailable)}
+                  />
+                  <div className={`hidden items-center justify-center text-xl font-medium sm:flex ${
+                    status.updateAvailable ? "text-blue-500" : "text-slate-300 dark:text-slate-600"
+                  }`}>
+                    {status.updateAvailable ? "→" : "="}
                   </div>
-                ) : (
-                  <div className="mt-4 grid gap-3 sm:grid-cols-[minmax(280px,420px)_minmax(220px,1fr)]">
-                    <VersionCard
-                      label="当前版本"
-                      version={status.currentCommit?.version}
-                      sha={currentSha}
-                      note={status.currentCommit?.subject || "当前正在运行的版本"}
-                      tone="current"
-                    />
-                    <div className="flex min-h-[104px] items-center rounded-xl border border-emerald-100 bg-emerald-50/60 px-4 dark:border-emerald-500/25 dark:bg-emerald-500/5">
-                      <div>
-                        <div className="text-[12px] font-semibold text-emerald-700 dark:text-emerald-300">已是最新版本</div>
-                        <div className="mt-1 text-[11px] leading-5 text-slate-500 dark:text-slate-300">远端版本与当前运行版本一致，不重复显示第二张版本卡。</div>
-                      </div>
-                    </div>
-                  </div>
-                )}
+                  <VersionCard
+                    label="GitHub 最新版本"
+                    version={status.latestCommit?.version || status.currentCommit?.version}
+                    sha={targetSha || currentSha}
+                    note={latestSubject || status.currentCommit?.subject || "GitHub 最新版本"}
+                    kind="latest"
+                    updateLevel={updateLevel}
+                    hasUpdate={Boolean(status.updateAvailable)}
+                  />
+                </div>
+
+                <div className={`mt-3 rounded-lg px-3 py-2 text-[11px] leading-5 ${
+                  status.updateAvailable
+                    ? updateLevel === "major"
+                      ? "bg-rose-50 font-semibold text-rose-700 dark:bg-rose-500/10 dark:text-rose-200"
+                      : updateLevel === "feature"
+                        ? "bg-amber-50 font-medium text-amber-700 dark:bg-amber-500/10 dark:text-amber-200"
+                        : "bg-blue-50 text-blue-700 dark:bg-blue-500/10 dark:text-blue-200"
+                    : "bg-slate-50 text-slate-500 dark:bg-slate-800/60 dark:text-slate-300"
+                }`}>
+                  {status.updateAvailable
+                    ? updateLevel === "major"
+                      ? "检测到重大版本更新：建议查看影响模块和变更内容后再安装。"
+                      : updateLevel === "feature"
+                        ? "检测到功能版本更新：包含功能、模型或数据库层面的变化，请确认后安装。"
+                        : "检测到小版本更新：通常为 UI、文案或普通缺陷修复。"
+                    : "当前运行版本与 GitHub 最新版本一致，无需更新。"}
+                </div>
 
                 <div className="mt-4 flex flex-wrap items-center gap-2 border-t border-slate-100 pt-4 dark:border-slate-700/70">
                   <span className="mr-1 text-[11px] font-semibold text-slate-600 dark:text-slate-300">影响模块</span>
@@ -921,24 +929,61 @@ function VersionCard({
   version,
   sha,
   note,
-  tone,
+  kind,
+  updateLevel,
+  hasUpdate,
 }: {
   label: string;
   version?: string | null;
   sha?: string | null;
   note: string;
-  tone: "current" | "target";
+  kind: "current" | "latest";
+  updateLevel: SystemUpdateLevel;
+  hasUpdate: boolean;
 }) {
-  const target = tone === "target";
+  const latest = kind === "latest";
+
+  let cardTone = "border-slate-200 bg-white dark:border-slate-700 dark:bg-slate-900";
+  let labelTone = "text-slate-500 dark:text-slate-300";
+  let badgeTone = "bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-300";
+  let versionTone = "text-slate-900 dark:text-slate-100";
+  let badgeText = latest ? "与当前一致" : "当前运行中";
+  let versionWeight = "font-semibold";
+
+  if (latest && hasUpdate) {
+    if (updateLevel === "major") {
+      cardTone = "border-rose-300 bg-rose-50/70 ring-1 ring-rose-200 dark:border-rose-500/60 dark:bg-rose-500/10 dark:ring-rose-500/20";
+      labelTone = "text-rose-700 dark:text-rose-200";
+      badgeTone = "bg-rose-100 font-semibold text-rose-700 dark:bg-rose-400/15 dark:text-rose-200";
+      versionTone = "text-rose-800 dark:text-rose-100";
+      badgeText = "重大版本";
+      versionWeight = "font-bold";
+    } else if (updateLevel === "feature") {
+      cardTone = "border-amber-300 bg-amber-50/70 dark:border-amber-500/60 dark:bg-amber-500/10";
+      labelTone = "text-amber-700 dark:text-amber-200";
+      badgeTone = "bg-amber-100 font-semibold text-amber-700 dark:bg-amber-400/15 dark:text-amber-200";
+      versionTone = "text-amber-800 dark:text-amber-100";
+      badgeText = "功能版本";
+      versionWeight = "font-bold";
+    } else {
+      cardTone = "border-blue-300 bg-blue-50/60 dark:border-blue-500/50 dark:bg-blue-500/10";
+      labelTone = "text-blue-700 dark:text-blue-200";
+      badgeTone = "bg-blue-100 text-blue-700 dark:bg-blue-400/15 dark:text-blue-200";
+      versionTone = "text-blue-800 dark:text-blue-100";
+      badgeText = "小版本";
+      versionWeight = "font-semibold";
+    }
+  }
+
   return (
-    <div className={`rounded-xl border p-4 ${target ? "border-amber-300 bg-amber-50/70 dark:border-amber-500/60 dark:bg-amber-500/10" : "border-blue-300 bg-blue-50/60 dark:border-blue-500/50 dark:bg-blue-500/10"}`}>
+    <div className={`rounded-xl border p-4 transition-colors ${cardTone}`}>
       <div className="flex items-center justify-between gap-2">
-        <div className={`text-[11px] font-medium ${target ? "text-amber-700 dark:text-amber-200" : "text-blue-700 dark:text-blue-200"}`}>{label}</div>
-        <span className={`rounded-full px-2 py-0.5 text-[11px] font-medium ${target ? "bg-amber-100 text-amber-700 dark:bg-amber-400/15 dark:text-amber-200" : "bg-emerald-100 text-emerald-700 dark:bg-emerald-400/15 dark:text-emerald-300"}`}>
-          {target ? "有新版本" : "当前运行中"}
+        <div className={`text-[11px] font-medium ${labelTone}`}>{label}</div>
+        <span className={`rounded-full px-2 py-0.5 text-[11px] font-medium ${badgeTone}`}>
+          {badgeText}
         </span>
       </div>
-      <div className={`mt-2 font-mono text-[19px] font-semibold tracking-tight ${target ? "text-amber-800 dark:text-amber-100" : "text-slate-900 dark:text-slate-100"}`}>
+      <div className={`mt-2 font-mono text-[19px] tracking-tight ${versionWeight} ${versionTone}`}>
         {version || shortSha(sha)}
       </div>
       <div className="mt-2 flex min-w-0 items-center gap-2 text-[11px] text-slate-500 dark:text-slate-300">
