@@ -8,7 +8,7 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from app.models.alibaba1688_import import Alibaba1688FileImport, Alibaba1688Order
-from app.models.purchase import ExternalPurchaseOrder, Supplier
+from app.models.purchase import ExternalPurchaseOrder, JackyunPurchaseOrder, JackyunPurchaseOrderLink, Supplier
 
 
 _PLATFORM_PRIORITY = {
@@ -88,6 +88,7 @@ def sync_suppliers_from_business_data(db: Session) -> dict[str, Any]:
     sources = {
         "purchaseOrders": 0,
         "1688Orders": 0,
+        "jackyunPurchaseOrders": 0,
     }
 
     def add(name: Any, platform: Any, source: str) -> None:
@@ -103,6 +104,18 @@ def sync_suppliers_from_business_data(db: Session) -> dict[str, Any]:
         if (row.raw or {}).get("referenceOnly") is True:
             continue
         add(row.supplier_name, row.platform, "purchaseOrders")
+
+    # 独立吉客云采购单同样属于真实采购事实。已经挂到 External/1688 工作流的
+    # 吉客云采购单是同一笔采购的下游单据，不重复创建第二个供应商主档。
+    linked_jackyun_ids = {
+        int(link.jackyun_po_id)
+        for link in db.query(JackyunPurchaseOrderLink).all()
+    }
+    for row in db.query(JackyunPurchaseOrder).order_by(JackyunPurchaseOrder.id).all():
+        status = str(row.status or "").strip().lower()
+        if row.id in linked_jackyun_ids or any(token in status for token in ("cancel", "取消", "作废", "void")):
+            continue
+        add(row.supplier_name, "其他", "jackyunPurchaseOrders")
 
     # 1688 已删除批次不再自动生成新供应商；采购工作流主档仍保留的供应商不会被删除。
     for row in (

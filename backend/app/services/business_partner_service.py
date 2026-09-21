@@ -33,7 +33,7 @@ from app.models.jackyun import (
     JackyunPurchaseSettlement,
 )
 from app.models.jky_web import JkyWebSalesOrder, JkyWebStockinOrder
-from app.models.purchase import ExternalPurchaseOrder, JackyunPurchaseOrder, Supplier
+from app.models.purchase import ExternalPurchaseOrder, JackyunPurchaseOrder, JackyunPurchaseOrderLink, Supplier
 from app.models.tax import TaxInvoice, TaxInvoiceLink
 
 
@@ -964,9 +964,11 @@ def _source_rows(db: Session, source_type: str, ids: set[int]) -> dict[int, Any]
 def _purchase_rows(db: Session, links: list[BusinessPartnerLink]) -> list[dict[str, Any]]:
     external_ids = {row.source_id for row in links if row.source_type == "external_purchase_order"}
     alibaba_ids = {row.source_id for row in links if row.source_type == "alibaba1688_order"}
+    jackyun_ids = {row.source_id for row in links if row.source_type == "jackyun_purchase_order"}
     consumable_ids = {row.source_id for row in links if row.source_type == "consumable_purchase"}
     external = _source_rows(db, "external_purchase_order", external_ids)
     alibaba = _source_rows(db, "alibaba1688_order", alibaba_ids)
+    jackyun = _source_rows(db, "jackyun_purchase_order", jackyun_ids)
     consumable = _source_rows(db, "consumable_purchase", consumable_ids)
     rows: list[dict[str, Any]] = []
     external_1688_nos = {
@@ -1002,6 +1004,26 @@ def _purchase_rows(db: Session, links: list[BusinessPartnerLink]) -> list[dict[s
             "paidAmount": _number(row.actual_payment),
             "status": row.order_status or "",
         })
+    linked_jackyun_ids = {
+        int(link.jackyun_po_id)
+        for link in db.query(JackyunPurchaseOrderLink).all()
+    }
+    for row in jackyun.values():
+        status = str(row.status or "").strip().lower()
+        if row.id in linked_jackyun_ids or any(token in status for token in ("cancel", "取消", "作废", "void")):
+            continue
+        rows.append({
+            "sourceType": "jackyun_purchase_order",
+            "id": row.id,
+            "no": row.purch_no or row.jackyun_purch_id,
+            "platform": "吉客云",
+            "title": "",
+            "date": _iso(row.created_at),
+            "amount": _number(row.amount),
+            "paidAmount": None,
+            "status": row.status or "",
+        })
+
     for row in consumable.values():
         rows.append({
             "sourceType": "consumable_purchase",
@@ -1281,7 +1303,15 @@ def partner_detail(
     invoices = _invoice_rows(db, links)
     payments = _bank_rows(db, links)
     sales = _sales_rows(db, links)
-    purchase_amount = sum((_decimal(row["paidAmount"]) for row in purchases), Decimal("0"))
+    purchase_amount = sum(
+        (
+            _decimal(row["paidAmount"])
+            if row.get("paidAmount") is not None
+            else _decimal(row.get("amount"))
+            for row in purchases
+        ),
+        Decimal("0"),
+    )
     inbound_amount = sum((_decimal(row["amount"]) for row in inbounds), Decimal("0"))
     invoice_amount = sum((_decimal(row["amount"]) for row in invoices), Decimal("0"))
     bank_paid = sum((_decimal(row["amount"]) for row in payments if row["direction"] == "out"), Decimal("0"))

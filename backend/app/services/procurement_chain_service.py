@@ -3071,17 +3071,89 @@ def execution_overview(db: Session) -> dict:
     }
 
 
+def _standalone_jackyun_purchase_rows(db: Session) -> list[dict]:
+    """把没有挂到 External/1688 工作流的吉客云采购单补进供应商画像。"""
+    linked_ids = {
+        int(link.jackyun_po_id)
+        for link in db.query(JackyunPurchaseOrderLink).all()
+    }
+    rows: list[dict] = []
+    for po in db.query(JackyunPurchaseOrder).order_by(JackyunPurchaseOrder.id).all():
+        status = str(po.status or "").strip().lower()
+        if po.id in linked_ids or any(token in status for token in ("cancel", "取消", "作废", "void")):
+            continue
+
+        amount = parse_decimal(po.amount) or Decimal("0")
+        invoice_links = (
+            db.query(TaxInvoiceLink)
+            .filter(
+                TaxInvoiceLink.target_type == "jackyun_purchase_order",
+                TaxInvoiceLink.target_id == po.id,
+                TaxInvoiceLink.confirmed.is_(True),
+                TaxInvoiceLink.match_method != "rejected",
+            )
+            .all()
+        )
+        unknown_alloc = any(link.allocated_amount is None for link in invoice_links)
+        allocated = sum(
+            (
+                parse_decimal(link.allocated_amount) or Decimal("0")
+                for link in invoice_links
+                if link.allocated_amount is not None
+            ),
+            Decimal("0"),
+        )
+        outstanding = max(amount - allocated, Decimal("0"))
+        if unknown_alloc:
+            invoice_status = "needs_review"
+        elif amount <= Decimal("0"):
+            invoice_status = "none"
+        elif allocated <= Decimal("0"):
+            invoice_status = "pending"
+        elif outstanding <= ABS_EPS:
+            invoice_status = "done"
+        else:
+            invoice_status = "partial"
+
+        rows.append({
+            "orderId": -(1_000_000_000 + int(po.id)),
+            "fileOrderId": None,
+            "externalPoId": None,
+            "source": "jackyun_history",
+            "platform": "吉客云",
+            "orderNo": po.purch_no or po.jackyun_purch_id,
+            "supplier": po.supplier_name or "",
+            "buyer": "",
+            "amount": float(amount),
+            "paidAmount": None,
+            "goodsTotal": None,
+            "freight": None,
+            "discount": None,
+            "orderDate": po.created_at.isoformat() if po.created_at else None,
+            "orderStatus": po.status or "",
+            "purchaseStatus": po.status or "historical",
+            "title": "",
+            "invoiceStatus": invoice_status,
+            "invoicedAmount": float(max(amount - outstanding, Decimal("0"))),
+            "invoiceOutstanding": float(amount if unknown_alloc else outstanding),
+            "invoiceNeedsReview": bool(unknown_alloc),
+            "invoiceReviewReasons": ["发票关联未填写分摊金额"] if unknown_alloc else [],
+            "hasException": bool(unknown_alloc),
+            "exceptionInfo": [],
+            "logistics": {},
+        })
+    return rows
+
+
 def supplier_summaries(db: Session, limit: int = 200, offset: int = 0) -> dict:
-    """供应商聚合列表：管理视角。"""
+    """供应商聚合列表：统一统计采购工作台订单 + 独立吉客云采购单。"""
     pairs, pf = chain_snapshot(db)
     rows = [_order_row(db, order, external, pf=pf) for order, external in pairs]
+    jackyun_rows = _standalone_jackyun_purchase_rows(db)
     by_supplier: dict[str, dict] = {}
     sku_counter: dict[str, dict[str, dict]] = {}
 
-    for row in rows:
-        supplier = normalize_supplier_name(row.get("supplier"))
-        if not supplier:
-            continue
+    def ensure_supplier_bucket(supplier: str) -> dict:
         if supplier not in by_supplier:
             by_supplier[supplier] = {
                 "supplierName": supplier,
@@ -3092,15 +3164,19 @@ def supplier_summaries(db: Session, limit: int = 200, offset: int = 0) -> dict:
                 "lastOrderDate": None,
             }
             sku_counter[supplier] = {}
+        return by_supplier[supplier]
 
-        info = by_supplier[supplier]
+    for row in rows:
+        supplier = normalize_supplier_name(row.get("supplier"))
+        if not supplier:
+            continue
+        info = ensure_supplier_bucket(supplier)
         info["orderCount"] += 1
-        amount = row.get("amount") or 0
+        amount = float(row.get("amount") or 0)
         info["totalPurchase"] += amount
 
         stages = stage_done_map(row)
         if not stages.get("invoice") and amount:
-            # 简单口径：只要没有收到发票，整单金额计入待开票
             info["uninvoiced"] += amount
         if not stages.get("inbound") and amount:
             info["uninbound"] += amount
@@ -3115,6 +3191,19 @@ def supplier_summaries(db: Session, limit: int = 200, offset: int = 0) -> dict:
             if sku_code not in sku_counter[supplier]:
                 sku_counter[supplier][sku_code] = {"skuCode": sku_code, "goodsName": name, "count": 0}
             sku_counter[supplier][sku_code]["count"] += 1
+
+    for row in jackyun_rows:
+        supplier = normalize_supplier_name(row.get("supplier"))
+        if not supplier:
+            continue
+        info = ensure_supplier_bucket(supplier)
+        info["orderCount"] += 1
+        amount = float(row.get("amount") or 0)
+        info["totalPurchase"] += amount
+        info["uninvoiced"] += float(row.get("invoiceOutstanding") or 0)
+        date = row.get("orderDate")
+        if date and (info["lastOrderDate"] is None or date > info["lastOrderDate"]):
+            info["lastOrderDate"] = date
 
     items = []
     for supplier in sorted(by_supplier.keys()):
@@ -3132,31 +3221,38 @@ def supplier_summaries(db: Session, limit: int = 200, offset: int = 0) -> dict:
 
 
 def supplier_detail(db: Session, supplier_name: str) -> dict | None:
-    """单个供应商详情：历史合作 + 最近订单 + 常购 SKU。"""
+    """单个供应商详情：采购工作台 + 独立吉客云历史采购统一展示。"""
     supplier_key = normalize_supplier_name(supplier_name)
     if not supplier_key:
         return None
     pairs, pf = chain_snapshot(db)
-    # 先按供应商关键字筛订单对，再对命中订单做完整行聚合：结果与全量聚合后再筛完全一致，
-    # 但省掉了为无关订单解析明细的成本。
     rows = [
         _order_row(db, order, external, pf=pf)
         for order, external in pairs
         if _pair_supplier_key(db, pf, order, external) == supplier_key
     ]
     matched = [r for r in rows if normalize_supplier_name(r.get("supplier")) == supplier_key]
+    matched.extend(
+        row
+        for row in _standalone_jackyun_purchase_rows(db)
+        if normalize_supplier_name(row.get("supplier")) == supplier_key
+    )
     if not matched:
         return None
 
     matched.sort(key=lambda r: r.get("orderDate") or "", reverse=True)
     total = sum((r.get("amount") or 0) for r in matched)
     uninvoiced = sum(
-        (r.get("amount") or 0) for r in matched
-        if not stage_done_map(r).get("invoice")
+        (
+            float(r.get("invoiceOutstanding") or 0)
+            if r.get("source") == "jackyun_history"
+            else ((r.get("amount") or 0) if not stage_done_map(r).get("invoice") else 0)
+        )
+        for r in matched
     )
     uninbound = sum(
         (r.get("amount") or 0) for r in matched
-        if not stage_done_map(r).get("inbound")
+        if r.get("source") != "jackyun_history" and not stage_done_map(r).get("inbound")
     )
 
     sku_counter: dict[str, dict] = {}

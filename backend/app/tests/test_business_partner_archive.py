@@ -4,7 +4,7 @@ from uuid import uuid4
 
 from app.models.bank import BankTransaction
 from app.models.business_partner import BusinessPartnerLink
-from app.models.purchase import ExternalPurchaseOrder, Supplier
+from app.models.purchase import ExternalPurchaseOrder, JackyunPurchaseOrder, JackyunPurchaseOrderLink, Supplier
 from app.models.tax import TaxInvoice, TaxInvoiceLink
 from app.services import business_partner_service as service
 
@@ -430,3 +430,65 @@ def test_update_partner_can_change_primary_account_and_former_names(db_session):
     assert detail["formerNames"] == ["旧名称B"]
     assert [row["accountNo"] for row in detail["bankAccounts"]] == ["10001", "10002"]
     assert [row["isPrimary"] for row in detail["bankAccounts"]] == [False, True]
+
+
+
+def test_partner_archive_counts_standalone_jackyun_purchase_as_real_purchase(db_session):
+    jpo = JackyunPurchaseOrder(
+        jackyun_purch_id="JKY-PARTNER-HEJIN-001",
+        purch_no="CG-HEJIN-001",
+        supplier_name="合锦（广州）供应链有限公司",
+        amount=Decimal("3080.00"),
+        status="completed",
+    )
+    db_session.add(jpo)
+    db_session.flush()
+
+    service.sync_business_partners(db_session)
+    items = service.list_partners(db_session, keyword="合锦")["items"]
+
+    assert len(items) == 1
+    detail = service.partner_detail(db_session, items[0]["id"])
+    assert detail is not None
+    assert detail["summary"]["purchaseOrderCount"] == 1
+    assert detail["summary"]["purchaseAmount"] == 3080.0
+    assert len(detail["purchases"]) == 1
+    assert detail["purchases"][0]["sourceType"] == "jackyun_purchase_order"
+    assert detail["purchases"][0]["no"] == "CG-HEJIN-001"
+
+
+def test_partner_archive_does_not_double_count_linked_jackyun_purchase(db_session):
+    external = ExternalPurchaseOrder(
+        external_order_id="BP-EXT-JKY-001",
+        platform="other",
+        supplier_name="采购去重供应商",
+        order_amount=Decimal("600.00"),
+        paid_amount=Decimal("600.00"),
+    )
+    jpo = JackyunPurchaseOrder(
+        jackyun_purch_id="BP-JKY-LINKED-001",
+        purch_no="BP-CG-LINKED-001",
+        supplier_name="采购去重供应商",
+        amount=Decimal("600.00"),
+        status="completed",
+    )
+    db_session.add_all([external, jpo])
+    db_session.flush()
+    db_session.add(
+        JackyunPurchaseOrderLink(
+            po_id=external.id,
+            jackyun_po_id=jpo.id,
+            relation_kind="",
+            alloc_amount=Decimal("600.00"),
+            note="",
+        )
+    )
+    db_session.flush()
+
+    service.sync_business_partners(db_session)
+    item = service.list_partners(db_session, keyword="采购去重供应商")["items"][0]
+    detail = service.partner_detail(db_session, item["id"])
+
+    assert detail is not None
+    assert detail["summary"]["purchaseOrderCount"] == 1
+    assert detail["summary"]["purchaseAmount"] == 600.0
