@@ -17,6 +17,7 @@ import urllib.request
 from urllib.parse import urlsplit
 import uuid
 from datetime import datetime
+from fnmatch import fnmatch
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -442,16 +443,217 @@ def _changed_files(current_sha: str, latest_sha: str) -> list[str]:
     return [line.strip() for line in result.stdout.splitlines() if line.strip()]
 
 
-_MODULE_RULES: list[tuple[str, tuple[str, ...]]] = [
-    ("财务中心", ("frontend/src/app/finance/", "backend/app/services/finance", "backend/app/models/finance", "backend/app/api/v1/finance")),
-    ("采购 / 供应链", ("frontend/src/app/purchase/", "frontend/src/app/supply-chain/", "frontend/src/app/procurement/", "frontend/src/app/suppliers/", "backend/app/services/purchase", "backend/app/services/procurement", "backend/app/services/supply", "backend/app/api/v1/purchase", "backend/app/api/v1/supply")),
-    ("库存", ("frontend/src/app/inventory/", "backend/app/services/inventory", "backend/app/models/inventory", "backend/app/api/v1/inventory")),
-    ("销售", ("frontend/src/app/sales/", "backend/app/services/sales", "backend/app/api/v1/sales")),
-    ("快递物流", ("frontend/src/app/logistics/", "backend/app/services/logistics", "backend/app/api/v1/logistics")),
-    ("外贸", ("frontend/src/app/foreign-trade/", "backend/app/services/foreign", "backend/app/models/foreign", "backend/app/api/v1/foreign")),
-    ("系统设置 / 更新", ("frontend/src/app/settings/", "frontend/src/app/automation/", "frontend/src/components/top-bar", "frontend/src/lib/navigation", "backend/app/services/system_update", "backend/app/api/v1/system", "scripts/system_update")),
-    ("数据接入", ("frontend/src/app/data-center-import/", "backend/app/adapters/", "backend/app/services/jky", "backend/app/services/alibaba", "backend/app/api/v1/integrations")),
+_MODULE_VERSION_RULES: list[tuple[str, str, tuple[str, ...]]] = [
+    ("home", "经营中心", (
+        "frontend/src/app/page.tsx",
+        "backend/app/api/v1/dashboard.py",
+        "backend/app/services/dashboard.py",
+    )),
+    ("sales", "销售中心", (
+        "frontend/src/app/sales/**",
+        "backend/app/api/v1/sales*.py",
+        "backend/app/services/sales*.py",
+        "backend/app/models/sales.py",
+    )),
+    ("products", "基础货品", (
+        "frontend/src/app/products/**",
+        "backend/app/models/catalog.py",
+        "backend/app/services/master_data_import_service.py",
+        "backend/app/services/tax_category_rule_service.py",
+    )),
+    ("inventory", "库存中心", (
+        "frontend/src/app/inventory/**",
+        "frontend/src/app/supply-chain/warehouses/**",
+        "backend/app/api/v1/warehouses.py",
+        "backend/app/services/inventory*.py",
+        "backend/app/services/warehouse*.py",
+        "backend/app/models/consumable.py",
+    )),
+    ("supply", "供应链中心", (
+        "frontend/src/app/supply-chain/**",
+        "frontend/src/app/purchase/**",
+        "frontend/src/app/procurement*/**",
+        "frontend/src/app/suppliers/**",
+        "frontend/src/app/data-center-import/**",
+        "backend/app/api/v1/purchase*.py",
+        "backend/app/api/v1/procurement*.py",
+        "backend/app/api/v1/supply_chain*.py",
+        "backend/app/api/v1/suppliers.py",
+        "backend/app/api/v1/alibaba1688*.py",
+        "backend/app/api/v1/jky*.py",
+        "backend/app/services/purchase*.py",
+        "backend/app/services/procurement*.py",
+        "backend/app/services/production*.py",
+        "backend/app/services/supplier*.py",
+        "backend/app/services/alibaba1688*.py",
+        "backend/app/services/jky*.py",
+        "backend/app/models/purchase.py",
+        "backend/app/models/procurement_chain.py",
+        "backend/app/models/production.py",
+    )),
+    ("finance", "财务中心", (
+        "frontend/src/app/finance/**",
+        "frontend/src/app/payments/**",
+        "frontend/src/app/profit/**",
+        "frontend/src/app/tax-invoices/**",
+        "backend/app/api/v1/finance.py",
+        "backend/app/api/v1/closing.py",
+        "backend/app/api/v1/opening.py",
+        "backend/app/api/v1/profit.py",
+        "backend/app/api/v1/reconciliation.py",
+        "backend/app/api/v1/tax*.py",
+        "backend/app/services/bank*.py",
+        "backend/app/services/finance*.py",
+        "backend/app/services/closing.py",
+        "backend/app/services/opening.py",
+        "backend/app/services/profit.py",
+        "backend/app/services/reconciliation.py",
+        "backend/app/services/invoice*.py",
+        "backend/app/services/payment*.py",
+        "backend/app/services/tax*.py",
+        "backend/app/models/bank.py",
+        "backend/app/models/finance.py",
+        "backend/app/models/payment.py",
+        "backend/app/models/profit.py",
+        "backend/app/models/tax.py",
+    )),
+    ("logistics", "快递物流", (
+        "frontend/src/app/logistics/**",
+        "backend/app/api/v1/logistics.py",
+        "backend/app/services/logistics*.py",
+        "backend/app/models/logistics.py",
+    )),
+    ("foreign", "外贸中心", (
+        "frontend/src/app/foreign-trade/**",
+        "backend/app/api/v1/foreign_trade.py",
+        "backend/app/services/foreign_trade*.py",
+        "backend/app/models/foreign_trade.py",
+    )),
+    ("data", "异常中心", (
+        "frontend/src/app/exceptions/**",
+        "backend/app/api/v1/exceptions.py",
+    )),
+    ("system", "系统设置", (
+        "frontend/src/app/settings/**",
+        "frontend/src/app/automation/**",
+        "backend/app/api/v1/system.py",
+        "backend/app/api/v1/automation.py",
+        "backend/app/services/system_update_service.py",
+        "backend/app/services/backup_status_service.py",
+        "backend/app/services/r2_backup_service.py",
+        "backend/app/services/kodo_backup_service.py",
+        "scripts/**",
+        "deploy/**",
+    )),
 ]
+
+_MODULE_RULES: list[tuple[str, tuple[str, ...]]] = [
+    (label, patterns) for _key, label, patterns in _MODULE_VERSION_RULES
+]
+
+_PUBLIC_PLATFORM_PATTERNS: tuple[str, ...] = (
+    "frontend/src/lib/**",
+    "frontend/src/components/**",
+    "backend/app/db/**",
+    "backend/app/config.py",
+    "backend/app/main.py",
+    "backend/app/core/**",
+    "backend/app/models/base.py",
+    "backend/app/models/org.py",
+    "backend/alembic/**",
+    ".github/**",
+)
+
+
+def _path_matches_any(path: str, patterns: tuple[str, ...]) -> bool:
+    return any(fnmatch(path, pattern) for pattern in patterns)
+
+
+def _modules_for_paths(paths: list[str]) -> list[str]:
+    modules: list[str] = []
+    for _key, label, patterns in _MODULE_VERSION_RULES:
+        if any(_path_matches_any(path, patterns) for path in paths):
+            modules.append(label)
+    if any(_path_matches_any(path, _PUBLIC_PLATFORM_PATTERNS) for path in paths):
+        modules.append("平台公共底层")
+    if not modules and paths:
+        modules.append("其他 / 公共代码")
+    return modules
+
+
+def _commit_changed_files(sha: str) -> list[str]:
+    if not _SHA_RE.fullmatch(sha):
+        return []
+    try:
+        output = _git(
+            "show",
+            "--pretty=format:",
+            "--name-only",
+            "--no-renames",
+            sha,
+            timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError, RuntimeError):
+        return []
+    return [line.strip() for line in output.splitlines() if line.strip()]
+
+
+def _module_commit_at(sha: str, patterns: tuple[str, ...]) -> dict[str, Any] | None:
+    if not _SHA_RE.fullmatch(sha):
+        return None
+    pathspecs = [f":(glob){pattern}" for pattern in patterns]
+    try:
+        output = _git(
+            "log",
+            "-1",
+            "--format=%H%x1f%s%x1f%cI",
+            sha,
+            "--",
+            *pathspecs,
+            timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError, RuntimeError):
+        return None
+    if not output or "\x1f" not in output:
+        return None
+    commit_sha, subject, committed_at = output.split("\x1f", 2)
+    return {
+        "sha": commit_sha,
+        "shortSha": commit_sha[:10],
+        "subject": subject,
+        "committedAt": committed_at,
+        "version": _version_from_time(committed_at),
+    }
+
+
+def _module_versions(current_sha: str, latest_sha: str) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    same_system_version = current_sha == latest_sha
+    for key, label, patterns in _MODULE_VERSION_RULES:
+        current = _module_commit_at(current_sha, patterns)
+        latest = current if same_system_version else _module_commit_at(latest_sha, patterns)
+        current_module_sha = str((current or {}).get("sha") or "")
+        latest_module_sha = str((latest or {}).get("sha") or "")
+        if not current and not latest:
+            state = "untracked"
+        elif current_module_sha == latest_module_sha:
+            state = "latest"
+        else:
+            state = "update"
+        rows.append({
+            "key": key,
+            "label": label,
+            "status": state,
+            "currentVersion": str((current or {}).get("version") or ""),
+            "currentSha": current_module_sha,
+            "currentSubject": str((current or {}).get("subject") or ""),
+            "currentCommittedAt": str((current or {}).get("committedAt") or ""),
+            "latestVersion": str((latest or {}).get("version") or ""),
+            "latestSha": latest_module_sha,
+            "latestSubject": str((latest or {}).get("subject") or ""),
+            "latestCommittedAt": str((latest or {}).get("committedAt") or ""),
+        })
+    return rows
 
 
 def _classify_update(changes: list[dict[str, Any]], changed_files: list[str]) -> dict[str, Any]:
@@ -499,27 +701,7 @@ def _classify_update(changes: list[dict[str, Any]], changed_files: list[str]) ->
     else:
         reasons.append("未检测到数据库、部署或重大结构变更")
 
-    impacted_modules: list[str] = []
-    for label, prefixes in _MODULE_RULES:
-        if any(path.startswith(prefixes) for path in changed_files):
-            impacted_modules.append(label)
-
-    core_prefixes = (
-        "frontend/src/lib/",
-        "frontend/src/components/",
-        "backend/app/db",
-        "backend/app/config.py",
-        "backend/app/main.py",
-        "backend/app/core/",
-        "backend/app/models/",
-        "backend/alembic/",
-        ".github/",
-        "scripts/",
-    )
-    if any(path.startswith(core_prefixes) for path in changed_files) and "平台公共底层" not in impacted_modules:
-        impacted_modules.append("平台公共底层")
-    if not impacted_modules and changed_files:
-        impacted_modules.append("其他 / 公共代码")
+    impacted_modules = _modules_for_paths(changed_files)
 
     return {
         "updateLevel": level,
@@ -626,7 +808,13 @@ def check_for_updates(*, actor: str = "system", automatic: bool = False) -> dict
             diverged = current_sha != latest_sha and ancestor.returncode == 1
             available = current_sha != latest_sha and not diverged
             change_rows = _changes(current_sha, latest_sha) if available else []
+            for row in change_rows:
+                row["modules"] = _modules_for_paths(_commit_changed_files(str(row.get("sha") or "")))
             changed_files = _changed_files(current_sha, latest_sha) if available else []
+            module_versions = _module_versions(
+                current_sha,
+                latest_sha if not diverged else current_sha,
+            )
             classification = _classify_update(change_rows, changed_files) if available else {
                 "updateLevel": "patch",
                 "updateLevelLabel": "小版本",
@@ -655,6 +843,7 @@ def check_for_updates(*, actor: str = "system", automatic: bool = False) -> dict
                 "latestCommit": _commit_info(latest_sha),
                 "currentCommit": _commit_info(current_sha),
                 "changes": change_rows,
+                "moduleVersions": module_versions,
                 **classification,
                 "autoInstallEligible": auto_install_eligible,
                 "autoInstallBlockedReason": "" if auto_install_eligible else (

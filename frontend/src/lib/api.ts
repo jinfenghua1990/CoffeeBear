@@ -209,6 +209,21 @@ export type SystemUpdateCommit = {
   subject: string;
   committedAt: string;
   version?: string;
+  modules?: string[];
+};
+
+export type SystemUpdateModuleVersion = {
+  key: string;
+  label: string;
+  status: "latest" | "update" | "untracked";
+  currentVersion: string;
+  currentSha: string;
+  currentSubject: string;
+  currentCommittedAt: string;
+  latestVersion: string;
+  latestSha: string;
+  latestSubject: string;
+  latestCommittedAt: string;
 };
 
 export type SystemUpdateHistory = {
@@ -291,6 +306,7 @@ export type SystemUpdateStatus = {
   updateLevel?: SystemUpdateLevel;
   updateLevelLabel?: string;
   impactedModules?: string[];
+  moduleVersions?: SystemUpdateModuleVersion[];
   changedFiles?: string[];
   changedFileCount?: number;
   hasMigration?: boolean;
