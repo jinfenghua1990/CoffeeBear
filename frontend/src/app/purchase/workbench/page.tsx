@@ -4179,7 +4179,7 @@ function ChainPanel({ overview, orders, total, pending, filter, loading, busy, p
               ? "bg-violet-600 text-white"
               : "border border-violet-200 bg-violet-50 text-violet-600 hover:bg-violet-100"
           )}
-          title="维护 1688 ↔ 入库单 手动交叉对照表：粘贴/编辑后点「解析预览」查看将创建/缺失明细，确认无误后点「应用」批量建链（同时落盘到 backend/data/1688_rk_xref.tsv）"
+          title="维护 1688 ↔ 入库单 手动交叉对照表：粘贴/编辑后点「解析预览」查看将创建/缺失明细，确认无误后点「应用」批量建链（同时落盘到外部 DATA_DIR）"
         >
           {xrefOpen ? "收起对照表" : "📋 对照表"}
         </button>
