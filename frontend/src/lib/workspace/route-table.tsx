@@ -268,6 +268,12 @@ const ROUTES: RouteEntry[] = [
     load: () => import("@/app/finance/tax-accounting/page"),
   },
   {
+    pathname: "/finance/opening",
+    title: "期初数据",
+    businessType: "master",
+    load: () => import("@/app/finance/opening/page"),
+  },
+  {
     pathname: "/logistics/workbench",
     title: "物流工作台",
     businessType: "master",

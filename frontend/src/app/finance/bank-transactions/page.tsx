@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { authenticatedFetch, type ReconTxn } from "@/lib/api";
-import { BankSummaryPanel } from "@/app/finance/bank-summary/page";
+import { BankSummaryPanel } from "@/app/finance/bank-transactions/bank-summary-panel";
 import { useTabRuntime, useTabScopedState, useTabTitle, useWorkspace } from "@/lib/workspace/tab-store";
 
 type DirectionFilter = "all" | "in" | "out";
