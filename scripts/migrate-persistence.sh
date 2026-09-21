@@ -129,7 +129,7 @@ sync_dir() {
     log "$label 已位于目标目录，跳过复制：$target"
     return
   fi
-  log "复制 $label：$source -> $target"
+  log "复制 ${label}：${source} -> ${target}"
   rsync -a "$source/" "$target/"
   local verify
   verify="$(rsync -a --checksum --dry-run "$source/" "$target/")"
