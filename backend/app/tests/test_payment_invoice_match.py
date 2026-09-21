@@ -13,6 +13,7 @@ from sqlalchemy import select
 
 from app.models.bank import BankTransaction
 from app.models.org import AuditLog
+from app.models.purchase import Supplier
 from app.models.tax import TaxInvoice, TaxInvoiceLink
 from app.services import payment_invoice_match_service as pm
 
@@ -28,12 +29,14 @@ def _txn(
     name="供货商甲",
     summary="货款",
     voucher="",
+    counterparty_account="",
 ) -> BankTransaction:
     row = BankTransaction(
         txn_date=date(year, month, day),
         direction=direction,
         amount=Decimal(amount),
         counterparty_name=name,
+        counterparty_account=counterparty_account,
         summary=summary,
         voucher_no=voucher,
         fingerprint=f"pytest-pim|{uuid4().hex}",
@@ -507,6 +510,189 @@ def test_auto_split_allows_exact_multi_invoice_total(db_session):
     status = pm.txn_reconciliation_statuses(db_session, [txn.id])[txn.id]
     assert status["status"] == "matched"
 
+
+
+def _add_supplier_bank_account(db_session, *, name: str, account: str) -> Supplier:
+    token = uuid4().hex[:10]
+    supplier = Supplier(
+        platform="other",
+        external_shop_id=f"PIM-SUP-{token}",
+        name=name,
+        bank_account_no=account,
+        bank_account_name=name,
+    )
+    db_session.add(supplier)
+    db_session.flush()
+    return supplier
+
+
+def test_auto_match_prefers_unique_nearest_invoice_with_supplier_account(db_session):
+    """真实故障回归：同供应商同金额多票时，账号证据后必须选日期唯一最近的票。"""
+    supplier = "合锦供应链"
+    account = "6222-8800-3080"
+    _add_supplier_bank_account(db_session, name=supplier, account=account)
+    old_invoice = _invoice(
+        db_session, seller=supplier, amount="3080.00", year=2026, month=4, day=21,
+    )
+    new_invoice = _invoice(
+        db_session, seller=supplier, amount="3080.00", year=2026, month=7, day=24,
+    )
+    txn = _txn(
+        db_session,
+        year=2026, month=7, day=22,
+        amount="3080.00", name=supplier,
+        voucher="9981871",
+        counterparty_account="622288003080",
+    )
+    db_session.commit()
+
+    result = pm.auto_match(db_session, 2026, 7)
+
+    assert result["matched"] == 1
+    assert result["ambiguous"] == 0
+    active = db_session.query(TaxInvoiceLink).filter(
+        TaxInvoiceLink.target_type == "bank_transaction",
+        TaxInvoiceLink.target_id == txn.id,
+        TaxInvoiceLink.confirmed.is_(True),
+        TaxInvoiceLink.match_method != "rejected",
+    ).all()
+    assert len(active) == 1
+    assert active[0].invoice_id == new_invoice.id
+    assert active[0].match_method == "supplier_account_date"
+    assert active[0].allocated_amount == Decimal("3080.0000")
+    assert not any(row.invoice_id == old_invoice.id for row in active)
+    assert result["details"][0]["dateDistanceDays"] == 2
+    assert result["details"][0]["candidateCount"] == 2
+    assert result["details"][0]["accountMatched"] is True
+
+
+def test_auto_match_repairs_wrong_historical_auto_link_to_unique_nearest_invoice(db_session):
+    """已被旧规则错占的整笔 auto 关联允许纠偏；旧关系软拒绝保留审计。"""
+    supplier = "合锦供应链"
+    account = "622288003080"
+    _add_supplier_bank_account(db_session, name=supplier, account=account)
+    old_invoice = _invoice(
+        db_session, seller=supplier, amount="3080.00", year=2026, month=4, day=21,
+    )
+    new_invoice = _invoice(
+        db_session, seller=supplier, amount="3080.00", year=2026, month=7, day=24,
+    )
+    txn = _txn(
+        db_session,
+        year=2026, month=7, day=22,
+        amount="3080.00", name=supplier,
+        voucher="9981871",
+        counterparty_account=account,
+    )
+    wrong = TaxInvoiceLink(
+        invoice_id=old_invoice.id,
+        target_type="bank_transaction",
+        target_id=txn.id,
+        allocated_amount=Decimal("3080.00"),
+        match_method="auto",
+        confidence=Decimal("1"),
+        confirmed=True,
+        note="旧规则同名同金额自动匹配",
+    )
+    db_session.add(wrong)
+    db_session.commit()
+
+    result = pm.auto_match(db_session, 2026, 7)
+
+    assert result["repaired"] == 1
+    assert result["matched"] == 0
+    db_session.refresh(wrong)
+    assert wrong.match_method == "rejected"
+    assert wrong.confirmed is False
+    assert "系统纠偏" in wrong.note
+
+    active = db_session.query(TaxInvoiceLink).filter(
+        TaxInvoiceLink.target_type == "bank_transaction",
+        TaxInvoiceLink.target_id == txn.id,
+        TaxInvoiceLink.confirmed.is_(True),
+        TaxInvoiceLink.match_method != "rejected",
+    ).all()
+    assert len(active) == 1
+    assert active[0].invoice_id == new_invoice.id
+    assert active[0].match_method == "auto_reassigned"
+    assert result["repairDetails"][0]["fromInvoiceId"] == old_invoice.id
+    assert result["repairDetails"][0]["toInvoiceId"] == new_invoice.id
+    assert result["repairDetails"][0]["dateDistanceDays"] == 2
+
+
+def test_auto_match_does_not_guess_when_best_candidates_tie(db_session):
+    """同额候选日期距离并列时必须留给人工，不能按数据库顺序抢占。"""
+    supplier = "并列候选供应商"
+    account = "90003080"
+    _add_supplier_bank_account(db_session, name=supplier, account=account)
+    inv_before = _invoice(
+        db_session, seller=supplier, amount="3080.00", year=2026, month=7, day=21,
+    )
+    inv_after = _invoice(
+        db_session, seller=supplier, amount="3080.00", year=2026, month=7, day=23,
+    )
+    txn = _txn(
+        db_session,
+        year=2026, month=7, day=22,
+        amount="3080.00", name=supplier,
+        counterparty_account=account,
+    )
+    db_session.commit()
+
+    result = pm.auto_match(db_session, 2026, 7)
+
+    assert result["matched"] == 0
+    assert result["ambiguous"] >= 1
+    assert db_session.query(TaxInvoiceLink).filter(
+        TaxInvoiceLink.invoice_id.in_([inv_before.id, inv_after.id]),
+        TaxInvoiceLink.target_type == "bank_transaction",
+        TaxInvoiceLink.target_id == txn.id,
+        TaxInvoiceLink.confirmed.is_(True),
+    ).count() == 0
+
+
+def test_auto_match_never_reassigns_manual_link_even_if_another_invoice_is_closer(db_session):
+    """人工确认优先级高于系统日期评分，任何时候都不得被自动纠偏覆盖。"""
+    supplier = "人工保护供应商"
+    account = "MANUAL3080"
+    _add_supplier_bank_account(db_session, name=supplier, account=account)
+    old_invoice = _invoice(
+        db_session, seller=supplier, amount="3080.00", year=2026, month=4, day=21,
+    )
+    new_invoice = _invoice(
+        db_session, seller=supplier, amount="3080.00", year=2026, month=7, day=24,
+    )
+    txn = _txn(
+        db_session,
+        year=2026, month=7, day=22,
+        amount="3080.00", name=supplier,
+        counterparty_account=account,
+    )
+    manual = TaxInvoiceLink(
+        invoice_id=old_invoice.id,
+        target_type="bank_transaction",
+        target_id=txn.id,
+        allocated_amount=Decimal("3080.00"),
+        match_method="manual",
+        confidence=Decimal("1"),
+        confirmed=True,
+        note="财务人工确认",
+    )
+    db_session.add(manual)
+    db_session.commit()
+
+    result = pm.auto_match(db_session, 2026, 7)
+
+    assert result["repaired"] == 0
+    db_session.refresh(manual)
+    assert manual.match_method == "manual"
+    assert manual.confirmed is True
+    assert db_session.query(TaxInvoiceLink).filter(
+        TaxInvoiceLink.invoice_id == new_invoice.id,
+        TaxInvoiceLink.target_type == "bank_transaction",
+        TaxInvoiceLink.target_id == txn.id,
+        TaxInvoiceLink.confirmed.is_(True),
+    ).count() == 0
 
 def test_partial_red_after_full_bank_payment_is_overpaid_not_matched(db_session):
     blue = _invoice(db_session, seller="红冲后超付供应商", amount="1000.00", month=8, day=2)

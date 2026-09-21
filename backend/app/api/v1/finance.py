@@ -443,7 +443,7 @@ def payment_invoice_match_auto(
     request: Request = None,
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
-    """按同名同金额规则自动匹配当月银行付款 ↔ 进项发票，直接落库。"""
+    """按账号/供应商、金额与唯一最近日期规则自动匹配；歧义候选不落库，并纠正明显旧版自动错配。"""
     from app.services.payment_invoice_match_service import auto_match
     result = auto_match(db, year=year, month=month, actor=current_actor(request))
     return result

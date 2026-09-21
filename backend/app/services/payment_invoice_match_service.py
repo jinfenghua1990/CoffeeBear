@@ -1,9 +1,9 @@
 """付款↔发票匹配标记清单（财务月度资料）。
 
 - 银行付款（bank_transactions.direction="out"）↔ 对方开来的进项发票（tax_invoices.direction="input"）
-- 关联复用 tax_invoice_links（target_type="bank_transaction"），手工标记才落库；
-  同名同金额只做"建议"展示（纯推导），不自动写库——遵循税务清单 _auto_link
-  "只按明确依据关联"的先例。
+- 关联复用 tax_invoice_links（target_type="bank_transaction"）；
+  自动匹配必须经过“供应商/账号 + 金额 + 唯一最佳日期”判定，歧义候选不落库；
+  人工确认与人工拒绝始终高于自动规则。
 - 银行付款核对状态只从 target_type="bank_transaction" 的 TaxInvoiceLink 推导；
   绝不读写 TaxInvoice.match_status / match_note，避免污染采购/销售业务匹配状态。
 """
@@ -19,6 +19,7 @@ from sqlalchemy.orm import Session
 
 from app.core.audit import audit
 from app.models.bank import BankAccount, BankTransaction
+from app.models.purchase import Supplier
 from app.models.tax import TaxInvoice, TaxInvoiceLink
 from app.services import tax_invoice_service
 from app.services.monthly_core import month_bounds
@@ -29,6 +30,9 @@ TOLERANCE = Decimal("0.01")
 MONEY_QUANT = Decimal("0.01")
 # 匹配窗口：发票日期 ±3 个月内的流水都视为同一笔交易
 MATCH_WINDOW_MONTHS = 3
+AUTO_REPAIR_NEAR_DAYS = 7
+AUTO_REPAIR_STALE_DAYS = 30
+AUTO_REASSIGNABLE_METHODS = {"auto", "supplier_account", "auto_date", "supplier_account_date", "auto_reassigned"}
 
 
 def _normalize_name(name: str | None) -> str:
@@ -39,6 +43,203 @@ def _normalize_name(name: str | None) -> str:
     text = text.replace("（", "(").replace("）", ")")
     text = re.sub(r"\s+", "", text)
     return text
+
+
+def _normalize_account(value: str | None) -> str:
+    """银行账号只去格式字符，不做模糊匹配。"""
+    return re.sub(r"[\s-]+", "", str(value or "").strip()).upper()
+
+
+def _invoice_issue_date(invoice: TaxInvoice) -> date | None:
+    value = invoice.issue_date
+    if value is None:
+        return None
+    return value.date() if hasattr(value, "date") else value
+
+
+def _supplier_accounts_by_name(db: Session) -> dict[str, set[str]]:
+    result: dict[str, set[str]] = {}
+    for supplier in db.query(Supplier).all():
+        name = _normalize_name(supplier.name)
+        account = _normalize_account(supplier.bank_account_no)
+        if name and account:
+            result.setdefault(name, set()).add(account)
+    return result
+
+
+def _candidate_evidence(
+    txn: BankTransaction,
+    invoice: TaxInvoice,
+    supplier_accounts: dict[str, set[str]],
+) -> dict[str, Any]:
+    invoice_name = _normalize_name(invoice.seller_name)
+    txn_name = _normalize_name(txn.counterparty_name)
+    txn_account = _normalize_account(getattr(txn, "counterparty_account", ""))
+    account_match = bool(
+        txn_account
+        and invoice_name
+        and txn_account in supplier_accounts.get(invoice_name, set())
+    )
+    name_match = bool(invoice_name and txn_name and invoice_name == txn_name)
+    issue_date = _invoice_issue_date(invoice)
+    distance = abs((issue_date - txn.txn_date).days) if issue_date and txn.txn_date else 10**9
+    return {
+        "nameMatch": name_match,
+        "accountMatch": account_match,
+        "dateDistanceDays": distance,
+        # 账号强证据优先；其后才比较日期距离。
+        "score": (0 if account_match else 1, distance),
+    }
+
+
+def _choose_unique_best_candidate(
+    txn: BankTransaction,
+    candidates: list[TaxInvoice],
+    supplier_accounts: dict[str, set[str]],
+) -> tuple[TaxInvoice | None, dict[str, Any]]:
+    scored: list[tuple[tuple[int, int], TaxInvoice, dict[str, Any]]] = []
+    for invoice in candidates:
+        evidence = _candidate_evidence(txn, invoice, supplier_accounts)
+        if not (evidence["nameMatch"] or evidence["accountMatch"]):
+            continue
+        scored.append((evidence["score"], invoice, evidence))
+    if not scored:
+        return None, {"candidateCount": 0, "ambiguous": False}
+    scored.sort(key=lambda item: (item[0], item[1].id))
+    best_score = scored[0][0]
+    tied = [item for item in scored if item[0] == best_score]
+    if len(tied) != 1:
+        return None, {
+            "candidateCount": len(scored),
+            "ambiguous": True,
+            "bestScore": list(best_score),
+            "candidateInvoiceIds": [item[1].id for item in tied],
+        }
+    _, invoice, evidence = tied[0]
+    return invoice, {
+        **evidence,
+        "candidateCount": len(scored),
+        "ambiguous": False,
+        "candidateInvoiceIds": [item[1].id for item in scored],
+    }
+
+
+def _repair_wrong_auto_links(
+    db: Session,
+    *,
+    txns: list[BankTransaction],
+    invoices: list[TaxInvoice],
+    supplier_accounts: dict[str, set[str]],
+) -> list[dict[str, Any]]:
+    """只纠正“整笔一对一”的系统自动关联；人工/拆分关系绝不自动搬家。"""
+    if not txns or not invoices:
+        return []
+    txn_map = {txn.id: txn for txn in txns}
+    txn_ids = list(txn_map)
+    rows = (
+        db.query(TaxInvoiceLink)
+        .filter(
+            TaxInvoiceLink.target_type == TARGET_TYPE,
+            TaxInvoiceLink.target_id.in_(txn_ids),
+        )
+        .all()
+    )
+    by_txn: dict[int, list[TaxInvoiceLink]] = {}
+    occupied_pairs = {(row.invoice_id, row.target_id) for row in rows}
+    for row in rows:
+        by_txn.setdefault(row.target_id, []).append(row)
+
+    repairs: list[dict[str, Any]] = []
+    for txn in txns:
+        txn_rows = by_txn.get(txn.id, [])
+        active = [row for row in txn_rows if row.confirmed and row.match_method != "rejected"]
+        # 一旦有人工作为依据，或存在拆分/多关联，不自动改。
+        if any(row.match_method not in AUTO_REASSIGNABLE_METHODS for row in active):
+            continue
+        if len(active) != 1:
+            continue
+        current_link = active[0]
+        if current_link.match_method not in AUTO_REASSIGNABLE_METHODS:
+            continue
+        current_invoice = db.get(TaxInvoice, current_link.invoice_id)
+        if current_invoice is None:
+            continue
+        link_amount = _link_amount(current_link, current_invoice)
+        txn_total = _dec(txn.amount)
+        if abs(link_amount - txn_total) > TOLERANCE:
+            continue
+
+        candidates: list[TaxInvoice] = []
+        for invoice in invoices:
+            pair = (invoice.id, txn.id)
+            if pair in occupied_pairs and invoice.id != current_invoice.id:
+                # 包含人工拒绝：任何历史 pair 都不能被自动复活/覆盖。
+                continue
+            evidence = _candidate_evidence(txn, invoice, supplier_accounts)
+            if not (evidence["nameMatch"] or evidence["accountMatch"]):
+                continue
+            used = _invoice_bank_allocated(
+                db,
+                invoice.id,
+                exclude_link_id=current_link.id if invoice.id == current_invoice.id else None,
+            )
+            remaining = _invoice_target_amount(db, invoice) - used
+            if abs(remaining - txn_total) <= TOLERANCE:
+                candidates.append(invoice)
+
+        best, best_evidence = _choose_unique_best_candidate(txn, candidates, supplier_accounts)
+        if best is None or best.id == current_invoice.id:
+            continue
+        current_evidence = _candidate_evidence(txn, current_invoice, supplier_accounts)
+        if tuple(best_evidence.get("score") or (99, 10**9)) >= tuple(current_evidence["score"]):
+            continue
+        # 历史账自动搬家只处理“明显错配”：账号必须一致，新票很近，旧票明显跨期过远。
+        if not best_evidence.get("accountMatch"):
+            continue
+        if int(best_evidence.get("dateDistanceDays") or 10**9) > AUTO_REPAIR_NEAR_DAYS:
+            continue
+        if int(current_evidence.get("dateDistanceDays") or 0) < AUTO_REPAIR_STALE_DAYS:
+            continue
+
+        old_note = current_link.note or ""
+        current_link.match_method = "rejected"
+        current_link.confirmed = False
+        current_link.confidence = None
+        current_link.note = (
+            "系统纠偏：原自动关联不是唯一最佳候选；"
+            f"由发票#{current_invoice.id}调整至#{best.id}。原备注：{old_note}"
+        )
+        method = "supplier_account_date" if best_evidence.get("accountMatch") else "auto_date"
+        replacement = TaxInvoiceLink(
+            invoice_id=best.id,
+            target_type=TARGET_TYPE,
+            target_id=txn.id,
+            allocated_amount=txn_total,
+            match_method="auto_reassigned",
+            confidence=Decimal("0.99") if best_evidence.get("accountMatch") else Decimal("0.95"),
+            confirmed=True,
+            note=(
+                f"系统纠偏自动匹配：method={method}；"
+                f"候选{best_evidence.get('candidateCount', 0)}张；"
+                f"日期差{best_evidence.get('dateDistanceDays')}天"
+            ),
+        )
+        db.add(replacement)
+        db.flush()
+        occupied_pairs.add((best.id, txn.id))
+        repairs.append({
+            "txnId": txn.id,
+            "txnDate": txn.txn_date.isoformat(),
+            "amount": str(txn_total),
+            "fromInvoiceId": current_invoice.id,
+            "fromInvoiceNumber": current_invoice.invoice_number,
+            "toInvoiceId": best.id,
+            "toInvoiceNumber": best.invoice_number,
+            "accountMatched": bool(best_evidence.get("accountMatch")),
+            "dateDistanceDays": best_evidence.get("dateDistanceDays"),
+            "candidateCount": best_evidence.get("candidateCount"),
+        })
+    return repairs
 
 
 def _month_range(year: int, month: int) -> tuple[date, date]:
@@ -318,18 +519,40 @@ def overview(db: Session, year: int, month: int) -> dict[str, Any]:
         invoice_pool.append(row)
         pool_by_id[invoice.id] = row
 
-    # 建议：对方户名 == 销方名 且 发票价税合计 == 付款剩余金额（同名同金额，够明确）
+    # 建议与自动匹配共用“账号优先 + 日期最近 + 唯一最佳”口径。
+    supplier_accounts = _supplier_accounts_by_name(db)
+    txn_by_id = {txn.id: txn for txn in txns}
+    pool_invoice_map = {invoice.id: invoice for invoice in pool_rows}
     for payment in payments:
         remaining = to_decimal(payment["remaining"]) or Decimal("0.0000")
         if remaining <= TOLERANCE:
             continue
-        for row in invoice_pool:
-            if row["suggested"]:
-                continue
-            if row["remaining"] == payment["remaining"] and row["sellerName"] and _normalize_name(row["sellerName"]) == _normalize_name(payment["counterpartyName"]):
-                row["suggested"] = True
-                row["suggestedPaymentIds"].append(payment["id"])
-                payment["suggestedInvoiceIds"].append(row["id"])
+        txn = txn_by_id.get(payment["id"])
+        if txn is None:
+            continue
+        candidate_invoices = [
+            pool_invoice_map[row["id"]]
+            for row in invoice_pool
+            if row["id"] in pool_invoice_map
+            and abs(_dec(row["remaining"]) - _dec(remaining)) <= TOLERANCE
+        ]
+        invoice, evidence = _choose_unique_best_candidate(txn, candidate_invoices, supplier_accounts)
+        if invoice is None:
+            if evidence.get("ambiguous"):
+                payment["suggestionBlockedReason"] = "存在并列的最佳候选，需人工确认"
+                payment["suggestedCandidateInvoiceIds"] = evidence.get("candidateInvoiceIds", [])
+            continue
+        row = pool_by_id.get(invoice.id)
+        if row is None:
+            continue
+        row["suggested"] = True
+        row["suggestedPaymentIds"].append(payment["id"])
+        row["suggestionEvidence"] = {
+            "accountMatched": bool(evidence.get("accountMatch")),
+            "dateDistanceDays": evidence.get("dateDistanceDays"),
+            "candidateCount": evidence.get("candidateCount"),
+        }
+        payment["suggestedInvoiceIds"].append(row["id"])
 
     invoice_total = sum((_dec(row["totalAmount"]) for row in invoice_pool), Decimal("0.0000"))
     invoice_matched_total = sum(
@@ -631,9 +854,9 @@ def _split_match_txn_to_invoices(
 def auto_match(db: Session, year: int, month: int, actor: str = "system") -> dict[str, Any]:
     """自动匹配当月银行付款 ↔ 进项发票。
 
-    规则（与 overview 建议规则一致）：对方户名 == 销方名 AND 剩余金额相等。
-    满足则只写 bank_transaction 关联（match_method=auto, confirmed=True）；
-    不改变发票台账的采购/销售 match_status。已有 manual 链路不会被覆盖。
+    规则：先收集“同供应商/供应商账号 + 剩余金额相等”的全部候选，
+    供应商银行账号为强证据，其次按付款日与开票日绝对距离排序；
+    只有唯一最佳候选才自动落库。已有 manual/rejected/拆分链路不会被自动改写。
     """
     start, end = _month_range(year, month)
     invoice_window_start, invoice_window_end = _invoice_candidate_window(year, month)
@@ -647,6 +870,7 @@ def auto_match(db: Session, year: int, month: int, actor: str = "system") -> dic
             BankTransaction.txn_date <= end,
             BankTransaction.direction == "out",
         )
+        .order_by(BankTransaction.txn_date, BankTransaction.id)
         .all()
     )
     if not txns:
@@ -665,6 +889,14 @@ def auto_match(db: Session, year: int, month: int, actor: str = "system") -> dic
     invoices = [invoice for invoice in invoices if tax_invoice_service.is_bank_payment_reconciliation_eligible(invoice, db=db)]
     if not invoices:
         return {"year": year, "month": month, "matched": 0, "skipped": 0, "details": []}
+
+    supplier_accounts = _supplier_accounts_by_name(db)
+    repair_details = _repair_wrong_auto_links(
+        db,
+        txns=txns,
+        invoices=invoices,
+        supplier_accounts=supplier_accounts,
+    )
 
     # 所有历史 pair 都要读取：rejected 不参与金额，但必须阻止自动复活。
     # 只有人工 link() 才允许用户明确把 rejected pair 重新启用。
@@ -700,6 +932,7 @@ def auto_match(db: Session, year: int, month: int, actor: str = "system") -> dic
     skipped = 0
     details: list[dict] = []
 
+    ambiguous_details: list[dict[str, Any]] = []
     for txn in txns:
         txn_total = _dec(txn.amount)
         txn_remaining = txn_total - allocated_by_txn.get(txn.id, Decimal("0"))
@@ -707,49 +940,72 @@ def auto_match(db: Session, year: int, month: int, actor: str = "system") -> dic
             skipped += 1
             existing_txn_ids.add(txn.id)
             continue
+
+        candidates: list[TaxInvoice] = []
         for invoice in invoices:
             if (invoice.id, txn.id) in existing_invoice_txn:
                 continue
             invoice_total = _invoice_target_amount(db, invoice)
             invoice_remaining = invoice_total - allocated_by_invoice.get(invoice.id, Decimal("0"))
-            if invoice_remaining <= TOLERANCE:
+            if invoice_remaining <= TOLERANCE or abs(invoice_remaining - txn_remaining) > TOLERANCE:
                 continue
-            # 规则：销方名 == 对方户名 + “双方剩余金额”相等。
-            # 用剩余金额而不是原始票面/付款金额，才能正确补齐历史部分匹配。
-            if (
-                invoice.seller_name
-                and txn.counterparty_name
-                and _normalize_name(invoice.seller_name) == _normalize_name(txn.counterparty_name)
-                and abs(invoice_remaining - txn_remaining) <= TOLERANCE
-            ):
-                portion = min(invoice_remaining, txn_remaining)
-                link_row = TaxInvoiceLink(
-                    invoice_id=invoice.id,
-                    target_type=TARGET_TYPE,
-                    target_id=txn.id,
-                    allocated_amount=portion,
-                    match_method="auto",
-                    confidence=Decimal("1"),
-                    confirmed=True,
-                    note="系统按同名同剩余金额自动匹配",
-                )
-                db.add(link_row)
-                db.flush()
-                allocated_by_txn[txn.id] = allocated_by_txn.get(txn.id, Decimal("0")) + portion
-                allocated_by_invoice[invoice.id] = allocated_by_invoice.get(invoice.id, Decimal("0")) + portion
-                matched += 1
-                if txn_total - allocated_by_txn[txn.id] <= TOLERANCE:
-                    existing_txn_ids.add(txn.id)
-                existing_invoice_txn.add((invoice.id, txn.id))
-                details.append({
-                    "invoiceId": invoice.id,
-                    "invoiceNumber": invoice.invoice_number,
-                    "sellerName": invoice.seller_name,
+            evidence = _candidate_evidence(txn, invoice, supplier_accounts)
+            if evidence["nameMatch"] or evidence["accountMatch"]:
+                candidates.append(invoice)
+
+        invoice, evidence = _choose_unique_best_candidate(txn, candidates, supplier_accounts)
+        if invoice is None:
+            if evidence.get("ambiguous"):
+                skipped += 1
+                ambiguous_details.append({
                     "txnId": txn.id,
                     "txnDate": txn.txn_date.isoformat(),
-                    "amount": str(portion),
+                    "amount": str(txn_remaining),
+                    "candidateCount": evidence.get("candidateCount", 0),
+                    "candidateInvoiceIds": evidence.get("candidateInvoiceIds", []),
+                    "reason": "同证据等级且日期距离相同，未自动匹配",
                 })
-                break  # 一笔付款的当前剩余额只配一张同额发票
+            continue
+
+        invoice_total = _invoice_target_amount(db, invoice)
+        invoice_remaining = invoice_total - allocated_by_invoice.get(invoice.id, Decimal("0"))
+        portion = min(invoice_remaining, txn_remaining)
+        account_match = bool(evidence.get("accountMatch"))
+        method = "supplier_account_date" if account_match else "auto_date"
+        link_row = TaxInvoiceLink(
+            invoice_id=invoice.id,
+            target_type=TARGET_TYPE,
+            target_id=txn.id,
+            allocated_amount=portion,
+            match_method=method,
+            confidence=Decimal("0.99") if account_match else Decimal("0.95"),
+            confirmed=True,
+            note=(
+                f"系统唯一最佳候选自动匹配：候选{evidence.get('candidateCount', 0)}张；"
+                f"账号证据={'是' if account_match else '否'}；"
+                f"付款/开票日期差{evidence.get('dateDistanceDays')}天"
+            ),
+        )
+        db.add(link_row)
+        db.flush()
+        allocated_by_txn[txn.id] = allocated_by_txn.get(txn.id, Decimal("0")) + portion
+        allocated_by_invoice[invoice.id] = allocated_by_invoice.get(invoice.id, Decimal("0")) + portion
+        matched += 1
+        if txn_total - allocated_by_txn[txn.id] <= TOLERANCE:
+            existing_txn_ids.add(txn.id)
+        existing_invoice_txn.add((invoice.id, txn.id))
+        details.append({
+            "invoiceId": invoice.id,
+            "invoiceNumber": invoice.invoice_number,
+            "sellerName": invoice.seller_name,
+            "txnId": txn.id,
+            "txnDate": txn.txn_date.isoformat(),
+            "amount": str(portion),
+            "matchMethod": method,
+            "accountMatched": account_match,
+            "dateDistanceDays": evidence.get("dateDistanceDays"),
+            "candidateCount": evidence.get("candidateCount"),
+        })
 
     # 第二轮：拆分匹配 — 把未配的发票按"同名 + 多笔流水合计 == 发票金额"找出来
     split_matched = 0
@@ -792,8 +1048,20 @@ def auto_match(db: Session, year: int, month: int, actor: str = "system") -> dic
                     break
                 needed_txns.append(t)
                 running += txn_remaining
-            # 自动拆分必须“组合金额精确对上”；只因为同名且金额够大，不能自动切一部分。
-            if abs(running - inv_remaining) <= TOLERANCE and needed_txns:
+            # 自动拆分必须真的是“多笔流水 → 一张票”，不能绕过一对一候选唯一规则。
+            same_amount_invoice_count = sum(
+                1
+                for other in inv_list
+                if abs(
+                    (_invoice_target_amount(db, other) - allocated_by_invoice.get(other.id, Decimal("0")))
+                    - inv_remaining
+                ) <= TOLERANCE
+            )
+            if (
+                abs(running - inv_remaining) <= TOLERANCE
+                and len(needed_txns) >= 2
+                and same_amount_invoice_count == 1
+            ):
                 cnt, allocated = _split_match_invoice_to_txns(
                     db, inv, needed_txns, actor,
                     allocated_by_invoice=allocated_by_invoice,
@@ -819,25 +1087,28 @@ def auto_match(db: Session, year: int, month: int, actor: str = "system") -> dic
         norm = _normalize_name(txn.counterparty_name)
         if norm not in inv_groups:
             continue
-        candidates = sorted(
-            [
-                inv for inv in inv_groups[norm]
-                if _invoice_target_amount(db, inv) - allocated_by_invoice.get(inv.id, Decimal("0")) > TOLERANCE
-            ],
-            key=lambda inv: (inv.issue_date or date.min, inv.id),
+        candidates = [
+            inv for inv in inv_groups[norm]
+            if _invoice_target_amount(db, inv) - allocated_by_invoice.get(inv.id, Decimal("0")) > TOLERANCE
+        ]
+        candidates.sort(
+            key=lambda inv: (
+                abs(((_invoice_issue_date(inv) or txn.txn_date) - txn.txn_date).days),
+                inv.id,
+            )
         )
         txn_remaining = _dec(txn.amount) - allocated_by_txn.get(txn.id, Decimal("0"))
-        selected: list[TaxInvoice] = []
-        selected_total = Decimal("0.0000")
-        for inv in candidates:
-            if selected_total >= txn_remaining - TOLERANCE:
-                break
-            selected.append(inv)
-            selected_total += _invoice_target_amount(db, inv) - allocated_by_invoice.get(inv.id, Decimal("0"))
-        # 同名多票只有合计金额精确等于当前流水剩余金额时才允许自动拆分。
-        if len(selected) >= 2 and abs(selected_total - txn_remaining) <= TOLERANCE:
+        selected_total = sum(
+            (
+                _invoice_target_amount(db, inv) - allocated_by_invoice.get(inv.id, Decimal("0"))
+                for inv in candidates
+            ),
+            Decimal("0.0000"),
+        )
+        # 大流水拆多票只在“全部剩余候选就是唯一整组”时自动处理，不猜子集。
+        if len(candidates) >= 2 and abs(selected_total - txn_remaining) <= TOLERANCE:
             cnt, allocated = _split_match_txn_to_invoices(
-                db, txn, selected, actor,
+                db, txn, candidates, actor,
                 allocated_by_invoice=allocated_by_invoice,
                 allocated_by_txn=allocated_by_txn,
             )
@@ -846,83 +1117,91 @@ def auto_match(db: Session, year: int, month: int, actor: str = "system") -> dic
                 split_details.append({
                     "txnId": txn.id,
                     "txnAmount": str(_dec(txn.amount)),
-                    "invoiceIds": [c.id for c in selected[:cnt]],
+                    "invoiceIds": [candidate.id for candidate in candidates[:cnt]],
                 })
 
-    # 第四轮：通过 Supplier 银行账户强匹配
-    from app.models.purchase import Supplier as SupplierModel
+    # 第四轮：账号强证据兜底（例如银行户名与供应商档案名不完全一致）。
+    # 仍要求“唯一最佳候选”，避免账号相同/同额票时再次发生抢占。
     supplier_matched = 0
     supplier_details: list[dict] = []
-    all_suppliers = db.query(SupplierModel).all()
-    # 流水对方账号 → Supplier
-    supplier_by_account: dict[str, list] = {}
-    for s in all_suppliers:
-        if s.bank_account_no:
-            supplier_by_account.setdefault(s.bank_account_no, []).append(s)
-    # 重新扫描未配流水
     still_unmatched_after_split = [t for t in leftover_txns if t.id not in existing_txn_ids]
     for txn in still_unmatched_after_split:
-        account = (getattr(txn, 'counterparty_account', '') or '').strip()
-        if not account or account not in supplier_by_account:
+        txn_remaining = _dec(txn.amount) - allocated_by_txn.get(txn.id, Decimal("0"))
+        if txn_remaining <= TOLERANCE:
             continue
-        # 找到 supplier；通过 supplier.name → 找对应进项发票
-        suppliers = supplier_by_account[account]
-        for s in suppliers:
-            supplier_norm = _normalize_name(s.name)
-            for inv in leftover_invoices:
-                inv_total = _invoice_target_amount(db, inv)
-                inv_remaining = inv_total - allocated_by_invoice.get(inv.id, Decimal("0"))
-                txn_total = _dec(txn.amount)
-                txn_remaining = txn_total - allocated_by_txn.get(txn.id, Decimal("0"))
-                if inv_remaining <= TOLERANCE or txn_remaining <= TOLERANCE:
-                    continue
-                # 供应商银行账户是强证据，但仍只在双方“剩余金额”相等时自动落库。
-                if supplier_norm == _normalize_name(inv.seller_name) and abs(inv_remaining - txn_remaining) <= TOLERANCE:
-                    if (inv.id, txn.id) not in existing_invoice_txn:
-                        portion = min(inv_remaining, txn_remaining)
-                        link_row = TaxInvoiceLink(
-                            invoice_id=inv.id,
-                            target_type=TARGET_TYPE,
-                            target_id=txn.id,
-                            allocated_amount=portion,
-                            match_method="supplier_account",
-                            confidence=Decimal("0.95"),
-                            confirmed=True,
-                            note=f"通过供应商银行账户强匹配：#{s.id} {s.name} 账号 {account}",
-                        )
-                        db.add(link_row)
-                        db.flush()
-                        allocated_by_invoice[inv.id] = allocated_by_invoice.get(inv.id, Decimal("0")) + portion
-                        allocated_by_txn[txn.id] = allocated_by_txn.get(txn.id, Decimal("0")) + portion
-                        existing_invoice_txn.add((inv.id, txn.id))
-                        supplier_matched += 1
-                        if allocated_by_txn.get(txn.id, Decimal("0")) >= txn_total - TOLERANCE:
-                            existing_txn_ids.add(txn.id)
-                        supplier_details.append({
-                            "invoiceId": inv.id,
-                            "supplierId": s.id,
-                            "supplierName": s.name,
-                            "bankAccount": account,
-                            "txnId": txn.id,
-                            "amount": str(portion),
-                        })
-                        break
-            if txn.id in existing_txn_ids:
-                break
+        account = _normalize_account(getattr(txn, "counterparty_account", ""))
+        if not account:
+            continue
+        candidates = []
+        for inv in leftover_invoices:
+            if (inv.id, txn.id) in existing_invoice_txn:
+                continue
+            evidence = _candidate_evidence(txn, inv, supplier_accounts)
+            if not evidence["accountMatch"]:
+                continue
+            inv_remaining = _invoice_target_amount(db, inv) - allocated_by_invoice.get(inv.id, Decimal("0"))
+            if inv_remaining > TOLERANCE and abs(inv_remaining - txn_remaining) <= TOLERANCE:
+                candidates.append(inv)
+        inv, evidence = _choose_unique_best_candidate(txn, candidates, supplier_accounts)
+        if inv is None or not evidence.get("accountMatch"):
+            if evidence.get("ambiguous"):
+                ambiguous_details.append({
+                    "txnId": txn.id,
+                    "txnDate": txn.txn_date.isoformat(),
+                    "amount": str(txn_remaining),
+                    "candidateCount": evidence.get("candidateCount", 0),
+                    "candidateInvoiceIds": evidence.get("candidateInvoiceIds", []),
+                    "reason": "供应商账号一致但最佳候选并列，未自动匹配",
+                })
+            continue
+        portion = txn_remaining
+        link_row = TaxInvoiceLink(
+            invoice_id=inv.id,
+            target_type=TARGET_TYPE,
+            target_id=txn.id,
+            allocated_amount=portion,
+            match_method="supplier_account_date",
+            confidence=Decimal("0.99"),
+            confirmed=True,
+            note=(
+                f"供应商账号强证据 + 唯一最近日期自动匹配；"
+                f"账号 {account}；日期差{evidence.get('dateDistanceDays')}天"
+            ),
+        )
+        db.add(link_row)
+        db.flush()
+        allocated_by_invoice[inv.id] = allocated_by_invoice.get(inv.id, Decimal("0")) + portion
+        allocated_by_txn[txn.id] = allocated_by_txn.get(txn.id, Decimal("0")) + portion
+        existing_invoice_txn.add((inv.id, txn.id))
+        existing_txn_ids.add(txn.id)
+        supplier_matched += 1
+        supplier_details.append({
+            "invoiceId": inv.id,
+            "invoiceNumber": inv.invoice_number,
+            "supplierName": inv.seller_name,
+            "bankAccount": account,
+            "txnId": txn.id,
+            "amount": str(portion),
+            "dateDistanceDays": evidence.get("dateDistanceDays"),
+            "candidateCount": evidence.get("candidateCount"),
+        })
 
     db.commit()
     audit(
         db, actor, "payment_invoice_match.auto", "tax_invoice_links", "",
         {"year": year, "month": month, "matched": matched, "skipped": skipped,
          "splitMatched": split_matched, "bigTxnSplitMatched": big_txn_split_matched,
-         "supplierMatched": supplier_matched},
+         "supplierMatched": supplier_matched, "repaired": len(repair_details),
+         "ambiguous": len(ambiguous_details), "repairDetails": repair_details},
     )
     return {
         "year": year, "month": month,
         "matched": matched, "skipped": skipped,
         "splitMatched": split_matched, "bigTxnSplitMatched": big_txn_split_matched,
         "supplierMatched": supplier_matched,
+        "repaired": len(repair_details), "ambiguous": len(ambiguous_details),
         "details": details, "splitDetails": split_details, "supplierDetails": supplier_details,
+        "repairDetails": repair_details, "ambiguousDetails": ambiguous_details,
     }
 
 
