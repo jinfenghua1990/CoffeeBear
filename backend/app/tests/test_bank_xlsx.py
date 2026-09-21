@@ -198,6 +198,38 @@ def test_import_resolves_configured_internal_alias_to_real_account(client, db_se
     assert txn.raw["internalAccountCode"] == "ZJRC-001"
 
 
+def test_import_ignores_placeholder_file_account_and_uses_real_mapping(client, db_session):
+    db_session.add(BankAccount(
+        account_no="201000260611394",
+        internal_code="ZJRC-001",
+        account_name="浙江柴本网络科技有限公司",
+        bank_name="浙江农信",
+    ))
+    db_session.commit()
+    content = _make_xlsx(
+        ["交易时间", "交易账号", "交易户名", "对方账号", "对方户名", "交易金额", "流水号", "凭证号码"],
+        [[
+            "2098-06-03 09:08:07", "子账户账号", "浙江柴本网络科技有限公司",
+            "666576427385", "合锦(广州)供应链有限公司", "支 3080.00",
+            "PLACEHOLDER-2098-001", "VOUCHER-2098-001",
+        ]],
+    )
+    response = client.post(
+        "/api/v1/reconciliation/import-bank",
+        files={"file": ("占位账号.xlsx", content, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
+        data={"account_no": "ZJRC-001", "period_year": "2098", "period_month": "6"},
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["accountNo"] == "201000260611394"
+    assert body["accountSource"] == "internal_code"
+    txn = db_session.query(BankTransaction).filter_by(serial_no="PLACEHOLDER-2098-001").one()
+    account = db_session.get(BankAccount, txn.account_id)
+    assert account.account_no == "201000260611394"
+    assert txn.raw["resolvedAccountNo"] == "201000260611394"
+    assert txn.raw["internalAccountCode"] == "ZJRC-001"
+
+
 def test_import_uses_file_account_and_raw_endpoint(client, db_session, tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "DATA_DIR", str(tmp_path))
     content = _make_xlsx(

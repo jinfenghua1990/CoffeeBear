@@ -152,6 +152,17 @@ def delete_rule(db: Session, rule_id: int, actor: str = "system") -> None:
 DEFAULT_INTERNAL_ACCOUNT_CODE = "ZJRC-001"
 
 
+def _is_usable_source_account(value: str) -> bool:
+    """Ignore bank export header placeholders masquerading as account values."""
+    account_ref = (value or "").strip()
+    if not account_ref:
+        return False
+    if account_ref == DEFAULT_INTERNAL_ACCOUNT_CODE:
+        return True
+    digits = "".join(char for char in account_ref if char.isdigit())
+    return len(digits) >= 8 and digits == account_ref.replace(" ", "")
+
+
 def resolve_account_reference(db: Session, value: str) -> tuple[str, str, str]:
     """把真实账号或内部编号解析为真实账号。
 
@@ -378,7 +389,11 @@ def import_bank_xlsx(db: Session, *, account_no: str = "", content: bytes,
             "请从银行系统导出包含交易日期/交易时间和交易金额的完整流水。"
         )
 
-    source_accounts = sorted({(r.get("account_no") or "").strip() for r in rows if r.get("account_no")})
+    source_accounts = sorted({
+        account_ref
+        for r in rows
+        if _is_usable_source_account(account_ref := (r.get("account_no") or "").strip())
+    })
     if len(source_accounts) > 1:
         batch.status = "failed"
         db.commit()
