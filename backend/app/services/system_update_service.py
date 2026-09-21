@@ -808,13 +808,27 @@ def check_for_updates(*, actor: str = "system", automatic: bool = False) -> dict
             diverged = current_sha != latest_sha and ancestor.returncode == 1
             available = current_sha != latest_sha and not diverged
             change_rows = _changes(current_sha, latest_sha) if available else []
+
+            # 模块归属/模块版本/变更文件属于更新中心的增强展示信息。
+            # 它们读取额外 Git 历史失败时不能把核心“是否有新版本”检查一起判失败。
             for row in change_rows:
-                row["modules"] = _modules_for_paths(_commit_changed_files(str(row.get("sha") or "")))
-            changed_files = _changed_files(current_sha, latest_sha) if available else []
-            module_versions = _module_versions(
-                current_sha,
-                latest_sha if not diverged else current_sha,
-            )
+                try:
+                    row["modules"] = _modules_for_paths(
+                        _commit_changed_files(str(row.get("sha") or ""))
+                    )
+                except Exception:
+                    row["modules"] = []
+            try:
+                changed_files = _changed_files(current_sha, latest_sha) if available else []
+            except Exception:
+                changed_files = []
+            try:
+                module_versions = _module_versions(
+                    current_sha,
+                    latest_sha if not diverged else current_sha,
+                )
+            except Exception:
+                module_versions = []
             classification = _classify_update(change_rows, changed_files) if available else {
                 "updateLevel": "patch",
                 "updateLevelLabel": "小版本",
