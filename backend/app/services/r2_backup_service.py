@@ -18,6 +18,7 @@ from sqlalchemy.orm import Session
 from app.core.audit import audit
 from app.core.security import decrypt_secret, encrypt_secret
 from app.models.integration import IntegrationConnection, IntegrationCredential
+from app.services.backup_schedule_service import get_schedule_status
 
 PROVIDER = "cloudflare_r2"
 MODE = "backup"
@@ -56,6 +57,7 @@ def get_config(db: Session) -> dict[str, Any]:
         "fullIntervalDays": int(meta.get("full_interval_days") or 10),
         "mode": MODE,
         "readEnabled": True,
+        "scheduler": get_schedule_status("r2"),
     }
 
 

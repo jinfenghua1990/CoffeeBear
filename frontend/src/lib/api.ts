@@ -399,6 +399,7 @@ export type R2BackupConfig = {
   fullIntervalDays: number;
   mode: "backup" | string;
   readEnabled: true;
+  scheduler: { mode: string; managed: boolean; label: string; message: string };
 };
 
 export type R2BackupConfigInput = {
@@ -452,6 +453,9 @@ export type BackupRecord = {
   detail: string;
   snapshotObjectKey?: string;
   recoverable?: boolean;
+  verificationLevel?: "local_manifest" | "uploaded" | "restore_ready" | "upload_acknowledged" | string;
+  uploadedCount?: number;
+  reusedCount?: number;
 };
 
 export type BackupStatus = {
@@ -461,6 +465,28 @@ export type BackupStatus = {
   lastR2: BackupRecord | null;
   lastR2Full: BackupRecord | null;
   lastKodo: BackupRecord | null;
+  lastAttemptR2: BackupJobAttempt | null;
+  lastAttemptKodo: BackupJobAttempt | null;
+  health: {
+    local: BackupHealth;
+    r2: BackupHealth;
+    kodo: BackupHealth;
+  };
+};
+
+export type BackupJobAttempt = {
+  target: "r2" | "kodo" | string;
+  status: "running" | "success" | "failed" | "skipped" | string;
+  startedAt: string | null;
+  finishedAt: string | null;
+  exitCode: number | null;
+  mode?: string;
+};
+
+export type BackupHealth = {
+  status: "healthy" | "stale" | "failed" | "running" | "never" | string;
+  ageHours: number | null;
+  message: string;
 };
 
 export function getBackupStatus(limit = 50): Promise<BackupStatus> {
@@ -489,6 +515,7 @@ export type KodoColdBackupConfig = {
   accessKeyHint: string;
   mode: "upload_only" | string;
   readEnabled: false;
+  scheduler: { mode: string; managed: boolean; label: string; message: string };
 };
 
 export type KodoColdBackupConfigInput = {
@@ -511,6 +538,24 @@ export function saveKodoColdBackupConfig(
     method: "PUT",
     body: JSON.stringify(body),
   });
+}
+
+export function testKodoColdBackupWrite(): Promise<{
+  ok: boolean;
+  status: number;
+  bucket: string;
+  message: string;
+}> {
+  return jsonFetch("/api/v1/integrations/kodo-cold/test-write", { method: "POST" });
+}
+
+export function runKodoColdBackup(): Promise<{
+  started: boolean;
+  target: "kodo";
+  mode: "full";
+  log: string;
+}> {
+  return jsonFetch("/api/v1/integrations/kodo-cold/run", { method: "POST" });
 }
 
 export type ExceptionRow = {

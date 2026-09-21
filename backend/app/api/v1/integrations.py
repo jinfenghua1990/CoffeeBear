@@ -55,6 +55,27 @@ def save_kodo_cold_backup_config(
         raise HTTPException(400, str(exc)) from exc
 
 
+@router.post("/kodo-cold/test-write", dependencies=[Depends(require_roles("admin"))])
+def test_kodo_cold_backup_write(db: Session = Depends(get_db)) -> dict[str, Any]:
+    """只执行一次 Kodo 上传探针；不读取、不列目录、不删除远端对象。"""
+    try:
+        return kodo_backup_service.test_write_connection(db)
+    except (ValueError, RuntimeError) as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@router.post("/kodo-cold/run", dependencies=[Depends(require_roles("admin"))])
+def run_kodo_cold_backup(db: Session = Depends(get_db)) -> dict[str, Any]:
+    """手动启动一次完整冷备；上传仍保持 upload-only。"""
+    config = kodo_backup_service.get_config(db)
+    if not config["configured"] or not config["enabled"]:
+        raise HTTPException(400, "Kodo 冷备尚未配置或当前未启用")
+    try:
+        return kodo_backup_service.start_backup()
+    except RuntimeError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
 class R2BackupConfigIn(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 

@@ -6,9 +6,11 @@ import {
   getKodoColdBackupConfig,
   getR2BackupConfig,
   prepareR2Restore,
+  runKodoColdBackup,
   runR2Backup,
   saveKodoColdBackupConfig,
   saveR2BackupConfig,
+  testKodoColdBackupWrite,
   testR2BackupConnection,
   type BackupStatus,
   type KodoColdBackupConfig,
@@ -264,7 +266,7 @@ function ConfigCard({
             </div>
           </div>
           <button type="button" onClick={onViewLog} className="rounded-md border border-blue-200 bg-white px-3 py-1.5 text-[9px] font-medium text-blue-600">
-            查看日志
+            查看记录
           </button>
         </div>
       </div>
@@ -280,6 +282,7 @@ function StorageRow({
   stateTone,
   onConfigure,
   onTestConnection,
+  testLabel = "测试连接",
   secondary,
   onSecondary,
 }: {
@@ -290,6 +293,7 @@ function StorageRow({
   stateTone: Tone;
   onConfigure: () => void;
   onTestConnection?: () => void;
+  testLabel?: string;
   secondary?: string;
   onSecondary?: () => void;
 }) {
@@ -321,7 +325,7 @@ function StorageRow({
         </button>
         {onTestConnection ? (
           <button type="button" onClick={onTestConnection} className="rounded-md border border-slate-200 bg-white px-3 py-1.5 text-[9px] font-medium text-slate-600">
-            测试连接
+            {testLabel}
           </button>
         ) : null}
         {secondary && onSecondary ? (
@@ -378,6 +382,29 @@ function backupTime(value: string | null | undefined) {
   return date.toLocaleString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
 }
 
+function healthTone(status: string | undefined): Tone {
+  if (status === "healthy") return "green";
+  if (status === "running") return "blue";
+  if (status === "stale" || status === "failed") return "amber";
+  return "slate";
+}
+
+function healthLabel(status: string | undefined): string {
+  if (status === "healthy") return "正常";
+  if (status === "running") return "执行中";
+  if (status === "stale") return "已过期";
+  if (status === "failed") return "最近失败";
+  return "暂无成功";
+}
+
+function scheduleLabel(
+  scheduler: { managed: boolean; mode: string; message: string } | undefined,
+  planned: string,
+): string {
+  if (scheduler?.managed) return `${planned} · 自动计划已加载`;
+  return `${planned} · 需外部调度`;
+}
+
 export default function BackupSettingsPage() {
   const [activeTab, setActiveTab] = useState<TabKey>("overview");
   const [selectedStorage, setSelectedStorage] = useState<StorageKey>("r2");
@@ -403,6 +430,8 @@ export default function BackupSettingsPage() {
   const [kodoConfig, setKodoConfig] = useState<KodoColdBackupConfig | null>(null);
   const [kodoLoading, setKodoLoading] = useState(true);
   const [kodoSaving, setKodoSaving] = useState(false);
+  const [kodoTesting, setKodoTesting] = useState(false);
+  const [kodoRunning, setKodoRunning] = useState(false);
   const [kodoForm, setKodoForm] = useState({
     bucket: "",
     uploadUrl: "",
@@ -649,6 +678,40 @@ export default function BackupSettingsPage() {
     }
   }
 
+  async function testKodoWrite() {
+    if (!kodoConfig?.configured) {
+      openStorage("kodo");
+      showNotice("请先保存 Kodo 配置，再执行只写测试。");
+      return;
+    }
+    setKodoTesting(true);
+    try {
+      const result = await testKodoColdBackupWrite();
+      showNotice(result.message || "Kodo 只写测试通过。");
+    } catch (error) {
+      showNotice("Kodo 只写测试失败：" + (error instanceof Error ? error.message : String(error)));
+    } finally {
+      setKodoTesting(false);
+    }
+  }
+
+  async function runKodo() {
+    if (!kodoConfig?.configured || !kodoConfig.enabled) {
+      openStorage("kodo");
+      showNotice("请先配置并启用 Kodo 冷备。");
+      return;
+    }
+    setKodoRunning(true);
+    try {
+      await runKodoColdBackup();
+      showNotice("Kodo 完整冷备已启动；状态会在任务完成后自动刷新。");
+    } catch (error) {
+      showNotice("Kodo 冷备启动失败：" + (error instanceof Error ? error.message : String(error)));
+    } finally {
+      setKodoRunning(false);
+    }
+  }
+
   function openStorage(key: StorageKey) {
     setSelectedStorage(key);
     setActiveTab("storage");
@@ -675,7 +738,7 @@ export default function BackupSettingsPage() {
               className="app-button-primary inline-flex h-9 items-center gap-2 rounded-lg px-4 text-[11px] font-medium disabled:cursor-wait disabled:opacity-50"
             >
               <span className="text-[11px]">▶</span>
-              {r2Running ? "启动中…" : r2Config?.configured && r2Config.enabled ? "立即备份" : "配置 R2"}
+              {r2Running ? "启动中…" : r2Config?.configured && r2Config.enabled ? "立即 R2 备份" : "配置 R2"}
             </button>
             <button
               type="button"
@@ -797,10 +860,10 @@ export default function BackupSettingsPage() {
                 tone="green"
                 enabled={Boolean(r2Config?.configured && r2Config.enabled)}
                 enabledText={r2Config?.configured && r2Config.enabled ? "已启用" : "待配置"}
-                schedule="计划：每天 03:00"
+                schedule={scheduleLabel(r2Config?.scheduler, "计划 03:00")}
                 content={["数据库（增量 / 变化检测）", "业务文件（变更检测）", "系统配置（变更检测）"]}
                 retention="远端保留：当前不自动删除 · 后续可配置"
-                status={r2Loading ? "读取 R2 配置" : r2Config?.configured && r2Config.enabled ? "R2 已启用" : "R2 待配置"}
+                status={r2Loading ? "读取 R2 配置" : r2Config?.configured && r2Config.enabled ? (r2Config.scheduler.managed ? "R2 已启用 · 自动计划可确认" : "R2 已启用 · 自动计划需外部确认") : "R2 待配置"}
                 onEdit={() => setActiveTab("config")}
                 onViewLog={() => setActiveTab("records")}
               />
@@ -809,10 +872,10 @@ export default function BackupSettingsPage() {
                 tone="blue"
                 enabled={Boolean(r2Config?.configured && r2Config.enabled)}
                 enabledText={r2Config?.configured && r2Config.enabled ? "已启用" : "待配置"}
-                schedule={`计划：每 ${r2Config?.fullIntervalDays || 10} 天 03:00`}
+                schedule={scheduleLabel(r2Config?.scheduler, `每 ${r2Config?.fullIntervalDays || 10} 天 · 03:00 策略`)}
                 content={["完整数据库", "全部业务文件", "系统配置（客户端加密）", "应用程序 / Docker 配置 / 必要文件", "恢复脚本 / 完整性清单", "独立恢复密钥不进入云端备份"]}
                 retention="计划：保留容灾恢复点"
-                status={r2Loading ? "读取 R2 配置" : r2Config?.configured && r2Config.enabled ? "R2 已启用" : "R2 待配置"}
+                status={r2Loading ? "读取 R2 配置" : r2Config?.configured && r2Config.enabled ? (r2Config.scheduler.managed ? "R2 已启用 · 自动计划可确认" : "R2 已启用 · 自动计划需外部确认") : "R2 待配置"}
                 onEdit={() => setActiveTab("config")}
                 onViewLog={() => setActiveTab("records")}
               />
@@ -825,7 +888,7 @@ export default function BackupSettingsPage() {
               <div className="space-y-2">
                 <StorageRow
                   name="Cloudflare R2（主存储）"
-                  subtitle="每日模块化 + 周期全量容灾；支持恢复读取"
+                  subtitle={r2Config?.scheduler.managed ? "每日模块化 + 周期全量容灾；自动计划已加载" : "主备与恢复已接入；自动执行需由 NAS / 系统计划任务触发"}
                   tone="amber"
                   state={r2Loading ? "读取配置" : r2Config?.configured ? (r2Config.enabled ? "已配置" : "已配置 · 停用") : "待配置"}
                   stateTone={r2Config?.configured && r2Config.enabled ? "green" : "amber"}
@@ -836,11 +899,15 @@ export default function BackupSettingsPage() {
                 />
                 <StorageRow
                   name="七牛云 Kodo（国内冷备）"
-                  subtitle="每天完整恢复点；内容按 SHA256 去重，只上传新增或变化内容；只存不取"
+                  subtitle={kodoConfig?.scheduler.managed ? "每日完整冷备；自动计划已加载；只存不取" : "完整冷备执行器已接入；自动执行需由 NAS / 系统计划任务触发"}
                   tone="blue"
                   state={kodoLoading ? "读取配置" : kodoConfig?.configured ? (kodoConfig.enabled ? "已配置" : "已配置 · 停用") : "待填写密钥"}
                   stateTone={kodoConfig?.configured && kodoConfig.enabled ? "green" : "amber"}
                   onConfigure={() => openStorage("kodo")}
+                  onTestConnection={() => void testKodoWrite()}
+                  testLabel="只写测试"
+                  secondary="立即冷备"
+                  onSecondary={() => void runKodo()}
                 />
                 <StorageRow
                   name="本地 NAS（可选）"
@@ -878,6 +945,21 @@ export default function BackupSettingsPage() {
                   </div>
                 </div>
               </div>
+              <div className="mt-3 grid gap-2 sm:grid-cols-3">
+                {([
+                  ["本地恢复点", backupStatus?.health.local],
+                  ["R2 主备", backupStatus?.health.r2],
+                  ["Kodo 冷备", backupStatus?.health.kodo],
+                ] as const).map(([label, health]) => (
+                  <div key={label} className="rounded-lg border border-slate-100 bg-white px-3 py-2.5">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-[9px] text-slate-400">{label}</span>
+                      <Pill tone={healthTone(health?.status)}>{healthLabel(health?.status)}</Pill>
+                    </div>
+                    <div className="mt-1 text-[9px] leading-4 text-slate-500">{health?.message || "正在读取真实执行状态"}</div>
+                  </div>
+                ))}
+              </div>
               <div className="mt-3 divide-y divide-slate-100 text-[10px]">
                 <div className="flex items-center justify-between gap-3 py-2">
                   <span className="text-slate-500">最近 R2 备份</span>
@@ -889,11 +971,11 @@ export default function BackupSettingsPage() {
                 </div>
                 <div className="flex items-center justify-between gap-3 py-2">
                   <span className="text-slate-500">R2 日常计划</span>
-                  <span className="font-medium text-slate-700">{r2Config?.configured && r2Config.enabled ? "每天 03:00" : "配置后启用"}</span>
+                  <span className="font-medium text-slate-700">{r2Config?.configured && r2Config.enabled ? scheduleLabel(r2Config.scheduler, "03:00") : "配置后启用"}</span>
                 </div>
                 <div className="flex items-center justify-between gap-3 py-2">
                   <span className="text-slate-500">R2 全量周期</span>
-                  <span className="font-medium text-slate-700">{r2Config?.configured && r2Config.enabled ? `每 ${r2Config.fullIntervalDays || 10} 天 · 03:00` : "配置后启用"}</span>
+                  <span className="font-medium text-slate-700">{r2Config?.configured && r2Config.enabled ? scheduleLabel(r2Config.scheduler, `每 ${r2Config.fullIntervalDays || 10} 天 · 03:00`) : "配置后启用"}</span>
                 </div>
               </div>
               <button type="button" onClick={() => setActiveTab("records")} className="app-button-secondary mt-4 w-full rounded-lg px-3 py-2 text-[10px] font-medium">
@@ -917,10 +999,10 @@ export default function BackupSettingsPage() {
               tone="green"
               enabled={Boolean(r2Config?.configured && r2Config.enabled)}
               enabledText={r2Config?.configured && r2Config.enabled ? "已启用" : "待配置"}
-              schedule="每天 03:00"
+              schedule={scheduleLabel(r2Config?.scheduler, "03:00")}
               content={["数据库：内容 Hash 变化检测", "业务文件：文件变化检测", "系统配置：Hash 变化检测", "应用未更新时不重复上传"]}
               retention="最近 30 个本地恢复点 + R2 模块快照"
-              status={r2Config?.configured && r2Config.enabled ? "R2 自动执行" : "R2 待配置"}
+              status={r2Config?.configured && r2Config.enabled ? (r2Config.scheduler.managed ? "自动计划已确认" : "执行器已启用 · 调度需外部确认") : "R2 待配置"}
               onEdit={() => openStorage("r2")}
               onViewLog={() => setActiveTab("records")}
             />
@@ -929,10 +1011,10 @@ export default function BackupSettingsPage() {
               tone="blue"
               enabled={Boolean(r2Config?.configured && r2Config.enabled)}
               enabledText={r2Config?.configured && r2Config.enabled ? "已启用" : "待配置"}
-              schedule={`每 ${r2Config?.fullIntervalDays || 10} 天 03:00`}
+              schedule={scheduleLabel(r2Config?.scheduler, `每 ${r2Config?.fullIntervalDays || 10} 天 · 03:00`)}
               content={["应用源码 / 锁定依赖", "可用时 Docker 镜像", "完整 PostgreSQL", "全部业务文件", "运行配置 / manifest / Hash 校验"]}
               retention="独立完整容灾恢复点"
-              status={r2Config?.configured && r2Config.enabled ? "R2 自动执行" : "R2 待配置"}
+              status={r2Config?.configured && r2Config.enabled ? (r2Config.scheduler.managed ? "自动计划已确认" : "执行器已启用 · 调度需外部确认") : "R2 待配置"}
               onEdit={() => openStorage("r2")}
               onViewLog={() => setActiveTab("records")}
             />
@@ -950,7 +1032,7 @@ export default function BackupSettingsPage() {
             </div>
             <div className="mt-4 grid gap-3 md:grid-cols-4">
               {[
-                ["执行时间", "每天 04:00"],
+                ["执行时间", kodoConfig?.configured && kodoConfig.enabled ? scheduleLabel(kodoConfig.scheduler, "04:00") : "配置后启用"],
                 ["默认目标", "七牛云 Kodo"],
                 ["存储方式", "内容去重 · 增量上传"],
                 ["访问规则", "只写入 · 禁止取回"],
@@ -1041,10 +1123,12 @@ export default function BackupSettingsPage() {
               {(backupStatus?.records || []).map((row) => (
                 <div key={`${row.type}-${row.timestamp}-${row.target}`} className="grid grid-cols-[1.1fr_.9fr_.8fr_1.2fr_.7fr] items-center px-4 py-3 text-[11px]">
                   <span className="text-slate-600">{backupTime(row.time)}</span>
-                  <span className="font-medium text-slate-700">{row.type === "r2_full" ? "全量容灾" : row.type === "r2_daily" ? "日常模块化" : row.type === "kodo_full" ? "冷备恢复点" : "本地基础"}</span>
+                  <span className="font-medium text-slate-700">{row.type === "r2_full" ? "全量容灾" : row.type === "r2_daily" ? "日常模块化" : row.type === "kodo_full" ? "冷备恢复点" : row.type === "r2_attempt" || row.type === "kodo_attempt" ? "任务状态" : "本地基础"}</span>
                   <span className="text-slate-600">{row.target}</span>
                   <span className="text-slate-500">{row.detail}</span>
-                  <span className="text-emerald-700">成功</span>
+                  <span className={row.status === "success" ? "text-emerald-700" : row.status === "running" ? "text-blue-700" : row.status === "failed" ? "text-red-600" : "text-amber-700"}>
+                    {row.status === "success" ? "成功" : row.status === "running" ? "执行中" : row.status === "failed" ? "失败" : row.status === "skipped" ? "已跳过" : row.status}
+                  </span>
                 </div>
               ))}
               {!backupStatus?.records.length ? <div className="px-4 py-12 text-center text-[11px] text-slate-400">暂无成功备份记录</div> : null}
@@ -1118,7 +1202,10 @@ export default function BackupSettingsPage() {
                   <div className="border-b border-slate-100 px-4 py-3">
                     <div className="text-[11px] font-semibold text-slate-700">R2 主备份配置</div>
                     <div className="mt-1 text-[11px] leading-5 text-slate-400">
-                      密钥加密保存在服务端，不回显到页面。每日 03:00 自动执行模块化备份，并按全量间隔自动生成完整容灾恢复点；Mac 原生运行会自动维护对应 launchd 计划。
+                      密钥加密保存在服务端，不回显到页面。备份执行器与恢复链路已接入；是否真正自动执行，以调度状态为准。
+                    </div>
+                    <div className={`mt-2 rounded-md px-2.5 py-2 text-[9px] ${r2Config?.scheduler.managed ? "bg-emerald-50 text-emerald-700" : "bg-amber-50 text-amber-700"}`}>
+                      调度状态：{r2Config?.scheduler.message || "正在读取"}。计划时间 03:00。
                     </div>
                   </div>
                   <div className="grid gap-3 p-4 md:grid-cols-2">
@@ -1150,7 +1237,7 @@ export default function BackupSettingsPage() {
                   <div className="flex flex-wrap items-center justify-between gap-3 border-t border-slate-100 px-4 py-3">
                     <label className="flex items-center gap-2 text-[11px] text-slate-600">
                       <input type="checkbox" checked={r2Form.enabled} onChange={(event) => setR2Form((current) => ({ ...current, enabled: event.target.checked }))} />
-                      保存后启用每日 03:00 自动备份
+                      启用 R2 备份执行器（NAS/Linux 需宿主机计划任务触发）
                     </label>
                     <span className="text-[11px] text-slate-400">全量周期：每 {r2Form.fullIntervalDays || 10} 天</span>
                   </div>
@@ -1168,7 +1255,10 @@ export default function BackupSettingsPage() {
                   <div className="border-b border-slate-100 px-4 py-3">
                     <div className="text-[10px] font-semibold text-slate-700">Kodo 上传配置</div>
                     <div className="mt-1 text-[9px] leading-4 text-slate-400">
-                      填写 Bucket、上传域名、Access Key、Secret Key 后即可启用。每天 04:00 生成完整冷备恢复点，内容按 SHA256 在本地回执中去重，只上传新增或变化内容；密钥加密存储且不回显。
+                      填写 Bucket、上传域名、Access Key、Secret Key 后即可启用。完整冷备按 SHA256 内容寻址去重，只上传新增或变化内容；密钥加密存储且不回显。
+                    </div>
+                    <div className={`mt-2 rounded-md px-2.5 py-2 text-[9px] ${kodoConfig?.scheduler.managed ? "bg-emerald-50 text-emerald-700" : "bg-amber-50 text-amber-700"}`}>
+                      调度状态：{kodoConfig?.scheduler.message || "正在读取"}。计划时间 04:00。
                     </div>
                   </div>
                   <div className="grid gap-3 p-4 md:grid-cols-2">
@@ -1231,7 +1321,7 @@ export default function BackupSettingsPage() {
                         checked={kodoForm.enabled}
                         onChange={(event) => setKodoForm((current) => ({ ...current, enabled: event.target.checked }))}
                       />
-                      保存后启用每日 04:00 冷备上传
+                      启用 Kodo 冷备执行器（NAS/Linux 需宿主机计划任务触发）
                     </label>
                     <span className="text-[9px] text-slate-400">读取权限：关闭且不提供</span>
                   </div>
@@ -1250,7 +1340,23 @@ export default function BackupSettingsPage() {
                   >
                     {kodoSaving ? "保存中…" : "保存 Kodo 配置"}
                   </button>
-                  <span className="text-[9px] text-slate-400">不提供“测试连接”按钮，避免读取远端对象。</span>
+                  <button
+                    type="button"
+                    disabled={kodoTesting || !kodoConfig?.configured}
+                    onClick={() => void testKodoWrite()}
+                    className="app-button-secondary rounded-lg px-4 py-2 text-[10px] font-medium disabled:opacity-40"
+                  >
+                    {kodoTesting ? "测试中…" : "只写测试"}
+                  </button>
+                  <button
+                    type="button"
+                    disabled={kodoRunning || !kodoConfig?.configured || !kodoConfig.enabled}
+                    onClick={() => void runKodo()}
+                    className="app-button-secondary rounded-lg px-4 py-2 text-[10px] font-medium disabled:opacity-40"
+                  >
+                    {kodoRunning ? "启动中…" : "立即冷备"}
+                  </button>
+                  <span className="text-[9px] text-slate-400">“只写测试”只上传固定探针，不执行 GET / List / HEAD / 删除。</span>
                 </div>
               </>
             ) : (

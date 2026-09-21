@@ -412,7 +412,7 @@ def write_receipt(directory: Path, snapshot: dict[str, Any]) -> None:
     path.write_text(json.dumps(snapshot, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
-def main() -> int:
+def _run_main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--mode", choices=["auto", "daily", "full"], default="auto")
     args = parser.parse_args()
@@ -466,6 +466,70 @@ def main() -> int:
 
         print(f"==> R2 {mode} 备份完成：{snapshot.get('timestamp')}")
         return 0
+
+
+def _receipt_fingerprint(directory: Path) -> str:
+    receipt_dir = directory / ".r2-uploaded"
+    if not receipt_dir.is_dir():
+        return ""
+    rows = sorted(receipt_dir.glob("*.json"), key=lambda p: p.stat().st_mtime_ns, reverse=True)
+    if not rows:
+        return ""
+    row = rows[0]
+    return f"{row.name}:{row.stat().st_mtime_ns}"
+
+
+def _write_job_status(
+    directory: Path,
+    *,
+    status: str,
+    started_at: str,
+    finished_at: str | None = None,
+    exit_code: int | None = None,
+) -> None:
+    status_dir = directory / ".job-status"
+    status_dir.mkdir(parents=True, exist_ok=True)
+    target = status_dir / "r2.json"
+    tmp = status_dir / ".r2.json.tmp"
+    payload = {
+        "target": "r2",
+        "status": status,
+        "mode": "backup",
+        "startedAt": started_at,
+        "finishedAt": finished_at,
+        "exitCode": exit_code,
+    }
+    tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    tmp.replace(target)
+
+
+def main() -> int:
+    directory = backup_dir()
+    directory.mkdir(parents=True, exist_ok=True)
+    started = dt.datetime.now(dt.timezone.utc).isoformat()
+    before = _receipt_fingerprint(directory)
+    _write_job_status(directory, status="running", started_at=started)
+    try:
+        code = _run_main()
+    except Exception:
+        _write_job_status(
+            directory,
+            status="failed",
+            started_at=started,
+            finished_at=dt.datetime.now(dt.timezone.utc).isoformat(),
+            exit_code=2,
+        )
+        raise
+    after = _receipt_fingerprint(directory)
+    status = "success" if code == 0 and after != before else "skipped" if code == 0 else "failed"
+    _write_job_status(
+        directory,
+        status=status,
+        started_at=started,
+        finished_at=dt.datetime.now(dt.timezone.utc).isoformat(),
+        exit_code=code,
+    )
+    return code
 
 
 if __name__ == "__main__":

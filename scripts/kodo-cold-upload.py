@@ -212,7 +212,7 @@ def upload_one(
     return payload
 
 
-def main() -> int:
+def _run_main() -> int:
     load_simple_env(ROOT / ".env")
 
     try:
@@ -426,6 +426,71 @@ def main() -> int:
     )
     print(f"==> 本地上传记录：{receipt}")
     return 0
+
+
+def _backup_dir() -> Path:
+    return Path(
+        os.getenv("BACKUP_DIR")
+        or (
+            Path(os.getenv("PERSIST_ROOT", str(ROOT))) / "backups"
+            if os.getenv("PERSIST_ROOT")
+            else ROOT / "backups"
+        )
+    ).expanduser()
+
+
+def _receipt_fingerprint(directory: Path) -> str:
+    receipt_dir = directory / ".kodo-uploaded"
+    if not receipt_dir.is_dir():
+        return ""
+    rows = sorted(receipt_dir.glob("*.json"), key=lambda p: p.stat().st_mtime_ns, reverse=True)
+    if not rows:
+        return ""
+    row = rows[0]
+    return f"{row.name}:{row.stat().st_mtime_ns}"
+
+
+def _write_job_status(
+    directory: Path,
+    *,
+    status: str,
+    started_at: str,
+    finished_at: str | None = None,
+    exit_code: int | None = None,
+) -> None:
+    status_dir = directory / ".job-status"
+    status_dir.mkdir(parents=True, exist_ok=True)
+    target = status_dir / "kodo.json"
+    tmp = status_dir / ".kodo.json.tmp"
+    payload = {
+        "target": "kodo",
+        "status": status,
+        "mode": "full",
+        "startedAt": started_at,
+        "finishedAt": finished_at,
+        "exitCode": exit_code,
+    }
+    tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    tmp.replace(target)
+
+
+def main() -> int:
+    directory = _backup_dir()
+    directory.mkdir(parents=True, exist_ok=True)
+    started = __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat()
+    before = _receipt_fingerprint(directory)
+    _write_job_status(directory, status="running", started_at=started)
+    try:
+        code = _run_main()
+    except Exception:
+        finished = __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat()
+        _write_job_status(directory, status="failed", started_at=started, finished_at=finished, exit_code=2)
+        raise
+    after = _receipt_fingerprint(directory)
+    status = "success" if code == 0 and after != before else "skipped" if code == 0 else "failed"
+    finished = __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat()
+    _write_job_status(directory, status=status, started_at=started, finished_at=finished, exit_code=code)
+    return code
 
 
 if __name__ == "__main__":

@@ -208,3 +208,57 @@ def test_kodo_upload_script_has_no_remote_read_requests():
     assert "requests.delete(" not in source
     assert "requests.put(" not in source
     assert "requests.post(" in source
+
+def test_kodo_write_probe_only_posts_and_never_reads(db_session, monkeypatch):
+    monkeypatch.setattr(settings, "APP_SECRET_KEY", "pytest-kodo-write-probe-secret")
+    kodo_backup_service.save_config(
+        db_session,
+        bucket="cold-write-probe",
+        upload_url="https://upload.example.invalid",
+        prefix="ecommerce-workspace/cold",
+        access_key="AK_WRITE_PROBE",
+        secret_key="SK_WRITE_PROBE",
+        enabled=True,
+        actor="pytest",
+    )
+
+    calls = []
+
+    class Response:
+        status_code = 200
+        text = '{"key":"ok"}'
+
+    def fake_post(url, **kwargs):
+        calls.append((url, kwargs))
+        return Response()
+
+    monkeypatch.setattr(kodo_backup_service.requests, "post", fake_post)
+    result = kodo_backup_service.test_write_connection(db_session)
+
+    assert result["ok"] is True
+    assert "只写测试通过" in result["message"]
+    assert len(calls) == 1
+    assert calls[0][0] == "https://upload.example.invalid"
+    assert calls[0][1]["data"]["key"].endswith("/_healthcheck/write-probe-v1.txt")
+
+
+def test_kodo_start_backup_runs_detached_executor(tmp_path, monkeypatch):
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    captured = {}
+
+    class DummyProcess:
+        pass
+
+    def fake_popen(command, **kwargs):
+        captured["command"] = command
+        captured["kwargs"] = kwargs
+        return DummyProcess()
+
+    monkeypatch.setattr(kodo_backup_service.subprocess, "Popen", fake_popen)
+    result = kodo_backup_service.start_backup()
+
+    assert result["started"] is True
+    assert result["target"] == "kodo"
+    assert result["mode"] == "full"
+    assert captured["command"][-1].endswith("scripts/kodo-cold-upload.py")
+    assert captured["kwargs"]["start_new_session"] is True
