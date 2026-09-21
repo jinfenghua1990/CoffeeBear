@@ -809,12 +809,20 @@ def check_for_updates(*, actor: str = "system", automatic: bool = False) -> dict
             available = current_sha != latest_sha and not diverged
             change_rows = _changes(current_sha, latest_sha) if available else []
             for row in change_rows:
-                row["modules"] = _modules_for_paths(_commit_changed_files(str(row.get("sha") or "")))
+                try:
+                    row["modules"] = _modules_for_paths(_commit_changed_files(str(row.get("sha") or "")))
+                except Exception:
+                    # 模块归属是版本概览的附加信息，读取失败不能阻塞主更新检查。
+                    row["modules"] = []
             changed_files = _changed_files(current_sha, latest_sha) if available else []
-            module_versions = _module_versions(
-                current_sha,
-                latest_sha if not diverged else current_sha,
-            )
+            try:
+                module_versions = _module_versions(
+                    current_sha,
+                    latest_sha if not diverged else current_sha,
+                )
+            except Exception:
+                # Git 对象暂时不可读时仍要返回可执行的更新结果；模块明细下一次检查再补齐。
+                module_versions = []
             classification = _classify_update(change_rows, changed_files) if available else {
                 "updateLevel": "patch",
                 "updateLevelLabel": "小版本",
