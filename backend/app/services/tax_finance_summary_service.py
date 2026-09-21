@@ -13,17 +13,15 @@ import csv
 import re
 import unicodedata
 from collections import defaultdict
-from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from io import StringIO
 from typing import Any
-from zoneinfo import ZoneInfo
 
 from sqlalchemy.orm import Session
 
-from app.config import settings
 from app.models.tax import TaxInvoice, TaxInvoiceImport, TaxInvoiceImportRecord
 from app.services import tax_category_rule_service as category_rule_service
+from app.services.monthly_core import month_bounds
 
 
 ALIASES: dict[str, tuple[str, ...]] = {
@@ -106,13 +104,10 @@ def _qty(value: Decimal | None) -> str | None:
     return None if value is None else f"{value.normalize():f}"
 
 
-def _month_range(year: int, month: int) -> tuple[datetime, datetime]:
+def _month_range(year: int, month: int):
     if year < 2000 or year > 9999 or month < 1 or month > 12:
         raise ValueError("账期不正确")
-    tz = ZoneInfo(settings.TZ)
-    start = datetime(year, month, 1, tzinfo=tz)
-    end = datetime(year + 1, 1, 1, tzinfo=tz) if month == 12 else datetime(year, month + 1, 1, tzinfo=tz)
-    return start, end
+    return month_bounds(year, month)
 
 
 def build_finance_summary(db: Session, year: int, month: int) -> dict[str, Any]:

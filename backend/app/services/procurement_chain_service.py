@@ -762,21 +762,32 @@ class ProcurementChainMatcher:
             link.consumable_usage_decided = False
             link.consumable_usage_enabled = None
             release_inbound_seeds_for_link(self.db, link, actor="system", commit=False)
+        # 更换关联必须保留旧关系审计历史，不能物理删除或原地改写旧 target。
+        link.confirmed = False
+        link.match_method = "rejected"
+        link.confidence = None
+        link.note = f"{(link.note or '').strip()}；已由人工更换关联".strip("；")
         if duplicate is not None:
-            if duplicate.target_type == "inbound":
+            replacement = duplicate
+            if replacement.target_type == "inbound":
                 from app.services.consumable_service import _reverse_inbound_usage
-                _reverse_inbound_usage(self.db, duplicate.id)
-                duplicate.consumable_usage_decided = False
-                duplicate.consumable_usage_enabled = None
-            self.db.delete(link)
-            link = duplicate
+                _reverse_inbound_usage(self.db, replacement.id)
+                replacement.consumable_usage_decided = False
+                replacement.consumable_usage_enabled = None
         else:
-            link.target_id = target_id
-        link.match_method = "manual"
-        link.confidence = Decimal("1")
-        link.note = note or "人工更换关联"
-        link.confirmed = True
+            replacement = ProcurementChainLink(
+                order_id=link.order_id,
+                external_po_id=link.external_po_id,
+                target_type=link.target_type,
+                target_id=target_id,
+            )
+            self.db.add(replacement)
+        replacement.match_method = "manual"
+        replacement.confidence = Decimal("1")
+        replacement.note = note or "人工更换关联"
+        replacement.confirmed = True
         self.db.commit()
+        link = replacement
         if link.target_type == "inbound":
             try:
                 seed_allocations_for_link(self.db, link)
@@ -1138,13 +1149,15 @@ def purge_voided_invoice_links(db: Session, actor: str = "system", dry_run: bool
     """清理建立在作废发票上的采购关联（status=red 或红字负数票）。
 
     早期版本没有过滤作废票，历史库里可能残留这类关联：已红冲的蓝字票被计进
-    采购金额，会造成票面金额虚高。默认 dry_run，确认清单后再实际删除。
+    采购金额，会造成票面金额虚高。默认 dry_run；执行时仅停用关联并保留审计历史。
     """
     link_rows = (
         db.query(TaxInvoiceLink, TaxInvoice)
         .join(TaxInvoice, TaxInvoice.id == TaxInvoiceLink.invoice_id)
         .filter(
             TaxInvoiceLink.target_type.in_(PURCHASE_LINK_TARGET_TYPES),
+            TaxInvoiceLink.match_method != "rejected",
+            TaxInvoiceLink.confirmed.is_(True),
             or_(TaxInvoice.status == INVOICE_STATUS_RED, TaxInvoice.total_amount <= 0),
         )
         .all()
@@ -1162,21 +1175,24 @@ def purge_voided_invoice_links(db: Session, actor: str = "system", dry_run: bool
         })
     if dry_run:
         return {"ok": True, "dryRun": True, "matched": len(items), "removed": 0, "items": items}
-    affected_invoices: dict[int, TaxInvoice] = {}
+    affected_invoices: dict[tuple[int, str], TaxInvoice] = {}
     for link, inv in link_rows:
-        db.delete(link)
-        affected_invoices[inv.id] = inv
+        link.confirmed = False
+        link.match_method = "rejected"
+        link.confidence = None
+        link.note = f"{(link.note or '')}；作废/红冲票关联已停用".strip("；")
+        affected_invoices[(inv.id, link.target_type)] = inv
         audit(
             db, actor, "procurement.invoice.purge_voided", "tax_invoice_link", str(link.id),
             {"invoiceId": link.invoice_id, "orderId": link.target_id},
             commit=False,
         )
     db.flush()
-    for inv in affected_invoices.values():
+    for (_invoice_id, target_type), inv in affected_invoices.items():
         sync_business_match_status(
             db,
             inv,
-            "alibaba1688_order",
+            target_type,
             "已解除作废票采购关联",
         )
     db.commit()
@@ -1875,16 +1891,13 @@ def _extract_1688_items(order: Alibaba1688Order | None) -> list[dict]:
         return []
 
     def _yuan(value):
-        try:
-            return round(float(value) / 100.0, 2)
-        except Exception:
+        parsed = parse_decimal(value)
+        if parsed is None:
             return None
+        return (parsed / Decimal("100")).quantize(Decimal("0.01"))
 
-    def _float(value):
-        try:
-            return float(value) if value not in (None, "") else None
-        except Exception:
-            return None
+    def _quantity(value):
+        return parse_decimal(value)
 
     items: list[dict] = []
     for entry in entries:
@@ -1892,11 +1905,11 @@ def _extract_1688_items(order: Alibaba1688Order | None) -> list[dict]:
             continue
         qty_raw = entry.get("quantity")
         qty = qty_raw.get("realAmount") or qty_raw.get("calAmount") if isinstance(qty_raw, dict) else qty_raw
-        qty = _float(qty)
+        qty = _quantity(qty)
         unit_price = _yuan(entry.get("actualUnitPrice") or entry.get("price"))
         amount = _yuan(entry.get("amount"))
         if unit_price is not None and qty:
-            amount = round(unit_price * qty, 2)
+            amount = (unit_price * qty).quantize(Decimal("0.01"))
         spec = ""
         for spec_item in ((entry.get("specInfo") or {}).get("specItems") or []):
             if isinstance(spec_item, dict) and spec_item.get("specValue"):
@@ -1908,11 +1921,15 @@ def _extract_1688_items(order: Alibaba1688Order | None) -> list[dict]:
             "productName": str(entry.get("productName") or "").strip(),
             "skuId": str(entry.get("skuId") or "").strip(),
             "spec": spec,
-            "quantity": qty,
-            "unitPrice": unit_price,
-            "amount": amount,
+            "quantity": float(qty) if qty is not None else None,
+            "unitPrice": float(unit_price) if unit_price is not None else None,
+            "amount": float(amount) if amount is not None else None,
             "statusLabel": str(entry.get("entryStatusLabel") or "").strip(),
-            "receivedQuantity": _float(extension.get("receivedQuantity")),
+            "receivedQuantity": (
+                float(received_qty)
+                if (received_qty := _quantity(extension.get("receivedQuantity"))) is not None
+                else None
+            ),
         })
     return items
 
@@ -2377,18 +2394,33 @@ def _po_amount_closure(purchase_orders: list[dict], order_amount) -> dict:
     """
     if not purchase_orders:
         return {"relevant": False, "allocTotal": None, "gap": None, "closed": True}
-    total = 0.0
+    total = Decimal("0")
+    has_explicit_allocation = False
     for po in purchase_orders:
-        alloc = po.get("allocAmount")
+        alloc = parse_decimal(po.get("allocAmount"))
         if alloc is not None and alloc > 0:
-            total += float(alloc)
-        elif po.get("amount") is not None:
-            total += float(po["amount"])
+            total += alloc
+            has_explicit_allocation = True
+        else:
+            po_amount = parse_decimal(po.get("amount"))
+            if po_amount is not None:
+                total += po_amount
+    total = total.quantize(Decimal("0.01"))
     if order_amount is None:
-        return {"relevant": True, "allocTotal": round(total, 2), "gap": None, "closed": True}
-    gap = round(float(order_amount) - total, 2)
-    closed = abs(gap) <= max(float(order_amount) * 0.02, 0.05)
-    return {"relevant": True, "allocTotal": round(total, 2), "gap": gap, "closed": closed}
+        return {"relevant": True, "allocTotal": float(total), "gap": None, "closed": True}
+    target = parse_decimal(order_amount) or Decimal("0")
+    gap = (target - total).quantize(Decimal("0.01"))
+    # 单张历史关联且没有显式分摊时只展示差额，不把运费/抵扣差异误报为合并拆分异常。
+    if len(purchase_orders) == 1 and not has_explicit_allocation:
+        closed = True
+    else:
+        closed = abs(gap) <= max(abs(target) * Decimal("0.02"), Decimal("0.05"))
+    return {
+        "relevant": True,
+        "allocTotal": float(total),
+        "gap": float(gap),
+        "closed": closed,
+    }
 
 
 def _order_date_str(order: Alibaba1688Order) -> str | None:

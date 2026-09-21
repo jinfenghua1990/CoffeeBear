@@ -454,6 +454,8 @@ def confirm_match(db: Session, *, txn_id: int, settlement_id: int,
         raise ValueError("流水或应收记录不存在")
     if txn.direction != "in":
         raise ValueError("仅入账流水可确认为回款")
+    db.refresh(txn, with_for_update=True)
+    db.refresh(settlement, with_for_update=True)
     confirmed = (
         db.query(ReconciliationMatch)
         .filter_by(txn_id=txn_id, status="confirmed")
@@ -463,6 +465,17 @@ def confirm_match(db: Session, *, txn_id: int, settlement_id: int,
         if confirmed.target_type == "settlement" and confirmed.target_id == settlement_id:
             raise ValueError("该匹配已确认")
         raise ValueError("该银行流水已确认到其他目标，不可重复确认")
+    expected = to_decimal(settlement.expected_amount)
+    settled_before = settled_amount_of(db, settlement.id)
+    remaining = max(expected - settled_before, Decimal("0"))
+    txn_amount = to_decimal(txn.amount)
+    if remaining <= Decimal("0.01"):
+        raise ValueError("该应收记录已结清，不能继续确认回款")
+    if txn_amount > remaining + Decimal("0.01"):
+        raise ValueError(
+            f"本次到账 {txn_amount} 超过该应收剩余金额 {remaining}，当前模型不允许超额确认"
+        )
+
     rules = active_rule_tuples(db)
     best = suggest_for_txn(db, txn, top=5, rules=rules)
     hit = next((b for b in best if b["settlement"].id == settlement_id), None)
@@ -525,10 +538,13 @@ def overview(db: Session) -> dict[str, Any]:
         agg["expected"] += expected
         agg["settled"] += settled
     received = sum((v["settled"] for v in per_platform.values()), Decimal("0"))
+    pending = max(receivable - received, Decimal("0"))
+    overpaid = max(received - receivable, Decimal("0"))
     return {
         "receivable": f"{receivable:f}",
         "received": f"{received:f}",
-        "pending": f"{receivable - received:f}",
+        "pending": f"{pending:f}",
+        "overpaid": f"{overpaid:f}",
         "byPlatform": {
             p: {"expected": f"{v['expected']:f}", "settled": f"{v['settled']:f}"}
             for p, v in per_platform.items()

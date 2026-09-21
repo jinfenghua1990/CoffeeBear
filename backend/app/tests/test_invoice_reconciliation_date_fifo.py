@@ -3,6 +3,7 @@ from decimal import Decimal
 
 from app.models.purchase import ExternalPurchaseOrder, JackyunPurchaseOrder, JackyunPurchaseOrderLink
 from app.models.tax import TaxInvoice, TaxInvoiceLink
+from app.services import invoice_reconciliation
 from app.services.invoice_reconciliation import reconcile
 
 
@@ -272,3 +273,14 @@ def test_bank_manual_link_does_not_override_purchase_fifo(db_session):
     assert invoice_row["status"] == "matched"
     assert [row["orderNo"] for row in invoice_row["covered"]] == [order.external_order_id]
     assert invoice_row["covered"][0]["source"] == "auto"
+
+def test_supplier_match_does_not_accept_arbitrary_prefix():
+    assert (
+        invoice_reconciliation.normalize_supplier("河北鸿鲲食品有限公司")
+        == invoice_reconciliation.normalize_supplier("河北鸿鲲食品")
+    )
+    assert not invoice_reconciliation._matches(
+        invoice_reconciliation.normalize_supplier("北京华"),
+        invoice_reconciliation.normalize_supplier("北京华贸世纪"),
+    )
+

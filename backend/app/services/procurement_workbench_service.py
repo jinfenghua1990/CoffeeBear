@@ -13,9 +13,11 @@ from __future__ import annotations
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from sqlalchemy.orm import Session
 
+from app.config import settings
 from app.core.audit import audit
 from app.models.alibaba1688_import import Alibaba1688Order
 from app.models.catalog import Warehouse
@@ -78,6 +80,17 @@ def _number(value: Any) -> float | None:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _view_decimal(value: Any) -> Decimal:
+    """把链路序列化视图值恢复为 Decimal；仅用于内部 view-dict → 业务计算边界。
+
+    _order_row 为兼容前端会输出 JSON 数字（float），这里立即通过其十进制文本表示
+    恢复 Decimal。全局 money.to_decimal 继续严格拒绝 float，避免业务层误用二进制金额。
+    """
+    if isinstance(value, float):
+        return Decimal(str(value))
+    return to_decimal(value)
 
 
 def _channel_key(platform: str | None) -> str:
@@ -564,28 +577,36 @@ def _pending_queue(row: dict) -> str | None:
             return "inbound"
 
     invoice_status = str(row.get("invoiceStatus") or "").strip().lower()
-    invoice_outstanding = float(row.get("invoiceOutstanding") or 0)
-    invoice_done = bool(row.get("invoice")) and invoice_status == "done" and invoice_outstanding <= 0.005
+    invoice_outstanding = _view_decimal(row.get("invoiceOutstanding"))
+    invoice_done = (
+        bool(row.get("invoice"))
+        and invoice_status == "done"
+        and invoice_outstanding <= Decimal("0.005")
+    )
     if inbound_ready and not invoice_done:
         return "invoice"
     return None
 
 
-def _paid_amount(row: dict, cap: float | None = None) -> float:
-    """合并结算与平台付款事实：同一订单取较大值，避免把同一笔付款重复相加。"""
+def _paid_amount(row: dict, cap: Any = None) -> Decimal:
+    """合并结算与平台付款事实；金额计算全程 Decimal。"""
     settlement_paid = sum(
-        float(item.get("paidAmount") or item.get("amount") or 0)
-        for item in row.get("settlement") or []
-        if item.get("paid")
+        (
+            _view_decimal(item.get("paidAmount") or item.get("amount"))
+            for item in row.get("settlement") or []
+            if item.get("paid")
+        ),
+        Decimal("0"),
     )
     platform_paid = (
-        float(row.get("paidAmount") or row.get("amount") or 0)
+        _view_decimal(row.get("paidAmount") or row.get("amount"))
         if row.get("paidOn1688")
-        else 0.0
+        else Decimal("0")
     )
     paid = max(settlement_paid, platform_paid)
     if cap is not None:
-        paid = min(paid, max(0.0, cap))
+        cap_value = _view_decimal(cap)
+        paid = min(paid, max(Decimal("0"), cap_value))
     return paid
 
 
@@ -593,7 +614,7 @@ def summary(db: Session) -> dict:
     """采购工作台统计指标，全部基于本地已落库事实。"""
     pairs, pf = chain_snapshot(db)
     rows = [_order_row(db, o, ext, pf=pf) for o, ext in pairs]
-    today = datetime.now().date()
+    today = datetime.now(ZoneInfo(settings.TZ)).date()
     consumable_nos = _consumable_source_nos(db)
     new_orders = 0
     pending_sku = 0
@@ -608,10 +629,10 @@ def summary(db: Session) -> dict:
     consumable_inbound = 0
     transit_orders = 0
     completed_orders = 0
-    paid_amount = 0.0
-    total_amount = 0.0
+    paid_amount = Decimal("0")
+    total_amount = Decimal("0")
     for row in rows:
-        amount = float(row.get("amount") or 0)
+        amount = _view_decimal(row.get("amount"))
         total_amount += amount
         paid_amount += _paid_amount(row, cap=amount)
 
@@ -672,9 +693,9 @@ def summary(db: Session) -> dict:
         "consumableInbound": consumable_inbound,
         "transitOrders": transit_orders,
         "completedOrders": completed_orders,
-        "paidRate": round(paid_amount / total_amount * 100) if total_amount else 0,
-        "paidAmount": round(paid_amount, 2),
-        "totalAmount": round(total_amount, 2),
+        "paidRate": round(paid_amount / total_amount * Decimal("100")) if total_amount else 0,
+        "paidAmount": float(paid_amount.quantize(Decimal("0.01"))),
+        "totalAmount": float(total_amount.quantize(Decimal("0.01"))),
         "funnel": _funnel_from_rows(rows),
         "todos": _todos_from_rows(rows),
     }
@@ -851,7 +872,7 @@ def list_orders(
     status = status if status in _VALID_STATUSES else "all"
     pairs, pf = chain_snapshot(db)
     rows = [_order_row(db, o, ext, pf=pf) for o, ext in pairs]
-    today = datetime.now().date()
+    today = datetime.now(ZoneInfo(settings.TZ)).date()
     exception_refs = _exception_refs(db)
     consumable_nos = _consumable_source_nos(db)
     channel = channel if channel in {"all", "1688", "pdd", "taobao", "other"} else "all"
@@ -1046,25 +1067,35 @@ def _warehouse_block(db: Session, row: dict[str, Any]) -> dict[str, Any]:
     )
     allocations = row.get("allocations") or []
     sku_ids = [a.get("skuId") for a in allocations if a.get("skuId")]
-    ordered_qty = sum(float(a.get("quantity") or 0) for a in allocations)
+    ordered_qty = sum(
+        (_view_decimal(a.get("quantity")) for a in allocations),
+        Decimal("0"),
+    )
 
     wh = db.query(Warehouse).filter(Warehouse.name == warehouse_name).first() if warehouse_name else None
     jackyun_wh_id = (wh.jackyun_warehouse_id or "") if wh else ""
     is_sellable = bool(wh.is_sellable) if wh else None
 
-    current_stock: float | None = None
+    current_stock_value: Decimal | None = None
     if wh is not None and sku_ids:
         from app.services.inventory_position_service import current_positions
         positions = current_positions(db)
-        current_stock = float(sum(
-            positions["by_sku_warehouse"].get(sku_id, {}).get(wh.id, Decimal("0"))
-            for sku_id in sku_ids
-        ))
+        current_stock_value = sum(
+            (
+                positions["by_sku_warehouse"].get(sku_id, {}).get(wh.id, Decimal("0"))
+                for sku_id in sku_ids
+            ),
+            Decimal("0"),
+        )
 
     purchase_status = str(row.get("purchaseStatus") or "")
     inbound_done = bool(inbound) or bool(consumable.get("received"))
     # 在途数量：已发货/到货但尚未入库时，等于本单分配数量；其余为 0。
-    in_transit = 0.0 if inbound_done else (ordered_qty if purchase_status in {"shipped", "arrived"} else 0.0)
+    in_transit = (
+        Decimal("0")
+        if inbound_done
+        else (ordered_qty if purchase_status in {"shipped", "arrived"} else Decimal("0"))
+    )
 
     return {
         "warehouseName": warehouse_name,
@@ -1073,8 +1104,8 @@ def _warehouse_block(db: Session, row: dict[str, Any]) -> dict[str, Any]:
         "targetWarehouseName": target_warehouse_name,
         "jackyunWarehouseId": jackyun_wh_id,
         "isSellable": is_sellable,
-        "currentStock": current_stock,
-        "inTransitQty": in_transit,
+        "currentStock": float(current_stock_value) if current_stock_value is not None else None,
+        "inTransitQty": float(in_transit),
     }
 
 

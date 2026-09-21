@@ -11,17 +11,15 @@ from __future__ import annotations
 import re
 import unicodedata
 from collections import defaultdict
-from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any
-from zoneinfo import ZoneInfo
 
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from app.config import settings
 from app.models.sales import SalesOrder, SalesOrderItem
 from app.models.tax import TaxInvoice, TaxInvoiceImport, TaxInvoiceLink
+from app.services.monthly_core import month_bounds
 from app.services.tax_invoice_service import is_effective_for_accounting
 from app.utils.money import to_decimal
 
@@ -125,12 +123,7 @@ def monthly_ledger(db: Session, year: int, month: int) -> dict[str, Any]:
     if year < 2000 or year > 9999 or month < 1 or month > 12:
         raise ValueError("账期不正确")
 
-    tz = ZoneInfo(settings.TZ)
-    start = datetime(year, month, 1, tzinfo=tz)
-    if month == 12:
-        end = datetime(year + 1, 1, 1, tzinfo=tz)
-    else:
-        end = datetime(year, month + 1, 1, tzinfo=tz)
+    start, end = month_bounds(year, month)
 
     # 只把已确认(active)的官方税务导入作为做账真值来源。
     rows = (

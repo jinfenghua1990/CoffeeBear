@@ -7,7 +7,7 @@ import pytest
 from app.models.catalog import ProductSku
 from app.models.jackyun import JackyunGoodsDocument, JackyunGoodsDocumentItem
 from app.models.profit import CostSnapshot
-from app.models.sales import SalesOrder, SalesOrderItem
+from app.models.sales import AftersalesOrder, SalesOrder, SalesOrderItem
 from app.services import dashboard
 from app.services.profit import compute, effective_cost, gross_profit, list_costs, upsert_cost
 
@@ -347,3 +347,39 @@ def test_sku_ranking_allocates_order_paid_amount_by_cost_share(db_session):
     assert Decimal(by_code["P-RANK-A"]["salesAmount"]) == Decimal("40.00")  # 100 × 8/20
     assert Decimal(by_code["P-RANK-B"]["salesAmount"]) == Decimal("60.00")  # 100 × 12/20
     assert sum(Decimal(row["salesAmount"]) for row in rows) == Decimal("100.00")
+
+def test_profit_net_sales_uses_same_refund_formula_as_monthly_overview(db_session):
+    sku = ProductSku(jackyun_sku_id="test-profit-refund", sku_code="P-REFUND", sku_name="退款口径")
+    db_session.add(sku)
+    db_session.flush()
+    inbound = JackyunGoodsDocument(
+        document_type="inbound", goodsdoc_no="PROFIT-REFUND-INBOUND",
+        document_at=datetime(2098, 4, 1, tzinfo=timezone.utc),
+    )
+    db_session.add(inbound)
+    db_session.flush()
+    db_session.add(JackyunGoodsDocumentItem(
+        document_id=inbound.id, line_no=1, goods_no=sku.sku_code,
+        quantity=Decimal("10"), unit_price_tax=Decimal("10"), matched_sku_id=sku.id,
+    ))
+    order = SalesOrder(
+        order_no="test-profit-refund-order", order_status="已完成",
+        paid_amount=Decimal("100"), ordered_at=datetime(2098, 4, 10, tzinfo=timezone.utc),
+    )
+    db_session.add(order)
+    db_session.flush()
+    db_session.add(SalesOrderItem(
+        order_id=order.id, sku_id=sku.id, sku_code=sku.sku_code,
+        quantity=Decimal("2"), amount=None, discount_amount=None,
+    ))
+    db_session.add(AftersalesOrder(
+        aftersale_no="test-profit-refund-aftersale",
+        order_no=order.order_no, type="refund", status="done",
+        refund_amount=Decimal("30"), created_at_src=datetime(2098, 4, 20, tzinfo=timezone.utc),
+    ))
+    db_session.flush()
+
+    result = compute(db_session, 2098, 4)
+    assert result["netSales"] == "70.00"
+    assert result["goodsCost"] == "20.00"
+    assert result["grossProfit"] == "50.00"

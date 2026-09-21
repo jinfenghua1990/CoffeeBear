@@ -1,6 +1,8 @@
 from datetime import date, datetime
 from decimal import Decimal
 import re
+
+import pytest
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
@@ -12,7 +14,7 @@ from app.models.procurement_chain import ProcurementChainLink
 from app.models.purchase import ExternalPurchaseOrder, PurchaseAllocationItem
 from app.config import settings
 from app.services import consumable_purchase_service, purchase_service
-from app.services.local_inbound_service import _number, create_purchase_inbound
+from app.services.local_inbound_service import _number, create_purchase_inbound, delete_local_purchase_inbound
 
 
 def test_local_purchase_inbound_uses_system_number_and_links_allocation(db_session):
@@ -123,4 +125,58 @@ def test_purchase_allocation_uses_total_to_calculate_unit_price(db_session):
     db_session.delete(allocation)
     db_session.delete(po)
     db_session.delete(sku)
+    db_session.commit()
+
+def test_local_purchase_inbound_allows_cumulative_partial_receipts(db_session):
+    po = ExternalPurchaseOrder(
+        external_order_id=f"1688-PARTIAL-{uuid4().hex[:8]}",
+        platform="1688", supplier_name="分批到货供应商", purchase_status="confirmed",
+    )
+    sku = ProductSku(
+        jackyun_sku_id=f"J-{uuid4().hex}", sku_code=f"PARTIAL-SKU-{uuid4().hex[:8]}",
+        sku_name="分批到货货品", unit="件",
+    )
+    warehouse = Warehouse(
+        code=f"PARTIAL-{uuid4().hex[:8]}", name="分批到货仓", purpose="goods", status="active"
+    )
+    db_session.add_all([po, sku, warehouse])
+    db_session.flush()
+    allocation = PurchaseAllocationItem(
+        po_id=po.id, sku_id=sku.id, sku_code=sku.sku_code, goods_name=sku.sku_name,
+        quantity=Decimal("10"), unit_price=Decimal("2"), amount=Decimal("20"), source="manual",
+    )
+    db_session.add(allocation)
+    db_session.commit()
+
+    first, _ = create_purchase_inbound(
+        db_session, order_id=-po.id, warehouse_id=warehouse.id,
+        items=[{"allocation_id": allocation.id, "quantity": Decimal("5")}], actor="pytest",
+    )
+    db_session.refresh(allocation)
+    assert "累计入库 5" in allocation.note
+
+    second, _ = create_purchase_inbound(
+        db_session, order_id=-po.id, warehouse_id=warehouse.id,
+        items=[{"allocation_id": allocation.id, "quantity": Decimal("5")}], actor="pytest",
+    )
+    db_session.refresh(allocation)
+    assert allocation.note == f"由入库单 #{second.id} 明细自动反填"
+
+    with pytest.raises(ValueError, match="已全部入库"):
+        create_purchase_inbound(
+            db_session, order_id=-po.id, warehouse_id=warehouse.id,
+            items=[{"allocation_id": allocation.id, "quantity": Decimal("1")}], actor="pytest",
+        )
+
+    delete_local_purchase_inbound(db_session, document_id=second.id)
+    db_session.refresh(allocation)
+    assert "累计入库 5" in allocation.note
+    delete_local_purchase_inbound(db_session, document_id=first.id)
+    db_session.refresh(allocation)
+    assert allocation.source == "manual"
+
+    db_session.delete(allocation)
+    db_session.delete(po)
+    db_session.delete(sku)
+    db_session.delete(warehouse)
     db_session.commit()

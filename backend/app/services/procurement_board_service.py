@@ -13,15 +13,18 @@ from __future__ import annotations
 
 from collections import Counter
 from datetime import date, datetime, timedelta
+from decimal import Decimal
+from zoneinfo import ZoneInfo
 
 from sqlalchemy.orm import Session
 
+from app.config import settings
 from app.services.procurement_chain_service import (
     _order_row,
     chain_snapshot,
     supplier_detail,
 )
-from app.services.procurement_workbench_service import _pending_queue, _step_states
+from app.services.procurement_workbench_service import _pending_queue, _step_states, _view_decimal
 
 
 # ---------- 顶部统计卡 ----------
@@ -37,12 +40,12 @@ def overview(db: Session) -> dict:
     po_count = 0          # 待采购单
     inbound_count = 0     # 待入库
     invoice_count = 0     # 待发票
-    paid_amount = 0.0     # 已付款（吉客云结算或 1688 已付款事实）
-    total_amount = 0.0    # 应付款总额
+    paid_amount = Decimal("0")     # 已付款（吉客云结算或 1688 已付款事实）
+    total_amount = Decimal("0")    # 应付款总额
     yesterday_count = 0   # 昨日新增订单（用于真实 delta 计算）
 
     for row in rows:
-        amount = row.get("amount") or 0
+        amount = _view_decimal(row.get("amount"))
         total_amount += amount
         # 今日 / 昨日新增订单（按 order_date 兜底 created_at）
         d = row.get("orderDate")
@@ -65,9 +68,9 @@ def overview(db: Session) -> dict:
             inbound_count += 1
         elif queue == "invoice":
             invoice_count += 1
-        paid_amount += _paid_amount(row, cap=float(amount))
+        paid_amount += _paid_amount(row, cap=amount)
 
-    paid_rate = round(paid_amount / total_amount * 100) if total_amount else 0
+    paid_rate = round(paid_amount / total_amount * Decimal("100")) if total_amount else 0
     return {
         "todayNewOrders": today_count,
         "todayDelta": today_count - yesterday_count,
@@ -76,13 +79,13 @@ def overview(db: Session) -> dict:
         "pendingInbound": inbound_count,
         "pendingInvoice": invoice_count,
         "paidRate": paid_rate,
-        "paidAmount": round(paid_amount, 2),
-        "totalAmount": round(total_amount, 2),
+        "paidAmount": float(paid_amount.quantize(Decimal("0.01"))),
+        "totalAmount": float(total_amount.quantize(Decimal("0.01"))),
     }
 
 
 def _today() -> date:
-    return datetime.now().date()
+    return datetime.now(ZoneInfo(settings.TZ)).date()
 
 
 def _first_undone_label(row: dict) -> str | None:
@@ -90,17 +93,25 @@ def _first_undone_label(row: dict) -> str | None:
     return _pending_queue(row)
 
 
-def _paid_amount(row: dict, cap: float | None = None) -> float:
-    """合并吉客云结算与 1688 已付款事实，避免同一订单重复计入。"""
+def _paid_amount(row: dict, cap=None) -> Decimal:
+    """合并吉客云结算与 1688 已付款事实；金额计算全程 Decimal。"""
     settlement_paid = sum(
-        float(item.get("paidAmount") or item.get("amount") or 0)
-        for item in row.get("settlement") or []
-        if item.get("paid")
+        (
+            _view_decimal(item.get("paidAmount") or item.get("amount"))
+            for item in row.get("settlement") or []
+            if item.get("paid")
+        ),
+        Decimal("0"),
     )
-    platform_paid = float(row.get("paidAmount") or row.get("amount") or 0) if row.get("paidOn1688") else 0.0
+    platform_paid = (
+        _view_decimal(row.get("paidAmount") or row.get("amount"))
+        if row.get("paidOn1688")
+        else Decimal("0")
+    )
     paid = max(settlement_paid, platform_paid)
     if cap is not None:
-        paid = min(paid, max(0.0, cap))
+        cap_value = _view_decimal(cap)
+        paid = min(paid, max(Decimal("0"), cap_value))
     return paid
 
 
@@ -339,7 +350,9 @@ def _supplier_often_skus(db: Session, supplier_name: str) -> list[dict]:
             "purchaseCount": count,   # 采购次数
             "qty": count,             # 数量（次数即数量）
             "unitPrice": meta["unitPrice"],
-            "amount": round(count * (meta["unitPrice"] or 0), 2),
+            "amount": float(
+                (Decimal(count) * _view_decimal(meta["unitPrice"])).quantize(Decimal("0.01"))
+            ),
         })
     return result
 
@@ -347,21 +360,25 @@ def _supplier_often_skus(db: Session, supplier_name: str) -> list[dict]:
 def _payment_breakdown(row: dict) -> dict:
     """金额与付款分层 8 列。"""
     # 商品金额优先用 1688 订单的 goods_total，否则回退为实付款额
-    goods_total = float(row.get("goodsTotal") or row.get("amount") or 0)
-    freight = float(row.get("freight") or 0)
-    extra = sum(float(item.get("amount") or 0) for item in row.get("expenses") or [])
-    discount = float(row.get("discount") or 0)
+    goods_total = _view_decimal(row.get("goodsTotal") or row.get("amount"))
+    freight = _view_decimal(row.get("freight"))
+    extra = sum(
+        (_view_decimal(item.get("amount")) for item in row.get("expenses") or []),
+        Decimal("0"),
+    )
+    discount = _view_decimal(row.get("discount"))
     total_due = goods_total + freight + extra - discount
     paid_amount = _paid_amount(row, cap=total_due)
-    unpaid_amount = max(0, round(total_due - paid_amount, 2))
-    diff_amount = 0.0
+    unpaid_amount = max(Decimal("0"), total_due - paid_amount)
+    diff_amount = Decimal("0")
+    money = lambda value: float(value.quantize(Decimal("0.01")))
     return {
-        "goodsAmount": round(goods_total, 2),
-        "freight": round(freight, 2),
-        "extra": round(extra, 2),
-        "discount": round(discount, 2),
-        "totalDue": round(total_due, 2),
-        "paidAmount": round(paid_amount, 2),
-        "unpaidAmount": unpaid_amount,
-        "diffAmount": round(diff_amount, 2),
+        "goodsAmount": money(goods_total),
+        "freight": money(freight),
+        "extra": money(extra),
+        "discount": money(discount),
+        "totalDue": money(total_due),
+        "paidAmount": money(paid_amount),
+        "unpaidAmount": money(unpaid_amount),
+        "diffAmount": money(diff_amount),
     }

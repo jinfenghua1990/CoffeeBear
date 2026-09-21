@@ -4,9 +4,8 @@
 - 吉客云开放平台 API 有到期风险；到期后销售业绩改由用户从吉客云客户端导出
   《销售单查询》（含「销售单」+「销售单货品」两个 sheet）手工导入本通道。
 - 金额/业绩维度一律以用户上传表格为准（与采购侧「入库申请单货品」口径一致）。
-- 本通道只落「成交单」（待发/已发/待确认收货/已完成，口径见 services/sales_scope），
-  关闭/取消/作废/待审核/退货/退款单不导入
-  （避免污染业绩聚合）；若库内已有同号订单被本文件标记为取消，则删除该残留。
+- 成交口径仍由 services/sales_scope 唯一决定；关闭/取消/作废/待审核/退货/退款
+  保留为历史业务事实，但不会进入业绩聚合，也不会物理删除已有订单。
 - 幂等：按 JY 订单号 upsert，重复导入覆盖更新；订单明细整单替换。
 
 时间口径：吉客云导出的「处理时间」是相对时长（如 15小时44分钟），不可用；
@@ -15,12 +14,15 @@
 from __future__ import annotations
 
 import hashlib
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
+from decimal import Decimal, InvalidOperation
 from io import BytesIO
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from openpyxl import load_workbook
+from openpyxl.utils.datetime import from_excel
 from sqlalchemy import delete
 from sqlalchemy.orm import Session
 
@@ -78,32 +80,42 @@ def _cell(row: dict[str, Any], aliases: tuple[str, ...]) -> Any:
     return None
 
 
-def _num(value: Any) -> float | None:
+def _num(value: Any) -> Decimal | None:
+    """金额/数量统一用 Decimal，禁止二进制 float 进入业务字段。"""
     if value is None:
         return None
     text = str(value).strip().replace(",", "").replace("¥", "")
     if not text:
         return None
     try:
-        return round(float(text), 4)
-    except ValueError:
+        return Decimal(text).quantize(Decimal("0.0001"))
+    except (InvalidOperation, ValueError):
         return None
 
 
 def _dt(value: Any) -> datetime | None:
+    """吉客云时间统一解释为 Asia/Shanghai，并返回 aware datetime。"""
     if value is None:
         return None
+    tz = ZoneInfo(settings.TZ)
+    if isinstance(value, datetime):
+        return value.astimezone(tz) if value.tzinfo else value.replace(tzinfo=tz)
+    if isinstance(value, date):
+        return datetime(value.year, value.month, value.day, tzinfo=tz)
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        try:
+            parsed = from_excel(value)
+            return parsed.astimezone(tz) if parsed.tzinfo else parsed.replace(tzinfo=tz)
+        except (TypeError, ValueError, OverflowError):
+            return None
     text = str(value).strip()
     if not text or "小时" in text or "分钟" in text:
         return None
     for fmt in _ts_fmts:
         try:
-            return datetime.strptime(text, fmt)
+            return datetime.strptime(text, fmt).replace(tzinfo=tz)
         except ValueError:
             continue
-    # 纯日期字符串（Excel 原生 date）
-    if isinstance(value, datetime):
-        return value
     return None
 
 
@@ -253,6 +265,7 @@ def import_sales_file(
     ws, hd = order_ws
     valid_rows: list[dict] = []
     cancelled_nos: set[str] = set()
+    cancelled_payloads: dict[str, dict[str, Any]] = {}
     order_idx = 0
     for row in ws.iter_rows(values_only=True):
         if not row:
@@ -265,6 +278,7 @@ def import_sales_file(
         status = str(_cell(payload, _STATUS_KEYS) or "").strip()
         if not _is_valid_status(status):
             cancelled_nos.add(order_no)
+            cancelled_payloads[order_no] = payload
             continue
         valid_rows.append(payload)
         order_idx += 1
@@ -290,9 +304,9 @@ def import_sales_file(
             "warehouse": str(_cell(payload, _WAREHOUSE_KEYS) or ""),
             "logisticsNo": str(_cell(payload, _LOGISTICS_KEYS) or ""),
             "logisticsCompany": str(_cell(payload, _EXPRESS_KEYS) or ""),
-            "goodsCount": _num(_cell(payload, _QTY_KEYS)),
-            "goodsCost": _num(_cell(payload, _COST_KEYS)),
-            "grossProfit": _num(_cell(payload, _GROSS_KEYS)),
+            "goodsCount": str(_num(_cell(payload, _QTY_KEYS))) if _num(_cell(payload, _QTY_KEYS)) is not None else None,
+            "goodsCost": str(_num(_cell(payload, _COST_KEYS))) if _num(_cell(payload, _COST_KEYS)) is not None else None,
+            "grossProfit": str(_num(_cell(payload, _GROSS_KEYS))) if _num(_cell(payload, _GROSS_KEYS)) is not None else None,
             "_source": "jky_sales_file",
             "_file": original_name,
             "_sha": sha,
@@ -308,9 +322,10 @@ def import_sales_file(
             db.add(row)
             created += 1
         else:
-            row.source_provider = "jky_file"
-            row.source_order_id = order_no
-            row.raw = raw
+            if not row.source_provider or row.source_provider == "jky_file":
+                row.source_provider = "jky_file"
+                row.source_order_id = order_no
+            row.raw = {**(row.raw or {}), **raw}
             updated += 1
         row.platform = str(_cell(payload, _CHANNEL_KEYS) or "").strip()
         row.order_type = str(_cell(payload, _TYPE_KEYS) or "").strip()
@@ -323,22 +338,67 @@ def import_sales_file(
         row.ordered_at = order_time
         row.paid_at = pay_at
 
-    # 库内残留的、被本文件标记为取消的单 → 删除（以清单为准）
+    # 非成交订单保留为业务事实，只撤销财务投影；禁止物理删除或破坏其他同步通道身份。
     removed_cancelled = 0
+    cancelled_preserved = 0
     if cancelled_nos:
-        leftovers = (
-            db.query(SalesOrder)
+        leftovers = {
+            row.order_no: row
+            for row in db.query(SalesOrder)
             .filter(SalesOrder.order_no.in_(list(cancelled_nos)))
             .all()
-        )
+        }
         from app.services import finance_projection_service
-        for row in leftovers:
+        for order_no in sorted(cancelled_nos):
+            payload = cancelled_payloads[order_no]
+            row = leftovers.get(order_no)
+            if row is None:
+                row = SalesOrder(
+                    order_no=order_no,
+                    source_provider="jky_file",
+                    source_order_id=order_no,
+                    raw={},
+                )
+                db.add(row)
+                db.flush()
+            status = str(_cell(payload, _STATUS_KEYS) or "").strip()
+            order_time = (
+                _dt(_cell(payload, _ORDERTIME_KEYS))
+                or _dt(_cell(payload, _PAYTIME_KEYS))
+                or _dt(_cell(payload, _SHIPTIME_KEYS))
+            )
+            pay_at = _dt(_cell(payload, _PAYTIME_KEYS)) or order_time
+            row.raw = {
+                **(row.raw or {}),
+                "orderStatus": status,
+                "settleStatus": str(_cell(payload, _SETTLE_KEYS) or ""),
+                "warehouse": str(_cell(payload, _WAREHOUSE_KEYS) or ""),
+                "_source": "jky_sales_file",
+                "_file": original_name,
+                "_sha": sha,
+                "_importedAt": imported_at,
+            }
+            row.order_status = status
+            if not row.platform:
+                row.platform = str(_cell(payload, _CHANNEL_KEYS) or "").strip()
+            if not row.order_type:
+                row.order_type = str(_cell(payload, _TYPE_KEYS) or "").strip()
+            if not row.pay_status:
+                row.pay_status = str(_cell(payload, _SETTLE_KEYS) or "").strip()
+            if row.ordered_at is None:
+                row.ordered_at = order_time
+            if row.paid_at is None:
+                row.paid_at = pay_at
+            amount = _num(_cell(payload, _AMOUNT_KEYS))
+            paid = _num(_cell(payload, _PAID_KEYS))
+            if row.order_amount is None:
+                row.order_amount = amount if amount is not None else paid
+            if row.paid_amount is None:
+                row.paid_amount = paid if paid is not None else amount
             finance_projection_service.delete_projected_source(
                 db, "domestic_sales_order", str(row.id)
             )
-            db.query(SalesOrderItem).filter(SalesOrderItem.order_id == row.id).delete()
-            db.delete(row)
-            removed_cancelled += 1
+            cancelled_preserved += 1
 
     db.flush()
 
@@ -411,6 +471,7 @@ def import_sales_file(
         "updated": updated,
         "cancelledSkipped": len(cancelled_nos),
         "removedCancelled": removed_cancelled,
+        "cancelledPreserved": cancelled_preserved,
         "itemsImported": item_total,
         "itemOrderHits": item_order_hits,
         "financeProjectedOrders": projected_orders,

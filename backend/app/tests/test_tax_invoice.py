@@ -250,7 +250,18 @@ def test_invoice_business_match_and_bank_payment_status_are_independent(db_sessi
     """同一张进项发票的业务匹配与银行付款核对必须各算各的，互不污染。"""
     from datetime import datetime, timezone
 
+    from app.models.purchase import ExternalPurchaseOrder
     from app.models.tax import TaxInvoice, TaxInvoiceLink
+
+    purchase = ExternalPurchaseOrder(
+        external_order_id=f"DOMAIN-PO-{uuid4().hex[:10]}",
+        platform="other",
+        supplier_name="独立域供应商",
+        order_amount=Decimal("1000.00"),
+        paid_amount=Decimal("1000.00"),
+    )
+    db_session.add(purchase)
+    db_session.flush()
 
     invoice = TaxInvoice(
         invoice_key=f"pytest-domain-{uuid4().hex}",
@@ -270,7 +281,7 @@ def test_invoice_business_match_and_bank_payment_status_are_independent(db_sessi
     business_link = TaxInvoiceLink(
         invoice_id=invoice.id,
         target_type="external_purchase_order",
-        target_id=987654321,
+        target_id=purchase.id,
         allocated_amount=Decimal("600.00"),
         match_method="manual",
         confirmed=True,
@@ -321,7 +332,18 @@ def test_invoice_business_match_and_bank_payment_status_are_independent(db_sessi
 
 def test_list_invoices_match_filter_uses_live_business_domain_not_cached_status(db_session):
     """服务端筛选必须与页面实时 businessMatchStatus 完全一致，银行链接不得参与。"""
+    from app.models.purchase import ExternalPurchaseOrder
     from app.models.tax import TaxInvoice, TaxInvoiceLink
+
+    purchase = ExternalPurchaseOrder(
+        external_order_id=f"FILTER-PO-{uuid4().hex[:10]}",
+        platform="other",
+        supplier_name="筛选口径供应商",
+        order_amount=Decimal("1000.00"),
+        paid_amount=Decimal("1000.00"),
+    )
+    db_session.add(purchase)
+    db_session.flush()
 
     invoice = TaxInvoice(
         invoice_key=f"pytest-filter-domain-{uuid4().hex}",
@@ -339,7 +361,7 @@ def test_list_invoices_match_filter_uses_live_business_domain_not_cached_status(
         TaxInvoiceLink(
             invoice_id=invoice.id,
             target_type="external_purchase_order",
-            target_id=777001,
+            target_id=purchase.id,
             allocated_amount=Decimal("600.00"),
             match_method="manual",
             confirmed=True,
@@ -594,3 +616,48 @@ def test_noneligible_invoice_deactivates_historical_source_ref(db_session):
     assert outcome is False
     assert stale.confirmed is False
     assert invoice.match_status == "unmatched"
+
+def test_orphan_business_link_is_needs_review_in_serialization_and_filter(db_session):
+    from app.models.tax import TaxInvoice, TaxInvoiceLink
+
+    invoice = TaxInvoice(
+        invoice_key=f"pytest-orphan-link-{uuid4().hex}",
+        invoice_number=f"ORPHAN-{uuid4().hex[:10]}",
+        direction="input",
+        status="issued",
+        seller_name="孤立关联供应商",
+        total_amount=Decimal("100.00"),
+        match_status="matched",
+        raw={},
+    )
+    db_session.add(invoice)
+    db_session.flush()
+    db_session.add(TaxInvoiceLink(
+        invoice_id=invoice.id,
+        target_type="external_purchase_order",
+        target_id=999999999,
+        allocated_amount=Decimal("100.00"),
+        match_method="manual",
+        confirmed=True,
+    ))
+    db_session.flush()
+
+    payload = service.serialize_invoice(invoice, db=db_session)
+    assert payload["businessMatchStatus"] == "needs_review"
+    assert payload["businessMatchedAmount"] == "0.0000"
+    assert payload["invalidLinkCount"] == 1
+
+    review_ids = {
+        row["id"]
+        for row in service.list_invoices(
+            db_session, direction="input", match_status="needs_review", limit=500
+        )
+    }
+    matched_ids = {
+        row["id"]
+        for row in service.list_invoices(
+            db_session, direction="input", match_status="matched", limit=500
+        )
+    }
+    assert invoice.id in review_ids
+    assert invoice.id not in matched_ids

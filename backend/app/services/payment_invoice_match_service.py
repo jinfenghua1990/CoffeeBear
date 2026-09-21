@@ -21,6 +21,7 @@ from app.core.audit import audit
 from app.models.bank import BankAccount, BankTransaction
 from app.models.tax import TaxInvoice, TaxInvoiceLink
 from app.services import tax_invoice_service
+from app.services.monthly_core import month_bounds
 from app.utils.money import quantize, to_decimal
 
 TARGET_TYPE = "bank_transaction"
@@ -53,14 +54,13 @@ def _offset_month(year: int, month: int, offset: int) -> tuple[int, int]:
     return target_year, zero_based_month + 1
 
 
-def _invoice_candidate_window(year: int, month: int) -> tuple[date, date]:
-    """当前账期银行流水可匹配的发票日期窗口：前后各 3 个完整自然月。"""
+def _invoice_candidate_window(year: int, month: int):
+    """当前账期银行流水可匹配的发票窗口，统一使用业务时区 [start, end)。"""
     start_year, start_month = _offset_month(year, month, -MATCH_WINDOW_MONTHS)
     end_year, end_month = _offset_month(year, month, MATCH_WINDOW_MONTHS)
-    return (
-        date(start_year, start_month, 1),
-        date(end_year, end_month, calendar.monthrange(end_year, end_month)[1]),
-    )
+    start, _ = month_bounds(start_year, start_month)
+    _, end = month_bounds(end_year, end_month)
+    return start, end
 
 
 def _dec(value: Decimal | int | str | None) -> Decimal:
@@ -121,7 +121,8 @@ def _invoice_brief(invoice: TaxInvoice, link: TaxInvoiceLink | None = None) -> d
         "sellerName": invoice.seller_name,
         "issueDate": invoice.issue_date.isoformat()[:10] if invoice.issue_date else "",
         "totalAmount": str(_dec(invoice.total_amount)),
-        "allocatedAmount": str(_dec(link.allocated_amount)) if link and link.allocated_amount is not None else None,
+        "allocatedAmount": str(_link_amount(link, invoice)) if link else None,
+        "legacyAllocatedAmountMissing": bool(link and link.allocated_amount is None),
     }
 
 
@@ -150,6 +151,7 @@ def _clear_manual_personal_on_bank_evidence(invoice: TaxInvoice) -> None:
 def overview(db: Session, year: int, month: int) -> dict[str, Any]:
     """当月银行付款清单 + 已挂发票 + 当月进项发票池 + 汇总（推导，不落库）。"""
     start, end = _month_range(year, month)
+    invoice_start, invoice_end = month_bounds(year, month)
 
     txns = (
         db.query(BankTransaction)
@@ -235,8 +237,8 @@ def overview(db: Session, year: int, month: int) -> dict[str, Any]:
         db.query(TaxInvoice)
         .filter(
             TaxInvoice.direction == "input",
-            TaxInvoice.issue_date >= start,
-            TaxInvoice.issue_date <= end,
+            TaxInvoice.issue_date >= invoice_start,
+            TaxInvoice.issue_date < invoice_end,
         )
         .order_by(TaxInvoice.issue_date, TaxInvoice.id)
         .all()
@@ -295,6 +297,7 @@ def overview(db: Session, year: int, month: int) -> dict[str, Any]:
                 "accountNo": account.account_no if account else "",
                 "accountName": account.account_name if account else "",
             })
+        linked_amount = min(max(linked_amount, Decimal("0.0000")), total)
         remaining = total - linked_amount
         row = {
             "id": invoice.id,
@@ -632,7 +635,7 @@ def auto_match(db: Session, year: int, month: int, actor: str = "system") -> dic
         .filter(
             TaxInvoice.direction == "input",
             TaxInvoice.issue_date >= invoice_window_start,
-            TaxInvoice.issue_date <= invoice_window_end,
+            TaxInvoice.issue_date < invoice_window_end,
         )
         .all()
     )

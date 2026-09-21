@@ -6,7 +6,7 @@ import hashlib
 import mimetypes
 import re
 from collections import Counter
-from datetime import datetime
+from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
@@ -30,8 +30,9 @@ from app.services.import_lifecycle import (
     transition_lifecycle,
     transition_row_status,
 )
+from app.services.sales_scope import deal_orders_condition, is_deal_status
 from app.utils.money import quantize, to_decimal
-from sqlalchemy import and_, case, cast, func, or_, String
+from sqlalchemy import and_, case, cast, exists, func, or_, String
 from sqlalchemy.orm import aliased
 
 
@@ -466,7 +467,11 @@ def _auto_link(db: Session, invoice: TaxInvoice, related_ref: str, direction: st
         for jpo in db.query(JackyunPurchaseOrder).filter_by(purch_no=ref).all():
             candidates.append(("jackyun_purchase_order", jpo.id))
     if direction in ("output", "unknown"):
-        for sales in db.query(SalesOrder).filter_by(order_no=ref).all():
+        for sales in (
+            db.query(SalesOrder)
+            .filter(SalesOrder.order_no == ref, deal_orders_condition())
+            .all()
+        ):
             candidates.append(("sales_order", sales.id))
 
     if len(candidates) != 1:
@@ -847,33 +852,50 @@ def _invoice_business_context(db: Session, rows: list[TaxInvoice]) -> dict[int, 
         purchase_nos: list[str] = []
         inbound_nos: list[str] = []
         link_rows: list[dict] = []
+        valid_invoice_links: list[TaxInvoiceLink] = []
+        invalid_link_count = 0
         for link in invoice_links:
             target = target_maps.get(link.target_type, {}).get(link.target_id)
+            target_exists = target is not None
+            target_valid = target_exists and (
+                link.target_type != SALES_LINK_TARGET_TYPE
+                or is_deal_status(target.order_status)
+            )
+            if target_valid:
+                valid_invoice_links.append(link)
+            else:
+                invalid_link_count += 1
             if link.target_type == "alibaba1688_order":
                 target_no = target.external_order_id if target else f"#{link.target_id}"
                 target_label = f"1688采购单 {target_no}"
-                purchase_nos.append(target_no)
+                if target_valid:
+                    purchase_nos.append(target_no)
             elif link.target_type == "external_purchase_order":
                 target_no = target.external_order_id if target else f"#{link.target_id}"
                 target_label = f"采购单 {target_no}"
-                purchase_nos.append(target_no)
+                if target_valid:
+                    purchase_nos.append(target_no)
             elif link.target_type == "jackyun_purchase_order":
                 target_no = (target.purch_no or target.jackyun_purch_id) if target else f"#{link.target_id}"
                 target_label = f"吉客云采购单 {target_no}"
-                purchase_nos.append(target_no)
+                if target_valid:
+                    purchase_nos.append(target_no)
             elif link.target_type == "sales_order":
                 target_no = target.order_no if target else f"#{link.target_id}"
                 target_label = f"销售单 {target_no}"
             else:
                 target_no = f"#{link.target_id}"
                 target_label = f"业务单 {target_no}"
-            inbound_nos.extend(inbound_by_target.get((link.target_type, link.target_id), []))
+            if target_valid:
+                inbound_nos.extend(inbound_by_target.get((link.target_type, link.target_id), []))
             link_rows.append({
                 "id": link.id,
                 "targetType": link.target_type,
                 "targetId": link.target_id,
                 "targetNo": target_no,
                 "targetLabel": target_label,
+                "targetExists": target_exists,
+                "targetValid": target_valid,
                 "allocatedAmount": float(link.allocated_amount) if link.allocated_amount is not None else None,
                 "matchMethod": link.match_method,
                 "confirmed": bool(link.confirmed),
@@ -883,16 +905,16 @@ def _invoice_business_context(db: Session, rows: list[TaxInvoice]) -> dict[int, 
         explicit_allocated = sum(
             (
                 quantize(to_decimal(link.allocated_amount))
-                for link in invoice_links
+                for link in valid_invoice_links
                 if link.allocated_amount is not None
             ),
             Decimal("0"),
         )
-        has_unknown_allocation = any(link.allocated_amount is None for link in invoice_links)
+        has_unknown_allocation = any(link.allocated_amount is None for link in valid_invoice_links)
         if invoice_total > 0:
             business_matched = min(max(explicit_allocated, Decimal("0")), invoice_total)
             business_remaining = max(invoice_total - business_matched, Decimal("0"))
-            if has_unknown_allocation:
+            if invalid_link_count or has_unknown_allocation:
                 business_status = "needs_review"
             elif business_matched <= Decimal("0"):
                 business_status = "needs_review" if invoice.match_status == "needs_review" else "unmatched"
@@ -912,6 +934,7 @@ def _invoice_business_context(db: Session, rows: list[TaxInvoice]) -> dict[int, 
             "businessMatchStatus": business_status,
             "businessMatchedAmount": str(quantize(business_matched)),
             "businessRemainingAmount": str(quantize(business_remaining)),
+            "invalidLinkCount": invalid_link_count,
         }
     return result
 
@@ -1264,22 +1287,62 @@ def list_invoices(
         if match_status not in {"matched", "partial", "unmatched", "needs_review"}:
             raise ValueError("无效的业务匹配状态")
 
-        def _business_stats(target_types: tuple[str, ...]):
+        purchase_target_valid = or_(
+            and_(
+                TaxInvoiceLink.target_type == "alibaba1688_order",
+                exists().where(Alibaba1688Order.id == TaxInvoiceLink.target_id),
+            ),
+            and_(
+                TaxInvoiceLink.target_type == "external_purchase_order",
+                exists().where(ExternalPurchaseOrder.id == TaxInvoiceLink.target_id),
+            ),
+            and_(
+                TaxInvoiceLink.target_type == "jackyun_purchase_order",
+                exists().where(JackyunPurchaseOrder.id == TaxInvoiceLink.target_id),
+            ),
+        )
+        sales_target_valid = and_(
+            TaxInvoiceLink.target_type == SALES_LINK_TARGET_TYPE,
+            exists().where(
+                and_(
+                    SalesOrder.id == TaxInvoiceLink.target_id,
+                    deal_orders_condition(),
+                )
+            ),
+        )
+
+        def _business_stats(target_types: tuple[str, ...], target_valid):
             return (
                 db.query(
                     TaxInvoiceLink.invoice_id.label("invoice_id"),
                     func.coalesce(
-                        func.sum(TaxInvoiceLink.allocated_amount), Decimal("0")
+                        func.sum(
+                            case(
+                                (
+                                    target_valid,
+                                    func.coalesce(TaxInvoiceLink.allocated_amount, Decimal("0")),
+                                ),
+                                else_=Decimal("0"),
+                            )
+                        ),
+                        Decimal("0"),
                     ).label("allocated"),
                     func.coalesce(
                         func.sum(
                             case(
-                                (TaxInvoiceLink.allocated_amount.is_(None), 1),
+                                (
+                                    and_(target_valid, TaxInvoiceLink.allocated_amount.is_(None)),
+                                    1,
+                                ),
                                 else_=0,
                             )
                         ),
                         0,
                     ).label("unknown_count"),
+                    func.coalesce(
+                        func.sum(case((target_valid, 0), else_=1)),
+                        0,
+                    ).label("invalid_count"),
                 )
                 .filter(
                     TaxInvoiceLink.target_type.in_(target_types),
@@ -1290,8 +1353,8 @@ def list_invoices(
                 .subquery()
             )
 
-        purchase_stats = _business_stats(PURCHASE_LINK_TARGET_TYPES)
-        sales_stats = _business_stats((SALES_LINK_TARGET_TYPE,))
+        purchase_stats = _business_stats(PURCHASE_LINK_TARGET_TYPES, purchase_target_valid)
+        sales_stats = _business_stats((SALES_LINK_TARGET_TYPE,), sales_target_valid)
         query = (
             query.outerjoin(
                 purchase_stats, purchase_stats.c.invoice_id == TaxInvoice.id
@@ -1317,6 +1380,12 @@ def list_invoices(
             (TaxInvoice.direction == "output", sales_unknown),
             else_=purchase_unknown,
         )
+        purchase_invalid = func.coalesce(purchase_stats.c.invalid_count, 0)
+        sales_invalid = func.coalesce(sales_stats.c.invalid_count, 0)
+        invalid_count = case(
+            (TaxInvoice.direction == "output", sales_invalid),
+            else_=purchase_invalid,
+        )
         invoice_total = func.coalesce(TaxInvoice.total_amount, Decimal("0"))
         zero_status = case(
             (TaxInvoice.match_status == "needs_review", "needs_review"),
@@ -1324,6 +1393,7 @@ def list_invoices(
         )
         business_status = case(
             (invoice_total <= 0, TaxInvoice.match_status),
+            (invalid_count > 0, "needs_review"),
             (unknown_count > 0, "needs_review"),
             (allocated <= 0, zero_status),
             (invoice_total - allocated <= Decimal("0.01"), "matched"),
@@ -1777,7 +1847,7 @@ def set_invoice_verified(
         raise ValueError("请填写实际认证所属月份，格式 YYYY-MM")
     invoice.verified = bool(verified)
     invoice.verified_month = verified_month if verified else ""
-    invoice.verified_at = datetime.now() if verified else None
+    invoice.verified_at = datetime.now(timezone.utc) if verified else None
     audit(
         db,
         actor,
@@ -1897,7 +1967,7 @@ def _sales_link_candidates(db: Session, invoice: TaxInvoice, keyword: str, limit
     invoice_amount = Decimal(str(invoice.total_amount)) if invoice.total_amount is not None else None
     occupancy = _purchase_link_occupancy(db)
 
-    query = db.query(SalesOrder)
+    query = db.query(SalesOrder).filter(deal_orders_condition())
     if needle:
         rows = (
             query.filter(
@@ -2143,14 +2213,27 @@ def link_purchase_order(
         raise ValueError("销项发票不能人工关联采购单，请关联销售订单")
 
     if target_type == SALES_LINK_TARGET_TYPE:
-        target = db.get(SalesOrder, target_id)
+        target = (
+            db.query(SalesOrder)
+            .filter(SalesOrder.id == target_id)
+            .with_for_update()
+            .one_or_none()
+        )
         if target is None:
             raise LookupError(f"销售订单不存在：#{target_id}")
+        if not is_deal_status(target.order_status):
+            raise ValueError("已取消/关闭/退款等非成交销售订单不能关联销项发票")
         order_no = target.order_no
         default_note = "人工关联销售订单"
         audit_action = "tax_invoice.link_sales"
     else:
-        target = _load_purchase_targets(db, target_type, [target_id]).get(target_id)
+        model = _PURCHASE_LINK_MODELS[target_type]
+        target = (
+            db.query(model)
+            .filter(model.id == target_id)
+            .with_for_update()
+            .one_or_none()
+        )
         if target is None:
             raise LookupError(f"采购单不存在：{target_type} #{target_id}")
         order_no = _purchase_target_brief(target_type, target)["orderNo"]

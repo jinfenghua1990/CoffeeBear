@@ -34,9 +34,23 @@ TOLERANCE = Decimal("0.05")
 _TRANS = str.maketrans({"（": "(", "）": ")", "　": "", "：": ":", "，": ","})
 
 
+_LEGAL_SUFFIXES = (
+    "有限责任公司", "股份有限公司", "集团有限公司", "有限公司", "股份公司", "公司"
+)
+
+
 def normalize_supplier(name: str | None) -> str:
-    """供应商名归一化：去空白、全角括号/标点转半角、大写。"""
-    return re.sub(r"\s+", "", (name or "").translate(_TRANS)).upper()
+    """供应商名归一化：只消除格式差异和明确企业后缀，不做任意前缀猜测。"""
+    text = re.sub(r"\s+", "", (name or "").translate(_TRANS)).upper()
+    changed = True
+    while text and changed:
+        changed = False
+        for suffix in _LEGAL_SUFFIXES:
+            if text.endswith(suffix) and len(text) > len(suffix):
+                text = text[:-len(suffix)]
+                changed = True
+                break
+    return text
 
 
 def _dec(value: Decimal | float | int | None) -> Decimal:
@@ -44,11 +58,8 @@ def _dec(value: Decimal | float | int | None) -> Decimal:
 
 
 def _matches(name_norm: str, target_norm: str) -> bool:
-    """供应商名宽松匹配：全等，或一方是另一方的前缀（处理"河北鸿鲲食品" vs
-    "河北鸿鲲食品有限公司"这类简称/全称差异）。"""
-    if not name_norm or not target_norm:
-        return False
-    return name_norm == target_norm or name_norm.startswith(target_norm) or target_norm.startswith(name_norm)
+    """只接受归一化后的全等，避免短名称误配到另一家公司。"""
+    return bool(name_norm and target_norm and name_norm == target_norm)
 
 
 def _explicit_link_map(db: Session, inv_ids: list[int], po_rows: list) -> dict[int, list[dict[str, Any]]]:
