@@ -22,7 +22,7 @@ source "$ROOT/.env"
 set +a
 export DATABASE_URL="postgresql+psycopg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@localhost:5432/${POSTGRES_DB}"
 export REDIS_URL="redis://localhost:6379/0"
-export DATA_DIR="$ROOT/data"
+export DATA_DIR="${DATA_DIR:-$ROOT/data}"
 
 echo "--- Smoke @ $BASE (native) ---"
 cd "$ROOT/backend"
@@ -115,6 +115,9 @@ allowed_query_4xx = {
     "/api/v1/tax-accounting/monthly-ledger",
     "/api/v1/tax-accounting/finance-summary",
     "/api/v1/tax-accounting/finance-summary.csv",
+    "/api/v1/dashboard/inventory/sku-transactions",
+    "/api/v1/finance/bank-summary",
+    "/api/v1/finance/corporate-payment-report",
 }
 
 

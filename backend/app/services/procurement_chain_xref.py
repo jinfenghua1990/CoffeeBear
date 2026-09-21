@@ -1,6 +1,6 @@
 """1688 ↔ 入库单 手动交叉对照表驱动的链路补齐。
 
-源数据可来自 backend/data/1688_rk_xref.tsv（默认）或调用方传入的文本（UI 粘贴/上传），
+源数据默认落在 DATA_DIR/procurement-chain/1688_rk_xref.tsv，也可来自调用方传入的文本（UI 粘贴/上传），
 将每条 (1688 订单号, 入库单号) 补建成 procurement_chain_links。
 
 特性：
@@ -20,11 +20,12 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.audit import audit
+from app.config import settings
 from app.models.alibaba1688_import import Alibaba1688Order
 from app.models.jackyun import JackyunGoodsDocument
 from app.models.procurement_chain import ProcurementChainLink
 
-XREF_PATH = Path(__file__).parent.parent.parent / "data" / "1688_rk_xref.tsv"
+XREF_PATH = Path(settings.DATA_DIR).expanduser() / "procurement-chain" / "1688_rk_xref.tsv"
 
 HDR = ["年度", "订货日期", "订单号", "条形码", "分类", "产品名", "规格", "单价",
        "订购件数-盒", "对应单颗", "合计金额", "发票", "外壳", "耗材代码",

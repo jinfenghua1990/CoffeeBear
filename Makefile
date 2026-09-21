@@ -6,10 +6,10 @@ BACKEND := $(ROOT)/backend
 VENV := $(BACKEND)/.venv
 SYSTEM_UPDATE_LAUNCH_LABEL ?= com.gino.ecommerce-dashboard
 LAUNCH_LABEL := gui/$(shell id -u)/$(SYSTEM_UPDATE_LAUNCH_LABEL)
-NATIVE_ENV = set -a; . "$(ROOT)/.env"; set +a; export DATABASE_URL="${DATABASE_URL:-postgresql+psycopg://$POSTGRES_USER:$POSTGRES_PASSWORD@localhost:5432/$POSTGRES_DB}"; export REDIS_URL="${REDIS_URL:-redis://localhost:6379/0}"; export DATA_DIR="${DATA_DIR:-$(ROOT)/data}";
-MIGRATION_ENV = $(NATIVE_ENV) if [ -n "$MIGRATION_DATABASE_URL" ]; then export DATABASE_URL="$MIGRATION_DATABASE_URL"; fi;
+NATIVE_ENV = set -a; . "$(ROOT)/.env"; set +a; export DATABASE_URL="$${DATABASE_URL:-postgresql+psycopg://$${POSTGRES_USER}:$${POSTGRES_PASSWORD}@localhost:5432/$${POSTGRES_DB}}"; export REDIS_URL="$${REDIS_URL:-redis://localhost:6379/0}"; export DATA_DIR="$${DATA_DIR:-$(ROOT)/data}";
+MIGRATION_ENV = $(NATIVE_ENV) if [ -n "$$MIGRATION_DATABASE_URL" ]; then export DATABASE_URL="$$MIGRATION_DATABASE_URL"; fi;
 
-.PHONY: help update-guard-check update-guard-install up restart status logs logs-api rebuild rebuild-fe test test-db lint tsc verify release-check secret-scan repo-hygiene smoke migrate migration-check exec-api backup backup-full backup-r2 backup-r2-daily backup-r2-full cold-backup-kodo restore-check orphan-audit backup-schedule-install backup-schedule-status backup-schedule-uninstall fresh
+.PHONY: help update-guard-check update-guard-install up restart status logs logs-api rebuild rebuild-fe test test-db lint tsc verify release-check secret-scan repo-hygiene smoke migrate migration-check exec-api persistence-migrate backup backup-full backup-r2 backup-r2-daily backup-r2-full cold-backup-kodo restore-check orphan-audit backup-schedule-install backup-schedule-status backup-schedule-uninstall fresh
 
 help: ## 列出所有 target
 	@awk 'BEGIN {FS = ":.*##"} /^[a-zA-Z_-]+:.*?##/ {printf "  \033[36m%-16s\033[0m %s\n", $1, $2}' $(MAKEFILE_LIST)
@@ -84,6 +84,9 @@ migration-check: ## 检查 models 与迁移是否漂移（优先使用 MIGRATION
 
 exec-api: ## 进入后端原生虚拟环境 shell
 	$(NATIVE_ENV) cd "$(BACKEND)" && exec "$(SHELL)"
+
+persistence-migrate: ## 一次性把 production 的 data/backups/logs 安全迁移到仓库外并更新 .env
+	bash ./scripts/migrate-persistence.sh
 
 backup: update-guard-check ## 备份 PostgreSQL 与 data/ 原始归档
 	./scripts/backup.sh

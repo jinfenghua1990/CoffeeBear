@@ -385,6 +385,56 @@ def test_git_merge_base_operational_error_is_not_treated_as_divergence(monkeypat
     assert result["changes"] == []
 
 
+def test_module_mapping_covers_ten_navigation_centers():
+    cases = {
+        "frontend/src/app/page.tsx": "经营中心",
+        "frontend/src/app/sales/page.tsx": "销售中心",
+        "frontend/src/app/products/page.tsx": "基础货品",
+        "frontend/src/app/inventory/page.tsx": "库存中心",
+        "frontend/src/app/supply-chain/page.tsx": "供应链中心",
+        "frontend/src/app/finance/page.tsx": "财务中心",
+        "frontend/src/app/logistics/workbench/page.tsx": "快递物流",
+        "frontend/src/app/foreign-trade/page.tsx": "外贸中心",
+        "frontend/src/app/exceptions/page.tsx": "异常中心",
+        "frontend/src/app/settings/update/page.tsx": "系统设置",
+    }
+    for path, expected in cases.items():
+        assert expected in service._modules_for_paths([path])
+
+
+def test_module_versions_marks_changed_center(monkeypatch):
+    current_sha = "a" * 40
+    latest_sha = "b" * 40
+
+    def fake_module_commit_at(sha, patterns):
+        label = next(
+            label
+            for _key, label, rule_patterns in service._MODULE_VERSION_RULES
+            if rule_patterns == patterns
+        )
+        changed = label == "财务中心"
+        effective_sha = latest_sha if changed and sha == latest_sha else current_sha
+        return {
+            "sha": effective_sha,
+            "shortSha": effective_sha[:10],
+            "subject": f"{label} change",
+            "committedAt": "2026-09-21T09:25:00+08:00",
+            "version": "2026.09.21.0925",
+        }
+
+    monkeypatch.setattr(service, "_module_commit_at", fake_module_commit_at)
+    rows = service._module_versions(current_sha, latest_sha)
+    states = {row["label"]: row["status"] for row in rows}
+
+    assert len(rows) == 10
+    assert states["财务中心"] == "update"
+    assert all(
+        state == "latest"
+        for label, state in states.items()
+        if label != "财务中心"
+    )
+
+
 def test_update_classification_detects_patch_module_and_auto_policy():
     result = service._classify_update(
         [{"subject": "fix: 修复月结页面", "sha": "a" * 40}],

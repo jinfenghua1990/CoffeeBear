@@ -194,7 +194,7 @@ export default function SystemUpdatePage() {
   useEffect(() => {
     if (!status || isContainer || firstCheckRef.current) return;
     firstCheckRef.current = true;
-    if (status.lastCheckAt) return;
+    if (status.lastCheckAt && status.moduleVersions?.length) return;
 
     void (async () => {
       setBusy("check");
@@ -343,6 +343,8 @@ export default function SystemUpdatePage() {
   const levelMeta = LEVEL_COPY[updateLevel];
   const autoInstallLevelMeta = LEVEL_COPY[draft.autoInstallLevel || "patch"];
   const visibleChanges = (status.changes || []).slice(0, 6);
+  const moduleVersions = status.moduleVersions || [];
+  const moduleUpdateCount = moduleVersions.filter((item) => item.status === "update").length;
   const showProgressNumber = status.running || status.phase === "success";
 
   const phaseStep: Record<string, number> = {
@@ -515,7 +517,14 @@ export default function SystemUpdatePage() {
                       </span>
                       <div className="min-w-0 flex-1">
                         <div className="truncate text-[12px] font-medium text-slate-700 dark:text-slate-100" title={item.subject}>{item.subject}</div>
-                        <div className="mt-0.5 text-[11px] text-slate-400 dark:text-slate-400">{fmtDate(item.committedAt)} · {item.shortSha}</div>
+                        <div className="mt-0.5 flex flex-wrap items-center gap-1.5 text-[11px] text-slate-400 dark:text-slate-400">
+                          <span>{fmtDate(item.committedAt)} · {item.shortSha}</span>
+                          {(item.modules || []).slice(0, 2).map((module) => (
+                            <span key={module} className="rounded-md bg-slate-100 px-1.5 py-0.5 text-[10px] font-medium text-slate-500 dark:bg-slate-800 dark:text-slate-300">
+                              {module}
+                            </span>
+                          ))}
+                        </div>
                       </div>
                     </div>
                   )) : (
@@ -573,6 +582,93 @@ export default function SystemUpdatePage() {
           </aside>
         </div>
       </section>
+
+      {!isContainer && (
+        <section className="mt-4 app-card overflow-hidden rounded-2xl">
+          <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-100 px-5 py-4 dark:border-slate-700">
+            <div>
+              <div className="flex flex-wrap items-center gap-2">
+                <h2 className="text-[15px] font-semibold text-slate-900 dark:text-slate-100">模块版本总览</h2>
+                <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-medium text-slate-500 dark:bg-slate-800 dark:text-slate-300">
+                  10 个模块
+                </span>
+                {moduleUpdateCount > 0 ? (
+                  <span className="rounded-full bg-amber-50 px-2 py-0.5 text-[10px] font-medium text-amber-700 dark:bg-amber-500/10 dark:text-amber-200">
+                    {moduleUpdateCount} 个有更新
+                  </span>
+                ) : moduleVersions.length ? (
+                  <span className="rounded-full bg-emerald-50 px-2 py-0.5 text-[10px] font-medium text-emerald-700 dark:bg-emerald-500/10 dark:text-emerald-300">
+                    全部已最新
+                  </span>
+                ) : null}
+              </div>
+              <p className="mt-1 text-[11px] text-slate-400 dark:text-slate-400">
+                模块版本表示该中心最近一次代码变更所属的平台版本；系统仍按一个总版本统一安装。
+              </p>
+            </div>
+            {status.impactedModules?.includes("平台公共底层") && (
+              <span className="rounded-lg border border-blue-100 bg-blue-50 px-2.5 py-1 text-[10px] font-medium text-blue-700 dark:border-blue-500/30 dark:bg-blue-500/10 dark:text-blue-200">
+                本次涉及平台公共底层
+              </span>
+            )}
+          </div>
+
+          {moduleVersions.length ? (
+            <div className="grid sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5">
+              {moduleVersions.map((module, index) => {
+                const hasUpdate = module.status === "update";
+                const tracked = module.status !== "untracked";
+                return (
+                  <div
+                    key={module.key}
+                    className={`min-w-0 px-4 py-4 ${
+                      index % 5 ? "xl:border-l xl:border-slate-100 dark:xl:border-slate-700" : ""
+                    } ${index >= 5 ? "border-t border-slate-100 dark:border-slate-700" : ""}`}
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="truncate text-[12px] font-semibold text-slate-800 dark:text-slate-100">{module.label}</div>
+                      <span className={`shrink-0 rounded-full px-2 py-0.5 text-[10px] font-medium ${
+                        hasUpdate
+                          ? "bg-amber-50 text-amber-700 dark:bg-amber-500/10 dark:text-amber-200"
+                          : tracked
+                            ? "bg-emerald-50 text-emerald-700 dark:bg-emerald-500/10 dark:text-emerald-300"
+                            : "bg-slate-100 text-slate-500 dark:bg-slate-800 dark:text-slate-300"
+                      }`}>
+                        {hasUpdate ? "有更新" : tracked ? "已最新" : "待建立"}
+                      </span>
+                    </div>
+
+                    <div className="mt-3 flex min-w-0 items-center gap-2">
+                      <span className="truncate font-mono text-[12px] font-semibold text-slate-700 dark:text-slate-100">
+                        {module.currentVersion || "—"}
+                      </span>
+                      {hasUpdate && (
+                        <>
+                          <span className="shrink-0 text-blue-500">→</span>
+                          <span className="truncate font-mono text-[12px] font-semibold text-amber-700 dark:text-amber-200">
+                            {module.latestVersion || "—"}
+                          </span>
+                        </>
+                      )}
+                    </div>
+
+                    <div
+                      className="mt-2 truncate text-[10px] leading-5 text-slate-400 dark:text-slate-400"
+                      title={hasUpdate ? module.latestSubject : module.currentSubject}
+                    >
+                      {hasUpdate ? module.latestSubject : module.currentSubject || "尚未识别到模块独立变更"}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          ) : (
+            <div className="px-5 py-6 text-[12px] text-slate-400 dark:text-slate-400">
+              正在生成模块版本信息；如果没有自动刷新，点击右上角“检查更新”即可重新计算。
+            </div>
+          )}
+        </section>
+      )}
 
       {error && (
         <div className="mt-4 rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-[12px] leading-5 text-rose-700 dark:border-rose-500/40 dark:bg-rose-500/10 dark:text-rose-200">

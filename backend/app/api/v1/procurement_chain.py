@@ -364,7 +364,7 @@ def xref_preview(body: XrefBody, db: Session = Depends(get_db)) -> dict:
 
 @router.post("/xref/apply")
 def xref_apply(body: XrefBody, db: Session = Depends(get_db)) -> dict:
-    """应用 1688↔RK 对照表：写库为已确认链（match_method=manual, confirmed=True），并落盘到 XREF_PATH。"""
+    """应用 1688↔RK 对照表：写库为已确认链并落盘到 DATA_DIR。"""
     from app.services.procurement_chain_xref import apply_xref_links
 
     return apply_xref_links(db, actor="agent", content_or_path=body.content,

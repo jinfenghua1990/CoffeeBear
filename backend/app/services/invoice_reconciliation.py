@@ -26,7 +26,7 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from app.models.alibaba1688_import import Alibaba1688Order
-from app.models.purchase import ExternalPurchaseOrder
+from app.models.purchase import ExternalPurchaseOrder, JackyunPurchaseOrderLink
 from app.models.tax import TaxInvoice, TaxInvoiceLink
 
 TOLERANCE = Decimal("0.05")
@@ -40,7 +40,7 @@ _LEGAL_SUFFIXES = (
 
 
 def normalize_supplier(name: str | None) -> str:
-    """供应商名归一化：仅去格式差异与明确企业后缀，不做任意前缀猜测。"""
+    """供应商名归一化：只消除格式差异和明确企业后缀，不做任意前缀猜测。"""
     text = re.sub(r"\s+", "", (name or "").translate(_TRANS)).upper()
     changed = True
     while text and changed:
@@ -58,16 +58,15 @@ def _dec(value: Decimal | float | int | None) -> Decimal:
 
 
 def _matches(name_norm: str, target_norm: str) -> bool:
-    """只接受归一化后全等，避免简称前缀误配到另一家公司。"""
+    """只接受归一化后的全等，避免短名称误配到另一家公司。"""
     return bool(name_norm and target_norm and name_norm == target_norm)
 
 
-def _manual_link_map(db: Session, inv_ids: list[int], po_rows: list) -> dict[int, list[dict[str, Any]]]:
-    """人工微调映射：invoice_id -> [{linkId, poId}]。
+def _explicit_link_map(db: Session, inv_ids: list[int], po_rows: list) -> dict[int, list[dict[str, Any]]]:
+    """明确业务关联映射：人工 manual 优先，否则使用税务清单 source_ref。
 
-    只取人工建立的关联（tax_invoice_links.match_method=manual；rejected 已解除，
-    自动建议不在此列，避免覆盖用户意图）。1688 源单关联按业务单号换算到对应
-    的工作流 PO；换算不到（订单已删除/不属于当前供应商范围）的跳过。
+    每条映射都携带真实 allocatedAmount；不能唯一落到采购工作流订单时保留 issue，
+    由 reconcile 明确标为待核对，绝不静默猜单/猜金额。
     """
     if not inv_ids:
         return {}
@@ -75,14 +74,29 @@ def _manual_link_map(db: Session, inv_ids: list[int], po_rows: list) -> dict[int
         db.query(TaxInvoiceLink)
         .filter(
             TaxInvoiceLink.invoice_id.in_(inv_ids),
-            TaxInvoiceLink.match_method == "manual",
+            TaxInvoiceLink.target_type.in_((
+                "external_purchase_order",
+                "alibaba1688_order",
+                "jackyun_purchase_order",
+            )),
+            TaxInvoiceLink.match_method.in_(("manual", "source_ref")),
             TaxInvoiceLink.confirmed.is_(True),
         )
         .all()
     )
     if not links:
         return {}
-    need_1688 = {lnk.target_id for lnk in links if lnk.target_type == "alibaba1688_order"}
+
+    # 同一发票人工选择优先于来源自动关联，避免用户纠正后 source_ref 再抢回去。
+    by_invoice: dict[int, list[TaxInvoiceLink]] = {}
+    for link in links:
+        by_invoice.setdefault(link.invoice_id, []).append(link)
+    selected: list[TaxInvoiceLink] = []
+    for invoice_links in by_invoice.values():
+        manual = [row for row in invoice_links if row.match_method == "manual"]
+        selected.extend(manual or invoice_links)
+
+    need_1688 = {lnk.target_id for lnk in selected if lnk.target_type == "alibaba1688_order"}
     no_by_1688: dict[int, str] = {}
     if need_1688:
         rows = (
@@ -91,23 +105,79 @@ def _manual_link_map(db: Session, inv_ids: list[int], po_rows: list) -> dict[int
             .all()
         )
         no_by_1688 = {r.id: r.external_order_id for r in rows}
-    po_id_by_no = {r.external_order_id: r.id for r in po_rows}
+
+    allowed_po_ids = {r.id for r in po_rows}
+    po_ids_by_no: dict[str, list[int]] = {}
+    for row in po_rows:
+        po_ids_by_no.setdefault(row.external_order_id, []).append(row.id)
+
+    need_jackyun = {lnk.target_id for lnk in selected if lnk.target_type == "jackyun_purchase_order"}
+    jackyun_groups: dict[int, list[JackyunPurchaseOrderLink]] = {}
+    if need_jackyun:
+        for row in (
+            db.query(JackyunPurchaseOrderLink)
+            .filter(JackyunPurchaseOrderLink.jackyun_po_id.in_(need_jackyun))
+            .all()
+        ):
+            if row.po_id in allowed_po_ids:
+                jackyun_groups.setdefault(row.jackyun_po_id, []).append(row)
+
     result: dict[int, list[dict[str, Any]]] = {}
-    for lnk in links:
-        if lnk.target_type == "external_purchase_order":
-            po_id: int | None = lnk.target_id
-        elif lnk.target_type == "alibaba1688_order":
-            no = no_by_1688.get(lnk.target_id)
-            po_id = po_id_by_no.get(no) if no else None
-        else:
-            continue
-        if po_id is None:
-            continue
-        result.setdefault(lnk.invoice_id, []).append({
-            "linkId": lnk.id,
+
+    def add(link: TaxInvoiceLink, *, po_id: int | None, allocated: Decimal | None, issue: str = "") -> None:
+        result.setdefault(link.invoice_id, []).append({
+            "linkId": link.id,
             "poId": po_id,
-            "allocatedAmount": _dec(lnk.allocated_amount) if lnk.allocated_amount is not None else None,
+            "allocatedAmount": allocated,
+            "source": link.match_method,
+            "targetType": link.target_type,
+            "issue": issue,
         })
+
+    for link in selected:
+        allocated = _dec(link.allocated_amount) if link.allocated_amount is not None else None
+        if link.target_type == "external_purchase_order":
+            if link.target_id in allowed_po_ids:
+                add(link, po_id=link.target_id, allocated=allocated)
+            else:
+                add(link, po_id=None, allocated=allocated, issue="business_target_out_of_scope")
+            continue
+
+        if link.target_type == "alibaba1688_order":
+            order_no = no_by_1688.get(link.target_id)
+            candidates = po_ids_by_no.get(order_no or "", [])
+            if len(candidates) == 1:
+                add(link, po_id=candidates[0], allocated=allocated)
+            elif not candidates:
+                add(link, po_id=None, allocated=allocated, issue="source_order_not_in_workflow")
+            else:
+                add(link, po_id=None, allocated=allocated, issue="source_order_number_ambiguous")
+            continue
+
+        if link.target_type == "jackyun_purchase_order":
+            group = jackyun_groups.get(link.target_id, [])
+            if len(group) == 1:
+                add(link, po_id=group[0].po_id, allocated=allocated)
+                continue
+            group_total = sum((_dec(row.alloc_amount) for row in group), Decimal("0"))
+            if (
+                len(group) > 1
+                and allocated is not None
+                and allocated > 0
+                and group_total > 0
+                and all(_dec(row.alloc_amount) > 0 for row in group)
+            ):
+                for row in group:
+                    share_amount = allocated * _dec(row.alloc_amount) / group_total
+                    add(link, po_id=row.po_id, allocated=share_amount)
+            elif not group:
+                add(link, po_id=None, allocated=allocated, issue="jackyun_target_not_mapped_to_workflow")
+            else:
+                add(link, po_id=None, allocated=allocated, issue="jackyun_group_allocation_missing")
+            continue
+
+        add(link, po_id=None, allocated=allocated, issue="unsupported_business_target")
+
     return result
 
 
@@ -168,8 +238,8 @@ def reconcile(db: Session, supplier: str | None = None) -> dict[str, Any]:
             continue
         po_pool.setdefault(norm, []).append(order_entry)
 
-    # 人工微调优先：有 manual 关联的发票按关联配平，其余继续 FIFO 自动推导
-    manual_map = _manual_link_map(db, [v.id for v in inv_rows], po_rows)
+    # 明确关联优先：人工 manual 优先于 source_ref；没有明确关联的发票才走 FIFO。
+    explicit_map = _explicit_link_map(db, [v.id for v in inv_rows], po_rows)
 
     # 发票按供应商分组（保持时间升序）；供应商模式下归并到目标分组
     inv_by_supplier: dict[str, list[TaxInvoice]] = {}
@@ -189,40 +259,49 @@ def reconcile(db: Session, supplier: str | None = None) -> dict[str, Any]:
         for inv in invoices:
             amount = _dec(inv.total_amount)
             inv_total += amount
-            manual_links = manual_map.get(inv.id, [])
+            explicit_links = explicit_map.get(inv.id, [])
             covered: list[dict[str, Any]] = []
             consumed_total = Decimal("0")
             remaining_need = amount
-            unknown_manual_allocation = False
-            if manual_links:
-                # 手工关联 = 用户意图，严格尊重 link.allocated_amount，不得重新 FIFO 改写金额。
-                for lnk in manual_links:
-                    order = po_entry_by_id.get(lnk["poId"])
+            explicit_issues: list[str] = []
+            if explicit_links:
+                # 明确关联金额就是唯一依据；不再根据“发票还差多少/订单还能吃多少”重新猜分摊。
+                for link in explicit_links:
+                    if link.get("issue"):
+                        explicit_issues.append(str(link["issue"]))
+                        continue
+                    order_id = link.get("poId")
+                    order = po_entry_by_id.get(order_id) if order_id is not None else None
+                    requested = link.get("allocatedAmount")
                     if order is None:
+                        explicit_issues.append("business_target_missing")
                         continue
-                    requested = lnk.get("allocatedAmount")
-                    if requested is None:
-                        unknown_manual_allocation = True
+                    if requested is None or requested <= 0:
+                        explicit_issues.append("allocated_amount_missing")
                         continue
-                    take = min(
-                        max(order["remaining"], Decimal("0")),
-                        max(_dec(requested), Decimal("0")),
-                        remaining_need,
-                    )
+                    order_before = max(order["remaining"], Decimal("0"))
+                    take = min(requested, order_before, max(remaining_need, Decimal("0")))
+                    allocation_issue = abs(take - requested) > TOLERANCE
+                    if allocation_issue:
+                        explicit_issues.append("allocated_amount_exceeds_remaining")
                     if take <= 0:
                         continue
                     covered.append({
                         "orderId": order["orderId"], "orderNo": order["orderNo"],
                         "platform": order["platform"], "date": order["date"],
                         "orderAmount": order["orderAmount"],
+                        "allocatedAmount": float(requested),
                         "consumed": float(take),
-                        "partial": take < order["remaining"] - TOLERANCE,
-                        "source": "manual", "linkId": lnk["linkId"],
+                        "partial": take < order_before - TOLERANCE,
+                        "source": link.get("source") or "manual",
+                        "linkId": link["linkId"],
+                        "allocationIssue": allocation_issue,
                     })
                     order["remaining"] -= take
                     remaining_need -= take
                     consumed_total += take
                     if order["remaining"] <= TOLERANCE:
+                        # 吃满的订单从所有 FIFO 池移除，避免后续 FIFO 重复消耗
                         for p in po_pool.values():
                             p[:] = [o for o in p if o["orderId"] != order["orderId"]]
             else:
@@ -260,11 +339,12 @@ def reconcile(db: Session, supplier: str | None = None) -> dict[str, Any]:
                     consumed_total += take
                     if order["remaining"] <= TOLERANCE:
                         pool.pop(eligible_index)
-            diff = consumed_total - amount  # <0 仅当截至开票日可用订单金额不足
-            if diff >= -TOLERANCE:
+            diff = consumed_total - amount  # <0 仅当可用/明确分摊金额不足
+            matched = diff >= -TOLERANCE and not explicit_issues
+            if matched:
                 matched_total += amount
             future_order_count = 0
-            if not manual_links and inv.issue_date is not None and remaining_need > TOLERANCE:
+            if not explicit_links and inv.issue_date is not None and remaining_need > TOLERANCE:
                 future_order_count = sum(
                     1 for order in pool
                     if order["remaining"] > TOLERANCE
@@ -280,20 +360,22 @@ def reconcile(db: Session, supplier: str | None = None) -> dict[str, Any]:
                 "issueDate": inv.issue_date.strftime("%Y-%m-%d") if inv.issue_date else None,
                 "seller": inv.seller_name,
                 "amount": float(amount),
-                "manualLinked": bool(manual_links),
+                "manualLinked": any(link.get("source") == "manual" for link in explicit_links),
+                "explicitLinked": bool(explicit_links),
                 "covered": covered,
                 "coveredTotal": float(consumed_total),
                 "diff": float(diff),
-                "status": "matched" if diff >= -TOLERANCE else "short",
+                "status": "matched" if matched else "short",
                 "shortReason": (
-                    "manual_allocation_missing"
-                    if diff < -TOLERANCE and manual_links and unknown_manual_allocation
+                    "explicit_link_issue"
+                    if explicit_issues
                     else "date_cutoff"
                     if diff < -TOLERANCE and future_order_count > 0
                     else "insufficient_orders"
                     if diff < -TOLERANCE
                     else None
                 ),
+                "explicitIssues": list(dict.fromkeys(explicit_issues)),
                 "futureOrderCount": future_order_count,
             })
 

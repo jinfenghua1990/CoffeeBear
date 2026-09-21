@@ -111,6 +111,7 @@ def test_invoice_auto_match_supports_non_1688_workflow_order(db_session):
         invoice_id=invoice.id,
     ).one()
     assert link.confirmed is True
+    assert link.allocated_amount == Decimal("800.0000")
     assert invoice.match_status == "matched"
     assert result["created"] >= 1
 
@@ -529,7 +530,6 @@ def test_manual_inbound_link_can_be_replaced_and_removed(client, db_session):
     assert link.confirmed is True
     assert link.match_method == "manual"
 
-    # 被更换的旧关联必须保留为 rejected 审计记录，不能物理删除/原地改写。
     old_link = db_session.get(ProcurementChainLink, link_id)
     assert old_link is not None
     assert old_link.target_id == first.id
@@ -609,6 +609,113 @@ def test_register_invoice_is_atomic_and_rejects_missing_invoice_no(client, db_se
     assert detail.status_code == 200
     assert detail.json()["invoices"][0]["invoiceNo"] == "INV-ATOMIC-001"
 
+
+def test_unconfirmed_invoice_candidate_does_not_consume_order_coverage(db_session):
+    """待确认候选不能占用采购单开票额度；只有 confirmed 分摊才是事实。"""
+    db_session.add(Supplier(name="候选额度供应商", tax_no="91330000CANDIDATE01"))
+    order = ExternalPurchaseOrder(
+        external_order_id="CANDIDATE-COVERAGE-001",
+        platform="taobao",
+        supplier_name="候选额度供应商",
+        paid_amount=Decimal("100"),
+        ordered_at=datetime(2026, 7, 1, tzinfo=timezone.utc),
+    )
+    pending_invoice = TaxInvoice(
+        invoice_key="candidate-coverage-pending",
+        invoice_number="INV-CANDIDATE-PENDING",
+        direction="input",
+        status="issued",
+        seller_name="候选额度供应商",
+        seller_tax_id="91330000CANDIDATE01",
+        total_amount=Decimal("100"),
+        issue_date=datetime(2026, 7, 2, tzinfo=timezone.utc),
+    )
+    new_invoice = TaxInvoice(
+        invoice_key="candidate-coverage-new",
+        invoice_number="INV-CANDIDATE-NEW",
+        direction="input",
+        status="issued",
+        seller_name="候选额度供应商",
+        seller_tax_id="91330000CANDIDATE01",
+        total_amount=Decimal("100"),
+        issue_date=datetime(2026, 7, 3, tzinfo=timezone.utc),
+    )
+    db_session.add_all([order, pending_invoice, new_invoice])
+    db_session.flush()
+    db_session.add(TaxInvoiceLink(
+        invoice_id=pending_invoice.id,
+        target_type="external_purchase_order",
+        target_id=order.id,
+        allocated_amount=Decimal("100"),
+        match_method="auto",
+        confirmed=False,
+    ))
+    db_session.flush()
+
+    result = service.ProcurementChainMatcher(db_session).run_match(auto_confirm=True)
+
+    new_link = db_session.query(TaxInvoiceLink).filter_by(
+        invoice_id=new_invoice.id,
+        target_type="external_purchase_order",
+        target_id=order.id,
+    ).one()
+    assert new_link.confirmed is True
+    assert new_link.allocated_amount == Decimal("100.0000")
+    assert new_invoice.match_status == "matched"
+    assert result["coverageUnknown"] == 0
+
+
+def test_confirmed_invoice_link_without_allocation_blocks_further_auto_coverage(db_session):
+    """历史已确认但无分摊金额的关联必须先人工复核，不能再继续自动叠加发票。"""
+    db_session.add(Supplier(name="历史未知供应商", tax_no="91330000UNKNOWN001"))
+    order = ExternalPurchaseOrder(
+        external_order_id="UNKNOWN-COVERAGE-001",
+        platform="taobao",
+        supplier_name="历史未知供应商",
+        paid_amount=Decimal("100"),
+        ordered_at=datetime(2026, 7, 1, tzinfo=timezone.utc),
+    )
+    legacy_invoice = TaxInvoice(
+        invoice_key="unknown-coverage-legacy",
+        invoice_number="INV-UNKNOWN-LEGACY",
+        direction="input",
+        status="issued",
+        seller_name="历史未知供应商",
+        seller_tax_id="91330000UNKNOWN001",
+        total_amount=Decimal("100"),
+        issue_date=datetime(2026, 7, 2, tzinfo=timezone.utc),
+    )
+    new_invoice = TaxInvoice(
+        invoice_key="unknown-coverage-new",
+        invoice_number="INV-UNKNOWN-NEW",
+        direction="input",
+        status="issued",
+        seller_name="历史未知供应商",
+        seller_tax_id="91330000UNKNOWN001",
+        total_amount=Decimal("100"),
+        issue_date=datetime(2026, 7, 3, tzinfo=timezone.utc),
+    )
+    db_session.add_all([order, legacy_invoice, new_invoice])
+    db_session.flush()
+    db_session.add(TaxInvoiceLink(
+        invoice_id=legacy_invoice.id,
+        target_type="external_purchase_order",
+        target_id=order.id,
+        allocated_amount=None,
+        match_method="auto",
+        confirmed=True,
+    ))
+    db_session.flush()
+
+    result = service.ProcurementChainMatcher(db_session).run_match(auto_confirm=True)
+
+    assert db_session.query(TaxInvoiceLink).filter_by(
+        invoice_id=new_invoice.id,
+        target_type="external_purchase_order",
+        target_id=order.id,
+    ).first() is None
+    assert result["coverageUnknown"] >= 1
+
 def test_purge_voided_invoice_links_preserves_rejected_history(db_session):
     invoice = TaxInvoice(
         invoice_key="PURGE-VOIDED-HISTORY",
@@ -639,6 +746,6 @@ def test_purge_voided_invoice_links_preserves_rejected_history(db_session):
     assert kept.match_method == "rejected"
     assert "已停用" in kept.note
 
-    # 再跑一次必须幂等，不重复“清理”同一条历史关系。
     again = service.purge_voided_invoice_links(db_session, dry_run=False)
     assert all(item["linkId"] != link_id for item in again["items"])
+

@@ -3815,8 +3815,12 @@ function SupplierInvoiceMatchSection({ entry, loading, hasData, onReload }: {
                       <div className="flex items-center justify-between gap-2">
                         <span className="truncate font-mono text-indigo-600">{inv.invoiceNo || "无发票号"}</span>
                         <span className="flex shrink-0 items-center gap-1">
-                          {inv.manualLinked && <span className="rounded bg-indigo-50 px-1.5 py-0.5 text-[10px] text-indigo-500">手动</span>}
-                          <span className={"rounded px-1.5 py-0.5 text-[10px] " + badge.cls}>{badge.text}</span>
+                          {inv.manualLinked ? (
+                            <span className="rounded bg-indigo-50 px-1.5 py-0.5 text-[10px] text-indigo-500">手动</span>
+                          ) : inv.explicitLinked ? (
+                            <span className="rounded bg-sky-50 px-1.5 py-0.5 text-[10px] text-sky-600">清单关联</span>
+                          ) : null}
+                          <span className={"rounded px-1.5 py-0.5 text-[10px] " + badge.cls}>{inv.shortReason === "explicit_link_issue" ? "待核对" : badge.text}</span>
                         </span>
                       </div>
                       <div className="mt-0.5 text-[11px] text-slate-400">
@@ -3835,20 +3839,27 @@ function SupplierInvoiceMatchSection({ entry, loading, hasData, onReload }: {
                           截至开票日可用采购订单金额不足，请核对是否存在漏单、金额未同步或供应商名称不一致。
                         </div>
                       )}
+                      {inv.status === "short" && inv.shortReason === "explicit_link_issue" && (
+                        <div className="mt-1 rounded bg-rose-50 px-2 py-1 text-[10px] leading-4 text-rose-700">
+                          已有明确关联，但分摊金额或采购单映射不完整，请先核对关联关系；系统不会回退到 FIFO 猜单。
+                        </div>
+                      )}
                       {inv.covered.length === 0 ? (
                         <div className="mt-1 text-[11px] text-amber-600">
                           {inv.shortReason === "date_cutoff"
                             ? "截至开票日暂无可用采购订单；系统不会把之后下单的订单倒挂到此前发票"
+                            : inv.shortReason === "explicit_link_issue"
+                            ? "明确关联尚未形成可用分摊，请核对订单映射或分摊金额"
                             : "未匹配到可用采购订单（订单池为空或金额已耗尽）"}
                         </div>
                       ) : inv.covered.map((order) => (
                         <div key={(order.linkId ?? "a") + "-" + order.orderId} className="mt-1 flex items-center justify-between gap-2 rounded bg-white px-2 py-1 text-[11px]">
                           <span className="flex min-w-0 items-center gap-1">
-                            <span className={"shrink-0 rounded px-1 py-px text-[9px] " + (order.source === "manual" ? "bg-indigo-50 text-indigo-500" : "bg-slate-100 text-slate-400")}>{order.source === "manual" ? "手动" : "自动"}</span>
+                            <span className={"shrink-0 rounded px-1 py-px text-[9px] " + (order.source === "manual" ? "bg-indigo-50 text-indigo-500" : order.source === "source_ref" ? "bg-sky-50 text-sky-600" : "bg-slate-100 text-slate-400")}>{order.source === "manual" ? "手动" : order.source === "source_ref" ? "清单" : "自动"}</span>
                             <span className="truncate font-mono text-slate-500">{order.orderNo || "无单号"}</span>
                           </span>
                           <span className="flex shrink-0 items-center gap-1.5 text-slate-400">
-                            {fmtDate(order.date)} · 消耗 {fmtMoney(order.consumed)}{order.partial && <span className="text-amber-500">（部分）</span>}
+                            {fmtDate(order.date)} · 消耗 {fmtMoney(order.consumed)}{order.allocatedAmount != null && order.allocatedAmount !== order.consumed ? <span className="text-rose-500">（关联 {fmtMoney(order.allocatedAmount)}）</span> : null}{order.partial && <span className="text-amber-500">（部分）</span>}
                             {order.source === "manual" && order.linkId != null && (
                               <button disabled={busy} onClick={() => removeLink(order.linkId!)} className="text-red-400 hover:text-red-500">移除</button>
                             )}
@@ -3856,7 +3867,7 @@ function SupplierInvoiceMatchSection({ entry, loading, hasData, onReload }: {
                         </div>
                       ))}
                       <div className="mt-1 flex items-center justify-between gap-2">
-                        <span className="text-[10px] text-slate-300">{inv.manualLinked ? "已按手工关联配平；全部移除后恢复自动匹配" : "自动匹配结果不对？可手动指定订单"}</span>
+                        <span className="text-[10px] text-slate-300">{inv.manualLinked ? "已按手工关联配平；全部移除后恢复清单/FIFO规则" : inv.explicitLinked ? "已按税务清单明确关联；如需纠正可手动指定订单覆盖" : "自动匹配结果不对？可手动指定订单"}</span>
                         <button disabled={busy} onClick={() => setAdjustingId(adjustingId === inv.invoiceId ? null : inv.invoiceId)} className="shrink-0 text-[11px] text-indigo-500 hover:underline">
                           {adjustingId === inv.invoiceId ? "收起" : "调整匹配"}
                         </button>
@@ -4179,7 +4190,7 @@ function ChainPanel({ overview, orders, total, pending, filter, loading, busy, p
               ? "bg-violet-600 text-white"
               : "border border-violet-200 bg-violet-50 text-violet-600 hover:bg-violet-100"
           )}
-          title="维护 1688 ↔ 入库单 手动交叉对照表：粘贴/编辑后点「解析预览」查看将创建/缺失明细，确认无误后点「应用」批量建链（同时落盘到 backend/data/1688_rk_xref.tsv）"
+          title="维护 1688 ↔ 入库单 手动交叉对照表：粘贴/编辑后点「解析预览」查看将创建/缺失明细，确认无误后点「应用」批量建链（同时落盘到外部 DATA_DIR）"
         >
           {xrefOpen ? "收起对照表" : "📋 对照表"}
         </button>

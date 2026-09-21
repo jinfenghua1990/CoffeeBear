@@ -209,6 +209,21 @@ export type SystemUpdateCommit = {
   subject: string;
   committedAt: string;
   version?: string;
+  modules?: string[];
+};
+
+export type SystemUpdateModuleVersion = {
+  key: string;
+  label: string;
+  status: "latest" | "update" | "untracked";
+  currentVersion: string;
+  currentSha: string;
+  currentSubject: string;
+  currentCommittedAt: string;
+  latestVersion: string;
+  latestSha: string;
+  latestSubject: string;
+  latestCommittedAt: string;
 };
 
 export type SystemUpdateHistory = {
@@ -291,6 +306,7 @@ export type SystemUpdateStatus = {
   updateLevel?: SystemUpdateLevel;
   updateLevelLabel?: string;
   impactedModules?: string[];
+  moduleVersions?: SystemUpdateModuleVersion[];
   changedFiles?: string[];
   changedFileCount?: number;
   hasMigration?: boolean;
@@ -2511,12 +2527,15 @@ export type InvoiceReconciliation = {
     months: Array<{ month: string; invoices: Array<{
       invoiceId: number; invoiceNo: string; issueDate: string | null; seller: string;
       amount: number; coveredTotal: number; diff: number; status: "matched" | "short";
-      shortReason?: "date_cutoff" | "insufficient_orders" | null;
+      shortReason?: "date_cutoff" | "insufficient_orders" | "explicit_link_issue" | null;
       futureOrderCount?: number;
       manualLinked: boolean;
+      explicitLinked?: boolean;
+      explicitIssues?: string[];
       covered: Array<{ orderId: number; orderNo: string; platform: string; date: string | null;
-        orderAmount: number; consumed: number; partial: boolean;
-        source: "manual" | "auto"; linkId?: number }>;
+        orderAmount: number; allocatedAmount?: number; consumed: number; partial: boolean;
+        allocationIssue?: boolean;
+        source: "manual" | "source_ref" | "auto"; linkId?: number }>;
     }> }>;
   }>;
   expenseSellers: Array<{ seller: string; invoiceCount: number; invoiceTotal: number }>;

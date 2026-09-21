@@ -7,7 +7,7 @@
 import json
 import re
 import unicodedata
-from datetime import datetime, timezone
+from datetime import datetime
 from decimal import Decimal
 
 from sqlalchemy import event, or_
@@ -35,7 +35,13 @@ from app.models.tax import TaxInvoice, TaxInvoiceLink
 from app.services.allocation import balance_check
 from app.services.import_lifecycle import filter_active_import, filter_active_rows
 from app.services.inbound_allocation_seed import seed_allocations_for_link
-from app.services.tax_invoice_service import filter_visible_invoices
+from app.services.tax_invoice_service import (
+    PURCHASE_LINK_TARGET_TYPES,
+    filter_visible_invoices,
+    set_invoice_verified as set_tax_invoice_verified,
+    sync_business_match_status,
+    unlink_purchase as unlink_tax_invoice_purchase,
+)
 
 AMOUNT_TOLERANCE = Decimal("0.02")  # 金额容差 2%
 
@@ -287,12 +293,6 @@ def _inbound_allocation_support_batch(
     return supported
 
 
-def mark_invoice_linked(invoice: TaxInvoice, note: str = "采购链自动关联") -> None:
-    """保持发票台账状态与已建立的采购链关联一致。"""
-    invoice.match_status = "matched"
-    invoice.match_note = note
-
-
 class ProcurementChainMatcher:
     def __init__(self, db: Session):
         self.db = db
@@ -381,29 +381,33 @@ class ProcurementChainMatcher:
         voided_invoices = 0
         extended_invoices = 0
         over_covered = 0
+        coverage_unknown = 0
         # 每张订单已被发票覆盖的金额（含历史关联）：换开/重开场景下同一笔采购会留下
         # 多张等额票，若无脑逐张关联会把票面金额翻好几倍，因此以订单实付为上限。
         covered: dict[int, Decimal] = {order.id: Decimal("0") for order in orders}
-        invoice_by_id = {inv.id: inv for inv in invoices}
+        unknown_covered_orders: set[int] = set()
         for link in self.db.query(TaxInvoiceLink).filter(
             TaxInvoiceLink.target_type == "alibaba1688_order",
             TaxInvoiceLink.match_method != "rejected",
+            TaxInvoiceLink.confirmed.is_(True),
         ).all():
-            linked = invoice_by_id.get(link.invoice_id)
-            if linked is None:
+            if link.allocated_amount is None:
+                unknown_covered_orders.add(link.target_id)
                 continue
-            linked_amount = parse_decimal(linked.total_amount) or Decimal("0")
+            linked_amount = parse_decimal(link.allocated_amount) or Decimal("0")
             if linked_amount > 0:
                 covered[link.target_id] = covered.get(link.target_id, Decimal("0")) + linked_amount
         covered_external: dict[int, Decimal] = {po.id: Decimal("0") for po in external_orders}
+        unknown_covered_external: set[int] = set()
         for link in self.db.query(TaxInvoiceLink).filter(
             TaxInvoiceLink.target_type == "external_purchase_order",
             TaxInvoiceLink.match_method != "rejected",
+            TaxInvoiceLink.confirmed.is_(True),
         ).all():
-            linked = invoice_by_id.get(link.invoice_id)
-            if linked is None:
+            if link.allocated_amount is None:
+                unknown_covered_external.add(link.target_id)
                 continue
-            linked_amount = parse_decimal(linked.total_amount) or Decimal("0")
+            linked_amount = parse_decimal(link.allocated_amount) or Decimal("0")
             if linked_amount > 0:
                 covered_external[link.target_id] = covered_external.get(link.target_id, Decimal("0")) + linked_amount
 
@@ -471,9 +475,15 @@ class ProcurementChainMatcher:
             order_id = order.id
             if not self._existing_invoice_link(target_type, order_id, invoice.id):
                 if target_type == "alibaba1688_order":
+                    if order_id in unknown_covered_orders:
+                        coverage_unknown += 1
+                        continue
                     payment = parse_decimal(order.actual_payment) or Decimal("0")
                     already = covered.get(order_id, Decimal("0"))
                 else:
+                    if order_id in unknown_covered_external:
+                        coverage_unknown += 1
+                        continue
                     payment = parse_decimal(order.paid_amount)
                     if payment is None:
                         payment = parse_decimal(order.order_amount)
@@ -484,7 +494,7 @@ class ProcurementChainMatcher:
                     over_covered += 1
                     continue
                 self._upsert_invoice_link(
-                    target_type, order_id, invoice.id, confidence, auto_confirm=auto_confirm,
+                    target_type, order_id, invoice.id, amount, confidence, auto_confirm=auto_confirm,
                     note=note if auto_confirm else f"{note}；待人工确认",
                 )
                 if target_type == "alibaba1688_order":
@@ -503,6 +513,7 @@ class ProcurementChainMatcher:
             "voidedInvoices": voided_invoices,
             "extendedInvoices": extended_invoices,
             "overCovered": over_covered,
+            "coverageUnknown": coverage_unknown,
             "supplierProfileMissing": supplier_profile_missing,
             "supplierProfileAmbiguous": supplier_profile_ambiguous,
             "requiresConfirmation": not auto_confirm or pending_inbound > 0,
@@ -669,22 +680,38 @@ class ProcurementChainMatcher:
         return link
 
     def _upsert_invoice_link(self, target_type: str, order_id: int, invoice_id: int,
-                             confidence: Decimal, auto_confirm: bool, note: str) -> TaxInvoiceLink:
+                             allocated_amount: Decimal, confidence: Decimal,
+                             auto_confirm: bool, note: str) -> TaxInvoiceLink:
         link = self.db.query(TaxInvoiceLink).filter_by(
             target_type=target_type, target_id=order_id, invoice_id=invoice_id
         ).first()
         if link is None:
             link = TaxInvoiceLink(
-                invoice_id=invoice_id, target_type=target_type, target_id=order_id,
-                match_method="auto", confidence=confidence, confirmed=auto_confirm, note=note,
+                invoice_id=invoice_id,
+                target_type=target_type,
+                target_id=order_id,
+                allocated_amount=allocated_amount,
+                match_method="auto",
+                confidence=confidence,
+                confirmed=auto_confirm,
+                note=note,
             )
             self.db.add(link)
-        elif auto_confirm and link.match_method != "rejected":
-            link.confirmed = True
+        elif link.match_method != "rejected":
+            if link.allocated_amount is None:
+                link.allocated_amount = allocated_amount
+            if auto_confirm:
+                link.confirmed = True
         if auto_confirm and link.match_method != "rejected":
+            self.db.flush()
             invoice = self.db.get(TaxInvoice, invoice_id)
             if invoice is not None:
-                mark_invoice_linked(invoice, note or "采购链自动关联")
+                sync_business_match_status(
+                    self.db,
+                    invoice,
+                    target_type,
+                    note or "采购链自动关联",
+                )
         return link
 
     # ---------- 人工关联/确认 ----------
@@ -825,10 +852,18 @@ class ProcurementChainMatcher:
         link = self.db.get(TaxInvoiceLink, link_id)
         if link is None:
             raise ValueError("关联不存在")
+        if link.allocated_amount is None or (parse_decimal(link.allocated_amount) or Decimal("0")) <= 0:
+            raise ValueError("该发票关联缺少分摊金额，请解除后重新匹配或人工关联")
         link.confirmed = True
+        self.db.flush()
         invoice = self.db.get(TaxInvoice, link.invoice_id)
         if invoice is not None:
-            mark_invoice_linked(invoice, link.note or "采购链自动关联")
+            sync_business_match_status(
+                self.db,
+                invoice,
+                link.target_type,
+                link.note or "采购链人工确认",
+            )
         self.db.commit()
         return link
 
@@ -857,24 +892,18 @@ class ProcurementChainMatcher:
 
     def remove_invoice_link(self, link_id: int) -> None:
         link = self.db.get(TaxInvoiceLink, link_id)
-        if link is not None:
-            link.confirmed = False
-            link.match_method = "rejected"
-            link.confidence = None
-            link.note = "人工拒绝或解除关联"
-            self.db.commit()
+        if link is None:
+            return
+        unlink_tax_invoice_purchase(self.db, link_id, actor="system")
 
     def set_invoice_verified(self, invoice_id: int, verified: bool, verified_month: str = "") -> TaxInvoice:
-        invoice = self.db.get(TaxInvoice, invoice_id)
-        if invoice is None:
-            raise ValueError("发票不存在")
-        if verified and not re.fullmatch(r"\d{4}-(0[1-9]|1[0-2])", verified_month):
-            raise ValueError("请填写实际认证所属月份，格式 YYYY-MM")
-        invoice.verified = verified
-        invoice.verified_month = verified_month if verified else ""
-        invoice.verified_at = datetime.now(timezone.utc) if verified else None
-        self.db.commit()
-        return invoice
+        return set_tax_invoice_verified(
+            self.db,
+            invoice_id,
+            verified,
+            verified_month,
+            actor="system",
+        )
 
 
 def auto_confirm_pending_links(db: Session, actor: str = "system") -> dict:
@@ -898,6 +927,7 @@ def auto_confirm_pending_links(db: Session, actor: str = "system") -> dict:
     confirmed_chain = 0
     resolved_inbound_usage = 0
     confirmed_invoices = 0
+    pending_invoice_amount = 0
     skipped_orphans = 0
     inbound_links: list[ProcurementChainLink] = []
 
@@ -1034,11 +1064,20 @@ def auto_confirm_pending_links(db: Session, actor: str = "system") -> dict:
         elif external_by_id.get(link.target_id) is None:
             skipped_orphans += 1
             continue
+        if link.allocated_amount is None or (parse_decimal(link.allocated_amount) or Decimal("0")) <= 0:
+            pending_invoice_amount += 1
+            continue
         if not link.confirmed:
             link.confirmed = True
             link.note = f"{link.note}；自动确认" if link.note else "自动确认"
             confirmed_invoices += 1
-        mark_invoice_linked(invoice, link.note or "采购链自动关联")
+        db.flush()
+        sync_business_match_status(
+            db,
+            invoice,
+            link.target_type,
+            link.note or "采购链自动关联",
+        )
 
     db.commit()
     allocation = {"seeded": 0, "skipped": 0, "touched_po_ids": []}
@@ -1086,6 +1125,7 @@ def auto_confirm_pending_links(db: Session, actor: str = "system") -> dict:
             "confirmedChain": confirmed_chain,
             "resolvedInboundUsage": resolved_inbound_usage,
             "confirmedInvoices": confirmed_invoices,
+            "pendingInvoiceAmount": pending_invoice_amount,
             "skippedOrphans": skipped_orphans,
             "allocSeeded": allocation.get("seeded", 0),
             "seedError": seed_error,
@@ -1096,6 +1136,7 @@ def auto_confirm_pending_links(db: Session, actor: str = "system") -> dict:
         "confirmedChain": confirmed_chain,
         "resolvedInboundUsage": resolved_inbound_usage,
         "confirmedInvoices": confirmed_invoices,
+        "pendingInvoiceAmount": pending_invoice_amount,
         "skippedOrphans": skipped_orphans,
         "allocSeeded": int(allocation.get("seeded", 0)),
         "allocSkipped": int(allocation.get("skipped", 0)),
@@ -1114,7 +1155,7 @@ def purge_voided_invoice_links(db: Session, actor: str = "system", dry_run: bool
         db.query(TaxInvoiceLink, TaxInvoice)
         .join(TaxInvoice, TaxInvoice.id == TaxInvoiceLink.invoice_id)
         .filter(
-            TaxInvoiceLink.target_type == "alibaba1688_order",
+            TaxInvoiceLink.target_type.in_(PURCHASE_LINK_TARGET_TYPES),
             TaxInvoiceLink.match_method != "rejected",
             TaxInvoiceLink.confirmed.is_(True),
             or_(TaxInvoice.status == INVOICE_STATUS_RED, TaxInvoice.total_amount <= 0),
@@ -1134,17 +1175,25 @@ def purge_voided_invoice_links(db: Session, actor: str = "system", dry_run: bool
         })
     if dry_run:
         return {"ok": True, "dryRun": True, "matched": len(items), "removed": 0, "items": items}
+    affected_invoices: dict[tuple[int, str], TaxInvoice] = {}
     for link, inv in link_rows:
         link.confirmed = False
         link.match_method = "rejected"
         link.confidence = None
         link.note = f"{(link.note or '')}；作废/红冲票关联已停用".strip("；")
-        inv.match_status = "unmatched"
-        inv.match_note = f"{(inv.match_note or '')}；已解除作废票关联".strip("；")
+        affected_invoices[(inv.id, link.target_type)] = inv
         audit(
             db, actor, "procurement.invoice.purge_voided", "tax_invoice_link", str(link.id),
             {"invoiceId": link.invoice_id, "orderId": link.target_id},
             commit=False,
+        )
+    db.flush()
+    for (_invoice_id, target_type), inv in affected_invoices.items():
+        sync_business_match_status(
+            db,
+            inv,
+            target_type,
+            "已解除作废票采购关联",
         )
     db.commit()
     return {"ok": True, "dryRun": False, "matched": len(items), "removed": len(items), "items": items}

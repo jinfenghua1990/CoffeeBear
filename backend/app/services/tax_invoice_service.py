@@ -6,7 +6,7 @@ import hashlib
 import mimetypes
 import re
 from collections import Counter
-from datetime import datetime
+from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
@@ -528,7 +528,7 @@ def _auto_link(db: Session, invoice: TaxInvoice, related_ref: str, direction: st
             note="税务官方清单明确提供关联单号",
         ))
     db.flush()
-    _sync_business_match_status(db, invoice, target_type)
+    sync_business_match_status(db, invoice, target_type)
     invoice.match_note = f"按清单关联单号自动匹配：{target_type}"
     return True
 
@@ -858,7 +858,8 @@ def _invoice_business_context(db: Session, rows: list[TaxInvoice]) -> dict[int, 
             target = target_maps.get(link.target_type, {}).get(link.target_id)
             target_exists = target is not None
             target_valid = target_exists and (
-                link.target_type != "sales_order" or is_deal_status(target.order_status)
+                link.target_type != SALES_LINK_TARGET_TYPE
+                or is_deal_status(target.order_status)
             )
             if target_valid:
                 valid_invoice_links.append(link)
@@ -1317,7 +1318,10 @@ def list_invoices(
                     func.coalesce(
                         func.sum(
                             case(
-                                (target_valid, func.coalesce(TaxInvoiceLink.allocated_amount, Decimal("0"))),
+                                (
+                                    target_valid,
+                                    func.coalesce(TaxInvoiceLink.allocated_amount, Decimal("0")),
+                                ),
                                 else_=Decimal("0"),
                             )
                         ),
@@ -1828,6 +1832,35 @@ def set_invoice_payment_methods(
     return invoices
 
 
+def set_invoice_verified(
+    db: Session,
+    invoice_id: int,
+    verified: bool,
+    verified_month: str = "",
+    actor: str = "system",
+) -> TaxInvoice:
+    """统一维护发票认证事实；采购链/API 只能通过本入口修改 TaxInvoice.verified*。"""
+    invoice = db.get(TaxInvoice, invoice_id)
+    if invoice is None:
+        raise LookupError(f"tax_invoices #{invoice_id} 不存在")
+    if verified and not re.fullmatch(r"\d{4}-(0[1-9]|1[0-2])", verified_month):
+        raise ValueError("请填写实际认证所属月份，格式 YYYY-MM")
+    invoice.verified = bool(verified)
+    invoice.verified_month = verified_month if verified else ""
+    invoice.verified_at = datetime.now(timezone.utc) if verified else None
+    audit(
+        db,
+        actor,
+        "tax.invoice.set_verified",
+        "tax_invoices",
+        invoice.id,
+        {"verified": invoice.verified, "verifiedMonth": invoice.verified_month},
+        commit=False,
+    )
+    db.commit()
+    return invoice
+
+
 PURCHASE_LINK_TARGET_TYPES = ("alibaba1688_order", "external_purchase_order", "jackyun_purchase_order")
 SALES_LINK_TARGET_TYPE = "sales_order"
 ALLOWED_LINK_TARGET_TYPES = PURCHASE_LINK_TARGET_TYPES + (SALES_LINK_TARGET_TYPE,)
@@ -2099,12 +2132,17 @@ def purchase_link_candidates(
     return [{key: item[key] for key in keys} for item in candidates[: min(max(limit, 1), 100)]]
 
 
-def _sync_business_match_status(
+def sync_business_match_status(
     db: Session,
     invoice: TaxInvoice,
     target_type: str,
+    note: str = "",
 ) -> str:
-    """按采购/销售业务域的真实 confirmed 分摊重算缓存状态。"""
+    """按采购/销售业务域的真实 confirmed 分摊重算发票业务匹配缓存。
+
+    这是 TaxInvoice.match_status / match_note 的统一写入口。采购、销售等上游域
+    只负责维护 TaxInvoiceLink，不应自行把发票标成 matched。
+    """
     domain_types = (
         PURCHASE_LINK_TARGET_TYPES
         if target_type in PURCHASE_LINK_TARGET_TYPES
@@ -2141,7 +2179,14 @@ def _sync_business_match_status(
     else:
         status = "partial"
     invoice.match_status = status
+    clean_note = (note or "").strip()
+    if clean_note and clean_note not in (invoice.match_note or ""):
+        invoice.match_note = f"{invoice.match_note}；{clean_note}" if invoice.match_note else clean_note
     return status
+
+
+# 兼容旧的内部调用名；新代码应使用公开入口 sync_business_match_status。
+_sync_business_match_status = sync_business_match_status
 
 
 def link_purchase_order(
@@ -2168,7 +2213,12 @@ def link_purchase_order(
         raise ValueError("销项发票不能人工关联采购单，请关联销售订单")
 
     if target_type == SALES_LINK_TARGET_TYPE:
-        target = db.get(SalesOrder, target_id)
+        target = (
+            db.query(SalesOrder)
+            .filter(SalesOrder.id == target_id)
+            .with_for_update()
+            .one_or_none()
+        )
         if target is None:
             raise LookupError(f"销售订单不存在：#{target_id}")
         if not is_deal_status(target.order_status):
@@ -2177,7 +2227,13 @@ def link_purchase_order(
         default_note = "人工关联销售订单"
         audit_action = "tax_invoice.link_sales"
     else:
-        target = _load_purchase_targets(db, target_type, [target_id]).get(target_id)
+        model = _PURCHASE_LINK_MODELS[target_type]
+        target = (
+            db.query(model)
+            .filter(model.id == target_id)
+            .with_for_update()
+            .one_or_none()
+        )
         if target is None:
             raise LookupError(f"采购单不存在：{target_type} #{target_id}")
         order_no = _purchase_target_brief(target_type, target)["orderNo"]
@@ -2263,7 +2319,7 @@ def link_purchase_order(
 
     db.flush()
     # 发票业务匹配缓存统一从业务域 confirmed 链接重算，避免 link/unlink 各写一套规则。
-    _sync_business_match_status(db, invoice, target_type)
+    sync_business_match_status(db, invoice, target_type)
     msg = f"{default_note} {order_no}"
     invoice.match_note = f"{invoice.match_note}；{msg}" if invoice.match_note else msg
 
@@ -2290,7 +2346,7 @@ def unlink_purchase(db: Session, link_id: int, actor: str = "system") -> dict:
 
     invoice = db.get(TaxInvoice, row.invoice_id)
     if invoice is not None:
-        _sync_business_match_status(db, invoice, row.target_type)
+        sync_business_match_status(db, invoice, row.target_type)
         msg = "已解除人工销售订单关联" if is_sales else "已解除人工采购关联"
         invoice.match_note = f"{invoice.match_note}；{msg}" if invoice.match_note else msg
 
