@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   systemUpdateApi,
   type SystemUpdateMode,
@@ -88,7 +88,7 @@ function updateState(status: SystemUpdateStatus) {
   if (status.updateAvailable) {
     return { label: "有新版本", tone: "bg-amber-50 text-amber-700 ring-amber-200" };
   }
-  return { label: "版本一致", tone: "bg-slate-100 text-slate-600 ring-slate-200 dark:bg-slate-800 dark:text-slate-300 dark:ring-slate-700" };
+  return { label: "版本一致", tone: "bg-emerald-50 text-emerald-700 ring-emerald-200 dark:bg-emerald-500/10 dark:text-emerald-300 dark:ring-emerald-500/30" };
 }
 
 function blockerReason(
@@ -459,10 +459,10 @@ export default function SystemUpdatePage() {
       </nav>
 
       {activeTab === "overview" && (
-        <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_430px]">
+        <div className="grid items-start gap-4 xl:grid-cols-2">
           <div className="min-w-0 space-y-4">
             <section className="app-card overflow-hidden rounded-2xl">
-              <div className="grid xl:grid-cols-[minmax(0,1fr)_250px]">
+              <div>
                 <div className="min-w-0 p-5">
                   <div className="mb-4 flex flex-wrap items-center gap-2">
                     <span className={`inline-flex rounded-full px-2.5 py-1 text-[11px] font-medium ring-1 ring-inset ${state.tone}`}>
@@ -480,7 +480,7 @@ export default function SystemUpdatePage() {
                     )}
                   </div>
 
-                  <div className="text-[13px] font-semibold text-slate-800 dark:text-slate-100">更新概览</div>
+                  <div className="text-[14px] font-semibold tracking-tight text-slate-900 dark:text-slate-100">版本概览</div>
                   <div className="mt-1 text-[11px] text-slate-400 dark:text-slate-400">当前运行版本与 GitHub 最新版本</div>
 
                   <div className="mt-4 overflow-hidden rounded-xl border border-slate-200 dark:border-slate-700">
@@ -501,6 +501,38 @@ export default function SystemUpdatePage() {
                       kind="latest"
                       updateLevel={updateLevel}
                       hasUpdate={Boolean(status.updateAvailable)}
+                      actions={!isContainer ? (
+                        <div className="flex flex-wrap items-center justify-end gap-1.5">
+                          <button
+                            type="button"
+                            onClick={() => void checkNow()}
+                            disabled={Boolean(busy || status.running)}
+                            className="app-button-secondary h-8 rounded-lg px-2.5 text-[10px] font-medium disabled:cursor-not-allowed disabled:opacity-45"
+                          >
+                            {busy === "check" ? "检查中…" : "检查更新"}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={openUpdateDialog}
+                            disabled={status.updateAvailable ? installDisabled : true}
+                            className={
+                              status.updateAvailable
+                                ? "app-button-primary h-8 rounded-lg px-3 text-[10px] font-semibold shadow-none disabled:cursor-not-allowed disabled:opacity-40"
+                                : "h-8 cursor-default rounded-lg border border-emerald-200 bg-emerald-50 px-3 text-[10px] font-semibold text-emerald-700 dark:border-emerald-500/30 dark:bg-emerald-500/10 dark:text-emerald-300"
+                            }
+                          >
+                            {status.running ? "更新进行中…" : status.updateAvailable ? "立即更新" : "当前已是最新版本"}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => void refreshRuntime()}
+                            disabled={Boolean(busy)}
+                            className="app-button-secondary h-8 rounded-lg px-2.5 text-[10px] font-medium disabled:opacity-40"
+                          >
+                            {busy === "refresh" ? "刷新中…" : "刷新状态"}
+                          </button>
+                        </div>
+                      ) : undefined}
                     />
                   </div>
 
@@ -511,7 +543,7 @@ export default function SystemUpdatePage() {
                         : updateLevel === "feature"
                           ? "bg-amber-50 font-medium text-amber-700 dark:bg-amber-500/10 dark:text-amber-200"
                           : "bg-blue-50 text-blue-700 dark:bg-blue-500/10 dark:text-blue-200"
-                      : "bg-slate-50 text-slate-500 dark:bg-slate-800/60 dark:text-slate-300"
+                      : "border border-emerald-100 bg-emerald-50/70 text-emerald-700 dark:border-emerald-500/20 dark:bg-emerald-500/10 dark:text-emerald-300"
                   }`}>
                     {status.updateAvailable
                       ? updateLevel === "major"
@@ -521,6 +553,12 @@ export default function SystemUpdatePage() {
                           : "检测到小版本更新：通常为 UI、文案或普通缺陷修复。"
                       : "当前版本与 GitHub 最新版本一致，无需更新。"}
                   </div>
+
+                  {reason && reason !== "当前没有待安装的新版本。" && !status.running && (
+                    <div className="mt-2 rounded-lg border border-slate-200 bg-slate-50/70 px-3 py-2 text-[10px] leading-5 text-slate-500 dark:border-slate-700 dark:bg-slate-800/50 dark:text-slate-300">
+                      {reason}
+                    </div>
+                  )}
 
                   <div className="mt-4 flex flex-wrap items-center gap-2 border-t border-slate-100 pt-4 dark:border-slate-700/70">
                     <span className="mr-1 text-[11px] font-semibold text-slate-600 dark:text-slate-300">影响模块</span>
@@ -604,41 +642,6 @@ export default function SystemUpdatePage() {
                   </div>
                 </div>
 
-                <aside className="border-t border-slate-100 bg-slate-50/70 p-5 xl:border-l xl:border-t-0 dark:border-slate-700 dark:bg-slate-900/35">
-                  <div className="text-[13px] font-semibold text-slate-800 dark:text-slate-100">更新操作</div>
-                  <p className="mt-1 text-[11px] leading-5 text-slate-500 dark:text-slate-300">检查版本或开始安全更新。</p>
-                  <div className="mt-5 grid gap-3">
-                    <button
-                      type="button"
-                      onClick={() => void checkNow()}
-                      disabled={Boolean(busy || status.running || isContainer)}
-                      className="app-button-secondary h-11 rounded-xl px-4 text-[12px] font-medium disabled:cursor-not-allowed disabled:opacity-45"
-                    >
-                      {busy === "check" ? "正在检查…" : "检查更新"}
-                    </button>
-                    <button
-                      type="button"
-                      onClick={openUpdateDialog}
-                      disabled={installDisabled}
-                      className="app-button-primary h-12 rounded-xl px-4 text-[13px] font-semibold shadow-sm disabled:cursor-not-allowed disabled:opacity-40"
-                    >
-                      {status.running ? "更新进行中…" : status.updateAvailable ? "立即更新到最新版本" : "当前已是最新版本"}
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => void refreshRuntime()}
-                      disabled={Boolean(busy)}
-                      className="app-button-secondary h-11 rounded-xl px-4 text-[12px] font-medium disabled:opacity-40"
-                    >
-                      {busy === "refresh" ? "刷新中…" : "刷新状态"}
-                    </button>
-                  </div>
-                  {reason && !status.running && (
-                    <div className="mt-4 rounded-xl border border-slate-100 bg-white px-3 py-2.5 text-[11px] leading-5 text-slate-500 dark:border-slate-700 dark:bg-slate-800/70 dark:text-slate-300">
-                      {reason}
-                    </div>
-                  )}
-                </aside>
               </div>
             </section>
 
@@ -665,7 +668,7 @@ export default function SystemUpdatePage() {
                       {moduleUpdateCount} 个有更新
                     </span>
                   ) : moduleVersions.length ? (
-                    <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-medium text-slate-500 dark:bg-slate-800 dark:text-slate-300">
+                    <span className="rounded-full border border-emerald-100 bg-emerald-50 px-2 py-0.5 text-[10px] font-medium text-emerald-700 dark:border-emerald-500/20 dark:bg-emerald-500/10 dark:text-emerald-300">
                       全部最新
                     </span>
                   ) : null}
@@ -673,7 +676,7 @@ export default function SystemUpdatePage() {
                 <p className="mt-1 text-[11px] text-slate-400 dark:text-slate-400">10 个中心 · 当前版本 / GitHub 最新版本</p>
               </div>
 
-              <div className="grid grid-cols-[106px_minmax(0,1fr)_minmax(0,1fr)_58px] gap-2 border-b border-slate-100 bg-slate-50/70 px-4 py-2 text-[10px] font-medium text-slate-400 dark:border-slate-700 dark:bg-slate-800/50">
+              <div className="grid grid-cols-[112px_minmax(0,1fr)_minmax(0,1fr)_60px] gap-2 border-b border-slate-100 bg-slate-50/55 px-4 py-2 text-[10px] font-medium text-slate-400 dark:border-slate-700 dark:bg-slate-800/45">
                 <span>模块</span><span>当前</span><span>GitHub</span><span className="text-right">状态</span>
               </div>
 
@@ -683,14 +686,14 @@ export default function SystemUpdatePage() {
                     const hasUpdate = module.status === "update";
                     const tracked = module.status !== "untracked";
                     const severityClass = !hasUpdate
-                      ? "bg-slate-100 text-slate-500 dark:bg-slate-800 dark:text-slate-300"
+                      ? "border border-emerald-100 bg-emerald-50 text-emerald-700 dark:border-emerald-500/20 dark:bg-emerald-500/10 dark:text-emerald-300"
                       : updateLevel === "major"
                         ? "bg-rose-50 font-semibold text-rose-700 dark:bg-rose-500/10 dark:text-rose-200"
                         : updateLevel === "feature"
                           ? "bg-amber-50 font-semibold text-amber-700 dark:bg-amber-500/10 dark:text-amber-200"
                           : "bg-blue-50 text-blue-700 dark:bg-blue-500/10 dark:text-blue-200";
                     return (
-                      <div key={module.key} className="grid grid-cols-[106px_minmax(0,1fr)_minmax(0,1fr)_58px] items-center gap-2 px-4 py-3">
+                      <div key={module.key} className="grid grid-cols-[112px_minmax(0,1fr)_minmax(0,1fr)_60px] items-center gap-2 px-4 py-2.5">
                         <div className="truncate text-[11px] font-semibold text-slate-800 dark:text-slate-100">{index + 1}. {module.label}</div>
                         <div className="truncate font-mono text-[10px] text-slate-500 dark:text-slate-300" title={module.currentVersion}>{module.currentVersion || "—"}</div>
                         <div className={`truncate font-mono text-[10px] ${hasUpdate ? "font-semibold text-slate-800 dark:text-slate-100" : "text-slate-500 dark:text-slate-300"}`} title={module.latestVersion}>
@@ -1008,6 +1011,7 @@ function VersionRow({
   kind,
   updateLevel,
   hasUpdate,
+  actions,
 }: {
   label: string;
   version?: string | null;
@@ -1016,11 +1020,16 @@ function VersionRow({
   kind: "current" | "latest";
   updateLevel: SystemUpdateLevel;
   hasUpdate: boolean;
+  actions?: ReactNode;
 }) {
   const latest = kind === "latest";
-  let rowTone = "bg-white dark:bg-slate-900";
+  let rowTone = latest
+    ? "bg-emerald-50/30 dark:bg-emerald-500/5"
+    : "bg-white dark:bg-slate-900";
   let versionTone = "text-slate-900 dark:text-slate-100";
-  let badgeTone = "bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-300";
+  let badgeTone = latest
+    ? "bg-emerald-50 text-emerald-700 dark:bg-emerald-500/10 dark:text-emerald-300"
+    : "bg-blue-50 text-blue-700 dark:bg-blue-500/10 dark:text-blue-300";
   let badgeText = latest ? "最新版本" : "当前运行中";
   let weight = "font-semibold";
 
@@ -1046,16 +1055,18 @@ function VersionRow({
   }
 
   return (
-    <div className={`grid grid-cols-[86px_minmax(0,1fr)_auto] items-center gap-x-4 px-4 py-3.5 first:border-b first:border-slate-100 dark:first:border-slate-700 ${rowTone}`}>
+    <div className={`grid grid-cols-[78px_minmax(0,1fr)] items-center gap-x-3 px-4 py-3.5 first:border-b first:border-slate-100 lg:grid-cols-[78px_minmax(0,1fr)_auto] dark:first:border-slate-700 ${rowTone}`}>
       <div className="text-[11px] font-medium text-slate-500 dark:text-slate-300">{label}</div>
       <div className="min-w-0">
-        <div className={`font-mono text-[17px] tracking-tight ${weight} ${versionTone}`}>{version || shortSha(sha)}</div>
+        <div className={`font-mono text-[17px] tracking-[-0.02em] ${weight} ${versionTone}`}>{version || shortSha(sha)}</div>
         <div className="mt-0.5 flex min-w-0 items-center gap-2 text-[10px] text-slate-400">
           <span className="shrink-0 font-mono">{shortSha(sha)}</span>
           <span className="truncate" title={note}>{note}</span>
         </div>
       </div>
-      <span className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${badgeTone}`}>{badgeText}</span>
+      <div className="col-span-2 mt-2 flex justify-end lg:col-span-1 lg:mt-0">
+        {actions || <span className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${badgeTone}`}>{badgeText}</span>}
+      </div>
     </div>
   );
 }
