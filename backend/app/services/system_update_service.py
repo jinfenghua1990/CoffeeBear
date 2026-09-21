@@ -749,6 +749,8 @@ def update_readiness() -> dict[str, Any]:
         persistence_status = "ok"
     else:
         persistence_detail = "；".join(str(item) for item in persistence["issues"])
+        if strict_persistence and not persistence["persistRoot"]:
+            persistence_detail += "；可在项目根目录执行 make persistence-migrate 完成一次性安全迁移"
         persistence_status = "error" if strict_persistence else "warn"
     add(
         "persistence_isolation",

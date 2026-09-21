@@ -45,16 +45,29 @@
 
 ## 兼容迁移
 
-运行层仍保留旧目录回退逻辑，便于历史实例读取和迁移；但 production 在完成数据外置前不得继续执行系统升级，标准化不能直接移动真实数据。
+运行层仍保留旧目录回退逻辑，便于历史实例读取和迁移；但 production 在完成数据外置前不得继续执行系统升级。自动更新不得自行搬迁真实业务数据。
 
-迁移时必须：
+原生 Mac 旧部署使用一次性迁移命令：
 
-1. 停止 API / worker / beat；
-2. 生成数据库与 data 全量备份；
-3. 校验备份；
-4. 将旧 data 复制到新的持久化目录；
-5. 在 .env 配置 PERSIST_ROOT / DATA_DIR / BACKUP_DIR / LOG_DIR；
-6. 启动服务并核对文件、订单、库存、财务数据；
-7. 确认无误后再清理旧目录。
+```bash
+make persistence-migrate
+```
 
-任何自动更新不得自行移动或删除真实业务数据。
+默认目标为 `~/ecommerce-workspace-data/production`，也可以显式指定：
+
+```bash
+PERSIST_MIGRATION_TARGET=/path/outside/repo make persistence-migrate
+```
+
+迁移脚本会：
+
+1. 停止 LaunchAgent / API / worker / beat，冻结业务写入；
+2. 先生成数据库与 data 恢复点；
+3. 将旧 data / backups / logs 复制到新的持久化目录；
+4. 使用 rsync checksum dry-run 校验复制结果；
+5. 原子更新 .env 中的 PERSIST_ROOT / DATA_DIR / BACKUP_DIR / LOG_DIR；
+6. 重启服务并执行健康检查；
+7. 失败时恢复原 .env 并重新启动旧配置；
+8. **不会自动删除任何旧目录**。
+
+完成后应回到“系统更新 → 环境自检”确认“程序 / 数据分离”为正常，并人工核对文件、订单、库存、财务页面。旧目录只在业务核对完成后另行清理。

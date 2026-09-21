@@ -36,6 +36,14 @@ RELEASE_CHANNEL=stable
 DEPLOYMENT_MODE=native
 ```
 
+production 必须把 `PERSIST_ROOT / DATA_DIR / BACKUP_DIR / LOG_DIR` 放在 Git 仓库外。旧安装若仍使用项目内 `data/ backups/ logs/`，执行：
+
+```bash
+make persistence-migrate
+```
+
+脚本会先停止服务并备份，再复制和校验数据、更新 `.env`、重启并做健康检查；旧目录不会自动删除。
+
 物理机器是 Mac 还是 NAS，与逻辑环境是否 production 是两回事，不强制修改现有生产数据环境。
 
 ## Codex 开发流程

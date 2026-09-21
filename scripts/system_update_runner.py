@@ -250,7 +250,8 @@ class Runner:
         if not persist_raw:
             raise RuntimeError(
                 "生产环境持久化目录未完全分离：PERSIST_ROOT 未配置；"
-                "请先把业务文件、备份和日志迁移到代码目录外"
+                "请先把业务文件、备份和日志迁移到代码目录外；"
+                "可在项目根目录执行 make persistence-migrate"
             )
 
         persist_root = self._runtime_path(persist_raw, self.root)
