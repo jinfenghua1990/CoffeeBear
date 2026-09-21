@@ -130,7 +130,6 @@ def recheck_partner_matches(
     db.commit()
     after = partner_service.partner_detail(db, partner_id) or {}
 
-    before_summary = before.get("summary") or {}
     after_summary = after.get("summary") or {}
     before_invoice_paid = sum(float(row.get("bankPaidAmount", 0) or 0) for row in before.get("invoices", []))
     after_invoice_paid = sum(float(row.get("bankPaidAmount", 0) or 0) for row in after.get("invoices", []))
