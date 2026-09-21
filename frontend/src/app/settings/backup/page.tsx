@@ -6,7 +6,6 @@ import {
   getKodoColdBackupConfig,
   getR2BackupConfig,
   prepareR2Restore,
-  runKodoColdBackup,
   runR2Backup,
   saveKodoColdBackupConfig,
   saveR2BackupConfig,
@@ -17,9 +16,9 @@ import {
   type R2BackupConfig,
 } from "@/lib/api";
 
-type TabKey = "overview" | "config" | "restore" | "records" | "storage";
+type TabKey = "overview" | "restore" | "records";
 type Tone = "green" | "blue" | "amber" | "slate";
-type StorageKey = "r2" | "kodo" | "nas" | "other";
+type StorageKey = "r2" | "kodo" | "nas";
 
 function Pill({
   children,
@@ -39,39 +38,22 @@ function Pill({
   return <span className={"rounded-full px-2 py-0.5 text-[10px] font-medium " + cls}>{children}</span>;
 }
 
-function StatusDot({ tone = "slate" }: { tone?: Tone }) {
-  const cls =
-    tone === "green"
-      ? "bg-emerald-500"
-      : tone === "blue"
-        ? "bg-blue-500"
-        : tone === "amber"
-          ? "bg-amber-500"
-          : "bg-slate-300";
-  return <span className={"inline-block h-2.5 w-2.5 rounded-full " + cls} />;
-}
-
-function CheckItem({ children }: { children: ReactNode }) {
-  return (
-    <div className="flex items-start gap-2 text-[10px] leading-5 text-slate-600">
-      <span className="mt-1 flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded-[3px] bg-blue-600 text-[9px] font-bold text-white">
-        ✓
-      </span>
-      <span>{children}</span>
-    </div>
-  );
-}
-
 function ArchitectureItem({
   icon,
   title,
   desc,
   tone = "green",
+  status,
+  statusTone = "slate",
+  onConfigure,
 }: {
   icon: "app" | "db" | "folder" | "settings" | "sync" | "shield" | "cloud" | "nas" | "box";
   title: string;
   desc: string;
   tone?: Tone;
+  status?: string;
+  statusTone?: Tone;
+  onConfigure?: () => void;
 }) {
   const toneCls =
     tone === "green"
@@ -131,10 +113,20 @@ function ArchitectureItem({
   return (
     <div className="flex items-center gap-3 rounded-lg bg-white px-3 py-3 shadow-[0_1px_2px_rgba(15,23,42,0.04)]">
       <span className={"flex h-9 w-9 shrink-0 items-center justify-center rounded-lg " + toneCls}>{iconNode}</span>
-      <div className="min-w-0">
+      <div className="min-w-0 flex-1">
         <div className="text-[11px] font-semibold text-slate-800">{title}</div>
         <div className="mt-0.5 text-[9px] leading-4 text-slate-400">{desc}</div>
       </div>
+      {status ? <Pill tone={statusTone}>{status}</Pill> : null}
+      {onConfigure ? (
+        <button
+          type="button"
+          onClick={onConfigure}
+          className="shrink-0 rounded-md border border-slate-200 bg-white px-3 py-1.5 text-[9px] font-medium text-slate-600 hover:bg-slate-50"
+        >
+          配置
+        </button>
+      ) : null}
     </div>
   );
 }
@@ -152,14 +144,8 @@ function StrategyOverviewCard({
   status: string;
   children: ReactNode;
 }) {
-  const shell =
-    tone === "green"
-      ? "border-emerald-100 bg-white"
-      : "border-blue-100 bg-white";
-  const iconCls =
-    tone === "green"
-      ? "bg-emerald-50 text-emerald-600"
-      : "bg-blue-50 text-blue-600";
+  const shell = tone === "green" ? "border-emerald-100 bg-white" : "border-blue-100 bg-white";
+  const iconCls = tone === "green" ? "bg-emerald-50 text-emerald-600" : "bg-blue-50 text-blue-600";
   return (
     <div className={"rounded-xl border p-3 " + shell}>
       <div className="flex items-start gap-3">
@@ -187,191 +173,21 @@ function StrategyOverviewCard({
   );
 }
 
-function ConfigCard({
-  title,
-  tone,
-  enabled,
-  enabledText,
-  schedule,
-  content,
-  retention,
-  status,
-  onEdit,
-  onViewLog,
-}: {
-  title: string;
-  tone: "green" | "blue";
-  enabled: boolean;
-  enabledText: string;
-  schedule: string;
-  content: string[];
-  retention: string;
-  status: string;
-  onEdit: () => void;
-  onViewLog: () => void;
-}) {
-  const frame =
-    tone === "green"
-      ? "border-emerald-200 bg-emerald-50/25"
-      : "border-blue-200 bg-blue-50/25";
-  const titleCls = tone === "green" ? "text-emerald-700" : "text-blue-700";
-  return (
-    <article className={"rounded-xl border p-4 " + frame}>
-      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-100 pb-3">
-        <div className={"text-[12px] font-semibold " + titleCls}>{title}</div>
-        <div className="flex items-center gap-2">
-          <span className={"relative inline-flex h-5 w-9 items-center rounded-full transition " + (enabled ? (tone === "green" ? "bg-emerald-500" : "bg-blue-600") : "bg-slate-200")}>
-            <span className={"absolute h-4 w-4 rounded-full bg-white shadow-sm transition-all " + (enabled ? "right-0.5" : "left-0.5")} />
-          </span>
-          <span className="text-[10px] font-medium text-slate-600">{enabledText}</span>
-        </div>
-      </div>
-
-      <div className="divide-y divide-slate-100">
-        <div className="flex items-center justify-between gap-4 py-3">
-          <span className="text-[10px] font-medium text-slate-600">执行时间</span>
-          <div className="flex items-center gap-2">
-            <span className="text-[10px] text-slate-500">{schedule}</span>
-            <button type="button" onClick={onEdit} className="rounded-md border border-blue-200 bg-white px-2 py-1 text-[9px] font-medium text-blue-600">
-              修改
-            </button>
-          </div>
-        </div>
-
-        <div className="grid gap-2 py-3 sm:grid-cols-[90px_1fr]">
-          <span className="text-[10px] font-medium text-slate-600">备份内容</span>
-          <div className="space-y-1.5">
-            {content.map((item) => (
-              <CheckItem key={item}>{item}</CheckItem>
-            ))}
-          </div>
-        </div>
-
-        <div className="flex items-center justify-between gap-4 py-3">
-          <span className="text-[10px] font-medium text-slate-600">保留策略</span>
-          <div className="flex items-center gap-2">
-            <span className="text-[10px] text-slate-500">{retention}</span>
-            <button type="button" onClick={onEdit} className="rounded-md border border-blue-200 bg-white px-2 py-1 text-[9px] font-medium text-blue-600">
-              修改
-            </button>
-          </div>
-        </div>
-
-        <div className="flex items-start justify-between gap-4 pt-3">
-          <div>
-            <div className="text-[10px] font-medium text-slate-600">状态</div>
-            <div className="mt-1 flex items-center gap-2 text-[10px] text-slate-500">
-              <StatusDot tone={enabled ? "green" : "amber"} />
-              {status}
-            </div>
-          </div>
-          <button type="button" onClick={onViewLog} className="rounded-md border border-blue-200 bg-white px-3 py-1.5 text-[9px] font-medium text-blue-600">
-            查看记录
-          </button>
-        </div>
-      </div>
-    </article>
-  );
-}
-
-function StorageRow({
-  name,
-  subtitle,
-  tone,
-  state,
-  stateTone,
-  onConfigure,
-  onTestConnection,
-  testLabel = "测试连接",
-  secondary,
-  onSecondary,
-}: {
-  name: string;
-  subtitle: string;
-  tone: Tone;
-  state: string;
-  stateTone: Tone;
-  onConfigure: () => void;
-  onTestConnection?: () => void;
-  testLabel?: string;
-  secondary?: string;
-  onSecondary?: () => void;
-}) {
-  return (
-    <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-slate-100 bg-white px-3 py-3">
-      <div className="flex min-w-0 items-center gap-3">
-        <span className={"flex h-9 w-9 shrink-0 items-center justify-center rounded-lg " + (
-          tone === "amber" ? "bg-amber-50 text-amber-600" :
-          tone === "blue" ? "bg-blue-50 text-blue-600" :
-          tone === "green" ? "bg-emerald-50 text-emerald-600" :
-          "bg-slate-100 text-slate-500"
-        )}>
-          <svg viewBox="0 0 24 24" fill="none" className="h-5 w-5" aria-hidden="true">
-            <path d="M4 7.5 12 4l8 3.5V17l-8 3-8-3V7.5Z" stroke="currentColor" strokeWidth="1.8" strokeLinejoin="round" />
-            <path d="m4.5 7.7 7.5 3.2 7.5-3.2M12 10.9v9" stroke="currentColor" strokeWidth="1.8" />
-          </svg>
-        </span>
-        <div className="min-w-0">
-          <div className="flex flex-wrap items-center gap-2">
-            <div className="text-[10px] font-semibold text-slate-800">{name}</div>
-            <Pill tone={stateTone}>{state}</Pill>
-          </div>
-          <div className="mt-0.5 text-[9px] leading-4 text-slate-400">{subtitle}</div>
-        </div>
-      </div>
-      <div className="flex flex-wrap gap-2">
-        <button type="button" onClick={onConfigure} className="rounded-md border border-slate-200 bg-white px-3 py-1.5 text-[9px] font-medium text-slate-600">
-          配置
-        </button>
-        {onTestConnection ? (
-          <button type="button" onClick={onTestConnection} className="rounded-md border border-slate-200 bg-white px-3 py-1.5 text-[9px] font-medium text-slate-600">
-            {testLabel}
-          </button>
-        ) : null}
-        {secondary && onSecondary ? (
-          <button type="button" onClick={onSecondary} className="rounded-md border border-slate-200 bg-white px-3 py-1.5 text-[9px] font-medium text-slate-600">
-            {secondary}
-          </button>
-        ) : null}
-      </div>
-    </div>
-  );
-}
-
-const STORAGE_DETAILS: Record<StorageKey, {
-  title: string;
-  role: string;
-  desc: string;
-  fields: string[];
-  note: string;
-}> = {
+const STORAGE_DETAILS: Record<StorageKey, { title: string; role: string; desc: string }> = {
   r2: {
     title: "Cloudflare R2",
     role: "主存储",
-    desc: "用于日常模块化备份与每 10 天一次的全量容灾备份。",
-    fields: ["Endpoint", "Bucket", "Access Key ID", "Secret Access Key"],
-    note: "运行配置进入云端前先做客户端加密；独立恢复密钥不上传 R2/Kodo，需另行安全保存。",
+    desc: "标准配置只保留必要的 ID 与密钥；技术参数统一放到高级配置。",
   },
   kodo: {
     title: "七牛云 Kodo",
     role: "国内冷备 · 只写入",
-    desc: "每天保留一个完整冷备恢复点；相同内容按 SHA256 去重，只上传新增或变化内容。系统只负责上传保存，不提供下载、取回、在线预览或远端恢复。",
-    fields: ["Bucket", "上传域名（Upload Host）", "Access Key", "Secret Key", "对象前缀"],
-    note: "去重索引只读取本地成功回执，不读取 Kodo。冷备通道不执行 GET / List / HEAD / 下载 / 取回 / 远端校验；完整性在上传前本地完成。",
+    desc: "标准配置只保留 Access Key 与 Secret Key；技术参数统一放到高级配置。",
   },
   nas: {
     title: "本地 NAS",
     role: "可选冷备",
-    desc: "后续可作为第三副本或本地快速恢复来源；当前尚未接入恢复执行器。",
-    fields: ["备份路径", "访问方式", "保留策略"],
-    note: "不作为唯一容灾副本。",
-  },
-  other: {
-    title: "其他存储",
-    role: "可扩展",
-    desc: "预留 AWS S3、阿里云 OSS、Wasabi 或其他 S3 兼容存储。",
-    fields: ["Provider", "Endpoint", "Bucket", "Credentials"],
-    note: "新增目标不改变备份业务逻辑。",
+    desc: "作为第三副本或本地快速恢复来源。",
   },
 };
 
@@ -382,100 +198,86 @@ function backupTime(value: string | null | undefined) {
   return date.toLocaleString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
 }
 
-function healthTone(status: string | undefined): Tone {
-  if (status === "healthy") return "green";
-  if (status === "running") return "blue";
-  if (status === "stale" || status === "failed") return "amber";
-  return "slate";
-}
-
-function healthLabel(status: string | undefined): string {
-  if (status === "healthy") return "正常";
-  if (status === "running") return "执行中";
-  if (status === "stale") return "已过期";
-  if (status === "failed") return "最近失败";
-  return "暂无成功";
-}
-
-function scheduleLabel(
-  scheduler: { managed: boolean; mode: string; message: string } | undefined,
-  planned: string,
-): string {
-  if (scheduler?.managed) return `${planned} · 自动计划已加载`;
-  return `${planned} · 需外部调度`;
-}
-
 export default function BackupSettingsPage() {
   const [activeTab, setActiveTab] = useState<TabKey>("overview");
   const [selectedStorage, setSelectedStorage] = useState<StorageKey>("r2");
+  const [storageModalOpen, setStorageModalOpen] = useState(false);
+  const [advancedConfigOpen, setAdvancedConfigOpen] = useState(false);
   const [notice, setNotice] = useState("");
-  const [menuOpen, setMenuOpen] = useState(false);
+
+  const [backupStatus, setBackupStatus] = useState<BackupStatus | null>(null);
+  const [selectedRestoreKey, setSelectedRestoreKey] = useState("");
+  const [restorePreparing, setRestorePreparing] = useState(false);
+
   const [r2Config, setR2Config] = useState<R2BackupConfig | null>(null);
   const [r2Loading, setR2Loading] = useState(true);
   const [r2Saving, setR2Saving] = useState(false);
-  const [r2Testing, setR2Testing] = useState(false);
   const [r2Running, setR2Running] = useState(false);
-  const [restorePreparing, setRestorePreparing] = useState(false);
-  const [selectedRestoreKey, setSelectedRestoreKey] = useState("");
-  const [backupStatus, setBackupStatus] = useState<BackupStatus | null>(null);
   const [r2Form, setR2Form] = useState({
+    accountId: "",
     endpointUrl: "",
-    bucket: "",
+    bucket: "ecommerce-workspace-backup",
     prefix: "ecommerce-workspace/backup",
     accessKey: "",
     secretKey: "",
     enabled: true,
     fullIntervalDays: 10,
   });
+
   const [kodoConfig, setKodoConfig] = useState<KodoColdBackupConfig | null>(null);
   const [kodoLoading, setKodoLoading] = useState(true);
   const [kodoSaving, setKodoSaving] = useState(false);
-  const [kodoTesting, setKodoTesting] = useState(false);
-  const [kodoRunning, setKodoRunning] = useState(false);
   const [kodoForm, setKodoForm] = useState({
-    bucket: "",
-    uploadUrl: "",
+    bucket: "ecommerce-workspace-cold",
+    uploadUrl: "https://upload.qiniup.com",
     prefix: "ecommerce-workspace/cold",
     accessKey: "",
     secretKey: "",
     enabled: true,
   });
 
-  const r2FullRestorePoints = useMemo(
-    () => (backupStatus?.records || []).filter(
-      (row) => row.type === "r2_full" && Boolean(row.snapshotObjectKey),
-    ),
-    [backupStatus],
-  );
-
   const tabs = useMemo(
     () =>
       [
         ["overview", "概览"],
-        ["config", "备份配置"],
         ["restore", "恢复管理"],
         ["records", "备份记录"],
-        ["storage", "存储管理"],
       ] as Array<[TabKey, string]>,
     [],
   );
 
+  const r2FullRestorePoints = useMemo(
+    () => (backupStatus?.records || []).filter((row) => row.type === "r2_full" && Boolean(row.snapshotObjectKey)),
+    [backupStatus],
+  );
+
   function showNotice(message: string) {
     setNotice(message);
-    window.setTimeout(() => setNotice(""), 3200);
+    window.setTimeout(() => setNotice(""), 3600);
+  }
+
+  function openStorage(key: StorageKey) {
+    setSelectedStorage(key);
+    setAdvancedConfigOpen(false);
+    setStorageModalOpen(true);
+  }
+
+  function closeStorageModal() {
+    setStorageModalOpen(false);
+    setAdvancedConfigOpen(false);
   }
 
   useEffect(() => {
     let cancelled = false;
-    const loadStatus = () => {
+    const load = () => {
       getBackupStatus()
         .then((status) => {
           if (!cancelled) setBackupStatus(status);
         })
         .catch(() => {});
     };
-    loadStatus();
-    const timer = window.setInterval(loadStatus, 30_000);
+    load();
+    const timer = window.setInterval(load, 30_000);
     return () => {
       cancelled = true;
       window.clearInterval(timer);
@@ -487,11 +289,14 @@ export default function BackupSettingsPage() {
     getR2BackupConfig()
       .then((config) => {
         if (cancelled) return;
+        const endpointUrl = config.endpointUrl || "";
+        const accountMatch = endpointUrl.match(/^https?:\/\/([^.]+)\.r2\.cloudflarestorage\.com/i);
         setR2Config(config);
         setR2Form((current) => ({
           ...current,
-          endpointUrl: config.endpointUrl || "",
-          bucket: config.bucket || "",
+          accountId: accountMatch?.[1] || "",
+          endpointUrl,
+          bucket: config.bucket || "ecommerce-workspace-backup",
           prefix: config.prefix || "ecommerce-workspace/backup",
           enabled: config.configured ? config.enabled : true,
           fullIntervalDays: config.fullIntervalDays || 10,
@@ -518,8 +323,8 @@ export default function BackupSettingsPage() {
         setKodoConfig(config);
         setKodoForm((current) => ({
           ...current,
-          bucket: config.bucket || "",
-          uploadUrl: config.uploadUrl || "",
+          bucket: config.bucket || "ecommerce-workspace-cold",
+          uploadUrl: config.uploadUrl || "https://upload.qiniup.com",
           prefix: config.prefix || "ecommerce-workspace/cold",
           enabled: config.configured ? config.enabled : true,
           accessKey: "",
@@ -527,9 +332,7 @@ export default function BackupSettingsPage() {
         }));
       })
       .catch(() => {
-        if (!cancelled) {
-          setKodoConfig(null);
-        }
+        if (!cancelled) setKodoConfig(null);
       })
       .finally(() => {
         if (!cancelled) setKodoLoading(false);
@@ -540,22 +343,28 @@ export default function BackupSettingsPage() {
   }, []);
 
   async function saveR2Config() {
-    if (!r2Form.endpointUrl.trim() || !r2Form.bucket.trim()) {
-      showNotice("请填写 R2 Endpoint 和 Bucket。");
+    const accountId = r2Form.accountId.trim();
+    const endpointUrl =
+      r2Form.endpointUrl.trim() ||
+      (accountId ? `https://${accountId}.r2.cloudflarestorage.com` : "");
+
+    if (!endpointUrl || !r2Form.bucket.trim()) {
+      showNotice("请填写账户 ID；特殊 Endpoint 或 Bucket 可在高级配置中调整。");
       return;
     }
     if (!r2Config?.configured && (!r2Form.accessKey.trim() || !r2Form.secretKey.trim())) {
-      showNotice("首次配置 R2 需要填写 Access Key ID 和 Secret Access Key。");
+      showNotice("首次配置需要填写 Access Key ID 和 Secret Access Key。");
       return;
     }
     if (Boolean(r2Form.accessKey.trim()) !== Boolean(r2Form.secretKey.trim())) {
-      showNotice("R2 Access Key ID 与 Secret Access Key 需要同时填写。");
+      showNotice("Access Key ID 与 Secret Access Key 需要同时填写。");
       return;
     }
+
     setR2Saving(true);
     try {
       const saved = await saveR2BackupConfig({
-        endpointUrl: r2Form.endpointUrl.trim(),
+        endpointUrl,
         bucket: r2Form.bucket.trim(),
         prefix: r2Form.prefix.trim() || "ecommerce-workspace/backup",
         accessKey: r2Form.accessKey.trim(),
@@ -566,6 +375,7 @@ export default function BackupSettingsPage() {
       setR2Config(saved);
       setR2Form((current) => ({
         ...current,
+        accountId: saved.endpointUrl.match(/^https?:\/\/([^.]+)\.r2\.cloudflarestorage\.com/i)?.[1] || current.accountId,
         endpointUrl: saved.endpointUrl,
         bucket: saved.bucket,
         prefix: saved.prefix,
@@ -574,7 +384,15 @@ export default function BackupSettingsPage() {
         accessKey: "",
         secretKey: "",
       }));
-      showNotice(saved.enabled ? "R2 主备份配置已保存并启用。" : "R2 配置已保存，当前保持停用。");
+
+      try {
+        await testR2BackupConnection();
+        closeStorageModal();
+        showNotice("R2 配置已保存，连接测试通过。");
+      } catch (error) {
+        setAdvancedConfigOpen(true);
+        showNotice("凭证已保存，但标准参数未通过连接测试，请检查高级配置：" + (error instanceof Error ? error.message : String(error)));
+      }
     } catch (error) {
       showNotice("保存失败：" + (error instanceof Error ? error.message : String(error)));
     } finally {
@@ -582,63 +400,9 @@ export default function BackupSettingsPage() {
     }
   }
 
-  async function testR2Connection() {
-    if (!r2Config?.configured) {
-      showNotice("请先保存 R2 配置，再测试连接。");
-      return;
-    }
-    setR2Testing(true);
-    try {
-      const result = await testR2BackupConnection();
-      showNotice(result.message || "R2 连接正常。");
-    } catch (error) {
-      showNotice("R2 连接失败：" + (error instanceof Error ? error.message : String(error)));
-    } finally {
-      setR2Testing(false);
-    }
-  }
-
-  async function runR2(mode: "auto" | "daily" | "full" = "auto") {
-    if (!r2Config?.configured || !r2Config.enabled) {
-      openStorage("r2");
-      showNotice("请先配置并启用 Cloudflare R2。");
-      return;
-    }
-    setR2Running(true);
-    try {
-      await runR2Backup(mode);
-      showNotice(mode === "full" ? "R2 全量容灾备份已启动。" : mode === "daily" ? "R2 日常模块化备份已启动。" : "R2 自动备份已启动。");
-    } catch (error) {
-      showNotice("启动失败：" + (error instanceof Error ? error.message : String(error)));
-    } finally {
-      setR2Running(false);
-    }
-  }
-
-  async function prepareSelectedR2Restore() {
-    if (!r2Config?.configured || !r2Config.enabled) {
-      openStorage("r2");
-      showNotice("请先配置并启用 Cloudflare R2。");
-      return;
-    }
-    setRestorePreparing(true);
-    try {
-      await prepareR2Restore(selectedRestoreKey);
-      showNotice(
-        selectedRestoreKey
-          ? "已开始下载并校验所选 R2 全量恢复点；只写入 staging，不会覆盖生产环境。"
-          : "已开始下载并校验 R2 最新全量恢复点；只写入 staging，不会覆盖生产环境。",
-      );
-    } catch (error) {
-      showNotice("恢复准备启动失败：" + (error instanceof Error ? error.message : String(error)));
-    } finally {
-      setRestorePreparing(false);
-    }
-  }
-
   async function saveKodoConfig() {
     if (!kodoForm.bucket.trim() || !kodoForm.uploadUrl.trim()) {
-      showNotice("请填写 Bucket 和上传域名。");
+      showNotice("标准参数缺失，请展开高级配置检查 Bucket 和上传域名。");
       return;
     }
     if (!kodoConfig?.configured && (!kodoForm.accessKey.trim() || !kodoForm.secretKey.trim())) {
@@ -670,7 +434,15 @@ export default function BackupSettingsPage() {
         accessKey: "",
         secretKey: "",
       }));
-      showNotice(saved.enabled ? "Kodo 冷备配置已保存；仅允许上传写入。" : "Kodo 冷备配置已保存，当前保持停用。");
+
+      try {
+        await testKodoColdBackupWrite();
+        closeStorageModal();
+        showNotice("Kodo 配置已保存，只写测试通过。");
+      } catch (error) {
+        setAdvancedConfigOpen(true);
+        showNotice("凭证已保存，但标准参数未通过只写测试，请检查高级配置：" + (error instanceof Error ? error.message : String(error)));
+      }
     } catch (error) {
       showNotice("保存失败：" + (error instanceof Error ? error.message : String(error)));
     } finally {
@@ -678,43 +450,38 @@ export default function BackupSettingsPage() {
     }
   }
 
-  async function testKodoWrite() {
-    if (!kodoConfig?.configured) {
-      openStorage("kodo");
-      showNotice("请先保存 Kodo 配置，再执行只写测试。");
+  async function runR2() {
+    if (!r2Config?.configured || !r2Config.enabled) {
+      openStorage("r2");
+      showNotice("请先完成 R2 配置。");
       return;
     }
-    setKodoTesting(true);
+    setR2Running(true);
     try {
-      const result = await testKodoColdBackupWrite();
-      showNotice(result.message || "Kodo 只写测试通过。");
+      await runR2Backup("auto");
+      showNotice("R2 备份已启动。");
     } catch (error) {
-      showNotice("Kodo 只写测试失败：" + (error instanceof Error ? error.message : String(error)));
+      showNotice("启动失败：" + (error instanceof Error ? error.message : String(error)));
     } finally {
-      setKodoTesting(false);
+      setR2Running(false);
     }
   }
 
-  async function runKodo() {
-    if (!kodoConfig?.configured || !kodoConfig.enabled) {
-      openStorage("kodo");
-      showNotice("请先配置并启用 Kodo 冷备。");
+  async function prepareSelectedR2Restore() {
+    if (!r2Config?.configured || !r2Config.enabled) {
+      openStorage("r2");
+      showNotice("请先完成 R2 配置。");
       return;
     }
-    setKodoRunning(true);
+    setRestorePreparing(true);
     try {
-      await runKodoColdBackup();
-      showNotice("Kodo 完整冷备已启动；状态会在任务完成后自动刷新。");
+      await prepareR2Restore(selectedRestoreKey);
+      showNotice("恢复点已开始下载并校验，只进入 staging，不覆盖生产环境。");
     } catch (error) {
-      showNotice("Kodo 冷备启动失败：" + (error instanceof Error ? error.message : String(error)));
+      showNotice("恢复准备启动失败：" + (error instanceof Error ? error.message : String(error)));
     } finally {
-      setKodoRunning(false);
+      setRestorePreparing(false);
     }
-  }
-
-  function openStorage(key: StorageKey) {
-    setSelectedStorage(key);
-    setActiveTab("storage");
   }
 
   return (
@@ -727,44 +494,20 @@ export default function BackupSettingsPage() {
               模块化备份、全量容灾、支持多存储，保障系统数据安全
             </p>
           </div>
-          <div className="relative flex items-center gap-2">
-            <button
-              type="button"
-              onClick={() => {
-                if (r2Config?.configured && r2Config.enabled) void runR2("auto");
-                else openStorage("r2");
-              }}
-              disabled={r2Running || r2Loading}
-              className="app-button-primary inline-flex h-9 items-center gap-2 rounded-lg px-4 text-[11px] font-medium disabled:cursor-wait disabled:opacity-50"
-            >
-              <span className="text-[11px]">▶</span>
-              {r2Running ? "启动中…" : r2Config?.configured && r2Config.enabled ? "立即 R2 备份" : "配置 R2"}
-            </button>
-            <button
-              type="button"
-              aria-label="更多操作"
-              aria-expanded={menuOpen}
-              onClick={() => setMenuOpen((value) => !value)}
-              className="flex h-9 w-9 items-center justify-center rounded-lg border border-slate-200 bg-white text-slate-500"
-            >
-              •••
-            </button>
-            {menuOpen ? (
-              <div className="absolute right-0 top-11 z-10 w-40 rounded-lg border border-slate-200 bg-white p-1.5 shadow-lg">
-                <button type="button" onClick={() => { setMenuOpen(false); setActiveTab("records"); }} className="w-full rounded-md px-3 py-2 text-left text-[10px] text-slate-600 hover:bg-slate-50">
-                  查看备份记录
-                </button>
-                <button type="button" onClick={() => { setMenuOpen(false); setActiveTab("storage"); }} className="w-full rounded-md px-3 py-2 text-left text-[10px] text-slate-600 hover:bg-slate-50">
-                  存储管理
-                </button>
-              </div>
-            ) : null}
-          </div>
+          <button
+            type="button"
+            onClick={() => void runR2()}
+            disabled={r2Running || r2Loading}
+            className="app-button-primary inline-flex h-9 items-center gap-2 rounded-lg px-4 text-[11px] font-medium disabled:cursor-wait disabled:opacity-50"
+          >
+            <span>▶</span>
+            {r2Running ? "启动中…" : r2Config?.configured && r2Config.enabled ? "立即 R2 备份" : "配置 R2"}
+          </button>
         </div>
       </header>
 
       {notice ? (
-        <div className="mt-3 max-w-7xl rounded-lg border border-blue-100 bg-blue-50 px-3 py-2 text-[10px] text-blue-700">
+        <div className="mt-3 max-w-7xl rounded-lg border border-blue-100 bg-blue-50 px-3 py-2 text-[10px] leading-5 text-blue-700">
           {notice}
         </div>
       ) : null}
@@ -790,12 +533,13 @@ export default function BackupSettingsPage() {
       </div>
 
       {activeTab === "overview" ? (
-        <div className="mt-4 max-w-7xl space-y-4">
+        <div className="mt-4 max-w-7xl">
           <section className="app-card rounded-xl p-4">
             <div className="mb-3 text-[13px] font-semibold text-slate-900">备份架构总览</div>
             <div className="relative grid gap-4 xl:grid-cols-[1fr_1.2fr_1fr]">
               <span className="pointer-events-none absolute left-[31.8%] top-1/2 z-[1] hidden -translate-x-1/2 -translate-y-1/2 text-2xl font-light text-slate-400 xl:block">→</span>
               <span className="pointer-events-none absolute left-[69.1%] top-1/2 z-[1] hidden -translate-x-1/2 -translate-y-1/2 text-2xl font-light text-slate-400 xl:block">→</span>
+
               <div className="rounded-xl border border-emerald-100 bg-emerald-50/35 p-3">
                 <div className="mb-3 text-center text-[11px] font-semibold text-slate-800">本地系统</div>
                 <div className="space-y-2">
@@ -814,17 +558,15 @@ export default function BackupSettingsPage() {
                       <li>• 每日检测有更新内容</li>
                       <li>• 模块化增量备份</li>
                       <li>• 未变化内容不重复上传</li>
-                      <li>• 远端保留策略待配置；当前不自动删除 R2 恢复点</li>
+                      <li>• 保留真实执行记录</li>
                     </ul>
                   </StrategyOverviewCard>
-
                   <StrategyOverviewCard icon="db" title="全量备份（容灾级）" tone="blue" status="策略已定义">
                     <ul className="space-y-0.5 text-[9px] leading-4 text-slate-500">
-                      <li>• 每 10 天执行一次</li>
-                      <li>• 完整系统备份（软件 + 数据 + 配置）</li>
-                      <li>• 运行配置客户端加密，恢复密钥独立保存</li>
+                      <li>• 默认每 10 天执行一次</li>
+                      <li>• 软件 + 数据 + 配置完整备份</li>
+                      <li>• 配置加密，恢复密钥独立保存</li>
                       <li>• 用于灾难恢复</li>
-                      <li>• 不依赖 GitHub 即可重建</li>
                     </ul>
                   </StrategyOverviewCard>
                 </div>
@@ -836,214 +578,34 @@ export default function BackupSettingsPage() {
                   <ArchitectureItem
                     icon="cloud"
                     title="Cloudflare R2（主存储）"
-                    desc={r2Loading ? "正在读取配置" : r2Config?.configured && r2Config.enabled ? "每日模块化 + 周期全量 · 已启用" : r2Config?.configured ? "已配置 · 当前停用" : "S3 兼容对象存储 · 待配置"}
+                    desc="每日模块化 + 周期全量容灾"
                     tone={r2Config?.configured && r2Config.enabled ? "green" : "amber"}
+                    status={r2Loading ? "读取中" : r2Config?.configured ? (r2Config.enabled ? "已配置" : "已停用") : "待配置"}
+                    statusTone={r2Config?.configured && r2Config.enabled ? "green" : "amber"}
+                    onConfigure={() => openStorage("r2")}
                   />
                   <ArchitectureItem
                     icon="box"
                     title="七牛云 Kodo（国内冷备）"
-                    desc={kodoLoading ? "正在读取配置" : kodoConfig?.configured && kodoConfig.enabled ? "每日完整恢复点 · 内容去重 · 只写入" : kodoConfig?.configured ? "已配置 · 当前停用" : "标准存储 · 去重上传 · 待密钥"}
+                    desc="每日完整恢复点 · 内容去重 · 只写入"
                     tone={kodoConfig?.configured && kodoConfig.enabled ? "green" : "amber"}
+                    status={kodoLoading ? "读取中" : kodoConfig?.configured ? (kodoConfig.enabled ? "已配置" : "已停用") : "待配置"}
+                    statusTone={kodoConfig?.configured && kodoConfig.enabled ? "green" : "amber"}
+                    onConfigure={() => openStorage("kodo")}
                   />
-                  <ArchitectureItem icon="nas" title="本地 NAS（可选）" desc="本地冷备 / 第三副本" tone="slate" />
-                  <ArchitectureItem icon="box" title="其他存储（可扩展）" desc="AWS S3 / 阿里云 / 本地硬盘等" tone="slate" />
+                  <ArchitectureItem
+                    icon="nas"
+                    title="本地 NAS（可选）"
+                    desc="本地冷备 / 第三副本"
+                    tone="slate"
+                    status="未接入"
+                    statusTone="slate"
+                    onConfigure={() => openStorage("nas")}
+                  />
                 </div>
               </div>
             </div>
           </section>
-
-          <section className="app-card rounded-xl p-4">
-            <div className="mb-3 text-[13px] font-semibold text-slate-900">备份策略配置</div>
-            <div className="grid gap-4 xl:grid-cols-2">
-              <ConfigCard
-                title="日常备份 · 模块化"
-                tone="green"
-                enabled={Boolean(r2Config?.configured && r2Config.enabled)}
-                enabledText={r2Config?.configured && r2Config.enabled ? "已启用" : "待配置"}
-                schedule={scheduleLabel(r2Config?.scheduler, "计划 03:00")}
-                content={["数据库（增量 / 变化检测）", "业务文件（变更检测）", "系统配置（变更检测）"]}
-                retention="远端保留：当前不自动删除 · 后续可配置"
-                status={r2Loading ? "读取 R2 配置" : r2Config?.configured && r2Config.enabled ? (r2Config.scheduler.managed ? "R2 已启用 · 自动计划可确认" : "R2 已启用 · 自动计划需外部确认") : "R2 待配置"}
-                onEdit={() => setActiveTab("config")}
-                onViewLog={() => setActiveTab("records")}
-              />
-              <ConfigCard
-                title="全量备份 · 容灾级"
-                tone="blue"
-                enabled={Boolean(r2Config?.configured && r2Config.enabled)}
-                enabledText={r2Config?.configured && r2Config.enabled ? "已启用" : "待配置"}
-                schedule={scheduleLabel(r2Config?.scheduler, `每 ${r2Config?.fullIntervalDays || 10} 天 · 03:00 策略`)}
-                content={["完整数据库", "全部业务文件", "系统配置（客户端加密）", "应用程序 / Docker 配置 / 必要文件", "恢复脚本 / 完整性清单", "独立恢复密钥不进入云端备份"]}
-                retention="计划：保留容灾恢复点"
-                status={r2Loading ? "读取 R2 配置" : r2Config?.configured && r2Config.enabled ? (r2Config.scheduler.managed ? "R2 已启用 · 自动计划可确认" : "R2 已启用 · 自动计划需外部确认") : "R2 待配置"}
-                onEdit={() => setActiveTab("config")}
-                onViewLog={() => setActiveTab("records")}
-              />
-            </div>
-          </section>
-
-          <section className="grid gap-4 xl:grid-cols-[1.65fr_.75fr]">
-            <div className="app-card rounded-xl p-4">
-              <div className="mb-3 text-[13px] font-semibold text-slate-900">存储目标配置</div>
-              <div className="space-y-2">
-                <StorageRow
-                  name="Cloudflare R2（主存储）"
-                  subtitle={r2Config?.scheduler.managed ? "每日模块化 + 周期全量容灾；自动计划已加载" : "主备与恢复已接入；自动执行需由 NAS / 系统计划任务触发"}
-                  tone="amber"
-                  state={r2Loading ? "读取配置" : r2Config?.configured ? (r2Config.enabled ? "已配置" : "已配置 · 停用") : "待配置"}
-                  stateTone={r2Config?.configured && r2Config.enabled ? "green" : "amber"}
-                  onConfigure={() => openStorage("r2")}
-                  onTestConnection={() => void testR2Connection()}
-                  secondary="备份记录"
-                  onSecondary={() => setActiveTab("records")}
-                />
-                <StorageRow
-                  name="七牛云 Kodo（国内冷备）"
-                  subtitle={kodoConfig?.scheduler.managed ? "每日完整冷备；自动计划已加载；只存不取" : "完整冷备执行器已接入；自动执行需由 NAS / 系统计划任务触发"}
-                  tone="blue"
-                  state={kodoLoading ? "读取配置" : kodoConfig?.configured ? (kodoConfig.enabled ? "已配置" : "已配置 · 停用") : "待填写密钥"}
-                  stateTone={kodoConfig?.configured && kodoConfig.enabled ? "green" : "amber"}
-                  onConfigure={() => openStorage("kodo")}
-                  onTestConnection={() => void testKodoWrite()}
-                  testLabel="只写测试"
-                  secondary="立即冷备"
-                  onSecondary={() => void runKodo()}
-                />
-                <StorageRow
-                  name="本地 NAS（可选）"
-                  subtitle="用于本地冷备 / 第三副本"
-                  tone="slate"
-                  state="未配置"
-                  stateTone="slate"
-                  onConfigure={() => openStorage("nas")}
-                />
-                <StorageRow
-                  name="其他存储（可扩展）"
-                  subtitle="AWS S3 / 阿里云 / 本地硬盘，可作为冷备目标"
-                  tone="slate"
-                  state="未配置"
-                  stateTone="slate"
-                  onConfigure={() => openStorage("other")}
-                />
-              </div>
-            </div>
-
-            <div className="app-card rounded-xl p-4">
-              <div className="mb-3 text-[13px] font-semibold text-slate-900">备份状态</div>
-              <div className="rounded-lg bg-slate-50 px-3 py-3">
-                <div className="flex items-center gap-3">
-                  <span className={`flex h-8 w-8 items-center justify-center rounded-full ${backupStatus?.lastLocal ? "bg-emerald-100 text-emerald-700" : "bg-amber-100 text-amber-700"}`}>
-                    {backupStatus?.lastLocal ? "✓" : "!"}
-                  </span>
-                  <div>
-                    <div className="text-[11px] font-semibold text-slate-800">
-                      {backupStatus?.lastLocal ? "本地基础备份已有成功恢复点" : "等待首次本地基础备份"}
-                    </div>
-                    <div className="mt-0.5 text-[9px] text-slate-400">
-                      {backupStatus?.lastLocal ? `最近成功：${backupTime(backupStatus.lastLocal.time)} · PostgreSQL + data/` : "尚未发现成功 manifest；不预判恢复演练结果"}
-                    </div>
-                  </div>
-                </div>
-              </div>
-              <div className="mt-3 grid gap-2 sm:grid-cols-3">
-                {([
-                  ["本地恢复点", backupStatus?.health.local],
-                  ["R2 主备", backupStatus?.health.r2],
-                  ["Kodo 冷备", backupStatus?.health.kodo],
-                ] as const).map(([label, health]) => (
-                  <div key={label} className="rounded-lg border border-slate-100 bg-white px-3 py-2.5">
-                    <div className="flex items-center justify-between gap-2">
-                      <span className="text-[9px] text-slate-400">{label}</span>
-                      <Pill tone={healthTone(health?.status)}>{healthLabel(health?.status)}</Pill>
-                    </div>
-                    <div className="mt-1 text-[9px] leading-4 text-slate-500">{health?.message || "正在读取真实执行状态"}</div>
-                  </div>
-                ))}
-              </div>
-              <div className="mt-3 divide-y divide-slate-100 text-[10px]">
-                <div className="flex items-center justify-between gap-3 py-2">
-                  <span className="text-slate-500">最近 R2 备份</span>
-                  <span className="font-medium text-slate-700">{backupStatus?.lastR2 ? backupTime(backupStatus.lastR2.time) : r2Loading ? "读取配置" : r2Config?.configured ? "尚无成功记录" : "待配置"}</span>
-                </div>
-                <div className="flex items-center justify-between gap-3 py-2">
-                  <span className="text-slate-500">最近 Kodo 冷备</span>
-                  <span className="font-medium text-slate-700">{backupStatus?.lastKodo ? backupTime(backupStatus.lastKodo.time) : kodoLoading ? "读取配置" : kodoConfig?.configured ? "尚无成功记录" : "待配置"}</span>
-                </div>
-                <div className="flex items-center justify-between gap-3 py-2">
-                  <span className="text-slate-500">R2 日常计划</span>
-                  <span className="font-medium text-slate-700">{r2Config?.configured && r2Config.enabled ? scheduleLabel(r2Config.scheduler, "03:00") : "配置后启用"}</span>
-                </div>
-                <div className="flex items-center justify-between gap-3 py-2">
-                  <span className="text-slate-500">R2 全量周期</span>
-                  <span className="font-medium text-slate-700">{r2Config?.configured && r2Config.enabled ? scheduleLabel(r2Config.scheduler, `每 ${r2Config.fullIntervalDays || 10} 天 · 03:00`) : "配置后启用"}</span>
-                </div>
-              </div>
-              <button type="button" onClick={() => setActiveTab("records")} className="app-button-secondary mt-4 w-full rounded-lg px-3 py-2 text-[10px] font-medium">
-                查看完整备份日志 →
-              </button>
-            </div>
-          </section>
-        </div>
-      ) : null}
-
-      {activeTab === "config" ? (
-        <div className="mt-4 max-w-7xl space-y-4">
-          <section className="app-card rounded-xl p-4">
-            <div className="mb-1 text-[13px] font-semibold text-slate-900">备份配置</div>
-            <p className="text-[10px] leading-5 text-slate-400">这里集中管理三个备份业务策略；R2 与 Kodo 已接入真实配置和执行器，NAS 保留扩展口。</p>
-          </section>
-
-          <div className="grid gap-4 xl:grid-cols-2">
-            <ConfigCard
-              title="日常备份 · 模块化"
-              tone="green"
-              enabled={Boolean(r2Config?.configured && r2Config.enabled)}
-              enabledText={r2Config?.configured && r2Config.enabled ? "已启用" : "待配置"}
-              schedule={scheduleLabel(r2Config?.scheduler, "03:00")}
-              content={["数据库：内容 Hash 变化检测", "业务文件：文件变化检测", "系统配置：Hash 变化检测", "应用未更新时不重复上传"]}
-              retention="最近 30 个本地恢复点 + R2 模块快照"
-              status={r2Config?.configured && r2Config.enabled ? (r2Config.scheduler.managed ? "自动计划已确认" : "执行器已启用 · 调度需外部确认") : "R2 待配置"}
-              onEdit={() => openStorage("r2")}
-              onViewLog={() => setActiveTab("records")}
-            />
-            <ConfigCard
-              title="全量备份 · 容灾级"
-              tone="blue"
-              enabled={Boolean(r2Config?.configured && r2Config.enabled)}
-              enabledText={r2Config?.configured && r2Config.enabled ? "已启用" : "待配置"}
-              schedule={scheduleLabel(r2Config?.scheduler, `每 ${r2Config?.fullIntervalDays || 10} 天 · 03:00`)}
-              content={["应用源码 / 锁定依赖", "可用时 Docker 镜像", "完整 PostgreSQL", "全部业务文件", "运行配置 / manifest / Hash 校验"]}
-              retention="独立完整容灾恢复点"
-              status={r2Config?.configured && r2Config.enabled ? (r2Config.scheduler.managed ? "自动计划已确认" : "执行器已启用 · 调度需外部确认") : "R2 待配置"}
-              onEdit={() => openStorage("r2")}
-              onViewLog={() => setActiveTab("records")}
-            />
-          </div>
-
-          <article className="app-card rounded-xl p-4">
-            <div className="flex flex-wrap items-start justify-between gap-3">
-              <div>
-                <div className="text-[12px] font-semibold text-amber-700">冷备份 · 每日恢复点</div>
-                <div className="mt-1 text-[10px] leading-5 text-slate-500">
-                  每天生成一个完整冷备恢复点；内容对象按 SHA256 去重，相同内容直接复用本地成功回执，只上传新增或变化内容。冷备通道只写入，不执行下载、取回、在线预览或远端恢复。
-                </div>
-              </div>
-              <Pill tone={kodoConfig?.configured && kodoConfig.enabled ? "green" : "amber"}>{kodoConfig?.configured && kodoConfig.enabled ? "已启用" : "待配置"}</Pill>
-            </div>
-            <div className="mt-4 grid gap-3 md:grid-cols-4">
-              {[
-                ["执行时间", kodoConfig?.configured && kodoConfig.enabled ? scheduleLabel(kodoConfig.scheduler, "04:00") : "配置后启用"],
-                ["默认目标", "七牛云 Kodo"],
-                ["存储方式", "内容去重 · 增量上传"],
-                ["访问规则", "只写入 · 禁止取回"],
-              ].map(([label, value]) => (
-                <div key={label} className="rounded-lg bg-slate-50 px-3 py-3">
-                  <div className="text-[9px] text-slate-400">{label}</div>
-                  <div className="mt-1 text-[10px] font-medium text-slate-700">{value}</div>
-                </div>
-              ))}
-            </div>
-          </article>
         </div>
       ) : null}
 
@@ -1053,57 +615,44 @@ export default function BackupSettingsPage() {
             <div className="flex flex-wrap items-start justify-between gap-3">
               <div>
                 <div className="text-[13px] font-semibold text-slate-900">恢复管理</div>
-                <p className="mt-1 text-[10px] leading-5 text-slate-400">当前恢复执行器仅接入 Cloudflare R2。NAS 为后续扩展；七牛云 Kodo 冷备按“只存不取”执行，不提供下载、取回、预览或恢复入口。</p>
+                <p className="mt-1 text-[10px] leading-5 text-slate-400">
+                  当前恢复执行器仅接入 Cloudflare R2；七牛云 Kodo 按“只存不取”执行。
+                </p>
               </div>
-              <Pill tone={r2Config?.configured && r2Config.enabled ? "green" : "amber"}>{r2Config?.configured && r2Config.enabled ? "R2 可准备恢复" : "R2 待配置"}</Pill>
+              <Pill tone={r2Config?.configured && r2Config.enabled ? "green" : "amber"}>
+                {r2Config?.configured && r2Config.enabled ? "R2 可准备恢复" : "R2 待配置"}
+              </Pill>
             </div>
-            <div className="mt-5 grid gap-3 md:grid-cols-4">
-              {[
-                ["1", "选择恢复点", "按日期选择目标版本"],
-                ["2", "选择来源", "当前仅 R2；NAS 后续接入"],
-                ["3", "自动校验", "manifest / Hash / 数据库"],
-                ["4", "恢复准备完成", "人工确认后再执行生产恢复"],
-              ].map(([step, title, desc]) => (
-                <div key={step} className="rounded-xl border border-slate-100 bg-slate-50 p-3">
-                  <span className="flex h-6 w-6 items-center justify-center rounded-full bg-blue-50 text-[10px] font-semibold text-blue-700">{step}</span>
-                  <div className="mt-2 text-[10px] font-semibold text-slate-700">{title}</div>
-                  <div className="mt-1 text-[9px] leading-4 text-slate-400">{desc}</div>
-                </div>
-              ))}
-            </div>
-            <div className="mt-5 border-t border-slate-100 pt-4">
-              <div className="grid gap-3 lg:grid-cols-[1fr_auto] lg:items-end">
-                <label className="space-y-1.5">
-                  <span className="text-[10px] font-medium text-slate-600">R2 全量恢复点</span>
-                  <select
-                    value={selectedRestoreKey}
-                    onChange={(event) => setSelectedRestoreKey(event.target.value)}
-                    disabled={!r2Config?.configured || !r2Config.enabled}
-                    className="h-9 w-full rounded-lg border border-slate-200 bg-white px-3 text-[10px] text-slate-700 outline-none focus:border-blue-400 disabled:bg-slate-50 disabled:text-slate-400"
-                  >
-                    <option value="">最新 R2 全量恢复点（灾难恢复默认）</option>
-                    {r2FullRestorePoints.map((row) => (
-                      <option key={row.snapshotObjectKey} value={row.snapshotObjectKey}>
-                        {backupTime(row.time)} · {row.timestamp}
-                      </option>
-                    ))}
-                  </select>
-                  <div className="text-[9px] leading-4 text-slate-400">
-                    历史选项来自本机成功上传回执；新机器没有本地记录时仍可直接选择“最新 R2 全量恢复点”。
-                  </div>
-                </label>
-                <button
-                  type="button"
-                  disabled={restorePreparing || !r2Config?.configured || !r2Config.enabled}
-                  onClick={() => void prepareSelectedR2Restore()}
-                  className="app-button-primary h-9 rounded-lg px-4 text-[10px] font-medium disabled:opacity-40"
+
+            <div className="mt-5 grid gap-3 lg:grid-cols-[1fr_auto] lg:items-end">
+              <label className="space-y-1.5">
+                <span className="text-[10px] font-medium text-slate-600">R2 全量恢复点</span>
+                <select
+                  value={selectedRestoreKey}
+                  onChange={(event) => setSelectedRestoreKey(event.target.value)}
+                  disabled={!r2Config?.configured || !r2Config.enabled}
+                  className="h-9 w-full rounded-lg border border-slate-200 bg-white px-3 text-[10px] text-slate-700 outline-none focus:border-blue-400 disabled:bg-slate-50 disabled:text-slate-400"
                 >
-                  {restorePreparing ? "准备中…" : "准备所选恢复点"}
-                </button>
-              </div>
-              <div className="mt-3 rounded-lg bg-slate-50 px-3 py-2 text-[9px] leading-5 text-slate-500">
-                安全流程：下载到 staging → SHA256 校验 → 临时数据库恢复演练。运行配置为客户端加密密文，真正恢复配置时必须提供独立恢复密钥；这里不会直接覆盖 PostgreSQL、data/、应用代码或 .env，Kodo 冷备不参与取回。
-              </div>
+                  <option value="">最新 R2 全量恢复点</option>
+                  {r2FullRestorePoints.map((row) => (
+                    <option key={row.snapshotObjectKey} value={row.snapshotObjectKey}>
+                      {backupTime(row.time)} · {row.timestamp}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <button
+                type="button"
+                disabled={restorePreparing || !r2Config?.configured || !r2Config.enabled}
+                onClick={() => void prepareSelectedR2Restore()}
+                className="app-button-primary h-9 rounded-lg px-4 text-[10px] font-medium disabled:opacity-40"
+              >
+                {restorePreparing ? "准备中…" : "准备恢复点"}
+              </button>
+            </div>
+
+            <div className="mt-3 rounded-lg bg-slate-50 px-3 py-2 text-[9px] leading-5 text-slate-500">
+              安全流程：下载到 staging → SHA256 校验 → 临时恢复演练；不会直接覆盖生产 PostgreSQL、data/、应用代码或 .env。
             </div>
           </section>
         </div>
@@ -1111,19 +660,21 @@ export default function BackupSettingsPage() {
 
       {activeTab === "records" ? (
         <div className="mt-4 max-w-7xl">
-          <section className="app-card rounded-xl overflow-hidden">
+          <section className="app-card overflow-hidden rounded-xl">
             <div className="border-b border-slate-100 px-4 py-3">
               <div className="text-[13px] font-semibold text-slate-900">备份记录</div>
-              <div className="mt-1 text-[11px] text-slate-400">来自本地 manifest、R2 成功回执和 Kodo 本地上传回执；不通过 Kodo 远端读取校验。</div>
+              <div className="mt-1 text-[10px] text-slate-400">来自本地 manifest、R2 成功回执和 Kodo 本地上传回执。</div>
             </div>
-            <div className="grid grid-cols-[1.1fr_.9fr_.8fr_1.2fr_.7fr] border-b border-slate-100 bg-slate-50 px-4 py-2 text-[11px] font-medium text-slate-500">
+            <div className="grid grid-cols-[1.1fr_.9fr_.8fr_1.2fr_.7fr] border-b border-slate-100 bg-slate-50 px-4 py-2 text-[10px] font-medium text-slate-500">
               <span>时间</span><span>类型</span><span>目标</span><span>说明</span><span>状态</span>
             </div>
             <div className="divide-y divide-slate-100">
               {(backupStatus?.records || []).map((row) => (
-                <div key={`${row.type}-${row.timestamp}-${row.target}`} className="grid grid-cols-[1.1fr_.9fr_.8fr_1.2fr_.7fr] items-center px-4 py-3 text-[11px]">
+                <div key={`${row.type}-${row.timestamp}-${row.target}`} className="grid grid-cols-[1.1fr_.9fr_.8fr_1.2fr_.7fr] items-center px-4 py-3 text-[10px]">
                   <span className="text-slate-600">{backupTime(row.time)}</span>
-                  <span className="font-medium text-slate-700">{row.type === "r2_full" ? "全量容灾" : row.type === "r2_daily" ? "日常模块化" : row.type === "kodo_full" ? "冷备恢复点" : row.type === "r2_attempt" || row.type === "kodo_attempt" ? "任务状态" : "本地基础"}</span>
+                  <span className="font-medium text-slate-700">
+                    {row.type === "r2_full" ? "全量容灾" : row.type === "r2_daily" ? "日常模块化" : row.type === "kodo_full" ? "冷备恢复点" : row.type === "r2_attempt" || row.type === "kodo_attempt" ? "任务状态" : "本地基础"}
+                  </span>
                   <span className="text-slate-600">{row.target}</span>
                   <span className="text-slate-500">{row.detail}</span>
                   <span className={row.status === "success" ? "text-emerald-700" : row.status === "running" ? "text-blue-700" : row.status === "failed" ? "text-red-600" : "text-amber-700"}>
@@ -1131,156 +682,134 @@ export default function BackupSettingsPage() {
                   </span>
                 </div>
               ))}
-              {!backupStatus?.records.length ? <div className="px-4 py-12 text-center text-[11px] text-slate-400">暂无成功备份记录</div> : null}
+              {!backupStatus?.records.length ? (
+                <div className="px-4 py-12 text-center text-[11px] text-slate-400">暂无备份记录</div>
+              ) : null}
             </div>
           </section>
         </div>
       ) : null}
 
-      {activeTab === "storage" ? (
-        <div className="mt-4 grid max-w-7xl gap-4 xl:grid-cols-[.8fr_1.2fr]">
-          <section className="app-card rounded-xl p-3">
-            <div className="px-1 pb-2 text-[11px] font-semibold text-slate-800">存储管理</div>
-            <div className="space-y-2">
-              {([
-                ["r2", "Cloudflare R2", "主存储"],
-                ["kodo", "七牛云 Kodo", "国内冷备 · 只写入"],
-                ["nas", "本地 NAS", "可选冷备"],
-                ["other", "其他存储", "可扩展"],
-              ] as Array<[StorageKey, string, string]>).map(([key, title, role]) => (
-                <button
-                  type="button"
-                  key={key}
-                  onClick={() => setSelectedStorage(key)}
-                  className={
-                    "w-full rounded-lg border px-3 py-3 text-left " +
-                    (selectedStorage === key ? "border-blue-200 bg-blue-50/70" : "border-slate-100 bg-white hover:bg-slate-50")
-                  }
-                >
-                  <div className="text-[10px] font-semibold text-slate-800">{title}</div>
-                  <div className="mt-0.5 text-[9px] text-slate-400">{role}</div>
-                </button>
-              ))}
-            </div>
-          </section>
-
-          <section className="app-card rounded-xl p-5">
-            <div className="flex flex-wrap items-start justify-between gap-3">
+      {storageModalOpen ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center px-4 py-6">
+          <button
+            type="button"
+            aria-label="关闭配置"
+            onClick={closeStorageModal}
+            className="absolute inset-0 bg-slate-950/30"
+          />
+          <section className="relative z-10 w-full max-w-xl overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-2xl">
+            <div className="flex items-start justify-between gap-4 border-b border-slate-100 px-5 py-4">
               <div>
-                <div className="text-[15px] font-semibold text-slate-900">{STORAGE_DETAILS[selectedStorage].title}</div>
+                <div className="text-[14px] font-semibold text-slate-900">{STORAGE_DETAILS[selectedStorage].title} 配置</div>
                 <div className="mt-1 text-[10px] font-medium text-blue-600">{STORAGE_DETAILS[selectedStorage].role}</div>
-                <p className="mt-2 text-[10px] leading-5 text-slate-500">{STORAGE_DETAILS[selectedStorage].desc}</p>
+                <p className="mt-1.5 text-[10px] leading-5 text-slate-500">{STORAGE_DETAILS[selectedStorage].desc}</p>
               </div>
-              <Pill tone={
-                selectedStorage === "r2" && r2Config?.configured && r2Config.enabled
-                  ? "green"
-                  : selectedStorage === "kodo" && kodoConfig?.configured && kodoConfig.enabled
-                    ? "green"
-                    : selectedStorage === "r2" || selectedStorage === "kodo"
-                      ? "amber"
-                      : "slate"
-              }>
-                {selectedStorage === "r2"
-                  ? r2Loading
-                    ? "读取配置"
-                    : r2Config?.configured
-                      ? r2Config.enabled ? "已配置" : "已配置 · 停用"
-                      : "待配置"
-                  : selectedStorage === "kodo"
-                    ? kodoLoading
-                      ? "读取配置"
-                      : kodoConfig?.configured
-                        ? kodoConfig.enabled ? "已配置" : "已配置 · 停用"
-                        : "待填写密钥"
-                    : "待配置"}
-              </Pill>
+              <button type="button" onClick={closeStorageModal} className="flex h-8 w-8 items-center justify-center rounded-lg text-slate-400 hover:bg-slate-100">×</button>
             </div>
 
             {selectedStorage === "r2" ? (
               <>
-                <div className="mt-5 rounded-xl border border-slate-100">
-                  <div className="border-b border-slate-100 px-4 py-3">
-                    <div className="text-[11px] font-semibold text-slate-700">R2 主备份配置</div>
-                    <div className="mt-1 text-[11px] leading-5 text-slate-400">
-                      密钥加密保存在服务端，不回显到页面。备份执行器与恢复链路已接入；是否真正自动执行，以调度状态为准。
+                <div className="space-y-3 px-5 py-4">
+                  <div className="rounded-lg bg-blue-50 px-3 py-2 text-[9px] leading-5 text-blue-700">
+                    标准配置只填 ID 与密钥。系统自动使用标准 Endpoint / Bucket；特殊环境再展开高级配置人工调整。
+                  </div>
+
+                  <label className="block space-y-1.5">
+                    <span className="text-[10px] font-medium text-slate-600">账户 ID</span>
+                    <input
+                      value={r2Form.accountId}
+                      onChange={(event) => {
+                        const accountId = event.target.value;
+                        setR2Form((current) => ({
+                          ...current,
+                          accountId,
+                          endpointUrl: accountId.trim()
+                            ? `https://${accountId.trim()}.r2.cloudflarestorage.com`
+                            : current.endpointUrl,
+                        }));
+                      }}
+                      placeholder="Cloudflare Account ID"
+                      className="h-9 w-full rounded-lg border border-slate-200 bg-white px-3 text-[10px] text-slate-700 outline-none focus:border-blue-400"
+                    />
+                  </label>
+
+                  <div className="grid gap-3 sm:grid-cols-2">
+                    <label className="block space-y-1.5">
+                      <span className="text-[10px] font-medium text-slate-600">
+                        Access Key ID {r2Config?.accessKeyHint ? <span className="font-normal text-slate-400">（已保存 {r2Config.accessKeyHint}）</span> : null}
+                      </span>
+                      <input
+                        type="password"
+                        autoComplete="new-password"
+                        value={r2Form.accessKey}
+                        onChange={(event) => setR2Form((current) => ({ ...current, accessKey: event.target.value }))}
+                        placeholder={r2Config?.configured ? "留空保持原密钥" : "填写 Access Key ID"}
+                        className="h-9 w-full rounded-lg border border-slate-200 bg-white px-3 text-[10px] text-slate-700 outline-none focus:border-blue-400"
+                      />
+                    </label>
+                    <label className="block space-y-1.5">
+                      <span className="text-[10px] font-medium text-slate-600">Secret Access Key</span>
+                      <input
+                        type="password"
+                        autoComplete="new-password"
+                        value={r2Form.secretKey}
+                        onChange={(event) => setR2Form((current) => ({ ...current, secretKey: event.target.value }))}
+                        placeholder={r2Config?.configured ? "留空保持原密钥" : "填写 Secret Key"}
+                        className="h-9 w-full rounded-lg border border-slate-200 bg-white px-3 text-[10px] text-slate-700 outline-none focus:border-blue-400"
+                      />
+                    </label>
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={() => setAdvancedConfigOpen((value) => !value)}
+                    className="text-[10px] font-medium text-slate-500 hover:text-slate-800"
+                  >
+                    {advancedConfigOpen ? "收起高级配置 ↑" : "高级配置 / 人工调整 ↓"}
+                  </button>
+
+                  {advancedConfigOpen ? (
+                    <div className="grid gap-3 rounded-xl border border-slate-100 bg-slate-50/60 p-3 sm:grid-cols-2">
+                      <label className="block space-y-1.5 sm:col-span-2">
+                        <span className="text-[9px] font-medium text-slate-500">Endpoint</span>
+                        <input value={r2Form.endpointUrl} onChange={(event) => setR2Form((current) => ({ ...current, endpointUrl: event.target.value }))} className="h-9 w-full rounded-lg border border-slate-200 bg-white px-3 text-[10px] text-slate-700 outline-none focus:border-blue-400" />
+                      </label>
+                      <label className="block space-y-1.5">
+                        <span className="text-[9px] font-medium text-slate-500">Bucket</span>
+                        <input value={r2Form.bucket} onChange={(event) => setR2Form((current) => ({ ...current, bucket: event.target.value }))} className="h-9 w-full rounded-lg border border-slate-200 bg-white px-3 text-[10px] text-slate-700 outline-none focus:border-blue-400" />
+                      </label>
+                      <label className="block space-y-1.5">
+                        <span className="text-[9px] font-medium text-slate-500">对象前缀</span>
+                        <input value={r2Form.prefix} onChange={(event) => setR2Form((current) => ({ ...current, prefix: event.target.value }))} className="h-9 w-full rounded-lg border border-slate-200 bg-white px-3 text-[10px] text-slate-700 outline-none focus:border-blue-400" />
+                      </label>
+                      <label className="block space-y-1.5">
+                        <span className="text-[9px] font-medium text-slate-500">全量容灾间隔（天）</span>
+                        <input type="number" min={1} max={365} value={r2Form.fullIntervalDays} onChange={(event) => setR2Form((current) => ({ ...current, fullIntervalDays: Number(event.target.value) || 10 }))} className="h-9 w-full rounded-lg border border-slate-200 bg-white px-3 text-[10px] text-slate-700 outline-none focus:border-blue-400" />
+                      </label>
+                      <label className="flex items-center gap-2 self-end pb-2 text-[9px] text-slate-600">
+                        <input type="checkbox" checked={r2Form.enabled} onChange={(event) => setR2Form((current) => ({ ...current, enabled: event.target.checked }))} />
+                        启用 R2 备份
+                      </label>
                     </div>
-                    <div className={`mt-2 rounded-md px-2.5 py-2 text-[9px] ${r2Config?.scheduler.managed ? "bg-emerald-50 text-emerald-700" : "bg-amber-50 text-amber-700"}`}>
-                      调度状态：{r2Config?.scheduler.message || "正在读取"}。计划时间 03:00。
-                    </div>
-                  </div>
-                  <div className="grid gap-3 p-4 md:grid-cols-2">
-                    <label className="space-y-1.5 md:col-span-2">
-                      <span className="text-[11px] font-medium text-slate-600">Endpoint</span>
-                      <input value={r2Form.endpointUrl} onChange={(event) => setR2Form((current) => ({ ...current, endpointUrl: event.target.value }))} placeholder="https://<account-id>.r2.cloudflarestorage.com" className="h-9 w-full rounded-lg border border-slate-200 bg-white px-3 text-[11px] text-slate-700 outline-none focus:border-blue-400" />
-                    </label>
-                    <label className="space-y-1.5">
-                      <span className="text-[11px] font-medium text-slate-600">Bucket</span>
-                      <input value={r2Form.bucket} onChange={(event) => setR2Form((current) => ({ ...current, bucket: event.target.value }))} placeholder="R2 Bucket 名称" className="h-9 w-full rounded-lg border border-slate-200 bg-white px-3 text-[11px] text-slate-700 outline-none focus:border-blue-400" />
-                    </label>
-                    <label className="space-y-1.5">
-                      <span className="text-[11px] font-medium text-slate-600">对象前缀</span>
-                      <input value={r2Form.prefix} onChange={(event) => setR2Form((current) => ({ ...current, prefix: event.target.value }))} placeholder="ecommerce-workspace/backup" className="h-9 w-full rounded-lg border border-slate-200 bg-white px-3 text-[11px] text-slate-700 outline-none focus:border-blue-400" />
-                    </label>
-                    <label className="space-y-1.5">
-                      <span className="text-[11px] font-medium text-slate-600">Access Key ID {r2Config?.accessKeyHint ? <span className="font-normal text-slate-400">（已保存 {r2Config.accessKeyHint}）</span> : null}</span>
-                      <input type="password" autoComplete="new-password" value={r2Form.accessKey} onChange={(event) => setR2Form((current) => ({ ...current, accessKey: event.target.value }))} placeholder={r2Config?.configured ? "留空保持现有密钥" : "待填写"} className="h-9 w-full rounded-lg border border-slate-200 bg-white px-3 text-[11px] text-slate-700 outline-none focus:border-blue-400" />
-                    </label>
-                    <label className="space-y-1.5">
-                      <span className="text-[11px] font-medium text-slate-600">Secret Access Key</span>
-                      <input type="password" autoComplete="new-password" value={r2Form.secretKey} onChange={(event) => setR2Form((current) => ({ ...current, secretKey: event.target.value }))} placeholder={r2Config?.configured ? "已保存且不回显；留空保持" : "待填写"} className="h-9 w-full rounded-lg border border-slate-200 bg-white px-3 text-[11px] text-slate-700 outline-none focus:border-blue-400" />
-                    </label>
-                    <label className="space-y-1.5">
-                      <span className="text-[11px] font-medium text-slate-600">全量容灾间隔（天）</span>
-                      <input type="number" min={1} max={365} value={r2Form.fullIntervalDays} onChange={(event) => setR2Form((current) => ({ ...current, fullIntervalDays: Number(event.target.value) || 10 }))} className="h-9 w-full rounded-lg border border-slate-200 bg-white px-3 text-[11px] text-slate-700 outline-none focus:border-blue-400" />
-                    </label>
-                  </div>
-                  <div className="flex flex-wrap items-center justify-between gap-3 border-t border-slate-100 px-4 py-3">
-                    <label className="flex items-center gap-2 text-[11px] text-slate-600">
-                      <input type="checkbox" checked={r2Form.enabled} onChange={(event) => setR2Form((current) => ({ ...current, enabled: event.target.checked }))} />
-                      启用 R2 备份执行器（NAS/Linux 需宿主机计划任务触发）
-                    </label>
-                    <span className="text-[11px] text-slate-400">全量周期：每 {r2Form.fullIntervalDays || 10} 天</span>
-                  </div>
+                  ) : null}
                 </div>
-                <div className="mt-4 flex flex-wrap items-center gap-2">
-                  <button type="button" disabled={r2Saving || r2Loading} onClick={() => void saveR2Config()} className="app-button-primary rounded-lg px-4 py-2 text-[11px] font-medium disabled:cursor-not-allowed disabled:opacity-50">{r2Saving ? "保存中…" : "保存 R2 配置"}</button>
-                  <button type="button" disabled={r2Testing || !r2Config?.configured} onClick={() => void testR2Connection()} className="app-button-secondary rounded-lg px-4 py-2 text-[11px] font-medium disabled:opacity-40">{r2Testing ? "测试中…" : "测试连接"}</button>
-                  <button type="button" disabled={r2Running || !r2Config?.configured || !r2Config.enabled} onClick={() => void runR2("daily")} className="app-button-secondary rounded-lg px-4 py-2 text-[11px] font-medium disabled:opacity-40">立即日常备份</button>
-                  <button type="button" disabled={r2Running || !r2Config?.configured || !r2Config.enabled} onClick={() => void runR2("full")} className="app-button-secondary rounded-lg px-4 py-2 text-[11px] font-medium disabled:opacity-40">立即全量容灾</button>
+                <div className="flex justify-end gap-2 border-t border-slate-100 px-5 py-3">
+                  <button type="button" onClick={closeStorageModal} className="app-button-secondary rounded-lg px-4 py-2 text-[10px] font-medium">取消</button>
+                  <button type="button" disabled={r2Saving || r2Loading} onClick={() => void saveR2Config()} className="app-button-primary rounded-lg px-4 py-2 text-[10px] font-medium disabled:opacity-50">
+                    {r2Saving ? "保存并检测…" : "保存并完成"}
+                  </button>
                 </div>
               </>
             ) : selectedStorage === "kodo" ? (
               <>
-                <div className="mt-5 rounded-xl border border-slate-100">
-                  <div className="border-b border-slate-100 px-4 py-3">
-                    <div className="text-[10px] font-semibold text-slate-700">Kodo 上传配置</div>
-                    <div className="mt-1 text-[9px] leading-4 text-slate-400">
-                      填写 Bucket、上传域名、Access Key、Secret Key 后即可启用。完整冷备按 SHA256 内容寻址去重，只上传新增或变化内容；密钥加密存储且不回显。
-                    </div>
-                    <div className={`mt-2 rounded-md px-2.5 py-2 text-[9px] ${kodoConfig?.scheduler.managed ? "bg-emerald-50 text-emerald-700" : "bg-amber-50 text-amber-700"}`}>
-                      调度状态：{kodoConfig?.scheduler.message || "正在读取"}。计划时间 04:00。
-                    </div>
+                <div className="space-y-3 px-5 py-4">
+                  <div className="rounded-lg bg-blue-50 px-3 py-2 text-[9px] leading-5 text-blue-700">
+                    标准配置只填 Access Key 与 Secret Key。系统使用标准上传地址与冷备空间；特殊环境再展开高级配置人工调整。
                   </div>
-                  <div className="grid gap-3 p-4 md:grid-cols-2">
-                    <label className="space-y-1.5">
-                      <span className="text-[10px] font-medium text-slate-600">Bucket</span>
-                      <input
-                        value={kodoForm.bucket}
-                        onChange={(event) => setKodoForm((current) => ({ ...current, bucket: event.target.value }))}
-                        placeholder="七牛空间名称"
-                        className="h-9 w-full rounded-lg border border-slate-200 bg-white px-3 text-[10px] text-slate-700 outline-none focus:border-blue-400"
-                      />
-                    </label>
-                    <label className="space-y-1.5">
-                      <span className="text-[10px] font-medium text-slate-600">上传域名（Upload Host）</span>
-                      <input
-                        value={kodoForm.uploadUrl}
-                        onChange={(event) => setKodoForm((current) => ({ ...current, uploadUrl: event.target.value }))}
-                        placeholder="https://..."
-                        className="h-9 w-full rounded-lg border border-slate-200 bg-white px-3 text-[10px] text-slate-700 outline-none focus:border-blue-400"
-                      />
-                    </label>
-                    <label className="space-y-1.5">
+
+                  <div className="grid gap-3 sm:grid-cols-2">
+                    <label className="block space-y-1.5">
                       <span className="text-[10px] font-medium text-slate-600">
                         Access Key {kodoConfig?.accessKeyHint ? <span className="font-normal text-slate-400">（已保存 {kodoConfig.accessKeyHint}）</span> : null}
                       </span>
@@ -1289,98 +818,68 @@ export default function BackupSettingsPage() {
                         autoComplete="new-password"
                         value={kodoForm.accessKey}
                         onChange={(event) => setKodoForm((current) => ({ ...current, accessKey: event.target.value }))}
-                        placeholder={kodoConfig?.configured ? "留空则保持现有密钥" : "待填写"}
+                        placeholder={kodoConfig?.configured ? "留空保持原密钥" : "填写 Access Key"}
                         className="h-9 w-full rounded-lg border border-slate-200 bg-white px-3 text-[10px] text-slate-700 outline-none focus:border-blue-400"
                       />
                     </label>
-                    <label className="space-y-1.5">
+                    <label className="block space-y-1.5">
                       <span className="text-[10px] font-medium text-slate-600">Secret Key</span>
                       <input
                         type="password"
                         autoComplete="new-password"
                         value={kodoForm.secretKey}
                         onChange={(event) => setKodoForm((current) => ({ ...current, secretKey: event.target.value }))}
-                        placeholder={kodoConfig?.configured ? "已保存且不回显；留空保持现有密钥" : "待填写"}
-                        className="h-9 w-full rounded-lg border border-slate-200 bg-white px-3 text-[10px] text-slate-700 outline-none focus:border-blue-400"
-                      />
-                    </label>
-                    <label className="space-y-1.5 md:col-span-2">
-                      <span className="text-[10px] font-medium text-slate-600">对象前缀</span>
-                      <input
-                        value={kodoForm.prefix}
-                        onChange={(event) => setKodoForm((current) => ({ ...current, prefix: event.target.value }))}
-                        placeholder="ecommerce-workspace/cold"
+                        placeholder={kodoConfig?.configured ? "留空保持原密钥" : "填写 Secret Key"}
                         className="h-9 w-full rounded-lg border border-slate-200 bg-white px-3 text-[10px] text-slate-700 outline-none focus:border-blue-400"
                       />
                     </label>
                   </div>
-                  <div className="flex flex-wrap items-center justify-between gap-3 border-t border-slate-100 px-4 py-3">
-                    <label className="flex items-center gap-2 text-[10px] text-slate-600">
-                      <input
-                        type="checkbox"
-                        checked={kodoForm.enabled}
-                        onChange={(event) => setKodoForm((current) => ({ ...current, enabled: event.target.checked }))}
-                      />
-                      启用 Kodo 冷备执行器（NAS/Linux 需宿主机计划任务触发）
-                    </label>
-                    <span className="text-[9px] text-slate-400">读取权限：关闭且不提供</span>
-                  </div>
-                </div>
 
-                <div className="mt-4 rounded-lg border border-amber-100 bg-amber-50 px-3 py-2.5 text-[9px] leading-5 text-amber-700">
-                  只存不取：不会调用 GET、List、HEAD、下载、在线预览、远端校验或远端恢复。去重只读取本地成功回执；当天 snapshot 会完整引用所需内容对象。Kodo 空间请保持“标准存储”，不要配置自动转低频/归档的生命周期规则。
-                </div>
+                  <button
+                    type="button"
+                    onClick={() => setAdvancedConfigOpen((value) => !value)}
+                    className="text-[10px] font-medium text-slate-500 hover:text-slate-800"
+                  >
+                    {advancedConfigOpen ? "收起高级配置 ↑" : "高级配置 / 人工调整 ↓"}
+                  </button>
 
-                <div className="mt-4 flex flex-wrap items-center gap-2">
-                  <button
-                    type="button"
-                    disabled={kodoSaving || kodoLoading}
-                    onClick={saveKodoConfig}
-                    className="app-button-primary rounded-lg px-4 py-2 text-[10px] font-medium disabled:cursor-not-allowed disabled:opacity-50"
-                  >
-                    {kodoSaving ? "保存中…" : "保存 Kodo 配置"}
+                  {advancedConfigOpen ? (
+                    <div className="grid gap-3 rounded-xl border border-slate-100 bg-slate-50/60 p-3 sm:grid-cols-2">
+                      <label className="block space-y-1.5">
+                        <span className="text-[9px] font-medium text-slate-500">Bucket</span>
+                        <input value={kodoForm.bucket} onChange={(event) => setKodoForm((current) => ({ ...current, bucket: event.target.value }))} className="h-9 w-full rounded-lg border border-slate-200 bg-white px-3 text-[10px] text-slate-700 outline-none focus:border-blue-400" />
+                      </label>
+                      <label className="block space-y-1.5">
+                        <span className="text-[9px] font-medium text-slate-500">上传域名</span>
+                        <input value={kodoForm.uploadUrl} onChange={(event) => setKodoForm((current) => ({ ...current, uploadUrl: event.target.value }))} className="h-9 w-full rounded-lg border border-slate-200 bg-white px-3 text-[10px] text-slate-700 outline-none focus:border-blue-400" />
+                      </label>
+                      <label className="block space-y-1.5 sm:col-span-2">
+                        <span className="text-[9px] font-medium text-slate-500">对象前缀</span>
+                        <input value={kodoForm.prefix} onChange={(event) => setKodoForm((current) => ({ ...current, prefix: event.target.value }))} className="h-9 w-full rounded-lg border border-slate-200 bg-white px-3 text-[10px] text-slate-700 outline-none focus:border-blue-400" />
+                      </label>
+                      <label className="flex items-center gap-2 text-[9px] text-slate-600">
+                        <input type="checkbox" checked={kodoForm.enabled} onChange={(event) => setKodoForm((current) => ({ ...current, enabled: event.target.checked }))} />
+                        启用 Kodo 冷备
+                      </label>
+                    </div>
+                  ) : null}
+                </div>
+                <div className="flex justify-end gap-2 border-t border-slate-100 px-5 py-3">
+                  <button type="button" onClick={closeStorageModal} className="app-button-secondary rounded-lg px-4 py-2 text-[10px] font-medium">取消</button>
+                  <button type="button" disabled={kodoSaving || kodoLoading} onClick={() => void saveKodoConfig()} className="app-button-primary rounded-lg px-4 py-2 text-[10px] font-medium disabled:opacity-50">
+                    {kodoSaving ? "保存并检测…" : "保存并完成"}
                   </button>
-                  <button
-                    type="button"
-                    disabled={kodoTesting || !kodoConfig?.configured}
-                    onClick={() => void testKodoWrite()}
-                    className="app-button-secondary rounded-lg px-4 py-2 text-[10px] font-medium disabled:opacity-40"
-                  >
-                    {kodoTesting ? "测试中…" : "只写测试"}
-                  </button>
-                  <button
-                    type="button"
-                    disabled={kodoRunning || !kodoConfig?.configured || !kodoConfig.enabled}
-                    onClick={() => void runKodo()}
-                    className="app-button-secondary rounded-lg px-4 py-2 text-[10px] font-medium disabled:opacity-40"
-                  >
-                    {kodoRunning ? "启动中…" : "立即冷备"}
-                  </button>
-                  <span className="text-[9px] text-slate-400">“只写测试”只上传固定探针，不执行 GET / List / HEAD / 删除。</span>
                 </div>
               </>
             ) : (
               <>
-                <div className="mt-5 rounded-xl border border-slate-100">
-                  <div className="border-b border-slate-100 px-4 py-3 text-[10px] font-semibold text-slate-700">配置字段</div>
-                  <div className="divide-y divide-slate-100 px-4">
-                    {STORAGE_DETAILS[selectedStorage].fields.map((field) => (
-                      <div key={field} className="flex items-center justify-between gap-4 py-3">
-                        <span className="text-[10px] font-medium text-slate-600">{field}</span>
-                        <span className="text-[9px] text-slate-400">待接入真实配置</span>
-                      </div>
-                    ))}
+                <div className="px-5 py-6">
+                  <div className="rounded-xl border border-slate-100 bg-slate-50 px-4 py-4 text-[10px] leading-5 text-slate-600">
+                    本地 NAS 当前仍是可选扩展目标，真实写入与恢复执行器尚未接入。这里暂不保存无效字段，避免出现“看起来已配置、实际上不可用”的状态。
                   </div>
                 </div>
-
-                <div className="mt-4 rounded-lg bg-slate-50 px-3 py-2.5 text-[9px] leading-5 text-slate-500">
-                  {STORAGE_DETAILS[selectedStorage].note}
-                </div>
-
-                <div className="mt-4">
-                  <button type="button" disabled className="rounded-lg border border-slate-200 bg-slate-50 px-4 py-2 text-[10px] font-medium text-slate-400">
-                    接口尚未接入
-                  </button>
+                <div className="flex justify-end border-t border-slate-100 px-5 py-3">
+                  <button type="button" onClick={closeStorageModal} className="app-button-primary rounded-lg px-4 py-2 text-[10px] font-medium">完成</button>
                 </div>
               </>
             )}
