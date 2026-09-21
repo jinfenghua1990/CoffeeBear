@@ -385,6 +385,37 @@ def test_git_merge_base_operational_error_is_not_treated_as_divergence(monkeypat
     assert result["changes"] == []
 
 
+def test_changed_files_falls_back_to_commit_range_when_diff_is_empty(monkeypatch):
+    current = "a" * 40
+    latest = "b" * 40
+    calls: list[tuple[str, ...]] = []
+
+    def fake_run(args, **kwargs):
+        calls.append(tuple(args))
+        if args[:4] == ["git", "diff", "--name-only", "--no-renames"]:
+            return subprocess.CompletedProcess(args=args, returncode=0, stdout="", stderr="")
+        if args[:4] == ["git", "log", "--format=", "--name-only"]:
+            return subprocess.CompletedProcess(
+                args=args,
+                returncode=0,
+                stdout="frontend/src/app/settings/update/page.tsx\n"
+                "backend/app/services/system_update_service.py\n"
+                "frontend/src/app/settings/update/page.tsx\n",
+                stderr="",
+            )
+        raise AssertionError(f"unexpected call: {args}")
+
+    monkeypatch.setattr(service, "_run", fake_run)
+
+    result = service._changed_files(current, latest)
+
+    assert result == [
+        "frontend/src/app/settings/update/page.tsx",
+        "backend/app/services/system_update_service.py",
+    ]
+    assert any(call[:4] == ("git", "log", "--format=", "--name-only") for call in calls)
+
+
 def test_module_mapping_covers_ten_navigation_centers():
     cases = {
         "frontend/src/app/page.tsx": "经营中心",

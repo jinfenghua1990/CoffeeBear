@@ -434,13 +434,51 @@ def _changes(current_sha: str, latest_sha: str) -> list[dict[str, Any]]:
 
 
 def _changed_files(current_sha: str, latest_sha: str) -> list[str]:
+    """Return the complete changed-file set between two releases.
+
+    git diff is the primary source. Some long-lived/native worktrees have
+    occasionally returned an empty stdout even though the two commits differ;
+    in that case fall back to the commit range and de-duplicate file names so
+    the update UI never silently reports zero files for a real update.
+    """
+    if current_sha == latest_sha:
+        return []
+
     try:
-        result = _run(["git", "diff", "--name-only", current_sha, latest_sha], timeout=30)
+        result = _run(
+            ["git", "diff", "--name-only", "--no-renames", current_sha, latest_sha],
+            timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError):
+        result = None
+
+    if result is not None and result.returncode == 0:
+        rows = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+        if rows:
+            return list(dict.fromkeys(rows))
+
+    try:
+        fallback = _run(
+            [
+                "git",
+                "log",
+                "--format=",
+                "--name-only",
+                "--no-renames",
+                f"{current_sha}..{latest_sha}",
+            ],
+            timeout=60,
+        )
     except (OSError, subprocess.SubprocessError):
         return []
-    if result.returncode != 0:
+
+    if fallback.returncode != 0:
         return []
-    return [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    return list(dict.fromkeys(
+        line.strip()
+        for line in fallback.stdout.splitlines()
+        if line.strip()
+    ))
 
 
 _MODULE_VERSION_RULES: list[tuple[str, str, tuple[str, ...]]] = [
