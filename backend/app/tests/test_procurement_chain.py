@@ -749,3 +749,123 @@ def test_purge_voided_invoice_links_preserves_rejected_history(db_session):
     again = service.purge_voided_invoice_links(db_session, dry_run=False)
     assert all(item["linkId"] != link_id for item in again["items"])
 
+
+
+def test_auto_invoice_match_shares_coverage_across_1688_aliases(db_session):
+    """工作流副本已有发票覆盖时，原始 1688 单自动匹配必须共用同一额度。"""
+    file_import = Alibaba1688FileImport(
+        original_name="alias-invoice-coverage.xlsx",
+        stored_path="/tmp/alias-invoice-coverage.xlsx",
+        sha256="alias-invoice-coverage-sha",
+        lifecycle="active",
+    )
+    db_session.add(file_import)
+    db_session.flush()
+    order_no = "ALIAS-INVOICE-COVERAGE-001"
+    raw_order = Alibaba1688Order(
+        external_order_id=order_no,
+        seller_company_name="Alias自动供应商",
+        actual_payment=Decimal("100"),
+        order_time=datetime(2026, 7, 1, tzinfo=timezone.utc),
+        import_id=file_import.id,
+    )
+    workflow = ExternalPurchaseOrder(
+        external_order_id=order_no,
+        platform="1688",
+        supplier_name="Alias自动供应商",
+        paid_amount=Decimal("100"),
+        order_amount=Decimal("100"),
+        ordered_at=datetime(2026, 7, 1, tzinfo=timezone.utc),
+    )
+    supplier = Supplier(
+        name="Alias自动供应商",
+        tax_no="91330000ALIASAUTO01",
+    )
+    existing_invoice = TaxInvoice(
+        invoice_key="alias-auto-existing",
+        invoice_number="INV-ALIAS-AUTO-EXISTING",
+        direction="input",
+        status="issued",
+        seller_name="Alias自动供应商",
+        seller_tax_id="91330000ALIASAUTO01",
+        total_amount=Decimal("60"),
+        issue_date=datetime(2026, 7, 2, tzinfo=timezone.utc),
+    )
+    new_invoice = TaxInvoice(
+        invoice_key="alias-auto-new",
+        invoice_number="INV-ALIAS-AUTO-NEW",
+        direction="input",
+        status="issued",
+        seller_name="Alias自动供应商",
+        seller_tax_id="91330000ALIASAUTO01",
+        total_amount=Decimal("100"),
+        issue_date=datetime(2026, 7, 3, tzinfo=timezone.utc),
+    )
+    db_session.add_all([raw_order, workflow, supplier, existing_invoice, new_invoice])
+    db_session.flush()
+    db_session.add(TaxInvoiceLink(
+        invoice_id=existing_invoice.id,
+        target_type="external_purchase_order",
+        target_id=workflow.id,
+        allocated_amount=Decimal("60"),
+        match_method="manual",
+        confirmed=True,
+    ))
+    db_session.commit()
+
+    result = service.ProcurementChainMatcher(db_session).run_match(auto_confirm=True)
+
+    assert result["overCovered"] >= 1
+    assert db_session.query(TaxInvoiceLink).filter_by(
+        invoice_id=new_invoice.id,
+        target_type="alibaba1688_order",
+        target_id=raw_order.id,
+    ).first() is None
+
+
+def test_auto_invoice_match_respects_rejected_link_on_1688_alias(db_session):
+    """用户在工作流副本解除关联后，自动匹配不能从原始 1688 实体绕过拒绝。"""
+    file_import = Alibaba1688FileImport(
+        original_name="alias-rejected.xlsx",
+        stored_path="/tmp/alias-rejected.xlsx",
+        sha256="alias-rejected-sha",
+        lifecycle="active",
+    )
+    db_session.add(file_import)
+    db_session.flush()
+    order_no = "ALIAS-REJECTED-001"
+    raw_order = Alibaba1688Order(
+        external_order_id=order_no,
+        seller_company_name="Alias拒绝供应商",
+        actual_payment=Decimal("100"),
+        import_id=file_import.id,
+    )
+    workflow = ExternalPurchaseOrder(
+        external_order_id=order_no,
+        platform="1688",
+        supplier_name="Alias拒绝供应商",
+        paid_amount=Decimal("100"),
+    )
+    invoice = TaxInvoice(
+        invoice_key="alias-rejected-invoice",
+        invoice_number="INV-ALIAS-REJECTED",
+        direction="input",
+        status="issued",
+        total_amount=Decimal("100"),
+    )
+    db_session.add_all([raw_order, workflow, invoice])
+    db_session.flush()
+    db_session.add(TaxInvoiceLink(
+        invoice_id=invoice.id,
+        target_type="external_purchase_order",
+        target_id=workflow.id,
+        allocated_amount=Decimal("100"),
+        match_method="rejected",
+        confirmed=False,
+    ))
+    db_session.flush()
+
+    matcher = service.ProcurementChainMatcher(db_session)
+    assert matcher._existing_invoice_link(
+        "alibaba1688_order", raw_order.id, invoice.id
+    ) is True

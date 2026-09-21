@@ -128,8 +128,9 @@ PostgreSQL / Redis 只属于基础设施，不作为公开业务端口。
 跨模块只能引用事实，不得互相覆盖事实字段：
 
 - `TaxInvoiceLink(target_type=bank_transaction)` 是银行对公付款证据；银行匹配服务只能维护该链接及分摊金额，不得直接改写 `TaxInvoice.payment_method`、`match_status` 或认证状态；
-- `TaxInvoice.payment_method=personal` 是人工确认的个人垫付事实；全额银行付款时最终展示可派生为 corporate，但不得删除人工事实。部分银行付款 + personal 必须派生为 mixed；
+- `TaxInvoice.payment_method=personal` 只保留人工补充/审计事实；最终付款方式统一从银行付款证据派生：全额银行匹配=corporate、部分银行匹配=mixed、无银行匹配=personal，不得由报表或其他模块反写；
 - `TaxInvoice.match_status` 是发票↔采购/销售业务链接的缓存状态，只能由发票域按 confirmed `TaxInvoiceLink` + `allocated_amount` 重算；
+- 同一 1688 订单的 `Alibaba1688Order` 原始实体与 `ExternalPurchaseOrder(platform=1688)` 工作流副本属于同一逻辑采购单；发票占用、订单开票额度、人工拒绝和自动匹配必须跨两种实体共享，禁止把 alias 当成两笔业务重复计票；
 - 未确认候选关系不得占用采购单开票额度；缺失 `allocated_amount` 的历史关系只能进入待复核，不能直接算 matched；
 - 红字/已红冲/作废发票属于会计事实，不得重新进入采购自动匹配或银行付款待核对池；
 - 财务报表可以派生“对公/个人/混合”结论，但必须保留结论依据，不能把报表结论反写成源业务事实。

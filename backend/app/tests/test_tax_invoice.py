@@ -1255,3 +1255,183 @@ def test_orphan_business_link_is_needs_review_in_serialization_and_filter(db_ses
     }
     assert invoice.id in review_ids
     assert invoice.id not in matched_ids
+
+
+def test_1688_alias_candidate_shares_invoice_occupancy(db_session):
+    """1688 原始单已挂票时，工作流副本候选必须显示同一占用事实。"""
+    from app.models.alibaba1688_import import Alibaba1688Order
+    from app.models.purchase import ExternalPurchaseOrder
+    from app.models.tax import TaxInvoice, TaxInvoiceLink
+
+    token = uuid4().hex[:10]
+    order_no = f"ALIAS-OCC-{token}"
+    invoice = TaxInvoice(
+        invoice_key=f"alias-occ-{token}",
+        invoice_number=f"INV-ALIAS-OCC-{token}",
+        direction="input",
+        status="issued",
+        total_amount=Decimal("100"),
+    )
+    raw_order = Alibaba1688Order(
+        external_order_id=order_no,
+        seller_company_name="Alias供应商",
+        actual_payment=Decimal("100"),
+        import_id=1,
+    )
+    workflow_order = ExternalPurchaseOrder(
+        external_order_id=order_no,
+        platform="1688",
+        supplier_name="Alias供应商",
+        paid_amount=Decimal("100"),
+        order_amount=Decimal("100"),
+    )
+    db_session.add_all([invoice, raw_order, workflow_order])
+    db_session.flush()
+    db_session.add(TaxInvoiceLink(
+        invoice_id=invoice.id,
+        target_type="alibaba1688_order",
+        target_id=raw_order.id,
+        allocated_amount=Decimal("100"),
+        match_method="manual",
+        confirmed=True,
+    ))
+    db_session.commit()
+
+    candidates = service.purchase_link_candidates(
+        db_session, invoice.id, keyword=order_no, limit=20
+    )
+    workflow = next(
+        row for row in candidates
+        if row["targetType"] == "external_purchase_order"
+        and row["targetId"] == workflow_order.id
+    )
+    assert workflow["linkedInvoiceId"] == invoice.id
+    assert workflow["linkedInvoiceNo"] == invoice.invoice_number
+
+
+def test_1688_alias_blocks_same_invoice_duplicate_and_shares_order_capacity(db_session):
+    """同一 1688 订单的双实体不能重复挂同一票，且不同票也必须共享订单总额度。"""
+    from app.models.alibaba1688_import import Alibaba1688Order
+    from app.models.purchase import ExternalPurchaseOrder
+    from app.models.tax import TaxInvoice, TaxInvoiceLink
+
+    token = uuid4().hex[:10]
+    order_no = f"ALIAS-CAP-{token}"
+    invoice_a = TaxInvoice(
+        invoice_key=f"alias-cap-a-{token}",
+        invoice_number=f"INV-ALIAS-CAP-A-{token}",
+        direction="input",
+        status="issued",
+        total_amount=Decimal("60"),
+    )
+    invoice_b = TaxInvoice(
+        invoice_key=f"alias-cap-b-{token}",
+        invoice_number=f"INV-ALIAS-CAP-B-{token}",
+        direction="input",
+        status="issued",
+        total_amount=Decimal("50"),
+    )
+    raw_order = Alibaba1688Order(
+        external_order_id=order_no,
+        seller_company_name="Alias额度供应商",
+        actual_payment=Decimal("100"),
+        import_id=1,
+    )
+    workflow_order = ExternalPurchaseOrder(
+        external_order_id=order_no,
+        platform="1688",
+        supplier_name="Alias额度供应商",
+        paid_amount=Decimal("100"),
+        order_amount=Decimal("100"),
+    )
+    db_session.add_all([invoice_a, invoice_b, raw_order, workflow_order])
+    db_session.flush()
+    db_session.add(TaxInvoiceLink(
+        invoice_id=invoice_a.id,
+        target_type="alibaba1688_order",
+        target_id=raw_order.id,
+        allocated_amount=Decimal("60"),
+        match_method="manual",
+        confirmed=True,
+    ))
+    db_session.commit()
+
+    with pytest.raises(ValueError, match="另一数据来源"):
+        service.link_purchase_order(
+            db_session,
+            invoice_id=invoice_a.id,
+            target_type="external_purchase_order",
+            target_id=workflow_order.id,
+            allocated_amount=Decimal("40"),
+            actor="pytest",
+        )
+
+    with pytest.raises(ValueError, match="超过订单金额"):
+        service.link_purchase_order(
+            db_session,
+            invoice_id=invoice_b.id,
+            target_type="external_purchase_order",
+            target_id=workflow_order.id,
+            allocated_amount=Decimal("50"),
+            actor="pytest",
+        )
+
+
+def test_duplicate_1688_alias_history_is_needs_review_in_cache_and_live_view(db_session):
+    """历史双实体重复链接即使总额未超票面，也必须暴露为 needs_review。"""
+    from app.models.alibaba1688_import import Alibaba1688Order
+    from app.models.purchase import ExternalPurchaseOrder
+    from app.models.tax import TaxInvoice, TaxInvoiceLink
+
+    token = uuid4().hex[:10]
+    order_no = f"ALIAS-DUP-{token}"
+    invoice = TaxInvoice(
+        invoice_key=f"alias-dup-{token}",
+        invoice_number=f"INV-ALIAS-DUP-{token}",
+        direction="input",
+        status="issued",
+        total_amount=Decimal("100"),
+        match_status="partial",
+    )
+    raw_order = Alibaba1688Order(
+        external_order_id=order_no,
+        seller_company_name="Alias重复供应商",
+        actual_payment=Decimal("100"),
+        import_id=1,
+    )
+    workflow_order = ExternalPurchaseOrder(
+        external_order_id=order_no,
+        platform="1688",
+        supplier_name="Alias重复供应商",
+        paid_amount=Decimal("100"),
+        order_amount=Decimal("100"),
+    )
+    db_session.add_all([invoice, raw_order, workflow_order])
+    db_session.flush()
+    db_session.add_all([
+        TaxInvoiceLink(
+            invoice_id=invoice.id,
+            target_type="alibaba1688_order",
+            target_id=raw_order.id,
+            allocated_amount=Decimal("40"),
+            match_method="manual",
+            confirmed=True,
+        ),
+        TaxInvoiceLink(
+            invoice_id=invoice.id,
+            target_type="external_purchase_order",
+            target_id=workflow_order.id,
+            allocated_amount=Decimal("40"),
+            match_method="manual",
+            confirmed=True,
+        ),
+    ])
+    db_session.flush()
+
+    assert service.sync_business_match_status(
+        db_session, invoice, "external_purchase_order"
+    ) == "needs_review"
+    payload = service.serialize_invoice(invoice, db=db_session)
+    assert payload["businessMatchStatus"] == "needs_review"
+    assert payload["duplicateLogicalLinkCount"] == 1
+    assert "重复业务链接" in payload["businessMatchException"]

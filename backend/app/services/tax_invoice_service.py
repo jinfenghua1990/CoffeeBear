@@ -1965,13 +1965,18 @@ def _invoice_business_context(db: Session, rows: list[TaxInvoice]) -> dict[int, 
             Decimal("0"),
         )
         has_unknown_allocation = any(link.allocated_amount is None for link in valid_invoice_links)
+        duplicate_logical_links = (
+            _duplicate_purchase_logical_link_count(db, valid_invoice_links, target_maps)
+            if invoice.direction != "output"
+            else 0
+        )
         business_overmatched = max(explicit_allocated - max(invoice_total, Decimal("0")), Decimal("0"))
         if invoice_total > 0:
             business_matched = min(max(explicit_allocated, Decimal("0")), invoice_total)
             business_remaining = max(invoice_total - business_matched, Decimal("0"))
             if business_overmatched > Decimal("0.01"):
                 business_status = "needs_review"
-            elif invalid_link_count or has_unknown_allocation:
+            elif invalid_link_count or has_unknown_allocation or duplicate_logical_links:
                 business_status = "needs_review"
             elif business_matched <= Decimal("0"):
                 business_status = "needs_review" if invoice.match_status == "needs_review" else "unmatched"
@@ -1984,8 +1989,21 @@ def _invoice_business_context(db: Session, rows: list[TaxInvoice]) -> dict[int, 
             business_remaining = Decimal("0")
             business_status = (
                 "needs_review"
-                if business_overmatched > Decimal("0.01") or invalid_link_count
+                if business_overmatched > Decimal("0.01")
+                or invalid_link_count
+                or duplicate_logical_links
                 else invoice.match_status
+            )
+
+        business_exceptions: list[str] = []
+        if duplicate_logical_links:
+            business_exceptions.append(
+                f"同一逻辑采购单存在 {duplicate_logical_links} 条重复业务链接"
+            )
+        if business_overmatched > Decimal("0.01"):
+            business_exceptions.append(
+                f"红冲后有效金额 {quantize(max(invoice_total, Decimal('0')))}，"
+                f"历史业务已关联 {quantize(explicit_allocated)}，超额 {quantize(business_overmatched)}"
             )
 
         result[invoice_id] = {
@@ -1996,10 +2014,8 @@ def _invoice_business_context(db: Session, rows: list[TaxInvoice]) -> dict[int, 
             "businessMatchedAmount": str(quantize(business_matched)),
             "businessRemainingAmount": str(quantize(business_remaining)),
             "businessOvermatchedAmount": str(quantize(business_overmatched)),
-            "businessMatchException": (
-                f"红冲后有效金额 {quantize(max(invoice_total, Decimal('0')))}，历史业务已关联 {quantize(explicit_allocated)}，超额 {quantize(business_overmatched)}"
-                if business_overmatched > Decimal("0.01") else ""
-            ),
+            "businessMatchException": "；".join(business_exceptions),
+            "duplicateLogicalLinkCount": duplicate_logical_links,
             "invalidLinkCount": invalid_link_count,
         }
     return result
@@ -3007,8 +3023,112 @@ def _load_purchase_targets(db: Session, target_type: str, target_ids: list[int])
     return {row.id: row for row in db.query(model).filter(model.id.in_(target_ids)).all()}
 
 
+def purchase_alias_target_refs(
+    db: Session,
+    target_type: str,
+    target_id: int,
+    target: Any | None = None,
+) -> set[tuple[str, int]]:
+    """返回同一逻辑采购单的所有实体引用。
+
+    1688 原始订单 Alibaba1688Order 与采购工作流 ExternalPurchaseOrder(platform=1688)
+    只是同一业务事实的两种载体，发票额度/拒绝/占用必须共用。
+    """
+    refs: set[tuple[str, int]] = {(target_type, target_id)}
+    if target_type not in PURCHASE_LINK_TARGET_TYPES:
+        return refs
+    if target is None:
+        model = _PURCHASE_LINK_MODELS[target_type]
+        target = db.get(model, target_id)
+    if target is None:
+        return refs
+
+    if target_type == "alibaba1688_order":
+        order_no = str(target.external_order_id or "").strip()
+        if order_no:
+            aliases = db.query(ExternalPurchaseOrder.id).filter(
+                ExternalPurchaseOrder.platform == "1688",
+                ExternalPurchaseOrder.external_order_id == order_no,
+            ).all()
+            refs.update(("external_purchase_order", row[0]) for row in aliases)
+    elif target_type == "external_purchase_order":
+        platform = str(target.platform or "").strip().lower()
+        order_no = str(target.external_order_id or "").strip()
+        if platform == "1688" and order_no:
+            aliases = db.query(Alibaba1688Order.id).filter(
+                Alibaba1688Order.external_order_id == order_no
+            ).all()
+            refs.update(("alibaba1688_order", row[0]) for row in aliases)
+    return refs
+
+
+def purchase_logical_target_key(
+    db: Session,
+    target_type: str,
+    target_id: int,
+    target: Any | None = None,
+) -> tuple[tuple[str, int], ...]:
+    """稳定表示一笔逻辑采购单；1688 双实体会得到同一个 key。"""
+    return tuple(sorted(purchase_alias_target_refs(db, target_type, target_id, target)))
+
+
+def purchase_alias_links(
+    db: Session,
+    target_type: str,
+    target_id: int,
+    *,
+    target: Any | None = None,
+    invoice_id: int | None = None,
+    active_only: bool = False,
+) -> list[TaxInvoiceLink]:
+    """读取同一逻辑采购单跨实体的发票链接。"""
+    refs = purchase_alias_target_refs(db, target_type, target_id, target)
+    clauses = [
+        and_(
+            TaxInvoiceLink.target_type == ref_type,
+            TaxInvoiceLink.target_id == ref_id,
+        )
+        for ref_type, ref_id in refs
+    ]
+    query = db.query(TaxInvoiceLink).filter(or_(*clauses))
+    if invoice_id is not None:
+        query = query.filter(TaxInvoiceLink.invoice_id == invoice_id)
+    if active_only:
+        query = query.filter(
+            TaxInvoiceLink.match_method != "rejected",
+            TaxInvoiceLink.confirmed.is_(True),
+        )
+    return query.all()
+
+
+def _duplicate_purchase_logical_link_count(
+    db: Session,
+    links: list[TaxInvoiceLink],
+    target_maps: dict[str, dict[int, Any]] | None = None,
+) -> int:
+    """同一张发票若通过 1688 双实体重复挂到同一逻辑订单，返回重复链接数。"""
+    seen: set[tuple[tuple[str, int], ...]] = set()
+    duplicates = 0
+    for link in links:
+        if link.target_type not in PURCHASE_LINK_TARGET_TYPES:
+            continue
+        target = (
+            target_maps.get(link.target_type, {}).get(link.target_id)
+            if target_maps is not None
+            else None
+        )
+        key = purchase_logical_target_key(
+            db, link.target_type, link.target_id, target=target
+        )
+        if key in seen:
+            duplicates += 1
+        else:
+            seen.add(key)
+    return duplicates
+
+
 def _purchase_link_occupancy(db: Session) -> dict[tuple[str, int], tuple[int, str]]:
-    """业务单当前被哪张发票非 rejected 关联：{(target_type, target_id): (invoice_id, invoice_number)}。"""
+    """业务单占用视图；1688 原始单与工作流副本共享同一占用事实。"""
     links = (
         db.query(TaxInvoiceLink)
         .filter(
@@ -3023,10 +3143,19 @@ def _purchase_link_occupancy(db: Session) -> dict[tuple[str, int], tuple[int, st
         {row.id: row for row in db.query(TaxInvoice).filter(TaxInvoice.id.in_(invoice_ids)).all()}
         if invoice_ids else {}
     )
-    return {
-        (link.target_type, link.target_id): (link.invoice_id, invoice_map[link.invoice_id].invoice_number)
-        for link in links if link.invoice_id in invoice_map
-    }
+    occupancy: dict[tuple[str, int], tuple[int, str]] = {}
+    for link in links:
+        invoice = invoice_map.get(link.invoice_id)
+        if invoice is None:
+            continue
+        refs = (
+            purchase_alias_target_refs(db, link.target_type, link.target_id)
+            if link.target_type in PURCHASE_LINK_TARGET_TYPES
+            else {(link.target_type, link.target_id)}
+        )
+        for ref in refs:
+            occupancy[ref] = (link.invoice_id, invoice.invoice_number)
+    return occupancy
 
 
 _SALES_BUYER_RAW_KEYS = (
@@ -3277,8 +3406,15 @@ def sync_business_match_status(
         ),
         Decimal("0"),
     )
+    duplicate_logical_links = (
+        _duplicate_purchase_logical_link_count(db, links)
+        if target_type in PURCHASE_LINK_TARGET_TYPES
+        else 0
+    )
     overmatched = max(allocated - max(invoice_total, Decimal("0")), Decimal("0"))
     if overmatched > Decimal("0.01"):
+        status = "needs_review"
+    elif duplicate_logical_links:
         status = "needs_review"
     elif invoice_total <= 0:
         status = "unmatched"
@@ -3294,6 +3430,10 @@ def sync_business_match_status(
     clean_note = (note or "").strip()
     if clean_note and clean_note not in (invoice.match_note or ""):
         invoice.match_note = f"{invoice.match_note}；{clean_note}" if invoice.match_note else clean_note
+    if duplicate_logical_links:
+        warning = f"同一逻辑采购单存在 {duplicate_logical_links} 条重复业务链接，需人工清理"
+        if warning not in (invoice.match_note or ""):
+            invoice.match_note = f"{invoice.match_note}；{warning}" if invoice.match_note else warning
     if overmatched > Decimal("0.01"):
         warning = (
             f"红冲后业务关联超额：有效金额 {quantize(max(invoice_total, Decimal('0')))}，"
@@ -3375,6 +3515,21 @@ def link_purchase_order(
     if invoice_total <= 0:
         raise ValueError("发票已全额红冲、红冲状态异常或无有效蓝字余额，不能继续关联业务单")
 
+    if target_type in PURCHASE_LINK_TARGET_TYPES:
+        equivalent_invoice_links = purchase_alias_links(
+            db,
+            target_type,
+            target_id,
+            target=target,
+            invoice_id=invoice.id,
+            active_only=True,
+        )
+        for equivalent in equivalent_invoice_links:
+            if link is None or equivalent.id != link.id:
+                raise ValueError(
+                    f"同一采购订单 {order_no} 已通过另一数据来源关联当前发票，请先解除重复关联"
+                )
+
     other_invoice_alloc = sum(
         (
             quantize(to_decimal(row.allocated_amount))
@@ -3391,19 +3546,28 @@ def link_purchase_order(
 
     if target_type == SALES_LINK_TARGET_TYPE:
         target_limit_raw = target.paid_amount if target.paid_amount is not None else target.order_amount
+        target_links = db.query(TaxInvoiceLink).filter(
+            TaxInvoiceLink.target_type == target_type,
+            TaxInvoiceLink.target_id == target_id,
+            TaxInvoiceLink.match_method != "rejected",
+            TaxInvoiceLink.confirmed.is_(True),
+        ).all()
     else:
         target_limit_raw = _purchase_target_brief(target_type, target)["amount"]
+        target_links = purchase_alias_links(
+            db,
+            target_type,
+            target_id,
+            target=target,
+            active_only=True,
+        )
     target_limit = quantize(to_decimal(target_limit_raw)) if target_limit_raw is not None else None
     other_target_alloc = sum(
         (
             quantize(to_decimal(row.allocated_amount))
-            for row in db.query(TaxInvoiceLink).filter(
-                TaxInvoiceLink.target_type == target_type,
-                TaxInvoiceLink.target_id == target_id,
-                TaxInvoiceLink.match_method != "rejected",
-                TaxInvoiceLink.confirmed.is_(True),
-                TaxInvoiceLink.id != (link.id if link is not None else -1),
-            ).all()
+            for row in target_links
+            if row.allocated_amount is not None
+            and row.id != (link.id if link is not None else -1)
         ),
         Decimal("0"),
     )

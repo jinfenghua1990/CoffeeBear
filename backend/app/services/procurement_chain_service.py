@@ -10,7 +10,7 @@ import unicodedata
 from datetime import datetime
 from decimal import Decimal
 
-from sqlalchemy import event, or_
+from sqlalchemy import and_, event, or_
 from sqlalchemy.orm import Session
 
 from app.core.audit import audit
@@ -38,6 +38,7 @@ from app.services.inbound_allocation_seed import seed_allocations_for_link
 from app.services.tax_invoice_service import (
     PURCHASE_LINK_TARGET_TYPES,
     filter_visible_invoices,
+    purchase_alias_target_refs,
     set_invoice_verified as set_tax_invoice_verified,
     sync_business_match_status,
     unlink_purchase as unlink_tax_invoice_purchase,
@@ -411,6 +412,36 @@ class ProcurementChainMatcher:
             if linked_amount > 0:
                 covered_external[link.target_id] = covered_external.get(link.target_id, Decimal("0")) + linked_amount
 
+        # 1688 原始订单与工作流副本是同一逻辑采购单：历史发票覆盖额度必须合并，
+        # 否则先挂 ExternalPurchaseOrder、再跑自动匹配时会从 Alibaba1688Order 再挂一遍。
+        raw_by_order_no = {
+            str(order.external_order_id or "").strip(): order.id
+            for order in orders
+            if str(order.external_order_id or "").strip()
+        }
+        all_external_1688 = self.db.query(ExternalPurchaseOrder).filter(
+            ExternalPurchaseOrder.platform == "1688"
+        ).all()
+        external_1688_by_order_no = {
+            str(po.external_order_id or "").strip(): po.id
+            for po in all_external_1688
+            if str(po.external_order_id or "").strip()
+        }
+        raw_alias_external: dict[int, int] = {}
+        external_alias_raw: dict[int, int] = {}
+        for order_no, raw_id in raw_by_order_no.items():
+            external_id = external_1688_by_order_no.get(order_no)
+            if external_id is None:
+                continue
+            raw_alias_external[raw_id] = external_id
+            external_alias_raw[external_id] = raw_id
+            combined = covered.get(raw_id, Decimal("0")) + covered_external.get(external_id, Decimal("0"))
+            covered[raw_id] = combined
+            covered_external[external_id] = combined
+            if raw_id in unknown_covered_orders or external_id in unknown_covered_external:
+                unknown_covered_orders.add(raw_id)
+                unknown_covered_external.add(external_id)
+
         for invoice in invoices:
             amount = parse_decimal(invoice.total_amount)
             voided = (invoice.status or "").lower() == INVOICE_STATUS_RED
@@ -498,9 +529,17 @@ class ProcurementChainMatcher:
                     note=note if auto_confirm else f"{note}；待人工确认",
                 )
                 if target_type == "alibaba1688_order":
-                    covered[order_id] = already + amount
+                    new_coverage = already + amount
+                    covered[order_id] = new_coverage
+                    alias_id = raw_alias_external.get(order_id)
+                    if alias_id is not None:
+                        covered_external[alias_id] = new_coverage
                 else:
-                    covered_external[order_id] = already + amount
+                    new_coverage = already + amount
+                    covered_external[order_id] = new_coverage
+                    alias_id = external_alias_raw.get(order_id)
+                    if alias_id is not None:
+                        covered[alias_id] = new_coverage
                 created += 1
         self.db.commit()
         sweep = auto_confirm_pending_links(self.db, actor="system") if auto_confirm else {}
@@ -657,8 +696,18 @@ class ProcurementChainMatcher:
         return {"linked": True, "settlementNo": best.settlement_no}
 
     def _existing_invoice_link(self, target_type: str, order_id: int, invoice_id: int) -> bool:
-        return self.db.query(TaxInvoiceLink).filter_by(
-            target_type=target_type, target_id=order_id, invoice_id=invoice_id
+        """同一逻辑采购单跨 1688 双实体共享“已关联/已拒绝”事实。"""
+        refs = purchase_alias_target_refs(self.db, target_type, order_id)
+        clauses = [
+            and_(
+                TaxInvoiceLink.target_type == ref_type,
+                TaxInvoiceLink.target_id == ref_id,
+            )
+            for ref_type, ref_id in refs
+        ]
+        return self.db.query(TaxInvoiceLink).filter(
+            TaxInvoiceLink.invoice_id == invoice_id,
+            or_(*clauses),
         ).first() is not None
 
     def _upsert_link(self, order_id: int, target_type: str, target_id: int,
