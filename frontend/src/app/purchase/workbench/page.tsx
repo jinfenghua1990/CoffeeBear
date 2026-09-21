@@ -355,7 +355,7 @@ function exportOrders(items: WorkbenchOrderItem[]) {
   const url = URL.createObjectURL(new Blob(["\ufeff" + csv], { type: "text/csv;charset=utf-8" }));
   const link = document.createElement("a");
   link.href = url;
-  link.download = "采购工作台-" + new Date().toISOString().slice(0, 10) + ".csv";
+  link.download = "采购订单-" + new Date().toISOString().slice(0, 10) + ".csv";
   link.click();
   URL.revokeObjectURL(url);
 }
@@ -779,7 +779,7 @@ export default function PurchaseWorkbenchPage() {
       ...(view === "orders" || view === "chain" ? [] : [loadChain()]),
       view === "orders" ? loadOrders() : view === "chain" ? loadChain() : view === "matching" ? loadMatching() : loadSuppliers(),
     ]);
-    setNotice("采购工作台已刷新");
+    setNotice("采购订单已刷新");
     setBusyAction("");
   }
 
@@ -1111,16 +1111,16 @@ function WorkbenchHeader({ view, busyAction, onViewChange, onNewOrder, onMatch, 
     <header className="sticky top-12 z-30 -mx-5 -mt-5 flex flex-wrap items-center justify-between gap-4 border-b border-slate-200/60 bg-[#f7f8fc] px-5 pb-3 pt-5 sm:-mx-6 sm:px-6 2xl:-mx-7 2xl:px-7">
       <div className="flex flex-wrap items-center gap-4">
         <div>
-          <div className="mb-1 text-[10px] text-slate-400">采购　/　采购工作台</div>
+          <div className="mb-1 text-[10px] text-slate-400">采购中心　/　采购订单</div>
           <div className="flex items-baseline gap-4">
-            <h1 className="text-[25px] font-semibold tracking-tight text-slate-900">采购工作台</h1>
-            <p className="hidden text-[12px] text-slate-400 2xl:block">以订单时间为主线，高效推进采购全流程</p>
+            <h1 className="text-[25px] font-semibold tracking-tight text-slate-900">采购订单</h1>
+            <p className="hidden text-[12px] text-slate-400 2xl:block">按下单时间组织采购主单，并关联生产、到仓、开票与付款状态</p>
           </div>
           <p className="mt-1 text-[11px] text-slate-400 2xl:hidden">以订单时间为主线，高效推进采购全流程</p>
         </div>
         <div className="flex rounded-lg border border-slate-200 bg-white p-0.5 shadow-sm">
           <ViewButton active={view === "orders"} onClick={() => onViewChange("orders")} icon="orders">订单视图</ViewButton>
-          <ViewButton active={view === "suppliers"} onClick={() => onViewChange("suppliers")} icon="users">供应商视图</ViewButton>
+          <ViewButton active={view === "suppliers"} onClick={() => onViewChange("suppliers")} icon="users">供应商维度</ViewButton>
           <ViewButton active={view === "chain"} onClick={() => onViewChange("chain")} icon="chart">链路建链</ViewButton>
           <ViewButton active={view === "matching"} onClick={() => onViewChange("matching")} icon="box">SKU 匹配</ViewButton>
         </div>

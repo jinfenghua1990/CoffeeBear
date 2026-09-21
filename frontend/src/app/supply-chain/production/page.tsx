@@ -8,7 +8,7 @@ export default function ProductionOrdersPage() {
     <div className="space-y-5">
       <header className="sticky top-0 z-20 -mx-8 -mt-6 flex flex-wrap items-end justify-between gap-4 border-b border-gray-200 bg-white/95 px-8 py-5 backdrop-blur">
         <div>
-          <div className="text-xs font-medium text-indigo-600">SUPPLY CHAIN / PRODUCTION</div>
+          <div className="text-xs font-medium text-indigo-600">采购中心 / 生产订单</div>
           <h1 className="mt-1 text-2xl font-semibold tracking-tight text-slate-900">生产订单</h1>
           <p className="mt-1 text-sm text-slate-500">以采购主单为入口自动归档：正品进入生产链路，耗材采购不会混入。</p>
         </div>

@@ -1,5 +1,5 @@
 export const WORKBENCH_VIEWS = {
-  orders: "采购订单", suppliers: "供应商管理", chain: "采购链路", matching: "SKU 匹配",
+  orders: "采购订单", suppliers: "供应商维度", chain: "采购链路", matching: "SKU 匹配",
   imports: "数据接入", tax: "发票对账", dashboard: "经营总览", sales: "销售管理",
   products: "货品档案", inventory_goods: "正品库存", inventory_consumables: "耗材管理",
   finance: "财务资料",

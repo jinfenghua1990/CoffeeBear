@@ -85,13 +85,28 @@ export const MODULES: ModuleDef[] = [
       || p.startsWith("/supply-chain/receiving")
       || p.startsWith("/supply-chain/material-flow")
       || p.startsWith("/settings/warehouses"),
-    items: [
-      { href: "/inventory", label: "库存总览", icon: "inventory" },
-      { href: "/supply-chain/warehouses", label: "仓库档案", icon: "warehouse" },
-      { href: "/supply-chain/receiving", label: "到仓入库", icon: "receive" },
-      { href: "/supply-chain/material-flow", label: "耗材流转", icon: "flow" },
-      { href: "/inventory/transactions", label: "库存流水", icon: "flow" },
-      { href: "/inventory/adjustments", label: "库存盘点", icon: "settings" },
+    groups: [
+      {
+        label: "库存管理",
+        items: [
+          { href: "/inventory", label: "库存总览", icon: "inventory" },
+          { href: "/inventory/transactions", label: "库存流水", icon: "flow" },
+          { href: "/inventory/adjustments", label: "库存盘点", icon: "settings" },
+        ],
+      },
+      {
+        label: "仓储作业",
+        items: [
+          { href: "/supply-chain/receiving", label: "到仓入库", icon: "receive" },
+          { href: "/supply-chain/material-flow", label: "耗材流转", icon: "flow" },
+        ],
+      },
+      {
+        label: "基础档案",
+        items: [
+          { href: "/supply-chain/warehouses", label: "仓库档案", icon: "warehouse" },
+        ],
+      },
     ],
   },
   {

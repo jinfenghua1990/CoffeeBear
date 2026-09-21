@@ -299,16 +299,18 @@ function TabContextMenu({
       className="fixed z-dropdown w-[168px] rounded-xl border border-slate-200 bg-white p-1.5 shadow-lg"
       style={{ left: Math.min(x, window.innerWidth - 180), top: Math.min(y, window.innerHeight - 220) }}
     >
-      {items.map((item) => (
-        <button
-          key={item.label}
-          type="button"
-          disabled={item.disabled}
-          onClick={item.onSelect}
-          className="block w-full rounded-lg px-2.5 py-1.5 text-left text-[12px] text-slate-600 transition hover:bg-slate-50 disabled:cursor-default disabled:text-slate-300 disabled:hover:bg-transparent"
-        >
-          {item.label}
-        </button>
+      {items.map((item, index) => (
+        <div key={item.label}>
+          {index === 3 && <div className="my-1 border-t border-slate-100" aria-hidden="true" />}
+          <button
+            type="button"
+            disabled={item.disabled}
+            onClick={item.onSelect}
+            className="block w-full rounded-lg px-2.5 py-1.5 text-left text-[12px] text-slate-600 transition hover:bg-slate-50 disabled:cursor-default disabled:text-slate-300 disabled:hover:bg-transparent"
+          >
+            {item.label}
+          </button>
+        </div>
       ))}
     </div>
   );

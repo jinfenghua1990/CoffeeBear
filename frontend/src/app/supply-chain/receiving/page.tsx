@@ -29,10 +29,10 @@ export default function ReceivingPage() {
       <header className="sticky top-0 z-20 -mx-8 -mt-6 flex flex-wrap items-center justify-between gap-3 border-b border-gray-200 bg-white/95 px-8 py-3.5 backdrop-blur">
         <div className="min-w-0">
           <div className="flex flex-wrap items-baseline gap-x-2.5 gap-y-0.5">
-            <h1 className="text-xl font-semibold tracking-tight text-slate-900">到仓入库单</h1>
-            <span className="text-xs font-medium text-violet-600">SUPPLY CHAIN / RECEIVING</span>
+            <h1 className="text-xl font-semibold tracking-tight text-slate-900">到仓入库</h1>
+            <span className="text-xs font-medium text-violet-600">库存中心 / 到仓入库</span>
           </div>
-          <p className="mt-1 text-xs text-slate-500">按仓库查看到仓入库单明细，覆盖本系统入库、吉客云入库单与耗材入库；点单据打开明细弹窗。</p>
+          <p className="mt-1 text-xs text-slate-500">按仓库查看到仓入库明细，覆盖本系统入库、吉客云入库单与耗材入库；点单据打开明细弹窗。</p>
         </div>
         <div className="flex flex-wrap gap-2">
           <button type="button" onClick={() => setShowJackyunImport(true)} className="rounded-lg border border-indigo-200 bg-indigo-50 px-3 py-1.5 text-sm font-medium text-indigo-700 hover:bg-indigo-100">吉客云入库单</button>
@@ -44,7 +44,7 @@ export default function ReceivingPage() {
           <div className="flex max-h-[calc(100vh-4rem)] w-full max-w-[1180px] flex-col overflow-hidden rounded-2xl border border-slate-200 bg-[#f7f9fc] shadow-2xl">
             <div className="flex shrink-0 items-start justify-between gap-4 border-b border-slate-200 bg-white px-6 py-4">
               <div>
-                <div className="text-xs font-medium text-indigo-600">到仓入库单 / 吉客云入库单</div>
+                <div className="text-xs font-medium text-indigo-600">到仓入库 / 吉客云入库单</div>
                 <h2 className="mt-1 text-xl font-semibold text-slate-900">上传吉客云入库单</h2>
                 <p className="mt-1 text-sm text-slate-500">在当前页面上传并识别文件；数据作为历史外部参考，不会替代本系统采购入库主单。</p>
               </div>

@@ -293,7 +293,7 @@ export default function MaterialFlowPage() {
     <div className="mx-auto max-w-[1650px] space-y-3">
       <div className="app-page-header flex flex-wrap items-end justify-between gap-3 rounded-xl border border-slate-200 bg-white px-4 py-3 shadow-sm">
         <div>
-          <div className="text-[10px] font-medium text-indigo-600">SUPPLY CHAIN / MATERIAL FLOW</div>
+          <div className="text-[10px] font-medium text-indigo-600">库存中心 / 耗材流转</div>
           <h1 className="mt-1 text-xl font-semibold tracking-tight text-slate-900">耗材流转</h1>
           <p className="mt-1 text-xs text-slate-500">统一读取采购主单和本系统入库单；正品入库后按 SKU 映射自动关联耗材使用。</p>
         </div>

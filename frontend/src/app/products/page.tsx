@@ -380,8 +380,8 @@ export default function ProductsPage() {
   const [categoryFilter, setCategoryFilter] = useTabScopedState("products.category", "all");
   const [statusFilter, setStatusFilter] = useTabScopedState("products.status", "all");
 
-  // 耗材模式下路由表标题（货品档案）不够准确，这里补一个更贴合业务的标题。
-  useTabTitle(kind === "consumable" ? "耗材档案" : null);
+  // 货品、套装、财务分类已经提升为独立导航入口；工作区标题与当前入口保持一致。
+  useTabTitle(tab === "bundles" ? "套装档案" : tab === "taxRules" ? "财务分类" : "货品档案");
 
   const canEdit = currentUser?.roles.some((role) => role === "admin" || role === "operator") ?? false;
   const canDeleteCatalog = currentUser?.roles.includes("admin") ?? false;
@@ -761,6 +761,30 @@ export default function ProductsPage() {
         <span title="仅管理员可停用/启用货品档案" className="rounded border border-slate-200 bg-white px-3 py-1.5 text-slate-400">停用/启用（仅管理员）</span></>}
     <button onClick={() => setSelected(new Set())} className="rounded border bg-white px-3 py-1.5 text-gray-600 hover:bg-gray-50">取消选择</button>
   </div>;
+  const pageMeta = tab === "bundles"
+    ? {
+        breadcrumb: "基础货品 / 套装档案",
+        title: "套装档案",
+        description: "独立维护套装与虚拟组合套装 SKU；货品档案不再通过页内 TAB 混合切换。",
+        badge: "套装与虚拟组合",
+        tone: "indigo",
+      }
+    : tab === "taxRules"
+      ? {
+          breadcrumb: "财务中心 / 财务分类",
+          title: "财务分类",
+          description: "维护货品与耗材共用的财务分类规则、匹配方式与税务代码；归属财务中心统一管理。",
+          badge: "财务规则",
+          tone: "indigo",
+        }
+      : {
+          breadcrumb: "基础货品 / 货品档案",
+          title: "货品档案",
+          description: "统一维护正品与耗材基础资料；库存、仓库与流水统一收口到库存中心。",
+          badge: "正品与耗材统一档案",
+          tone: "blue",
+        };
+
   const bundleBulkBar = selectedBundleIds.length > 0 && <div className="mt-3 flex flex-wrap items-center gap-2 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-xs">
     <span className="font-medium text-rose-700">已选 {selectedBundleIds.length} 个套装</span>
     <span className="text-rose-600">仅删除没有历史业务引用的档案</span>
@@ -774,31 +798,23 @@ export default function ProductsPage() {
     <header className="rounded-2xl border border-slate-200 bg-white px-5 py-4 shadow-sm">
       <div className="flex flex-wrap items-start justify-between gap-4">
         <div>
-          <div className="text-[11px] font-medium tracking-wide text-blue-600">基础货品 / 基础档案</div>
-          <h1 className="mt-1 text-2xl font-semibold tracking-tight text-slate-900">货品档案</h1>
-          <p className="mt-1 max-w-3xl text-sm leading-6 text-slate-500">统一维护正品、耗材与套装基础资料；库存、仓库与流水统一收口到库存管理。</p>
+          <div className={`text-[11px] font-medium tracking-wide ${pageMeta.tone === "indigo" ? "text-indigo-600" : "text-blue-600"}`}>{pageMeta.breadcrumb}</div>
+          <h1 className="mt-1 text-2xl font-semibold tracking-tight text-slate-900">{pageMeta.title}</h1>
+          <p className="mt-1 max-w-3xl text-sm leading-6 text-slate-500">{pageMeta.description}</p>
         </div>
-        <span className="rounded-full bg-blue-50 px-3 py-1.5 text-xs font-medium text-blue-700">正品与耗材统一档案</span>
+        <span className={`rounded-full px-3 py-1.5 text-xs font-medium ${pageMeta.tone === "indigo" ? "bg-indigo-50 text-indigo-700" : "bg-blue-50 text-blue-700"}`}>{pageMeta.badge}</span>
       </div>
     </header>
 
-    <section className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-4" aria-label="货品档案指标">
+    {tab === "catalog" && <section className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-4" aria-label="货品档案指标">
       <CatalogMetric label="正品数量" value={String(counts.baseGoods)} hint="单品档案" tone="blue" />
       <CatalogMetric label="耗材数量" value={String(counts.consumable)} hint="耗材档案" tone="amber" />
-      <CatalogMetric label="套装数量" value={String(counts.bundles)} hint="套装与虚拟组合" tone="indigo" />
+      <CatalogMetric label="套装数量" value={String(counts.bundles)} hint="套装档案已独立到左侧菜单" tone="indigo" />
       <CatalogMetric label="最近变更" value="—" hint="当前接口未返回档案更新时间" tone="slate" />
-    </section>
+    </section>}
 
     {err && <div className="mt-4 rounded-lg bg-red-50 p-3 text-sm text-red-700">{err}{canDeleteCatalog && blockedForInactive.length > 0 && <button onClick={() => void setCatalogStatus(blockedForInactive, "inactive")} disabled={statusSaving} className="ml-3 rounded bg-slate-600 px-2.5 py-1 text-xs font-medium text-white hover:bg-slate-700 disabled:cursor-wait disabled:opacity-60">改为停用（{blockedForInactive.length} 项）</button>}<button className="ml-3" onClick={() => { setErr(""); setBlockedForInactive([]); }}>关闭</button></div>}
     {msg && <div className="mt-4 rounded-lg bg-green-50 p-3 text-sm text-green-700">{msg}</div>}
-
-    <div className="products-tabbar mt-5 border-b border-slate-200 bg-[#f4f7fb]/95 backdrop-blur">
-      <div className="flex h-12 items-stretch overflow-x-auto border-b border-slate-200">
-        {([["catalog", "货品档案"], ["bundles", "套装档案"], ["taxRules", "财务分类"]] as const).map(([key, label]) => (
-          <button key={key} className={`whitespace-nowrap border-b-2 px-4 text-sm font-medium transition ${tab === key ? "border-blue-600 text-blue-700" : "border-transparent text-slate-500 hover:border-slate-300 hover:text-slate-800"}`} onClick={() => selectTab(key)}>{label}</button>
-        ))}
-      </div>
-    </div>
 
     {tab === "catalog" && <section className="mt-4 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
       <div className="flex flex-wrap items-center justify-between gap-3">
@@ -825,7 +841,7 @@ export default function ProductsPage() {
     </section>}
 
     {tab === "bundles" && <section className="mt-4 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
-      <div className="flex flex-wrap items-center justify-between gap-3"><div><div className="flex items-center gap-2"><h2 className="text-sm font-medium text-gray-700">套装档案</h2><span className="rounded-full bg-indigo-50 px-2 py-0.5 text-[11px] text-indigo-600">{counts.bundles} 个 SKU</span></div><p className="mt-1 text-xs text-gray-400">单独维护套装与虚拟组合套装 SKU 主档；当前系统没有套装组成明细表，因此模板只维护主档字段，不虚构组成关系。</p></div><div className="flex flex-wrap items-center gap-2"><MasterDataActions dataset="bundles" label="套装" canEdit={canEdit} exporting={exportingMaster} importing={importingMaster} onExport={exportMasterData} onImport={importMasterData} /><input value={bundleSearch} onChange={(e) => setBundleSearch(e.target.value)} placeholder="搜索编码、条码或名称" className="w-56 rounded-lg border px-3 py-1.5 text-sm" /></div></div>
+      <div className="flex flex-wrap items-center justify-between gap-3"><div><div className="flex items-center gap-2"><h2 className="text-sm font-medium text-gray-700">套装与虚拟组合</h2><span className="rounded-full bg-indigo-50 px-2 py-0.5 text-[11px] text-indigo-600">{counts.bundles} 个 SKU</span></div><p className="mt-1 text-xs text-gray-400">单独维护套装与虚拟组合套装 SKU 主档；当前系统没有套装组成明细表，因此模板只维护主档字段，不虚构组成关系。</p></div><div className="flex flex-wrap items-center gap-2"><MasterDataActions dataset="bundles" label="套装" canEdit={canEdit} exporting={exportingMaster} importing={importingMaster} onExport={exportMasterData} onImport={importMasterData} /><input value={bundleSearch} onChange={(e) => setBundleSearch(e.target.value)} placeholder="搜索编码、条码或名称" className="w-56 rounded-lg border px-3 py-1.5 text-sm" /></div></div>
       {canEdit && editing !== 0 && <div className="mt-3 flex justify-end"><button type="button" onClick={startNewBundle} className="rounded-lg bg-indigo-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-indigo-700">+ 新建套装</button></div>}
       {editing === 0 && <ProductEditor form={productForm} setForm={setProductForm} onSubmit={saveProduct} onCancel={() => setEditing(null)} taxRules={taxRules} />}
       {bundleBulkBar}
@@ -833,7 +849,7 @@ export default function ProductsPage() {
     </section>}
 
     {tab === "taxRules" && <>
-      <div className="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-indigo-100 bg-indigo-50/60 px-4 py-3"><div><h2 className="text-sm font-semibold text-indigo-900">财务分类档案</h2><p className="mt-1 text-xs text-indigo-700">分类规则、匹配方式和税务代码独立导入导出；修改已关联规则后，货品税务代码会同步更新。</p></div><MasterDataActions dataset="tax_rules" label="财务分类" canEdit={canEdit} exporting={exportingMaster} importing={importingMaster} onExport={exportMasterData} onImport={importMasterData} /></div>
+      <div className="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-indigo-100 bg-indigo-50/60 px-4 py-3"><div><h2 className="text-sm font-semibold text-indigo-900">分类规则</h2><p className="mt-1 text-xs text-indigo-700">分类规则、匹配方式和税务代码独立导入导出；修改已关联规则后，货品税务代码会同步更新。</p></div><MasterDataActions dataset="tax_rules" label="财务分类" canEdit={canEdit} exporting={exportingMaster} importing={importingMaster} onExport={exportMasterData} onImport={importMasterData} /></div>
       <TaxCategoryRulesPanel onChanged={load} canEdit={canEdit} />
     </>}
 

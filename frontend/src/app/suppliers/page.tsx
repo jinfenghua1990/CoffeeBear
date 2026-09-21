@@ -507,7 +507,7 @@ export default function SuppliersPage() {
     <div className="space-y-4">
       <header className="sticky top-0 z-20 -mx-8 -mt-6 border-b border-slate-200 bg-white/95 px-8 py-4 backdrop-blur">
         <nav className="flex items-center gap-1.5 text-xs text-slate-400">
-          <Link href="/supply-chain" className="hover:text-violet-600">供应链中心</Link>
+          <span>供应商</span>
           <span>/</span>
           <span className="text-slate-600">供应商档案</span>
         </nav>

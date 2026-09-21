@@ -146,12 +146,6 @@ const ROUTES: RouteEntry[] = [
     load: () => import("@/app/inventory/operations/page"),
   },
   {
-    pathname: "/supply-chain",
-    title: "供应链总览",
-    businessType: "master",
-    load: () => import("@/app/supply-chain/page"),
-  },
-  {
     pathname: "/supply-chain/warehouses",
     title: "仓库档案",
     businessType: "master",
@@ -171,7 +165,7 @@ const ROUTES: RouteEntry[] = [
   },
   {
     pathname: "/purchase/workbench",
-    title: "采购工作台",
+    title: "采购订单",
     businessType: "purchase",
     // 采购单号是业务对象：同一张采购单只保留一个 Tab，工作台母页面另外保留一个
     identityKeys: ["order"],
@@ -197,7 +191,7 @@ const ROUTES: RouteEntry[] = [
   },
   {
     pathname: "/supply-chain/receiving",
-    title: "到仓入库单",
+    title: "到仓入库",
     businessType: "master",
     titleFor: (search) => (search.get("panel") === "jackyun" ? "吉客云入库导入" : null),
     load: () => import("@/app/supply-chain/receiving/page"),

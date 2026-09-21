@@ -168,8 +168,8 @@ export default function LogisticsBillsPage() {
     <div className="flex flex-col gap-4 p-4">
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-lg font-semibold text-gray-800">物流账单</h1>
-          <p className="mt-0.5 text-xs text-gray-400">通常半年出一次账单，导入并核销后替换预估物流成本</p>
+          <div className="text-[10px] font-medium text-blue-600">财务中心 / 物流对账</div>\n          <h1 className="mt-1 text-lg font-semibold text-gray-800">物流对账</h1>
+          <p className="mt-0.5 text-xs text-gray-400">导入物流公司实际账单，按运单/订单核对费用；确认后的实际物流成本用于利润核算</p>
         </div>
         <div className="flex items-center gap-2">
           <input
