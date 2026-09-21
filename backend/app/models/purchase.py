@@ -15,6 +15,14 @@ MONEY = Numeric(18, 4)
 class Supplier(Base, PkMixin, TimestampMixin):
     __tablename__ = "suppliers"
 
+    # V2: Supplier 只是采购角色/兼容资料，不再是独立身份根。
+    partner_id: Mapped[int | None] = mapped_column(
+        BigInteger,
+        ForeignKey("business_partners.id", ondelete="SET NULL"),
+        nullable=True,
+        unique=True,
+        index=True,
+    )
     platform: Mapped[str] = mapped_column(String(32), default="1688")
     external_shop_id: Mapped[str] = mapped_column(String(128), default="", index=True)
     name: Mapped[str] = mapped_column(String(256), index=True, nullable=False)
@@ -48,6 +56,12 @@ class ExternalPurchaseOrder(Base, PkMixin, TimestampMixin):
     platform: Mapped[str] = mapped_column(String(32), default="1688")
     buyer_account: Mapped[str] = mapped_column(String(128), default="")
     supplier_name: Mapped[str] = mapped_column(String(256), default="", index=True)
+    supplier_partner_id: Mapped[int | None] = mapped_column(
+        BigInteger,
+        ForeignKey("business_partners.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
     # 采购订单的计划入库仓库；实际入库完成后，以入库单上的仓库为准。
     warehouse_id: Mapped[int | None] = mapped_column(
         BigInteger, ForeignKey("warehouses.id"), nullable=True, index=True,
@@ -167,6 +181,12 @@ class PurchaseInvoiceLink(Base, PkMixin):
 class JackyunPurchaseOrder(Base, PkMixin, TimestampMixin):
     __tablename__ = "jackyun_purchase_orders"
 
+    supplier_partner_id: Mapped[int | None] = mapped_column(
+        BigInteger,
+        ForeignKey("business_partners.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
     jackyun_purch_id: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
     purch_no: Mapped[str] = mapped_column(String(128), default="", index=True)
     supplier_name: Mapped[str] = mapped_column(String(256), default="")
