@@ -34,10 +34,14 @@ DEFAULT_RULES = [
 # ---------- 纯函数（可单测） ----------
 
 def build_fingerprint(account_no: str, txn_date: str, amount, voucher_no: str,
-                      counterparty_name: str = "", summary: str = "") -> str:
-    """账户+日期+金额+流水号；流水号为空用可重复 hash fallback（规格 16）。"""
+                      counterparty_name: str = "", summary: str = "",
+                      serial_no: str = "") -> str:
+    """真实账户+日期+金额+银行流水号/凭证号；无编号时使用稳定回退值。"""
     amt = f"{quantize(to_decimal(amount), Decimal('0.01')):f}"
-    if voucher_no:
+    if serial_no:
+        raw = f"{account_no}|{txn_date}|{amt}|{serial_no}|{voucher_no}"
+    elif voucher_no:
+        # 保持旧版人工录入/历史导入的指纹兼容，避免升级后同一笔重新生成。
         raw = f"{account_no}|{txn_date}|{amt}|{voucher_no}"
     else:
         raw = f"{account_no}|{txn_date}|{amt}|{counterparty_name}|{summary}"
@@ -146,35 +150,137 @@ def delete_rule(db: Session, rule_id: int, actor: str = "system") -> None:
 
 
 def ensure_account(db: Session, account_no: str, account_name: str = "") -> BankAccount:
+    account_no = (account_no or "").strip()
+    if not account_no:
+        raise ValueError("银行真实账号不能为空；请从流水文件读取或明确填写真实账号")
     row = db.query(BankAccount).filter_by(account_no=account_no).first()
     if not row:
         row = BankAccount(account_no=account_no, account_name=account_name or account_no,
                           bank_name="浙江农信")
         db.add(row)
         db.commit()
+    elif account_name and (not row.account_name or row.account_name == row.account_no):
+        row.account_name = account_name
+        db.commit()
     return row
+
+
+def _merge_raw(previous: dict | None, incoming: dict | None) -> dict:
+    """保留当前来源和历史来源，重复导入不丢原始行。"""
+    if not incoming:
+        return previous or {}
+    if not previous:
+        return incoming
+
+    same_source = (
+        previous.get("archiveFileId") == incoming.get("archiveFileId")
+        and previous.get("rowNumber") == incoming.get("rowNumber")
+        and previous.get("sheet") == incoming.get("sheet")
+    )
+    history = list(previous.get("sourceHistory") or [])
+    previous_snapshot = {key: value for key, value in previous.items() if key != "sourceHistory"}
+    if not same_source and previous_snapshot not in history:
+        history.append(previous_snapshot)
+    merged = dict(incoming)
+    if history:
+        merged["sourceHistory"] = history
+    return merged
+
+
+def _parse_transaction_time(value: str | datetime | None) -> datetime | None:
+    if not value:
+        return None
+    if isinstance(value, datetime):
+        return value
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _legacy_candidate(
+    db: Session,
+    *,
+    txn_date: date,
+    direction: str,
+    amount: Decimal,
+    counterparty_name: str,
+    counterparty_account: str,
+    serial_no: str,
+    voucher_no: str,
+) -> BankTransaction | None:
+    """兼容旧版把真实流水号写进 voucher_no 的历史记录。"""
+    query = db.query(BankTransaction).filter(
+        BankTransaction.txn_date == txn_date,
+        BankTransaction.direction == direction,
+        BankTransaction.amount == amount,
+        BankTransaction.counterparty_name == (counterparty_name or ""),
+    )
+    if counterparty_account:
+        query = query.filter(BankTransaction.counterparty_account == counterparty_account)
+    candidates = query.all()
+    matched = []
+    for candidate in candidates:
+        identifiers = {candidate.serial_no or "", candidate.voucher_no or ""}
+        wanted = {serial_no or "", voucher_no or ""} - {""}
+        if wanted and identifiers.intersection(wanted):
+            matched.append(candidate)
+        elif not wanted and len(candidates) == 1:
+            matched.append(candidate)
+    return matched[0] if len(matched) == 1 else None
 
 
 def add_transaction(db: Session, *, account_no: str, txn_date: date, direction: str,
                     amount, counterparty_name: str = "", counterparty_account: str = "",
-                    summary: str = "", voucher_no: str = "",
+                    summary: str = "", serial_no: str = "", voucher_no: str = "",
+                    account_name: str = "", transaction_time: datetime | None = None,
+                    source_row_number: int | None = None, raw: dict | None = None,
                     import_batch_id: int | None = None,
                     actor: str = "system") -> tuple[BankTransaction, bool]:
-    """登记银行流水。指纹幂等：重复返回已有记录（created=False）。"""
+    """登记银行流水并保留原始来源。重复导入会补齐来源，不会清空 raw。"""
     if direction not in ("in", "out"):
         raise ValueError("方向必须为 in/out")
-    account = ensure_account(db, account_no)
+    account_no = (account_no or "").strip()
+    serial_no = (serial_no or "").strip()
+    voucher_no = (voucher_no or "").strip()
+    counterparty_name = counterparty_name or ""
+    counterparty_account = counterparty_account or ""
+    summary = summary or ""
+    account = ensure_account(db, account_no, account_name=account_name)
+    amount_value = quantize(to_decimal(amount), Decimal("0.01"))
     fp = build_fingerprint(account_no, txn_date.isoformat(), amount, voucher_no,
-                           counterparty_name, summary)
+                           counterparty_name, summary, serial_no=serial_no)
     existing = db.query(BankTransaction).filter_by(fingerprint=fp).first()
+    if existing is None:
+        existing = _legacy_candidate(
+            db, txn_date=txn_date, direction=direction, amount=amount_value,
+            counterparty_name=counterparty_name, counterparty_account=counterparty_account,
+            serial_no=serial_no, voucher_no=voucher_no,
+        )
     if existing:
+        # 老记录可能使用了系统别名或把流水号放在 voucher_no；重新上传真实文件时
+        # 原地补齐来源和账号，避免产生第二条同一笔付款，也不破坏已有匹配关系。
+        existing.account_id = account.id
+        existing.import_batch_id = import_batch_id or existing.import_batch_id
+        existing.transaction_time = transaction_time or existing.transaction_time
+        existing.source_row_number = source_row_number or existing.source_row_number
+        if serial_no:
+            existing.serial_no = serial_no
+        if voucher_no:
+            existing.voucher_no = voucher_no
+        existing.raw = _merge_raw(existing.raw or {}, raw)
+        if existing.fingerprint != fp:
+            existing.fingerprint = fp
+        db.commit()
         return existing, False
     row = BankTransaction(
         account_id=account.id, import_batch_id=import_batch_id,
         txn_date=txn_date, direction=direction,
-        amount=quantize(to_decimal(amount), Decimal("0.01")),
-        counterparty_name=counterparty_name or "", counterparty_account=counterparty_account or "",
-        summary=summary or "", voucher_no=voucher_no or "", fingerprint=fp,
+        transaction_time=transaction_time,
+        amount=amount_value,
+        counterparty_name=counterparty_name, counterparty_account=counterparty_account,
+        summary=summary, serial_no=serial_no, voucher_no=voucher_no,
+        source_row_number=source_row_number, fingerprint=fp, raw=raw or {},
     )
     db.add(row)
     db.commit()
@@ -183,15 +289,14 @@ def add_transaction(db: Session, *, account_no: str, txn_date: date, direction: 
     return row, True
 
 
-def import_bank_xlsx(db: Session, *, account_no: str, content: bytes,
+def import_bank_xlsx(db: Session, *, account_no: str = "", content: bytes,
                      period_year: int, period_month: int,
                      file_name: str, archive_file_id: int,
                      actor: str = "system") -> dict:
-    """解析浙江农信 XLSX 并幂等导入流水（规格 8.1 / 16）。
+    """解析并导入银行流水，同时保存真实账户和每一行原始来源。
 
-    - 解析结果逐行 add_transaction（指纹幂等，重复跳过）
-    - 记录 BankImportBatch 归档元信息
-    返回 {"parsed": N, "created": N, "duplicates": N, "skipped": N}
+    文件中识别到的我方账号优先级高于接口传入值。只有文件确实没有我方账号时，
+    才允许调用方明确传入人工确认的真实账号；旧的 ``ZJRC-001`` 不能再作为默认账号。
     """
     from datetime import date
 
@@ -218,16 +323,42 @@ def import_bank_xlsx(db: Session, *, account_no: str, content: bytes,
               {"archiveFileId": archive_file_id, "reason": "未识别到交易明细", "diagnosis": diag})
         col_text = "、".join(diag.get("columns") or []) or "（空表头）"
         missing_labels = {
-            "txn_date": "交易日期", "amount_in": "收入金额", "amount_out": "支出金额",
-            "counterparty": "对方户名", "summary": "摘要", "voucher_no": "流水号",
+            "txn_date_or_time": "交易日期或交易时间", "amount": "交易金额/收入金额/支出金额",
+            "counterparty": "对方户名", "summary": "摘要", "serial_no": "流水号",
         }
         missing_text = "、".join(missing_labels.get(k, k) for k in (diag.get("missing") or []))
         raise ValueError(
             f"文件已归档但解析失败：工作表「{diag.get('sheet') or '?'}」，共 {diag.get('rows') or 0} 行数据，"
             f"识别到列：{col_text}。缺少关键列：{missing_text}。"
-            "请从银行系统导出包含交易日期、收入/支出金额、对方户名、摘要的完整流水。"
+            "请从银行系统导出包含交易日期/交易时间和交易金额的完整流水。"
         )
-    created = duplicates = skipped = 0
+
+    source_accounts = sorted({(r.get("account_no") or "").strip() for r in rows if r.get("account_no")})
+    if len(source_accounts) > 1:
+        batch.status = "failed"
+        db.commit()
+        audit(db, actor, "bank.import.xlsx.failed", "bank_import_batches", batch.id,
+              {"archiveFileId": archive_file_id, "reason": "单文件包含多个我方账号",
+               "accounts": source_accounts})
+        raise ValueError("同一个银行明细文件识别到多个我方账号，请按账号拆分后再导入，避免串账")
+
+    manual_account = (account_no or "").strip()
+    if source_accounts:
+        resolved_account_no = source_accounts[0]
+        account_source = "file"
+    else:
+        if not manual_account or manual_account == "ZJRC-001":
+            batch.status = "failed"
+            db.commit()
+            audit(db, actor, "bank.import.xlsx.failed", "bank_import_batches", batch.id,
+                  {"archiveFileId": archive_file_id, "reason": "文件没有真实我方账号"})
+            raise ValueError("文件未识别我方交易账号，请填写真实账号；禁止使用系统别名作为默认账号")
+        resolved_account_no = manual_account
+        account_source = "manual"
+
+    account_names = sorted({(r.get("account_name") or "").strip() for r in rows if r.get("account_name")})
+    account_name = account_names[0] if len(account_names) == 1 else ""
+    created = duplicates = skipped = raw_stored = 0
     for r in rows:
         if not r.get("txn_date"):
             skipped += 1
@@ -245,18 +376,30 @@ def import_bank_xlsx(db: Session, *, account_no: str, content: bytes,
         else:
             skipped += 1
             continue
+        raw = dict(r.get("raw") or {})
+        raw.update({
+            "archiveFileId": archive_file_id,
+            "importBatchId": batch.id,
+            "accountSource": account_source,
+            "resolvedAccountNo": resolved_account_no,
+        })
         try:
             txn_date = date.fromisoformat(r["txn_date"])
             _, is_new = add_transaction(
-                db, account_no=account_no, txn_date=txn_date, direction=direction,
-                amount=amount, counterparty_name=r.get("counterparty") or "",
+                db, account_no=resolved_account_no, account_name=account_name,
+                txn_date=txn_date, direction=direction, amount=amount,
+                counterparty_name=r.get("counterparty") or "",
                 counterparty_account=r.get("counterparty_account") or "",
-                summary=r.get("summary") or "", voucher_no=r.get("voucher_no") or "",
+                summary=r.get("summary") or "", serial_no=r.get("serial_no") or "",
+                voucher_no=r.get("voucher_no") or "",
+                transaction_time=_parse_transaction_time(r.get("transaction_time")),
+                source_row_number=(r.get("raw") or {}).get("rowNumber"), raw=raw,
                 import_batch_id=batch.id, actor=actor,
             )
         except (TypeError, ValueError):
             skipped += 1
             continue
+        raw_stored += 1
         if is_new:
             created += 1
         else:
@@ -266,13 +409,18 @@ def import_bank_xlsx(db: Session, *, account_no: str, content: bytes,
     batch.status = "done"
     db.commit()
     audit(db, actor, "bank.import.xlsx", "bank_import_batches", batch.id,
-          {"account": account_no, "parsed": len(rows), "created": created,
-           "duplicates": duplicates, "skipped": skipped,
+          {"account": resolved_account_no, "accountSource": account_source,
+           "parsed": len(rows), "created": created, "duplicates": duplicates,
+           "rawStored": raw_stored, "skipped": skipped,
            "period": f"{period_year}-{period_month:02d}",
            "archiveFileId": archive_file_id})
-    return {"batchId": batch.id, "archiveFileId": archive_file_id,
-            "parsed": len(rows), "created": created,
-            "duplicates": duplicates, "skipped": skipped}
+    return {
+        "batchId": batch.id, "archiveFileId": archive_file_id,
+        "accountNo": resolved_account_no, "accountSource": account_source,
+        "sourceAccounts": source_accounts, "parsed": len(rows),
+        "created": created, "duplicates": duplicates,
+        "rawStored": raw_stored, "skipped": skipped,
+    }
 
 
 def add_settlement(db: Session, *, platform: str, period_year: int, period_month: int,

@@ -7,7 +7,8 @@ from sqlalchemy.orm import Session
 
 from app.api.deps import current_actor
 from app.db import get_db
-from app.models.bank import BankAccount, BankTransaction
+from app.models.bank import BankAccount, BankImportBatch, BankTransaction
+from app.models.finance import ArchiveFile
 from app.models.payment import SettlementRecord
 from app.services import finance_service, payment_invoice_match_service
 from app.services import reconciliation as rc
@@ -54,7 +55,7 @@ def delete_rule(rule_id: int, request: Request, db: Session = Depends(get_db)) -
 # ---------- 银行流水 ----------
 
 class TxnBody(BaseModel):
-    account_no: str = Field(default="ZJRC-001", min_length=1, max_length=64)
+    account_no: str = Field(min_length=1, max_length=64)
     txn_date: date
     direction: Literal["in", "out"] = "in"
     amount: str = Field(min_length=1, max_length=64)
@@ -89,6 +90,7 @@ def list_transactions(
         query = query.filter(
             BankTransaction.counterparty_name.ilike(like)
             | BankTransaction.summary.ilike(like)
+            | BankTransaction.serial_no.ilike(like)
             | BankTransaction.voucher_no.ilike(like)
         )
     rows = (
@@ -109,7 +111,11 @@ def list_transactions(
         {
             "id": r.id, "txnDate": r.txn_date.isoformat(), "direction": r.direction,
             "amount": str(r.amount), "counterpartyName": r.counterparty_name,
-            "summary": r.summary, "voucherNo": r.voucher_no,
+            "summary": r.summary, "serialNo": r.serial_no, "voucherNo": r.voucher_no,
+            "transactionTime": r.transaction_time.isoformat() if r.transaction_time else None,
+            "sourceRowNumber": r.source_row_number, "importBatchId": r.import_batch_id,
+            "rawAvailable": bool(r.raw),
+            "accountSource": (r.raw or {}).get("accountSource", ""),
             # 兼容字段 matched 按流水方向映射到对应域；新代码仍应使用显式域字段。
             "matched": (
                 r.id in settlement_matched_ids
@@ -203,6 +209,36 @@ def list_transactions(
     ]
 
 
+@router.get("/transactions/{txn_id}/raw")
+def get_transaction_raw(txn_id: int, db: Session = Depends(get_db)) -> dict[str, Any]:
+    """读取单笔流水的原始整行和不可覆盖归档文件元数据。"""
+    row = db.get(BankTransaction, txn_id)
+    if row is None:
+        raise HTTPException(404, "银行流水不存在")
+    batch = db.get(BankImportBatch, row.import_batch_id) if row.import_batch_id else None
+    archive = db.get(ArchiveFile, batch.archive_file_id) if batch and batch.archive_file_id else None
+    account = db.get(BankAccount, row.account_id) if row.account_id else None
+    return {
+        "id": row.id,
+        "txnDate": row.txn_date.isoformat(),
+        "transactionTime": row.transaction_time.isoformat() if row.transaction_time else None,
+        "accountNo": account.account_no if account else "",
+        "serialNo": row.serial_no,
+        "voucherNo": row.voucher_no,
+        "sourceRowNumber": row.source_row_number,
+        "importBatchId": row.import_batch_id,
+        "raw": row.raw or {},
+        "sourceFile": {
+            "id": archive.id,
+            "fileName": archive.original_name,
+            "sha256": archive.sha256,
+            "size": archive.size,
+            "version": archive.version,
+            "downloadUrl": f"/api/v1/finance/files/{archive.id}/download",
+        } if archive else None,
+    }
+
+
 @router.post("/transactions")
 def create_transaction(body: TxnBody, request: Request,
                        db: Session = Depends(get_db)) -> dict[str, Any]:
@@ -223,7 +259,7 @@ def create_transaction(body: TxnBody, request: Request,
 async def import_bank_xlsx(
     request: Request,
     file: UploadFile = File(...),
-    account_no: str = Form("ZJRC-001"),
+    account_no: str = Form(""),
     period_year: int = Form(...),
     period_month: int = Form(...),
     db: Session = Depends(get_db),

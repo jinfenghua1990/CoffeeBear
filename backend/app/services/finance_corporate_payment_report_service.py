@@ -462,6 +462,7 @@ def build_report(
                 "paymentAccount": account.account_no if account else "",
                 "paymentAccountName": account.account_name if account else "",
                 "counterpartyAccount": txn.counterparty_account or "",
+                "serialNo": txn.serial_no or "",
                 "voucherNo": txn.voucher_no or "",
                 "summary": txn.summary or "",
                 "paymentAmount": str(txn_total),

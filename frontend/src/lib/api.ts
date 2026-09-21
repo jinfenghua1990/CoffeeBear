@@ -517,7 +517,13 @@ export type ReconTxn = {
   bankName?: string;
   counterpartyName: string;
   summary: string;
+  serialNo: string;
   voucherNo: string;
+  transactionTime?: string | null;
+  sourceRowNumber?: number | null;
+  importBatchId?: number | null;
+  rawAvailable?: boolean;
+  accountSource?: "file" | "manual" | string;
   /** 兼容字段：收入=settlementMatched；支出=invoicePaymentMatched。新代码优先使用显式域字段。 */
   matched: boolean;
   settlementMatched?: boolean;

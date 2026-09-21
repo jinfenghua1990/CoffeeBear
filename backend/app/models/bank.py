@@ -41,12 +41,15 @@ class BankTransaction(Base, PkMixin, TimestampMixin):
     account_id: Mapped[int | None] = mapped_column(BigInteger, index=True, nullable=True)
     import_batch_id: Mapped[int | None] = mapped_column(BigInteger, index=True, nullable=True)
     txn_date: Mapped[date] = mapped_column(Date, nullable=False, index=True)
+    transaction_time: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
     direction: Mapped[str] = mapped_column(String(8), default="in")  # in/out
     amount: Mapped[Decimal | None] = mapped_column(MONEY, nullable=True)
     counterparty_name: Mapped[str] = mapped_column(String(256), default="", index=True)
     counterparty_account: Mapped[str] = mapped_column(String(128), default="")
     summary: Mapped[str] = mapped_column(Text, default="")
+    serial_no: Mapped[str] = mapped_column(String(128), default="", index=True)
     voucher_no: Mapped[str] = mapped_column(String(128), default="", index=True)
+    source_row_number: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     # 幂等指纹：账户+日期+金额+流水号（规格 16），流水号为空用可重复 hash fallback
     fingerprint: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
     matched_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

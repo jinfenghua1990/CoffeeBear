@@ -257,6 +257,7 @@ async def upload_file(
     category: str = Form(...),
     original_name: str = Form(""),
     company: str = Form(""),
+    account_no: str = Form(""),
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
     """原始资料上传：SHA256 + 版本化归档，同名不覆盖。
@@ -295,7 +296,7 @@ async def upload_file(
     ):
         try:
             bank_result = reconciliation_service.import_bank_xlsx(
-                db, account_no="ZJRC-001", content=content,
+                db, account_no=account_no.strip(), content=content,
                 period_year=period_year, period_month=period_month,
                 file_name=display_name, archive_file_id=row.id,
                 actor=current_actor(request),

@@ -890,6 +890,7 @@ def _red_settlement_context(db: Session, rows: list[TaxInvoice]) -> dict[int, di
                         if txn else f"银行入账 #{link.target_id}"
                     ),
                     "txnDate": txn.txn_date.isoformat() if txn else None,
+                    "serialNo": txn.serial_no if txn else "",
                     "voucherNo": txn.voucher_no if txn else "",
                 })
             elif link.target_type == RED_FUTURE_OFFSET_TARGET_TYPE:
@@ -940,6 +941,7 @@ def red_refund_candidates(
         query = query.filter(
             or_(
                 BankTransaction.counterparty_name.ilike(f"%{needle}%"),
+                BankTransaction.serial_no.ilike(f"%{needle}%"),
                 BankTransaction.voucher_no.ilike(f"%{needle}%"),
                 BankTransaction.summary.ilike(f"%{needle}%"),
             )
@@ -956,6 +958,7 @@ def red_refund_candidates(
             "txnDate": txn.txn_date.isoformat(),
             "amount": str(quantize(amount)),
             "counterpartyName": txn.counterparty_name or "",
+            "serialNo": txn.serial_no or "",
             "voucherNo": txn.voucher_no or "",
             "summary": txn.summary or "",
             "supplierMatched": bool(supplier and name and (supplier in name or name in supplier)),
