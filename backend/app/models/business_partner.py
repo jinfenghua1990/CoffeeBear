@@ -65,6 +65,35 @@ class BusinessPartnerIdentifier(Base, PkMixin, TimestampMixin):
     source: Mapped[str] = mapped_column(String(32), default="system")
 
 
+class BusinessPartnerDuplicateReview(Base, PkMixin, TimestampMixin):
+    """人工对“疑似同一主体”两个档案的判断结果（双向各存一行）。"""
+
+    __tablename__ = "business_partner_duplicate_reviews"
+    __table_args__ = (
+        UniqueConstraint(
+            "partner_id", "other_partner_id",
+            name="uq_business_partner_duplicate_pair",
+        ),
+    )
+
+    partner_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("business_partners.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    other_partner_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("business_partners.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    # same / different
+    decision: Mapped[str] = mapped_column(String(16), nullable=False)
+    note: Mapped[str] = mapped_column(Text, default="")
+    decided_by: Mapped[str] = mapped_column(String(128), default="")
+
+
 class BusinessPartnerLink(Base, PkMixin, TimestampMixin):
     """一条来源业务事实与往来单位的关联（或待确认关联）。"""
 

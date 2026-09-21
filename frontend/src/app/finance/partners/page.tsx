@@ -122,6 +122,10 @@ export default function BusinessPartnersPage() {
   const [alias, setAlias] = useState("");
   const [rawDetail, setRawDetail] = useState<BankRawDetail | null>(null);
   const [rawLoading, setRawLoading] = useState(false);
+  const [duplicatePrompt, setDuplicatePrompt] = useState<{ mine: BusinessPartnerDetail; other: BusinessPartnerDetail } | null>(null);
+  const [savingDuplicate, setSavingDuplicate] = useState(false);
+  // 「稍后处理」只关弹窗，本次会话内对同一组合不再弹。
+  const [deferredDuplicates, setDeferredDuplicates] = useState<string[]>([]);
   const initialSelection = useRef(false);
   const searchParams = useSearchParams();
   const entryApplied = useRef(false);
@@ -186,6 +190,27 @@ export default function BusinessPartnersPage() {
 
   useEffect(() => { void loadDetail(selectedId); }, [loadDetail, selectedId]);
   useTabTitle(detail ? `往来单位 · ${detail.name}` : "往来单位档案");
+
+  // 详情里还有未确认的「疑似同一主体」时弹窗，请人工判断；已判断过的组合后端不会再返回。
+  useEffect(() => {
+    const pending = detail?.possibleDuplicates.find(
+      (item) => !deferredDuplicates.includes(`${detail.id}-${item.id}`),
+    );
+    if (!detail || !pending) {
+      setDuplicatePrompt(null);
+      return;
+    }
+    let cancelled = false;
+    void (async () => {
+      try {
+        const other = await businessPartnerApi.detail(pending.id);
+        if (!cancelled) setDuplicatePrompt({ mine: detail, other });
+      } catch {
+        if (!cancelled) setDuplicatePrompt(null);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [detail, deferredDuplicates]);
 
   const totalReview = useMemo(
     () => items.reduce((total, item) => total + item.summary.needsReviewCount, 0),
@@ -261,6 +286,33 @@ export default function BusinessPartnersPage() {
     }
   }
 
+  async function decideDuplicate(same: boolean) {
+    if (!detail || !duplicatePrompt) return;
+    const other = duplicatePrompt.other;
+    setSavingDuplicate(true);
+    setError("");
+    try {
+      const next = await businessPartnerApi.decideDuplicate(detail.id, other.id, {
+        same,
+        note: same ? "财务中心人工确认同一主体，登记曾用名" : "财务中心人工确认不是同一主体",
+      });
+      setDetail(next);
+      setDuplicatePrompt(null);
+      setMessage(same ? `已登记曾用名：之后带「${other.name}」的发票和流水会回到本档案。` : `已记录「${detail.name}」与「${other.name}」不是同一主体。`);
+      await loadList();
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "保存判断失败");
+    } finally {
+      setSavingDuplicate(false);
+    }
+  }
+
+  function deferDuplicate() {
+    if (!detail || !duplicatePrompt) return;
+    setDeferredDuplicates((prev) => [...prev, `${detail.id}-${duplicatePrompt.other.id}`]);
+    setDuplicatePrompt(null);
+  }
+
   async function openRaw(url: string) {
     setRawLoading(true);
     try {
@@ -328,7 +380,7 @@ export default function BusinessPartnersPage() {
           {selectedId && detailLoading && <div className="flex min-h-[560px] items-center justify-center text-sm text-slate-400">正在汇总往来数据…</div>}
           {detail && !detailLoading && <>
             <div className="border-b border-slate-100 px-5 py-4">
-              <div className="flex flex-wrap items-start justify-between gap-3"><div className="min-w-0"><div className="flex flex-wrap items-center gap-2"><h2 className="max-w-[650px] truncate text-xl font-semibold text-slate-900">{detail.name}</h2><RoleBadges roles={detail.roles} /></div><div className="mt-1 flex flex-wrap gap-x-4 gap-y-1 text-xs text-slate-500"><span>税号：{detail.taxNo || "待补充"}</span><span>主账号：{detail.bankAccountNo || "待补充"}</span>{detail.legacySupplierId && <Link href="/suppliers" className="font-medium text-blue-600 hover:text-blue-700">已承接原供应商档案，查看供应商档案 →</Link>}</div></div><div className="flex gap-2"><button type="button" onClick={() => { setForm(partnerToForm(detail)); setEditingId(detail.id); }} className="rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50">编辑档案</button><Link href="/finance/bank-transactions?view=transactions" className="rounded-lg border border-blue-200 px-3 py-1.5 text-xs font-medium text-blue-600 hover:bg-blue-50">银行流水</Link></div></div>
+              <div className="flex flex-wrap items-start justify-between gap-3"><div className="min-w-0"><div className="flex flex-wrap items-center gap-2"><h2 className="max-w-[650px] truncate text-xl font-semibold text-slate-900">{detail.name}</h2><RoleBadges roles={detail.roles} /></div><div className="mt-1 flex flex-wrap gap-x-4 gap-y-1 text-xs text-slate-500"><span>税号：{detail.taxNo || "待补充"}</span><span>主账号：{detail.bankAccountNo || "待补充"}</span>{detail.formerNames.length > 0 && <span>曾用名：{detail.formerNames.join("、")}</span>}{detail.legacySupplierId && <Link href="/suppliers" className="font-medium text-blue-600 hover:text-blue-700">已承接原供应商档案，查看供应商档案 →</Link>}</div></div><div className="flex gap-2"><button type="button" onClick={() => { setForm(partnerToForm(detail)); setEditingId(detail.id); }} className="rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50">编辑档案</button><Link href="/finance/bank-transactions?view=transactions" className="rounded-lg border border-blue-200 px-3 py-1.5 text-xs font-medium text-blue-600 hover:bg-blue-50">银行流水</Link></div></div>
               {detail.possibleDuplicates.length > 0 && (
                 <div className="mt-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-[11px] text-amber-700">
                   <span className="font-medium">疑似同一主体：</span>
@@ -358,6 +410,7 @@ export default function BusinessPartnersPage() {
       </div>
 
       {form && <PartnerForm form={form} setForm={setForm} editing={editingId != null} saving={saving} onClose={() => { setForm(null); setEditingId(null); }} onSave={() => void saveForm()} />}
+      {duplicatePrompt && <DuplicateDialog mine={duplicatePrompt.mine} other={duplicatePrompt.other} saving={savingDuplicate} onDecide={(same) => void decideDuplicate(same)} onDefer={deferDuplicate} />}
       {rawDetail && <RawDialog detail={rawDetail} onClose={() => setRawDetail(null)} />}
     </div>
   );
@@ -428,5 +481,51 @@ function PartnerForm({ form, setForm, editing, saving, onClose, onSave }: { form
 }
 
 function Field({ label, children, wide = false }: { label: string; children: ReactNode; wide?: boolean }) { return <label className={wide ? "sm:col-span-2" : ""}><span className="mb-1 block text-xs font-medium text-slate-600">{label}</span>{children}</label>; }
+
+function DuplicateDialog({ mine, other, saving, onDecide, onDefer }: { mine: BusinessPartnerDetail; other: BusinessPartnerDetail; saving: boolean; onDecide: (same: boolean) => void; onDefer: () => void }) {
+  const rows: Array<[string, BusinessPartnerDetail, string]> = [
+    ["当前档案", mine, "text-slate-700"],
+    ["疑似同一主体", other, "text-amber-700"],
+  ];
+  return <div className="fixed inset-0 z-[60] flex items-center justify-center bg-slate-900/35 p-4">
+    <div className="max-h-[calc(100vh-40px)] w-full max-w-xl overflow-y-auto rounded-2xl bg-white shadow-2xl">
+      <div className="border-b border-slate-100 px-5 py-4">
+        <h3 className="text-base font-semibold text-slate-900">疑似同一主体，请确认</h3>
+        <p className="mt-1 text-xs text-slate-500">名称去掉括号内容和公司后缀后相同。系统不会自动合并，请人工判断这两个档案是不是同一主体。</p>
+      </div>
+      <div className="space-y-3 p-5">
+        <div className="overflow-hidden rounded-xl border border-amber-200">
+          <table className="w-full text-left text-[11px]">
+            <thead className="bg-amber-50/60 text-amber-700">
+              <tr>
+                <th className="px-3 py-2 font-medium">档案</th>
+                <th className="px-3 py-2 text-right font-medium">采购单</th>
+                <th className="px-3 py-2 text-right font-medium">发票</th>
+                <th className="px-3 py-2 text-right font-medium">银行流水</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-amber-100">
+              {rows.map(([label, row, tone]) => <tr key={row.id}>
+                <td className="px-3 py-2">
+                  <div className={`truncate ${tone}`}>{row.name}</div>
+                  <div className="mt-0.5 text-[10px] text-slate-400">{label} · 税号 {row.taxNo || "无税号"}</div>
+                </td>
+                <td className="px-3 py-2 text-right tabular-nums text-slate-700">{row.summary.purchaseOrderCount}</td>
+                <td className="px-3 py-2 text-right tabular-nums text-slate-700">{row.summary.invoiceCount}</td>
+                <td className="px-3 py-2 text-right tabular-nums text-slate-700">{row.summary.bankTransactionCount}</td>
+              </tr>)}
+            </tbody>
+          </table>
+        </div>
+        <p className="text-[11px] leading-4 text-slate-500">确认为同一主体后，对方名称会登记为本档案的曾用名，之后带该名称的发票和流水会回到本档案；两个档案已有的采购、发票和流水记录都不会被改动。</p>
+      </div>
+      <div className="flex flex-wrap justify-end gap-2 border-t border-slate-100 px-5 py-4">
+        <button type="button" onClick={onDefer} disabled={saving} className="rounded-lg px-3 py-2 text-sm text-slate-600 hover:bg-slate-100 disabled:opacity-50">稍后处理</button>
+        <button type="button" onClick={() => onDecide(false)} disabled={saving} className="rounded-lg border border-slate-200 px-3 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50">不是同一主体</button>
+        <button type="button" onClick={() => onDecide(true)} disabled={saving} className="rounded-lg bg-amber-600 px-4 py-2 text-sm font-medium text-white hover:bg-amber-700 disabled:opacity-50">{saving ? "保存中…" : "确认为同一主体（登记曾用名）"}</button>
+      </div>
+    </div>
+  </div>;
+}
 
 function RawDialog({ detail, onClose }: { detail: BankRawDetail; onClose: () => void }) { return <div className="fixed inset-0 z-[60] flex items-center justify-center bg-slate-900/35 p-4"><div className="max-h-[calc(100vh-40px)] w-full max-w-3xl overflow-y-auto rounded-2xl bg-white shadow-2xl"><div className="sticky top-0 flex items-start justify-between border-b border-slate-100 bg-white px-5 py-4"><div><h3 className="text-base font-semibold text-slate-900">银行原始流水记录</h3><p className="mt-1 text-xs text-slate-500">第 {detail.sourceRowNumber ?? detail.raw.rowNumber ?? "—"} 行 · 流水号 {detail.serialNo || "—"}</p></div><button type="button" onClick={onClose} className="text-xl text-slate-400 hover:text-slate-700">×</button></div><div className="grid gap-2 p-5 sm:grid-cols-4"><Info label="交易日期" value={detail.txnDate} /><Info label="交易时间" value={detail.transactionTime || ""} /><Info label="凭证号码" value={detail.voucherNo} /><Info label="我方账号" value={detail.accountNo} /></div><div className="px-5 pb-5"><div className="rounded-xl border border-slate-200"><div className="border-b border-slate-100 px-3 py-2 text-xs font-medium text-slate-700">完整原始字段</div><div className="grid gap-px bg-slate-100 sm:grid-cols-2">{Object.entries(detail.raw.fields || {}).map(([key, value]) => <div key={key} className="bg-white px-3 py-2"><div className="text-[10px] text-slate-400">{key}</div><div className="mt-1 break-all text-xs text-slate-700">{rawValue(value)}</div></div>)}{!Object.keys(detail.raw.fields || {}).length && <pre className="overflow-x-auto bg-white p-3 text-xs text-slate-600">{JSON.stringify(detail.raw, null, 2)}</pre>}</div></div>{detail.sourceFile && <div className="mt-3 text-xs text-slate-500">来源文件：{detail.sourceFile.fileName} · SHA256：{detail.sourceFile.sha256}{detail.sourceFile.downloadUrl && <a className="ml-2 font-medium text-blue-600" href={detail.sourceFile.downloadUrl}>下载原文件</a>}</div>}</div></div></div>; }

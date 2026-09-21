@@ -186,3 +186,111 @@ def test_bank_row_without_counterparty_identity_is_skipped(db_session):
         .count()
         == 0
     )
+
+
+def _duplicate_pair(db_session, *, plain_name: str, licensed_name: str, tax_no: str) -> dict[str, int]:
+    plain = Supplier(name=plain_name)
+    licensed = Supplier(name=licensed_name, tax_no=tax_no)
+    db_session.add_all([plain, licensed])
+    db_session.flush()
+    service.sync_business_partners(db_session)
+    items = service.list_partners(db_session, keyword=plain_name)["items"]
+    assert len(items) == 2
+    assert {row["possibleDuplicateCount"] for row in items} == {1}
+    return {row["name"]: row["id"] for row in items}
+
+
+def test_duplicate_decision_different_clears_suggestion_for_both_partners(db_session):
+    ids = _duplicate_pair(
+        db_session,
+        plain_name="义乌市庚注塑厂",
+        licensed_name="义乌市庚注塑厂（个体工商户）",
+        tax_no="92330782MAEBFPHX0A",
+    )
+    plain_id, licensed_id = ids["义乌市庚注塑厂"], ids["义乌市庚注塑厂（个体工商户）"]
+
+    detail = service.decide_duplicate(
+        db_session, plain_id, other_partner_id=licensed_id, same=False, actor="财务甲"
+    )
+    assert detail["possibleDuplicates"] == []
+    assert detail["formerNames"] == []
+    other = service.partner_detail(db_session, licensed_id)
+    assert other is not None
+    assert other["possibleDuplicates"] == []
+    assert {row["possibleDuplicateCount"] for row in service.list_partners(db_session, keyword="庚注塑厂")["items"]} == {0}
+
+
+def test_duplicate_decision_same_registers_former_names_and_keeps_old_name_sources(db_session):
+    ids = _duplicate_pair(
+        db_session,
+        plain_name="义乌市辛注塑厂",
+        licensed_name="义乌市辛注塑厂（个体工商户）",
+        tax_no="92330782MAEBFPHX0B",
+    )
+    plain_id, licensed_id = ids["义乌市辛注塑厂"], ids["义乌市辛注塑厂（个体工商户）"]
+
+    detail = service.decide_duplicate(
+        db_session,
+        plain_id,
+        other_partner_id=licensed_id,
+        same=True,
+        note="人工确认同一主体",
+        actor="财务甲",
+    )
+    assert detail["possibleDuplicates"] == []
+    assert detail["formerNames"] == ["义乌市辛注塑厂（个体工商户）"]
+    assert {row["possibleDuplicateCount"] for row in service.list_partners(db_session, keyword="辛注塑厂")["items"]} == {0}
+    other = service.partner_detail(db_session, licensed_id)
+    assert other is not None
+    assert other["formerNames"] == ["义乌市辛注塑厂"]
+
+    # 后到的、用旧名开的发票仍然自动回到该档案，不会因为曾用名登记而变成待确认。
+    invoice = _invoice(
+        db_session,
+        seller="义乌市辛注塑厂（个体工商户）",
+        tax_no="92330782MAEBFPHX0B",
+        amount="66.00",
+    )
+    service.sync_business_partners(db_session)
+    link = (
+        db_session.query(BusinessPartnerLink)
+        .filter_by(source_type="tax_invoice", source_id=invoice.id, relation_role="seller")
+        .one()
+    )
+    assert link.partner_id == licensed_id
+    assert link.status == "linked"
+
+
+def test_duplicate_decision_same_keeps_plain_name_sources_linked(db_session):
+    """登记曾用名后规范名称仍优先：无税号的旧名来源不会变成多命中待确认。"""
+    ids = _duplicate_pair(
+        db_session,
+        plain_name="义乌市壬注塑厂",
+        licensed_name="义乌市壬注塑厂（个体工商户）",
+        tax_no="92330782MAEBFPHX0C",
+    )
+    plain_id, licensed_id = ids["义乌市壬注塑厂"], ids["义乌市壬注塑厂（个体工商户）"]
+    purchase = ExternalPurchaseOrder(
+        external_order_id=f"PA-DUP-{uuid4().hex[:10]}",
+        platform="1688",
+        supplier_name="义乌市壬注塑厂",
+        order_amount=Decimal("120.00"),
+        paid_amount=Decimal("120.00"),
+    )
+    db_session.add(purchase)
+    db_session.flush()
+
+    service.decide_duplicate(db_session, plain_id, other_partner_id=licensed_id, same=True)
+    service.sync_business_partners(db_session)
+
+    link = (
+        db_session.query(BusinessPartnerLink)
+        .filter_by(source_type="external_purchase_order", source_id=purchase.id, relation_role="supplier")
+        .one()
+    )
+    assert link.status == "linked"
+    assert link.partner_id == plain_id
+    detail = service.partner_detail(db_session, plain_id)
+    assert detail is not None
+    assert detail["reviewItems"] == []
+    assert detail["summary"]["purchaseOrderCount"] == 1

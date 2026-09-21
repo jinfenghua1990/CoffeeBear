@@ -716,6 +716,11 @@ export default function SuppliersPage() {
                   >
                     查看财务往来档案 →
                   </Link>
+                  {selected.record.formerNames.length > 0 && (
+                    <span className="rounded bg-amber-50 px-1.5 py-0.5 text-[10px] text-amber-700">
+                      曾用名：{selected.record.formerNames.join("、")}
+                    </span>
+                  )}
                 </div>
                 <p className="mt-1.5 truncate text-xs text-slate-400">
                   联系人 {selected.record.contact || "—"} / 电话 {selected.record.phone || "—"} / 地址 {selected.record.address || "—"}

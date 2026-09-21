@@ -1167,6 +1167,7 @@ export type SupplierRecord = {
   isTemp: boolean;
   purchaseType: "regular" | "temporary";
   orderCount?: number;
+  formerNames: string[];
   createdAt: string | null;
 };
 
@@ -1253,6 +1254,7 @@ export type BusinessPartnerListItem = {
   roles: BusinessPartnerRole[];
   status: string;
   identifiers: BusinessPartnerIdentifier[];
+  formerNames: string[];
   legacySupplierId: number | null;
   summary: BusinessPartnerSummary;
   possibleDuplicateCount: number;
@@ -1334,6 +1336,10 @@ export const businessPartnerApi = {
   addIdentifier: (id: number, kind: BusinessPartnerIdentifier["kind"], value: string) =>
     jsonFetch<BusinessPartnerDetail>(`/api/v1/finance/partners/${id}/identifiers`, {
       method: "POST", body: JSON.stringify({ kind, value }),
+    }),
+  decideDuplicate: (id: number, otherId: number, body: { same: boolean; note?: string }) =>
+    jsonFetch<BusinessPartnerDetail>(`/api/v1/finance/partners/${id}/duplicates/${otherId}/decide`, {
+      method: "POST", body: JSON.stringify(body),
     }),
   claimReview: (id: number, linkId: number, note = "") =>
     jsonFetch<BusinessPartnerDetail>(`/api/v1/finance/partners/${id}/review-links/${linkId}/claim`, {

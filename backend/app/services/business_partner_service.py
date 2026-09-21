@@ -21,6 +21,7 @@ from app.models.alibaba1688_import import Alibaba1688Order
 from app.models.bank import BankTransaction
 from app.models.business_partner import (
     BusinessPartner,
+    BusinessPartnerDuplicateReview,
     BusinessPartnerIdentifier,
     BusinessPartnerLink,
 )
@@ -37,7 +38,7 @@ from app.models.tax import TaxInvoice, TaxInvoiceLink
 
 
 PARTNER_ROLES = {"supplier", "customer", "counterparty"}
-IDENTIFIER_KINDS = {"name", "alias", "tax_no", "bank_account", "customer_code"}
+IDENTIFIER_KINDS = {"name", "alias", "former_name", "tax_no", "bank_account", "customer_code"}
 SOURCE_LABELS = {
     "supplier": "历史供应商档案",
     "external_purchase_order": "采购订单",
@@ -134,6 +135,7 @@ class PartnerIndex:
         self.by_tax: dict[str, set[int]] = defaultdict(set)
         self.by_account: dict[str, set[int]] = defaultdict(set)
         self.by_name: dict[str, set[int]] = defaultdict(set)
+        self.by_canonical_name: dict[str, set[int]] = defaultdict(set)
         self.by_loose_name: dict[str, set[int]] = defaultdict(set)
         self.add_many(partners)
         for row in identifiers:
@@ -154,8 +156,11 @@ class PartnerIndex:
             self.by_tax[value].add(partner_id)
         elif kind == "bank_account":
             self.by_account[value].add(partner_id)
-        elif kind in {"name", "alias"}:
+        elif kind in {"name", "alias", "former_name"}:
             self.by_name[value].add(partner_id)
+            if kind == "name":
+                # 规范名称单独索引：曾用名/别名命中不能覆盖它（见 resolve）。
+                self.by_canonical_name[value].add(partner_id)
             loose = loose_name_key(value)
             if loose:
                 self.by_loose_name[loose].add(partner_id)
@@ -184,13 +189,17 @@ class PartnerIndex:
                 return Resolution(None, candidates=account_ids)
 
         if exact_name:
+            canonical_ids = self._active(self.by_canonical_name.get(exact_name, set()), self.partners)
             name_ids = self._active(self.by_name.get(exact_name, set()), self.partners)
             # 来源提供税号但同名主档已有不同税号时，不能用同名绕过冲突。
-            if tax and len(name_ids) == 1:
-                candidate = self.partners[name_ids[0]]
-                known_tax = normalize_tax_no(candidate.tax_no)
-                if known_tax and known_tax != tax:
-                    return Resolution(None, candidates=name_ids)
+            if tax and any(
+                (known_tax := normalize_tax_no(self.partners[pid].tax_no)) and known_tax != tax
+                for pid in name_ids
+            ):
+                return Resolution(None, candidates=name_ids)
+            # 规范名称优先：确认“曾用名”后，旧名来源按规范名称唯一归属，不会被判成多命中。
+            if len(canonical_ids) == 1:
+                return Resolution(self.partners[canonical_ids[0]], "exact_name", confidence=0.95)
             if len(name_ids) == 1:
                 return Resolution(self.partners[name_ids[0]], "exact_name", confidence=0.95)
             if len(name_ids) > 1:
@@ -796,6 +805,10 @@ def _partner_core(db: Session, partner: BusinessPartner) -> dict[str, Any]:
         "status": partner.status,
         "notes": partner.notes or "",
         "legacySupplierId": partner.legacy_supplier_id,
+        # 人工确认“同一主体”后登记的历史名称，来源匹配时和别名同样有效。
+        "formerNames": [
+            row.value for row in identifiers if row.kind == "former_name"
+        ],
         "identifiers": [_identifier_dict(row) for row in identifiers],
         "createdAt": _iso(partner.created_at),
         "updatedAt": _iso(partner.updated_at),
@@ -1096,16 +1109,28 @@ def _duplicate_map(db: Session) -> dict[str, list[tuple[int, str, str]]]:
     return {key: members for key, members in groups.items() if len(members) > 1}
 
 
+def _duplicate_decisions(db: Session) -> set[tuple[int, int]]:
+    """已人工判断过的“疑似同一主体”组合；双向各存一行。"""
+    rows = db.query(
+        BusinessPartnerDuplicateReview.partner_id,
+        BusinessPartnerDuplicateReview.other_partner_id,
+    ).all()
+    return {(int(row.partner_id), int(row.other_partner_id)) for row in rows}
+
+
 def _possible_duplicates(
-    partner: BusinessPartner, duplicate_map: dict[str, list[tuple[int, str, str]]]
+    partner: BusinessPartner,
+    duplicate_map: dict[str, list[tuple[int, str, str]]],
+    decisions: set[tuple[int, int]] | None = None,
 ) -> list[dict[str, Any]]:
     key = loose_name_key(partner.name)
     if len(key) < 4:
         return []
+    decided = decisions or set()
     return [
         {"id": member_id, "name": name, "taxNo": tax_no}
         for member_id, name, tax_no in duplicate_map.get(key, [])
-        if member_id != partner.id
+        if member_id != partner.id and (partner.id, member_id) not in decided
     ]
 
 
@@ -1114,6 +1139,7 @@ def partner_detail(
     partner_id: int,
     *,
     duplicate_map: dict[str, list[tuple[int, str, str]]] | None = None,
+    duplicate_decisions: set[tuple[int, int]] | None = None,
 ) -> dict[str, Any] | None:
     partner = db.get(BusinessPartner, partner_id)
     if partner is None or partner.status == "archived":
@@ -1137,7 +1163,11 @@ def partner_detail(
     bank_paid = sum((_decimal(row["amount"]) for row in payments if row["direction"] == "out"), Decimal("0"))
     bank_received = sum((_decimal(row["amount"]) for row in payments if row["direction"] == "in"), Decimal("0"))
     sales_amount = sum((_decimal(row["paidAmount"]) for row in sales), Decimal("0"))
-    duplicates = _possible_duplicates(partner, duplicate_map if duplicate_map is not None else _duplicate_map(db))
+    duplicates = _possible_duplicates(
+        partner,
+        duplicate_map if duplicate_map is not None else _duplicate_map(db),
+        duplicate_decisions if duplicate_decisions is not None else _duplicate_decisions(db),
+    )
     return {
         **_partner_core(db, partner),
         "summary": {
@@ -1184,11 +1214,17 @@ def list_partners(
     )
     needle = normalize_name(keyword)
     duplicate_map = _duplicate_map(db)
+    duplicate_decisions = _duplicate_decisions(db)
     items = []
     for row in rows:
         if role in PARTNER_ROLES and role not in set(row.roles or []):
             continue
-        detail = partner_detail(db, row.id, duplicate_map=duplicate_map)
+        detail = partner_detail(
+            db,
+            row.id,
+            duplicate_map=duplicate_map,
+            duplicate_decisions=duplicate_decisions,
+        )
         if detail is None:
             continue
         searchable = " ".join(
@@ -1296,6 +1332,65 @@ def add_identifier(db: Session, partner_id: int, *, kind: str, value: str) -> Bu
         partner.bank_account_no = normalize_account(value)
     row = ctx.identifier_by_key[(partner.id, kind, normalize_identifier(kind, value))]
     return row
+
+
+def decide_duplicate(
+    db: Session,
+    partner_id: int,
+    *,
+    other_partner_id: int,
+    same: bool,
+    note: str = "",
+    actor: str = "",
+) -> dict[str, Any]:
+    """人工判断两个档案是否同一主体；确认同一时双向登记曾用名。
+
+    只登记曾用名和判断结果，不移动任何来源记录：两个档案的事实仍然各自可追溯，
+    但之后带旧名的发票/流水会按名称回到本档案。
+    """
+    partner = db.get(BusinessPartner, partner_id)
+    other = db.get(BusinessPartner, other_partner_id)
+    if partner is None or partner.status == "archived":
+        raise ValueError("往来单位不存在")
+    if other is None or other.status == "archived":
+        raise ValueError("对方往来单位不存在或已归档")
+    if partner.id == other.id:
+        raise ValueError("不能把同一个档案判断为疑似重复")
+
+    decision = "same" if same else "different"
+    clean_note = str(note or "").strip()
+    decided_by = str(actor or "").strip()
+    existing = {
+        (row.partner_id, row.other_partner_id): row
+        for row in db.query(BusinessPartnerDuplicateReview)
+        .filter(
+            BusinessPartnerDuplicateReview.partner_id.in_([partner.id, other.id]),
+            BusinessPartnerDuplicateReview.other_partner_id.in_([partner.id, other.id]),
+        )
+        .all()
+    }
+    for left, right in ((partner.id, other.id), (other.id, partner.id)):
+        row = existing.get((left, right))
+        if row is None:
+            db.add(
+                BusinessPartnerDuplicateReview(
+                    partner_id=left,
+                    other_partner_id=right,
+                    decision=decision,
+                    note=clean_note,
+                    decided_by=decided_by,
+                )
+            )
+            continue
+        row.decision = decision
+        row.note = clean_note
+        row.decided_by = decided_by
+    if same:
+        # 曾用名和别名一样参与名称匹配：两个方向都登记，任意一侧的旧名都能回到本档案。
+        add_identifier(db, partner.id, kind="former_name", value=other.name)
+        add_identifier(db, other.id, kind="former_name", value=partner.name)
+    db.flush()
+    return partner_detail(db, partner_id) or {}
 
 
 def claim_review_link(db: Session, *, partner_id: int, link_id: int, note: str = "") -> BusinessPartnerLink:

@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 from app.api.deps import current_actor
 from app.core.audit import audit
 from app.db import get_db
+from app.models.business_partner import BusinessPartner, BusinessPartnerIdentifier
 from app.models.purchase import Supplier
 from app.services.procurement_chain_service import supplier_summaries
 from app.services.supplier_sync_service import normalize_supplier_name, sync_suppliers_from_business_data
@@ -32,7 +33,11 @@ class SupplierInput(BaseModel):
     is_temp: bool = False
 
 
-def _serialize(row: Supplier, order_count: int | None = None) -> dict[str, Any]:
+def _serialize(
+    row: Supplier,
+    order_count: int | None = None,
+    former_names: list[str] | None = None,
+) -> dict[str, Any]:
     data: dict[str, Any] = {
         "id": row.id,
         "name": row.name,
@@ -46,10 +51,35 @@ def _serialize(row: Supplier, order_count: int | None = None) -> dict[str, Any]:
         "isTemp": bool(row.is_temp),
         "purchaseType": "regular" if (order_count or 0) >= 2 else "temporary",
         "createdAt": row.created_at.isoformat() if row.created_at else None,
+        # 往来单位档案上人工确认过的曾用名；没有关联档案时为空列表。
+        "formerNames": list(former_names or []),
     }
     if order_count is not None:
         data["orderCount"] = order_count
     return data
+
+
+def _former_names_by_supplier(db: Session, supplier_ids: list[int]) -> dict[int, list[str]]:
+    """一次查询取出这批供应商的曾用名，避免逐条 SQL。"""
+    if not supplier_ids:
+        return {}
+    rows = (
+        db.query(BusinessPartner.legacy_supplier_id, BusinessPartnerIdentifier.value)
+        .join(
+            BusinessPartnerIdentifier,
+            BusinessPartnerIdentifier.partner_id == BusinessPartner.id,
+        )
+        .filter(
+            BusinessPartner.legacy_supplier_id.in_(supplier_ids),
+            BusinessPartnerIdentifier.kind == "former_name",
+        )
+        .order_by(BusinessPartnerIdentifier.id)
+        .all()
+    )
+    result: dict[int, list[str]] = {}
+    for supplier_id, value in rows:
+        result.setdefault(int(supplier_id), []).append(value)
+    return result
 
 
 def _ensure_tax_no_unique(db: Session, tax_no: str, exclude_id: int | None = None) -> None:
@@ -114,7 +144,15 @@ def list_suppliers(
     elif status in {"temporary", "temp"}:
         rows = [row for row in rows if purchase_counts.get(row.name, 0) == 1]
 
-    return [_serialize(row, purchase_counts.get(row.name, 0)) for row in rows]
+    former_names = _former_names_by_supplier(db, [row.id for row in rows])
+    return [
+        _serialize(
+            row,
+            purchase_counts.get(row.name, 0),
+            former_names.get(row.id, []),
+        )
+        for row in rows
+    ]
 
 
 @router.post("")

@@ -40,6 +40,13 @@ class ReviewClaimInput(BaseModel):
     note: str = Field(default="", max_length=1000)
 
 
+class DuplicateDecisionInput(BaseModel):
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
+
+    same: bool
+    note: str = Field(default="", max_length=1000)
+
+
 def _sync_and_commit(db: Session) -> dict[str, int]:
     result = partner_service.sync_business_partners(db)
     db.commit()
@@ -153,6 +160,38 @@ def add_partner_identifier(
             {"kind": row.kind, "value": row.value, "sync": sync},
         )
         return partner_service.partner_detail(db, partner_id) or {}
+    except ValueError as exc:
+        db.rollback()
+        raise HTTPException(422, str(exc)) from exc
+
+
+@router.post("/{partner_id}/duplicates/{other_partner_id}/decide")
+def decide_partner_duplicate(
+    partner_id: int,
+    other_partner_id: int,
+    payload: DuplicateDecisionInput,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    try:
+        detail = partner_service.decide_duplicate(
+            db,
+            partner_id,
+            other_partner_id=other_partner_id,
+            same=payload.same,
+            note=payload.note,
+            actor=current_actor(request),
+        )
+        db.commit()
+        audit(
+            db,
+            current_actor(request),
+            "business_partner.duplicate_decided",
+            "business_partner",
+            str(partner_id),
+            {"otherPartnerId": other_partner_id, "same": payload.same, "note": payload.note},
+        )
+        return detail
     except ValueError as exc:
         db.rollback()
         raise HTTPException(422, str(exc)) from exc
