@@ -126,22 +126,63 @@ def test_invoice_auto_match_supports_non_1688_workflow_order(db_session):
     assert states["closeout"]["detail"].endswith("已付款")
 
 
-def test_invoice_auto_match_requires_unique_supplier_tax_profile(db_session):
-    """没有唯一供应商税号档案时不能按名称猜测关联采购单。"""
+def test_invoice_auto_match_backfills_unique_purchase_supplier_tax_no(db_session):
+    """有真实采购且发票卖方名称唯一全等时，自动补税号并继续完成发票匹配。"""
+    supplier = Supplier(name="义乌市聚科注塑厂", tax_no="")
     order = ExternalPurchaseOrder(
-        external_order_id="TAOBAO-INVOICE-NO-TAX-PROFILE",
+        external_order_id="JUKETAX-BACKFILL-001",
+        platform="taobao",
+        supplier_name="义乌市聚科注塑厂",
+        paid_amount=Decimal("800"),
+        ordered_at=datetime(2026, 7, 1, tzinfo=timezone.utc),
+    )
+    invoice = TaxInvoice(
+        invoice_key="pytest-juke-tax-backfill",
+        invoice_number="INV-JUKE-TAX-BACKFILL",
+        direction="input",
+        status="issued",
+        seller_name="义乌市聚科注塑厂",
+        seller_tax_id="91330782MA2JUKETAX",
+        total_amount=Decimal("800"),
+        issue_date=datetime(2026, 7, 2, tzinfo=timezone.utc),
+    )
+    db_session.add_all([supplier, order, invoice])
+    db_session.flush()
+
+    result = service.ProcurementChainMatcher(db_session).run_match()
+
+    db_session.refresh(supplier)
+    assert supplier.tax_no == "91330782MA2JUKETAX"
+    link = db_session.query(TaxInvoiceLink).filter_by(
+        invoice_id=invoice.id,
+        target_type="external_purchase_order",
+        target_id=order.id,
+    ).one()
+    assert link.confirmed is True
+    assert invoice.match_status == "matched"
+    assert result["supplierTaxNoBackfilled"] == 1
+
+
+def test_invoice_auto_match_does_not_backfill_ambiguous_blank_tax_profiles(db_session):
+    """同名空税号主档不唯一时仍然不猜，避免把发票税号写到错误主体。"""
+    db_session.add_all([
+        Supplier(name="同名供应商", tax_no=""),
+        Supplier(name="同名供应商", tax_no=""),
+    ])
+    order = ExternalPurchaseOrder(
+        external_order_id="TAOBAO-INVOICE-AMBIGUOUS-TAX-PROFILE",
         platform="taobao",
         supplier_name="同名供应商",
         paid_amount=Decimal("800"),
         ordered_at=datetime(2025, 9, 28, tzinfo=timezone.utc),
     )
     invoice = TaxInvoice(
-        invoice_key="pytest-invoice-no-tax-profile",
-        invoice_number="INV-NO-TAX-PROFILE",
+        invoice_key="pytest-invoice-ambiguous-tax-profile",
+        invoice_number="INV-AMBIGUOUS-TAX-PROFILE",
         direction="input",
         status="issued",
         seller_name="同名供应商",
-        seller_tax_id="91330000NO_PROFILE",
+        seller_tax_id="91330000AMBIGUOUS",
         total_amount=Decimal("800"),
         issue_date=datetime(2025, 10, 1, tzinfo=timezone.utc),
     )
@@ -151,7 +192,8 @@ def test_invoice_auto_match_requires_unique_supplier_tax_profile(db_session):
     result = service.ProcurementChainMatcher(db_session).run_match()
 
     assert db_session.query(TaxInvoiceLink).filter_by(invoice_id=invoice.id).count() == 0
-    assert result["supplierProfileMissing"] >= 1
+    assert db_session.query(Supplier).filter(Supplier.tax_no != "").count() == 0
+    assert result["supplierProfileAmbiguous"] >= 1
 
 
 def test_chain_row_merges_file_order_and_purchase_workflow(db_session):

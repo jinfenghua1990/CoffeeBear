@@ -35,7 +35,7 @@ from app.models.tax import TaxInvoice, TaxInvoiceLink
 from app.services.allocation import balance_check
 from app.services.import_lifecycle import filter_active_import, filter_active_rows
 from app.services.inbound_allocation_seed import seed_allocations_for_link
-from app.services.supplier_sync_service import normalize_supplier_name
+from app.services.supplier_sync_service import normalize_supplier_name, sync_suppliers_from_business_data
 from app.services import purchase_invoice_truth_service as invoice_truth
 from app.services.tax_invoice_service import (
     PURCHASE_LINK_TARGET_TYPES,
@@ -316,11 +316,11 @@ class ProcurementChainMatcher:
         invoices = filter_visible_invoices(
             self.db.query(TaxInvoice).filter_by(direction="input")
         ).all()
-        supplier_profiles: dict[str, list[Supplier]] = {}
-        for supplier in self.db.query(Supplier).filter(Supplier.tax_no != "").all():
-            tax_no = normalize_tax_no(supplier.tax_no)
-            if tax_no:
-                supplier_profiles.setdefault(tax_no, []).append(supplier)
+
+        # 发票导入会直接触发本自动化，不能依赖用户先打开“供应商档案”页面才建档。
+        # 先从真实采购订单幂等补齐供应商主档，再做税号/发票匹配。
+        supplier_sync = sync_suppliers_from_business_data(self.db)
+
         order_by_no = {order.external_order_id: order for order in orders}
         # 淘宝/拼多多/手工采购单没有 Alibaba1688Order 原始副本，需要单独参与发票匹配。
         # 有 1688 原始副本的工作流副本已由上面的订单处理，避免同一订单被重复候选。
@@ -332,11 +332,36 @@ class ProcurementChainMatcher:
                 or po.external_order_id not in order_by_no
             )
         ]
+
+        # 已维护税号仍然是最高优先级；对于“有真实采购、主档已自动创建但税号为空”的供应商，
+        # 仅允许发票卖方名称与供应商名称全等（只清理空白/全角）且候选唯一时自动回填税号。
+        # 这样能补上采购→供应商→发票之间的断点，同时不把简称/近似名当成同一主体。
+        supplier_profiles: dict[str, list[Supplier]] = {}
+        blank_supplier_profiles: dict[str, list[Supplier]] = {}
+        purchase_supplier_names = {
+            normalize_supplier_name(order.seller_company_name)
+            for order in orders
+            if normalize_supplier_name(order.seller_company_name)
+        } | {
+            normalize_supplier_name(po.supplier_name)
+            for po in external_orders
+            if normalize_supplier_name(po.supplier_name)
+        }
+        for supplier in self.db.query(Supplier).all():
+            tax_no = normalize_tax_no(supplier.tax_no)
+            if tax_no:
+                supplier_profiles.setdefault(tax_no, []).append(supplier)
+                continue
+            name_key = normalize_supplier_name(supplier.name)
+            if name_key and name_key in purchase_supplier_names:
+                blank_supplier_profiles.setdefault(name_key, []).append(supplier)
+
         created, skipped = 0, 0
         protected_inbound = 0
         pending_inbound = 0
         supplier_profile_missing = 0
         supplier_profile_ambiguous = 0
+        supplier_tax_no_backfilled = 0
 
         # 每张单据最多推荐一个“时间最近”的订单，避免同供应商批量笛卡尔关联。
         for doc in documents:
@@ -458,9 +483,39 @@ class ProcurementChainMatcher:
                 continue
             tax_no = normalize_tax_no(invoice.seller_tax_id)
             profiles = supplier_profiles.get(tax_no, []) if tax_no else []
+            supplier_note = f"供应商档案税号一致（{tax_no}）"
+            if not profiles and tax_no:
+                seller_key = normalize_supplier_name(invoice.seller_name)
+                candidates = blank_supplier_profiles.get(seller_key, [])
+                if len(candidates) == 1:
+                    supplier_profile = candidates[0]
+                    supplier_profile.tax_no = tax_no
+                    supplier_profiles.setdefault(tax_no, []).append(supplier_profile)
+                    blank_supplier_profiles[seller_key] = []
+                    profiles = [supplier_profile]
+                    supplier_tax_no_backfilled += 1
+                    supplier_note = f"发票卖方名称唯一一致，自动补齐供应商税号（{tax_no}）"
+                    audit(
+                        self.db,
+                        "system",
+                        "supplier.tax_no_auto_backfill",
+                        "suppliers",
+                        str(supplier_profile.id),
+                        {
+                            "supplier": supplier_profile.name,
+                            "taxNo": tax_no,
+                            "invoiceId": invoice.id,
+                            "invoiceNo": invoice.invoice_number or invoice.invoice_code or "",
+                        },
+                        commit=False,
+                    )
+                elif len(candidates) > 1:
+                    supplier_profile_ambiguous += 1
+                    skipped += 1
+                    continue
             if not profiles:
-                # 供应商档案是采购、入库、发票的统一维度；没有税号档案时不按名称猜测，
-                # 避免同名/改名主体被串单。人工关联仍可在发票详情中执行。
+                # 没有税号档案且也不存在“名称全等 + 唯一 + 有真实采购”的空税号主档时，
+                # 仍然不做近似名称猜测，避免不同主体被串单。
                 supplier_profile_missing += 1
                 skipped += 1
                 continue
@@ -470,7 +525,6 @@ class ProcurementChainMatcher:
                 continue
             supplier_profile = profiles[0]
             supplier_name = supplier_profile.name
-            supplier_note = f"供应商档案税号一致（{tax_no}）"
             target_type = "alibaba1688_order"
             match = self._best_order(orders, supplier_name, amount, invoice.issue_date)
             if match is None:
@@ -558,6 +612,8 @@ class ProcurementChainMatcher:
             "coverageUnknown": coverage_unknown,
             "supplierProfileMissing": supplier_profile_missing,
             "supplierProfileAmbiguous": supplier_profile_ambiguous,
+            "supplierTaxNoBackfilled": supplier_tax_no_backfilled,
+            "supplierSyncCreated": int(supplier_sync.get("created", 0)),
             "requiresConfirmation": not auto_confirm or pending_inbound > 0,
             "autoConfirmed": (
                 int(sweep.get("confirmedChain", 0)) + int(sweep.get("confirmedInvoices", 0))
