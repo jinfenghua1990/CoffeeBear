@@ -694,3 +694,105 @@ def test_detached_runner_accepts_external_production_persistence(monkeypatch, tm
 
     runner.validate_persistence_isolation()
 
+
+
+def test_migration_database_policy_warns_when_not_configured(monkeypatch):
+    monkeypatch.setattr(
+        service.settings,
+        "DATABASE_URL",
+        "postgresql+psycopg://ecommerce_app:app-secret@localhost:5432/ecommerce",
+    )
+    monkeypatch.setattr(service.settings, "MIGRATION_DATABASE_URL", "")
+
+    result = service._migration_database_policy()
+
+    assert result["configured"] is False
+    assert result["sameTarget"] is True
+    assert result["separated"] is False
+
+
+def test_migration_database_policy_accepts_separate_user_same_database(monkeypatch):
+    monkeypatch.setattr(
+        service.settings,
+        "DATABASE_URL",
+        "postgresql+psycopg://ecommerce_app:app-secret@postgres:5432/ecommerce",
+    )
+    monkeypatch.setattr(
+        service.settings,
+        "MIGRATION_DATABASE_URL",
+        "postgresql+psycopg://ecommerce_migrator:migrate-secret@postgres:5432/ecommerce",
+    )
+
+    result = service._migration_database_policy()
+
+    assert result["configured"] is True
+    assert result["sameTarget"] is True
+    assert result["separated"] is True
+    assert result["issues"] == []
+
+
+def test_migration_database_policy_rejects_different_database(monkeypatch):
+    monkeypatch.setattr(
+        service.settings,
+        "DATABASE_URL",
+        "postgresql+psycopg://ecommerce_app:app-secret@postgres:5432/ecommerce",
+    )
+    monkeypatch.setattr(
+        service.settings,
+        "MIGRATION_DATABASE_URL",
+        "postgresql+psycopg://ecommerce_migrator:migrate-secret@postgres:5432/ecommerce_staging",
+    )
+
+    result = service._migration_database_policy()
+
+    assert result["sameTarget"] is False
+    assert result["separated"] is False
+    assert any("指向不同数据库" in item for item in result["issues"])
+
+
+def test_detached_runner_uses_migration_url_and_blocks_wrong_database(monkeypatch, tmp_path: Path):
+    from argparse import Namespace
+    from importlib.util import module_from_spec, spec_from_file_location
+
+    repo_root = Path(__file__).resolve().parents[3]
+    runner_path = repo_root / "scripts" / "system_update_runner.py"
+    spec = spec_from_file_location("system_update_runner_db_roles_test_module", runner_path)
+    assert spec is not None and spec.loader is not None
+    module = module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    fake_root = tmp_path / "repo"
+    fake_root.mkdir()
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    args = Namespace(
+        root=str(fake_root),
+        data_dir=str(data_dir),
+        target="a" * 40,
+        branch="develop",
+        remote="origin",
+        actor="pytest",
+        run_id="run-db-role",
+        health_url="http://127.0.0.1:8000/healthz",
+    )
+    runner = module.Runner(args)
+
+    monkeypatch.setenv(
+        "DATABASE_URL",
+        "postgresql+psycopg://ecommerce_app:app-secret@localhost:5432/ecommerce",
+    )
+    monkeypatch.setenv(
+        "MIGRATION_DATABASE_URL",
+        "postgresql+psycopg://ecommerce_migrator:migrate-secret@localhost:5432/ecommerce",
+    )
+    assert runner.migration_env()["DATABASE_URL"].startswith(
+        "postgresql+psycopg://ecommerce_migrator:"
+    )
+    runner.validate_migration_database_target()
+
+    monkeypatch.setenv(
+        "MIGRATION_DATABASE_URL",
+        "postgresql+psycopg://ecommerce_migrator:migrate-secret@localhost:5432/ecommerce_staging",
+    )
+    with pytest.raises(RuntimeError, match="指向不同数据库"):
+        runner.validate_migration_database_target()

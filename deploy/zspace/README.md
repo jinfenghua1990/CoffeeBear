@@ -57,12 +57,16 @@ ecommerce/
 3. 将 staging.env.example 复制为 .env。
 4. 填写独立数据库密码、APP_SECRET_KEY、管理员密码和极空间真实目录。
 5. APP_IMAGE 默认可以先使用 candidate。
-6. 拉取镜像后执行数据库迁移：
+6. 首次启用数据库最小权限时，先备份，再初始化 app / migrator 两个角色；已有数据卷不要修改原来的 POSTGRES_USER：
 
 ```bash
+docker compose up -d postgres redis
+docker compose --profile ops run --rm db-roles
 docker compose --profile ops run --rm migrate
-docker compose up -d postgres redis api worker beat
+docker compose up -d api worker beat
 ```
+
+`db-roles` 会把业务数据库与 public schema/现有业务对象 ownership 交给 migrator，并只给 app 账号授予业务 DML。它是显式运维动作，不会跟随 API 自动执行；角色密码变更时可再次执行。
 
 7. 浏览器访问 NAS_IP:8100。
 8. 做采购、库存、耗材、财务、B2B/B2C 等业务回归。
@@ -100,6 +104,7 @@ APP_IMAGE=ghcr.io/jinfenghua1990/ecommerce-workspace:v2026.09.19.153000
 确认数据库/文件备份
 -> 拉取指定版本镜像
 -> 暂停 worker/beat
+-> （首次拆分账号或轮换账号密码时）docker compose --profile ops run --rm db-roles
 -> docker compose --profile ops run --rm migrate
 -> 更新 api
 -> /healthz 验证
@@ -139,6 +144,9 @@ SYSTEM_UPDATE_ENABLED=0
 ## 安全边界
 
 - PostgreSQL 不映射到 NAS 局域网端口。
+- API / worker / beat 使用 `DATABASE_URL` 的 app 账号；migrate 使用 `MIGRATION_DATABASE_URL` 的 migrator 账号。
+- `POSTGRES_USER` 只作为数据库部署/兜底管理员；已有数据卷不要通过改 .env 用户名来“重建管理员”。
+- 更新前会校验业务连接与迁移连接必须指向同一个数据库。
 - Redis 不映射到 NAS 局域网端口。
 - 只暴露 Web/API 端口。
 - .env 不提交 Git。

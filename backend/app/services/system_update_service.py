@@ -14,6 +14,7 @@ import shutil
 import subprocess
 import threading
 import urllib.request
+from urllib.parse import urlsplit
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -108,6 +109,60 @@ def _production_persistence_policy(root: Path) -> dict[str, Any]:
         "dataDir": str(data_dir),
         "backupDir": str(backup_dir),
         "logDir": str(log_dir),
+    }
+
+
+def _database_target(url: str) -> tuple[str, int, str]:
+    parsed = urlsplit(url)
+    return (
+        (parsed.hostname or "").lower(),
+        parsed.port or 5432,
+        (parsed.path or "").lstrip("/"),
+    )
+
+
+def _database_username(url: str) -> str:
+    try:
+        return urlsplit(url).username or ""
+    except ValueError:
+        return ""
+
+
+def _migration_database_policy() -> dict[str, Any]:
+    """Validate migration/runtime DB separation without exposing credentials."""
+    app_url = (settings.DATABASE_URL or "").strip()
+    migration_url = (settings.MIGRATION_DATABASE_URL or "").strip()
+    app_user = _database_username(app_url)
+
+    if not migration_url:
+        return {
+            "configured": False,
+            "sameTarget": True,
+            "separated": False,
+            "appUser": app_user,
+            "migrationUser": "",
+            "issues": ["MIGRATION_DATABASE_URL 未配置，迁移仍兼容使用业务 DATABASE_URL"],
+        }
+
+    migration_user = _database_username(migration_url)
+    try:
+        same_target = _database_target(app_url) == _database_target(migration_url)
+    except ValueError:
+        same_target = False
+
+    issues: list[str] = []
+    if not same_target:
+        issues.append("MIGRATION_DATABASE_URL 与 DATABASE_URL 指向不同数据库")
+    if app_user and migration_user and app_user == migration_user:
+        issues.append("业务运行与数据库迁移仍使用同一账号")
+
+    return {
+        "configured": True,
+        "sameTarget": same_target,
+        "separated": bool(same_target and app_user and migration_user and app_user != migration_user),
+        "appUser": app_user,
+        "migrationUser": migration_user,
+        "issues": issues,
     }
 
 
@@ -701,6 +756,34 @@ def update_readiness() -> dict[str, Any]:
         persistence_status,
         persistence_detail,
         blocking=strict_persistence and not persistence_ok,
+    )
+
+    db_roles = _migration_database_policy()
+    if not db_roles["configured"]:
+        role_status = "warn"
+        role_detail = "迁移账号尚未拆分；当前仍兼容使用 DATABASE_URL"
+        role_blocking = False
+    elif not db_roles["sameTarget"]:
+        role_status = "error"
+        role_detail = "MIGRATION_DATABASE_URL 与业务 DATABASE_URL 不是同一数据库，已阻止更新"
+        role_blocking = True
+    elif db_roles["separated"]:
+        role_status = "ok"
+        role_detail = (
+            f"业务账号 {db_roles['appUser'] or '(unknown)'} / "
+            f"迁移账号 {db_roles['migrationUser'] or '(unknown)'} 已分离"
+        )
+        role_blocking = False
+    else:
+        role_status = "warn"
+        role_detail = "业务运行与 Alembic 迁移仍共用同一数据库账号"
+        role_blocking = False
+    add(
+        "database_roles",
+        "数据库最小权限",
+        role_status,
+        role_detail,
+        blocking=role_blocking,
     )
 
     current_branch = ""

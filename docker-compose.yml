@@ -32,6 +32,26 @@ services:
       timeout: 3s
       retries: 20
 
+
+  migrate:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: "no"
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-ecommerce}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-ecommerce}
+      MIGRATION_DATABASE_URL: ${MIGRATION_DATABASE_URL:-}
+      REDIS_URL: redis://redis:6379/0
+      DATA_DIR: /data
+      HOME: /tmp
+    volumes:
+      - ${DATA_DIR_HOST:-./data}:/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: ["bash", "-lc", "if [ -n \"$$MIGRATION_DATABASE_URL\" ]; then export DATABASE_URL=\"$$MIGRATION_DATABASE_URL\"; fi; alembic upgrade head && python -m app.seed"]
+
   api:
     build:
       context: .
@@ -41,6 +61,8 @@ services:
     env_file: .env
     environment:
       DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-ecommerce}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-ecommerce}
+      MIGRATION_DATABASE_URL: ""
+      POSTGRES_PASSWORD: ""
       REDIS_URL: redis://redis:6379/0
       DATA_DIR: /data
       FRONTEND_OUT: /app/frontend/out
@@ -50,8 +72,8 @@ services:
     volumes:
       - ${DATA_DIR_HOST:-./data}:/data
     depends_on:
-      postgres:
-        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
       redis:
         condition: service_healthy
     healthcheck:
@@ -68,15 +90,17 @@ services:
     env_file: .env
     environment:
       DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-ecommerce}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-ecommerce}
+      MIGRATION_DATABASE_URL: ""
+      POSTGRES_PASSWORD: ""
       REDIS_URL: redis://redis:6379/0
       DATA_DIR: /data
       HOME: /tmp
     volumes:
       - ${DATA_DIR_HOST:-./data}:/data
     depends_on:
+      migrate:
+        condition: service_completed_successfully
       redis:
-        condition: service_healthy
-      postgres:
         condition: service_healthy
 
   beat:
@@ -87,9 +111,13 @@ services:
     env_file: .env
     environment:
       DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-ecommerce}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-ecommerce}
+      MIGRATION_DATABASE_URL: ""
+      POSTGRES_PASSWORD: ""
       REDIS_URL: redis://redis:6379/0
       HOME: /tmp
     depends_on:
+      migrate:
+        condition: service_completed_successfully
       redis:
         condition: service_healthy
 

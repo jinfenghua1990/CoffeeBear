@@ -66,6 +66,14 @@ make release-check
 
 ## 5. 发布与回滚
 
+### 数据库连接职责
+
+- API / worker / beat 使用 `DATABASE_URL`；
+- Alembic / migrate 阶段优先使用 `MIGRATION_DATABASE_URL`；
+- `MIGRATION_DATABASE_URL` 未配置时暂时兼容回退 `DATABASE_URL`，用于旧实例平滑迁移；
+- 一旦配置独立迁移连接，它必须与业务连接指向同一个 host / port / database，仅用户名和权限边界不同；
+- 生产环境完成角色拆分后，不再允许 API 容器拥有 DDL/owner 权限。
+
 正式发布固定顺序：
 
 ```text
@@ -74,7 +82,7 @@ make release-check
 → PostgreSQL + DATA_DIR 备份
 → 校验备份
 → 切换目标版本
-→ Alembic migration
+→ 独立 migrate 阶段执行 Alembic migration
 → 构建前端
 → 启动 API
 → 健康检查

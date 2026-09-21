@@ -20,6 +20,7 @@ import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 
@@ -141,10 +142,12 @@ class Runner:
         shutil.rmtree(self.lock_dir, ignore_errors=True)
 
     def run(self, command: list[str], *, cwd: Path | None = None, timeout: int = 1800,
-            check: bool = True) -> subprocess.CompletedProcess[str]:
+            check: bool = True, env_overrides: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
         self.log("$ " + " ".join(command))
         env = os.environ.copy()
         env["ECOMMERCE_UPDATE_RUN_ID"] = self.args.run_id
+        if env_overrides:
+            env.update(env_overrides)
         result = subprocess.run(
             command,
             cwd=str(cwd or self.root),
@@ -165,12 +168,36 @@ class Runner:
     def git(self, *args: str, timeout: int = 180) -> str:
         return self.run(["git", *args], timeout=timeout).stdout.strip()
 
+    def migration_env(self) -> dict[str, str]:
+        migration_url = (os.environ.get("MIGRATION_DATABASE_URL") or "").strip()
+        return {"DATABASE_URL": migration_url} if migration_url else {}
+
+    @staticmethod
+    def _database_target(url: str) -> tuple[str, int, str]:
+        parsed = urlsplit(url)
+        return (
+            (parsed.hostname or "").lower(),
+            parsed.port or 5432,
+            (parsed.path or "").lstrip("/"),
+        )
+
+    def validate_migration_database_target(self) -> None:
+        app_url = (os.environ.get("DATABASE_URL") or "").strip()
+        migration_url = (os.environ.get("MIGRATION_DATABASE_URL") or "").strip()
+        if not migration_url or not app_url:
+            return
+        if self._database_target(app_url) != self._database_target(migration_url):
+            raise RuntimeError(
+                "MIGRATION_DATABASE_URL 与 DATABASE_URL 指向不同数据库，拒绝执行迁移"
+            )
+
     def db_revision(self) -> str:
         result = self.run(
             [str(self.venv_python), "-m", "alembic", "current"],
             cwd=self.root / "backend",
             timeout=120,
             check=False,
+            env_overrides=self.migration_env(),
         )
         # Alembic may append "(head)" or other labels; first revision token is enough.
         for line in result.stdout.splitlines():
@@ -256,6 +283,7 @@ class Runner:
         if not SHA_RE.fullmatch(self.args.target):
             raise RuntimeError("目标 commit 格式无效")
         self.validate_persistence_isolation()
+        self.validate_migration_database_target()
         if not self.venv_python.is_file():
             raise RuntimeError("backend/.venv 不存在，无法安全执行更新")
         current_branch = self.git("branch", "--show-current")
@@ -417,6 +445,7 @@ class Runner:
             [str(self.venv_python), "-m", "alembic", "upgrade", "head"],
             cwd=self.root / "backend",
             timeout=1800,
+            env_overrides=self.migration_env(),
         )
 
     def build_frontend(self) -> None:
@@ -448,6 +477,7 @@ class Runner:
                         [str(self.venv_python), "-m", "alembic", "downgrade", self.previous_db_revision],
                         cwd=self.root / "backend",
                         timeout=1800,
+                        env_overrides=self.migration_env(),
                     )
         except Exception as exc:
             rollback_errors.append(f"数据库迁移回退失败：{exc}")

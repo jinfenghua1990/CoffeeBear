@@ -43,6 +43,9 @@ class Settings(BaseSettings):
     )
 
     DATABASE_URL: str = "postgresql+psycopg://ecommerce:CHANGE_ME@postgres:5432/ecommerce"
+    # 可选：Alembic/发布迁移专用连接。为空时兼容沿用 DATABASE_URL。
+    # production 推荐使用独立 migrator 账号，日常 API/worker 只使用 DATABASE_URL。
+    MIGRATION_DATABASE_URL: str = ""
     REDIS_URL: str = "redis://redis:6379/0"
 
     # 持久化目录与应用代码分离。production 自更新会把这组配置作为硬门禁检查。

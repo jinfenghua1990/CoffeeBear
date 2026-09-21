@@ -7,6 +7,7 @@ VENV := $(BACKEND)/.venv
 SYSTEM_UPDATE_LAUNCH_LABEL ?= com.gino.ecommerce-dashboard
 LAUNCH_LABEL := gui/$(shell id -u)/$(SYSTEM_UPDATE_LAUNCH_LABEL)
 NATIVE_ENV = set -a; . "$(ROOT)/.env"; set +a; export DATABASE_URL="${DATABASE_URL:-postgresql+psycopg://$POSTGRES_USER:$POSTGRES_PASSWORD@localhost:5432/$POSTGRES_DB}"; export REDIS_URL="${REDIS_URL:-redis://localhost:6379/0}"; export DATA_DIR="${DATA_DIR:-$(ROOT)/data}";
+MIGRATION_ENV = $(NATIVE_ENV) if [ -n "$MIGRATION_DATABASE_URL" ]; then export DATABASE_URL="$MIGRATION_DATABASE_URL"; fi;
 
 .PHONY: help update-guard-check update-guard-install up restart status logs logs-api rebuild rebuild-fe test test-db lint tsc verify release-check secret-scan repo-hygiene smoke migrate migration-check exec-api backup backup-full backup-r2 backup-r2-daily backup-r2-full cold-backup-kodo restore-check orphan-audit backup-schedule-install backup-schedule-status backup-schedule-uninstall fresh
 
@@ -75,11 +76,11 @@ release-check: verify restore-check smoke ## 发布前门禁：完整回归 + �
 smoke: ## 枚举公开 API 并做带鉴权 smoke test
 	./scripts/smoke.sh
 
-migrate: update-guard-check ## 应用 Alembic 迁移
-	$(NATIVE_ENV) cd "$(BACKEND)" && "$(VENV)/bin/alembic" upgrade head
+migrate: update-guard-check ## 应用 Alembic 迁移（优先使用 MIGRATION_DATABASE_URL）
+	$(MIGRATION_ENV) cd "$(BACKEND)" && "$(VENV)/bin/alembic" upgrade head
 
-migration-check: ## 检查 models 与迁移是否漂移
-	$(NATIVE_ENV) cd "$(BACKEND)" && "$(VENV)/bin/alembic" check
+migration-check: ## 检查 models 与迁移是否漂移（优先使用 MIGRATION_DATABASE_URL）
+	$(MIGRATION_ENV) cd "$(BACKEND)" && "$(VENV)/bin/alembic" check
 
 exec-api: ## 进入后端原生虚拟环境 shell
 	$(NATIVE_ENV) cd "$(BACKEND)" && exec "$(SHELL)"

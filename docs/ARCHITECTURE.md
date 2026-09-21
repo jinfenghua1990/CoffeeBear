@@ -138,6 +138,18 @@ PostgreSQL / Redis 只属于基础设施，不作为公开业务端口。
 
 ## 9. 认证与安全
 
+### 数据库最小权限
+
+生产目标固定拆成两类连接：
+
+- `DATABASE_URL`：API / worker / beat 日常业务连接，只需要业务表 DML 权限；
+- `MIGRATION_DATABASE_URL`：Alembic / 发布迁移专用连接，负责 schema owner / DDL；
+- 两个连接必须指向同一个 PostgreSQL 数据库；如迁移连接指向其他数据库，更新流程必须阻断；
+- Docker 应用镜像启动不得隐式执行 Alembic，数据库迁移必须是独立 lifecycle stage；
+- 兼容旧实例时允许 `MIGRATION_DATABASE_URL` 暂时为空并回退 `DATABASE_URL`，但 production 更新中心应持续给出最小权限警告，直至完成角色拆分。
+
+极空间 Compose 提供一次性 `db-roles` 运维服务：将现有 public schema / 表 / 序列等 ownership 交给 migrator，并仅向 app 账号授予业务 DML。该步骤不得自动随 API 启动执行。
+
 - 默认 `ACCESS_MODE=rbac`
 - `APP_SECRET_KEY` 只来自 `.env` / 环境变量
 - 密码使用 PBKDF2-HMAC-SHA256；当前新 hash 工作因子 600,000
