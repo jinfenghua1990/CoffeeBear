@@ -1388,6 +1388,41 @@ def _deactivate_source_ref_links(db: Session, invoice: TaxInvoice, reason: str) 
         link.note = reason
 
 
+def _sync_after_source_ref_deactivation(
+    db: Session,
+    invoice: TaxInvoice,
+    *,
+    reason: str,
+    fallback_status: str,
+) -> str:
+    """撤销自动来源证据后，以仍然有效的业务链接重新计算状态。
+
+    人工 confirmed 链接是比导入文件中的来源提示更强的业务事实，不能因为
+    source_ref 缺失、歧义或失效而被覆盖。若没有任何有效业务链接，才使用
+    调用方给出的 fallback_status。
+    """
+    db.flush()
+    remaining = (
+        db.query(TaxInvoiceLink)
+        .filter(
+            TaxInvoiceLink.invoice_id == invoice.id,
+            TaxInvoiceLink.target_type.in_(ALLOWED_LINK_TARGET_TYPES),
+            TaxInvoiceLink.match_method != "rejected",
+            TaxInvoiceLink.confirmed.is_(True),
+        )
+        .order_by(TaxInvoiceLink.id)
+        .first()
+    )
+    if remaining is not None:
+        status = sync_business_match_status(db, invoice, remaining.target_type, note=reason)
+    else:
+        status = fallback_status
+        invoice.match_status = status
+        if reason and reason not in (invoice.match_note or ""):
+            invoice.match_note = f"{invoice.match_note}；{reason}" if invoice.match_note else reason
+    return status
+
+
 def _auto_link(db: Session, invoice: TaxInvoice, related_ref: str, direction: str) -> bool:
     """按税务清单明确订单号自动关联。
 
@@ -1422,8 +1457,12 @@ def _auto_link(db: Session, invoice: TaxInvoice, related_ref: str, direction: st
             else f"关联单号 {ref} 命中多个采购渠道或业务对象，待人工确认"
         )
         _deactivate_source_ref_links(db, invoice, reason)
-        invoice.match_status = "needs_review"
-        invoice.match_note = reason
+        _sync_after_source_ref_deactivation(
+            db,
+            invoice,
+            reason=reason,
+            fallback_status="needs_review",
+        )
         return False
 
     invoice_total = quantize(to_decimal(invoice.total_amount))
@@ -1436,8 +1475,12 @@ def _auto_link(db: Session, invoice: TaxInvoice, related_ref: str, direction: st
             else "票据已非有效正数发票，撤销来源订单自动关联"
         )
         _deactivate_source_ref_links(db, invoice, reason)
-        invoice.match_status = "needs_review" if invoice.status == "unknown" else "unmatched"
-        invoice.match_note = reason
+        _sync_after_source_ref_deactivation(
+            db,
+            invoice,
+            reason=reason,
+            fallback_status="needs_review" if invoice.status == "unknown" else "unmatched",
+        )
         return False
 
     target_type, target_id = candidates[0]
@@ -1447,8 +1490,13 @@ def _auto_link(db: Session, invoice: TaxInvoice, related_ref: str, direction: st
         .first()
     )
     if exists is not None and exists.match_method == "rejected":
-        invoice.match_status = "needs_review"
-        invoice.match_note = f"关联单号 {ref} 曾被人工解除，待人工确认后重新关联"
+        reason = f"关联单号 {ref} 曾被人工解除，待人工确认后重新关联"
+        _sync_after_source_ref_deactivation(
+            db,
+            invoice,
+            reason=reason,
+            fallback_status="needs_review",
+        )
         return False
 
     if exists:
@@ -1504,7 +1552,15 @@ def serialize_import(row: TaxInvoiceImport) -> dict:
 
 
 def _payment_method_context(row: TaxInvoice, bank_status: str) -> dict[str, str]:
-    """付款方式唯一派生入口；发票业务匹配状态不得参与计算。"""
+    """付款方式唯一派生入口；只按银行付款事实判断对公/个人。
+
+    财务口径：
+    - 全额银行匹配 = 对公；
+    - 部分银行匹配 = 对公 + 个人；
+    - 无银行匹配 = 个人；
+    - 红冲/作废/待确认等不适用付款核对的票据不强行分类。
+    payment_method=personal 只保留人工审计事实，不再决定最终展示。
+    """
     manual_method = (
         "personal"
         if row.direction == "input" and row.payment_method == "personal"
@@ -1512,15 +1568,11 @@ def _payment_method_context(row: TaxInvoice, bank_status: str) -> dict[str, str]
     )
     if row.direction != "input":
         final_method = ""
-    elif bank_status == "matched":
+    elif bank_status in {"matched", "overpaid_after_red", "red_overpayment_settled"}:
         final_method = "corporate"
-    elif bank_status in {"overpaid_after_red", "red_overpayment_settled"}:
-        final_method = "corporate"
-    elif bank_status == "partial" and manual_method == "personal":
-        final_method = "mixed"
     elif bank_status == "partial":
-        final_method = "corporate"
-    elif manual_method == "personal":
+        final_method = "mixed"
+    elif bank_status == "unmatched":
         final_method = "personal"
     else:
         final_method = ""
@@ -1528,6 +1580,11 @@ def _payment_method_context(row: TaxInvoice, bank_status: str) -> dict[str, str]
         "manualPaymentMethod": manual_method,
         "paymentMethod": final_method,
     }
+
+
+def payment_method_context(row: TaxInvoice, bank_status: str) -> dict[str, str]:
+    """公开的付款方式派生入口，供财务报表复用。"""
+    return _payment_method_context(row, bank_status)
 
 
 def _serialize_invoice(row: TaxInvoice, context: dict | None = None, db: Session | None = None) -> dict:
@@ -2087,9 +2144,13 @@ def _ingest_rows(
         if len(refs) > 1:
             review_reason = "同一张发票的多行出现多个不同关联订单号，待人工确认"
             _deactivate_source_ref_links(db, invoice, review_reason)
-            invoice.match_status = "needs_review"
-            invoice.match_note = review_reason
-            outcome = "needs_review"
+            status = _sync_after_source_ref_deactivation(
+                db,
+                invoice,
+                reason=review_reason,
+                fallback_status="needs_review",
+            )
+            outcome = "matched" if status == "matched" else "needs_review"
         elif len(refs) == 1:
             linked = _auto_link(db, invoice, next(iter(refs)), invoice.direction)
             if linked:

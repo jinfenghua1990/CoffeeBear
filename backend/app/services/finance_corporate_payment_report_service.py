@@ -1,4 +1,4 @@
-"""月度「已收票 + 对公付款」清单。
+"""月度「已收票付款方式核对」清单（对公 / 个人 / 混合）。
 
 以已经落库的银行付款↔进项发票关联为唯一付款事实，再向采购订单与商品分配明细下钻。
 当月进项发票全部保留用于财务交付，但只有有效、正数金额发票参与银行付款核对；
@@ -67,33 +67,41 @@ def _payment_source(
     invoice: TaxInvoice,
     bank_status: str,
 ) -> tuple[str, str, str]:
-    """财务交付口径：结论和证据分开。
+    """财务交付只解释证据；支付分类统一复用发票服务的单一派生入口。"""
+    canonical_bank_status = {
+        "paid": "matched",
+        "unpaid": "unmatched",
+        "partial": "partial",
+        "overpaid_after_red": "overpaid_after_red",
+        "red_overpayment_settled": "red_overpayment_settled",
+        "not_applicable": "not_applicable",
+    }.get(bank_status, "not_applicable")
+    payment = tax_invoice_service.payment_method_context(invoice, canonical_bank_status)
+    key = str(payment.get("paymentMethod") or "not_applicable")
 
-    仍按用户业务规则把“无对公流水”的有效进项票归到个人支付，但必须注明这是系统推定；
-    只有 payment_method=personal 才显示“已确认个人支付”。这样财务能区分事实与推定。
-    """
-    if bank_status == "overpaid_after_red":
-        key, basis = "corporate", "历史对公付款超过红冲后有效金额，超额部分待退款或冲抵"
-    elif bank_status == "red_overpayment_settled":
-        key, basis = "corporate", "历史红冲超额付款已通过退款/后续冲抵完成处理"
-    elif not tax_invoice_service.is_bank_payment_reconciliation_eligible(invoice, db=db):
-        key, basis = "not_applicable", tax_invoice_service.bank_payment_reconciliation_ineligible_reason(invoice, db=db)
-    elif bank_status == "paid":
-        key, basis = "corporate", "已确认银行支出流水"
-    elif bank_status == "partial":
-        key = "mixed"
+    if key == "corporate":
+        basis = (
+            "历史对公付款超过红冲后有效金额，超额部分待退款或冲抵"
+            if bank_status == "overpaid_after_red"
+            else "历史红冲超额付款已通过退款/后续冲抵完成处理"
+            if bank_status == "red_overpayment_settled"
+            else "已确认银行支出流水"
+        )
+    elif key == "mixed":
         basis = (
             "银行部分付款 + 已确认个人垫付"
             if invoice.payment_method == "personal"
             else "银行部分付款；剩余部分按无对公流水系统推定为个人支付"
         )
-    else:
-        key = "personal"
+    elif key == "personal":
         basis = (
             "人工已确认个人垫付"
             if invoice.payment_method == "personal"
             else "未匹配到对公银行支出流水，按月结规则系统推定"
         )
+    else:
+        basis = tax_invoice_service.bank_payment_reconciliation_ineligible_reason(invoice, db=db)
+
     label = _PAYMENT_SOURCE_LABELS[key]
     if key == "personal" and invoice.payment_method != "personal":
         label = "个人支付（系统推定）"

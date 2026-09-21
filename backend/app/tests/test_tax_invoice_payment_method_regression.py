@@ -6,6 +6,7 @@ import pytest
 
 from app.models.bank import BankTransaction
 from app.models.tax import TaxInvoice, TaxInvoiceLink
+from app.services import finance_corporate_payment_report_service as finance_payment_service
 from app.services import payment_invoice_match_service as payment_service
 from app.services import tax_invoice_service as service
 
@@ -215,3 +216,63 @@ def test_auto_bank_match_preserves_manual_personal_fact(db_session):
     assert row["manualPaymentMethod"] == "personal"
     assert row["paymentMethod"] == "corporate"
     assert row["bankPaymentStatus"] == "matched"
+
+
+def test_unmatched_input_invoice_defaults_to_personal_from_bank_evidence_rule(db_session):
+    invoice = _invoice(db_session, "input")
+
+    row = _listed(db_session, invoice.id)
+
+    assert row["manualPaymentMethod"] == ""
+    assert row["bankPaymentStatus"] == "unmatched"
+    assert row["paymentMethod"] == "personal"
+
+
+def test_partial_bank_payment_defaults_to_mixed_without_manual_flag(db_session):
+    invoice = _invoice(db_session, "input")
+    txn = BankTransaction(
+        txn_date=date(2026, 9, 21),
+        direction="out",
+        amount=Decimal("40"),
+        counterparty_name="部分银行付款默认混合供应商",
+        fingerprint=f"payment-method-partial-default-{uuid4().hex}",
+    )
+    db_session.add(txn)
+    db_session.commit()
+
+    payment_service.link(
+        db_session,
+        txn_id=txn.id,
+        invoice_id=invoice.id,
+        allocated_amount=Decimal("40"),
+        actor="pytest",
+    )
+
+    row = _listed(db_session, invoice.id)
+    assert row["manualPaymentMethod"] == ""
+    assert row["bankPaymentStatus"] == "partial"
+    assert row["bankPaidAmount"] == "40.00"
+    assert row["bankRemainingAmount"] == "60.00"
+    assert row["paymentMethod"] == "mixed"
+
+
+@pytest.mark.parametrize(
+    ("bank_status", "finance_status", "expected"),
+    [
+        ("unmatched", "unpaid", "personal"),
+        ("partial", "partial", "mixed"),
+        ("matched", "paid", "corporate"),
+    ],
+)
+def test_finance_export_and_invoice_ledger_share_payment_classification(
+    db_session, bank_status, finance_status, expected
+):
+    invoice = _invoice(db_session, "input")
+
+    ledger_method = service.payment_method_context(invoice, bank_status)["paymentMethod"]
+    finance_method, _, _ = finance_payment_service._payment_source(
+        db_session, invoice, finance_status
+    )
+
+    assert ledger_method == expected
+    assert finance_method == expected

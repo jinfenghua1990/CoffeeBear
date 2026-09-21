@@ -320,7 +320,7 @@ def test_invoice_business_match_and_bank_payment_status_are_independent(db_sessi
     business = rows[business_invoice.id]
     assert business["businessMatchStatus"] == "matched"
     assert business["bankPaymentStatus"] == "unmatched"
-    assert business["paymentMethod"] == ""
+    assert business["paymentMethod"] == "personal"
     assert [link["targetType"] for link in business["links"]] == ["external_purchase_order"]
 
     paid = rows[paid_invoice.id]
@@ -372,7 +372,7 @@ def test_invoice_partial_bank_payment_does_not_change_business_match(db_session)
     assert row["bankPaymentStatus"] == "partial"
     assert Decimal(row["bankPaidAmount"]) == Decimal("40.00")
     assert Decimal(row["bankRemainingAmount"]) == Decimal("60.00")
-    assert row["paymentMethod"] == "corporate"
+    assert row["paymentMethod"] == "mixed"
 
 
 
