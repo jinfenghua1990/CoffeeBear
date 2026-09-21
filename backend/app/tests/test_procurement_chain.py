@@ -524,9 +524,17 @@ def test_manual_inbound_link_can_be_replaced_and_removed(client, db_session):
     assert replaced.status_code == 200
     link = db_session.get(ProcurementChainLink, replaced.json()["id"])
     assert link is not None
+    assert link.id != link_id
     assert link.target_id == second.id
     assert link.confirmed is True
     assert link.match_method == "manual"
+
+    # 被更换的旧关联必须保留为 rejected 审计记录，不能物理删除/原地改写。
+    old_link = db_session.get(ProcurementChainLink, link_id)
+    assert old_link is not None
+    assert old_link.target_id == first.id
+    assert old_link.confirmed is False
+    assert old_link.match_method == "rejected"
 
     candidates = client.get("/api/v1/procurement-chain/candidates", params={
         "order_id": order.id,
@@ -600,3 +608,37 @@ def test_register_invoice_is_atomic_and_rejects_missing_invoice_no(client, db_se
     detail = client.get(f"/api/v1/purchase/orders/{po.id}")
     assert detail.status_code == 200
     assert detail.json()["invoices"][0]["invoiceNo"] == "INV-ATOMIC-001"
+
+def test_purge_voided_invoice_links_preserves_rejected_history(db_session):
+    invoice = TaxInvoice(
+        invoice_key="PURGE-VOIDED-HISTORY",
+        invoice_number="PURGE-VOIDED-HISTORY",
+        direction="input",
+        status="red",
+        total_amount=Decimal("100"),
+    )
+    db_session.add(invoice)
+    db_session.flush()
+    link = TaxInvoiceLink(
+        invoice_id=invoice.id,
+        target_type="alibaba1688_order",
+        target_id=999999,
+        allocated_amount=Decimal("100"),
+        match_method="manual",
+        confirmed=True,
+    )
+    db_session.add(link)
+    db_session.flush()
+    link_id = link.id
+
+    result = service.purge_voided_invoice_links(db_session, dry_run=False)
+    assert result["removed"] >= 1
+    kept = db_session.get(TaxInvoiceLink, link_id)
+    assert kept is not None
+    assert kept.confirmed is False
+    assert kept.match_method == "rejected"
+    assert "已停用" in kept.note
+
+    # 再跑一次必须幂等，不重复“清理”同一条历史关系。
+    again = service.purge_voided_invoice_links(db_session, dry_run=False)
+    assert all(item["linkId"] != link_id for item in again["items"])

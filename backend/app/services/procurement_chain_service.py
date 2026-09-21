@@ -735,21 +735,32 @@ class ProcurementChainMatcher:
             link.consumable_usage_decided = False
             link.consumable_usage_enabled = None
             release_inbound_seeds_for_link(self.db, link, actor="system", commit=False)
+        # 更换关联必须保留旧关系审计历史，不能物理删除或原地改写旧 target。
+        link.confirmed = False
+        link.match_method = "rejected"
+        link.confidence = None
+        link.note = f"{(link.note or '').strip()}；已由人工更换关联".strip("；")
         if duplicate is not None:
-            if duplicate.target_type == "inbound":
+            replacement = duplicate
+            if replacement.target_type == "inbound":
                 from app.services.consumable_service import _reverse_inbound_usage
-                _reverse_inbound_usage(self.db, duplicate.id)
-                duplicate.consumable_usage_decided = False
-                duplicate.consumable_usage_enabled = None
-            self.db.delete(link)
-            link = duplicate
+                _reverse_inbound_usage(self.db, replacement.id)
+                replacement.consumable_usage_decided = False
+                replacement.consumable_usage_enabled = None
         else:
-            link.target_id = target_id
-        link.match_method = "manual"
-        link.confidence = Decimal("1")
-        link.note = note or "人工更换关联"
-        link.confirmed = True
+            replacement = ProcurementChainLink(
+                order_id=link.order_id,
+                external_po_id=link.external_po_id,
+                target_type=link.target_type,
+                target_id=target_id,
+            )
+            self.db.add(replacement)
+        replacement.match_method = "manual"
+        replacement.confidence = Decimal("1")
+        replacement.note = note or "人工更换关联"
+        replacement.confirmed = True
         self.db.commit()
+        link = replacement
         if link.target_type == "inbound":
             try:
                 seed_allocations_for_link(self.db, link)
@@ -1097,13 +1108,15 @@ def purge_voided_invoice_links(db: Session, actor: str = "system", dry_run: bool
     """清理建立在作废发票上的采购关联（status=red 或红字负数票）。
 
     早期版本没有过滤作废票，历史库里可能残留这类关联：已红冲的蓝字票被计进
-    采购金额，会造成票面金额虚高。默认 dry_run，确认清单后再实际删除。
+    采购金额，会造成票面金额虚高。默认 dry_run；执行时仅停用关联并保留审计历史。
     """
     link_rows = (
         db.query(TaxInvoiceLink, TaxInvoice)
         .join(TaxInvoice, TaxInvoice.id == TaxInvoiceLink.invoice_id)
         .filter(
             TaxInvoiceLink.target_type == "alibaba1688_order",
+            TaxInvoiceLink.match_method != "rejected",
+            TaxInvoiceLink.confirmed.is_(True),
             or_(TaxInvoice.status == INVOICE_STATUS_RED, TaxInvoice.total_amount <= 0),
         )
         .all()
@@ -1122,7 +1135,10 @@ def purge_voided_invoice_links(db: Session, actor: str = "system", dry_run: bool
     if dry_run:
         return {"ok": True, "dryRun": True, "matched": len(items), "removed": 0, "items": items}
     for link, inv in link_rows:
-        db.delete(link)
+        link.confirmed = False
+        link.match_method = "rejected"
+        link.confidence = None
+        link.note = f"{(link.note or '')}；作废/红冲票关联已停用".strip("；")
         inv.match_status = "unmatched"
         inv.match_note = f"{(inv.match_note or '')}；已解除作废票关联".strip("；")
         audit(

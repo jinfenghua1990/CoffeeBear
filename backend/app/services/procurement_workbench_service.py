@@ -860,7 +860,7 @@ def list_orders(
     status = status if status in _VALID_STATUSES else "all"
     pairs, pf = chain_snapshot(db)
     rows = [_order_row(db, o, ext, pf=pf) for o, ext in pairs]
-    today = datetime.now().date()
+    today = datetime.now(ZoneInfo(settings.TZ)).date()
     exception_refs = _exception_refs(db)
     consumable_nos = _consumable_source_nos(db)
     channel = channel if channel in {"all", "1688", "pdd", "taobao", "other"} else "all"

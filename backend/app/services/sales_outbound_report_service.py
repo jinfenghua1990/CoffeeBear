@@ -17,49 +17,40 @@ from typing import Any
 
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.models.jackyun import JackyunGoodsDocument, JackyunGoodsDocumentItem
+from app.services.monthly_core import month_bounds
 
 DOC_TYPE = "outbound"
 
 
 def months_with_data(db: Session) -> list[dict]:
-    """列出有出库单数据的账期（年/月/单据数），降序。"""
-    rows = (
-        db.execute(
-            select(
-                func.extract("year", JackyunGoodsDocument.document_at).label("y"),
-                func.extract("month", JackyunGoodsDocument.document_at).label("m"),
-                func.count(JackyunGoodsDocument.id),
-            )
-            .where(
-                JackyunGoodsDocument.document_type == DOC_TYPE,
-                JackyunGoodsDocument.document_at.isnot(None),
-            )
-            .group_by("y", "m")
-            .order_by("y", "m")
+    """列出有出库单数据的业务账期（Asia/Shanghai），降序。"""
+    timestamps = (
+        db.query(JackyunGoodsDocument.document_at)
+        .filter(
+            JackyunGoodsDocument.document_type == DOC_TYPE,
+            JackyunGoodsDocument.document_at.isnot(None),
         )
-        .fetchall()
+        .all()
     )
-    return [{"year": int(r[0]), "month": int(r[1]), "docCount": r[2]} for r in rows]
-
-
-def _month_range(year: int, month: int) -> tuple[datetime, datetime]:
     tz = ZoneInfo(settings.TZ)
-    start = datetime(year, month, 1, 0, 0, 0, tzinfo=tz)
-    if month == 12:
-        nxt = datetime(year + 1, 1, 1, 0, 0, 0, tzinfo=tz)
-    else:
-        nxt = datetime(year, month + 1, 1, 0, 0, 0, tzinfo=tz)
-    return start, nxt
+    counts: dict[tuple[int, int], int] = {}
+    for (value,) in timestamps:
+        local = value.astimezone(tz) if value.tzinfo is not None else value.replace(tzinfo=tz)
+        key = (local.year, local.month)
+        counts[key] = counts.get(key, 0) + 1
+    return [
+        {"year": year, "month": month, "docCount": counts[(year, month)]}
+        for year, month in sorted(counts, reverse=True)
+    ]
 
 
 def build_report(db: Session, year: int, month: int) -> dict[str, Any]:
     """聚合单月销售出库：汇总 + 按仓库 + 按货品 + 明细。金额列在 hasAmount 为真时才填充。"""
-    start, nxt = _month_range(year, month)
+    start, nxt = month_bounds(year, month)
     docs = (
         db.query(JackyunGoodsDocument)
         .filter(
