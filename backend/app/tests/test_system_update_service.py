@@ -444,6 +444,48 @@ def test_time_based_version_uses_project_timezone(monkeypatch):
 
 
 
+def test_production_persistence_policy_blocks_repo_local_storage(monkeypatch, tmp_path: Path):
+    root = tmp_path / "repo"
+    root.mkdir()
+
+    monkeypatch.setattr(service.settings, "PERSIST_ROOT", "")
+    monkeypatch.setattr(service.settings, "DATA_DIR", str(root / "data"))
+    monkeypatch.setattr(service.settings, "BACKUP_DIR", "")
+    monkeypatch.setattr(service.settings, "LOG_DIR", "")
+    monkeypatch.setattr(service.settings, "DATABASE_URL", "sqlite:///local.db")
+
+    result = service._production_persistence_policy(root)
+
+    assert result["ok"] is False
+    assert "PERSIST_ROOT 未配置" in result["issues"]
+    assert any("DATA_DIR 位于代码目录内" in item for item in result["issues"])
+    assert any("BACKUP_DIR 位于代码目录内" in item for item in result["issues"])
+    assert any("LOG_DIR 位于代码目录内" in item for item in result["issues"])
+    assert "DATABASE_URL 不是独立 PostgreSQL 数据库" in result["issues"]
+
+
+def test_production_persistence_policy_accepts_external_storage(monkeypatch, tmp_path: Path):
+    root = tmp_path / "repo"
+    root.mkdir()
+    persist = tmp_path / "persistent" / "production"
+
+    monkeypatch.setattr(service.settings, "PERSIST_ROOT", str(persist))
+    monkeypatch.setattr(service.settings, "DATA_DIR", str(persist / "data"))
+    monkeypatch.setattr(service.settings, "BACKUP_DIR", str(persist / "backups"))
+    monkeypatch.setattr(service.settings, "LOG_DIR", str(persist / "logs"))
+    monkeypatch.setattr(
+        service.settings,
+        "DATABASE_URL",
+        "postgresql+psycopg://ecommerce:secret@localhost:5432/ecommerce",
+    )
+
+    result = service._production_persistence_policy(root)
+
+    assert result["ok"] is True
+    assert result["issues"] == []
+    assert result["persistRoot"] == str(persist.resolve())
+
+
 def test_global_update_lock_rejects_parallel_update(monkeypatch, tmp_path: Path):
     root = tmp_path / "repo"
     (root / ".git").mkdir(parents=True)
@@ -584,3 +626,71 @@ def test_runner_rejects_target_sha_different_from_locked_target(tmp_path: Path):
 
     owner = json.loads(owner_file.read_text(encoding="utf-8"))
     assert owner["targetSha"] == locked_target
+
+def test_detached_runner_blocks_production_repo_local_persistence(monkeypatch, tmp_path: Path):
+    from argparse import Namespace
+    from importlib.util import module_from_spec, spec_from_file_location
+
+    repo_root = Path(__file__).resolve().parents[3]
+    runner_path = repo_root / "scripts" / "system_update_runner.py"
+    spec = spec_from_file_location("system_update_runner_persistence_test_module", runner_path)
+    assert spec is not None and spec.loader is not None
+    module = module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    fake_root = tmp_path / "repo"
+    fake_root.mkdir()
+    data_dir = fake_root / "data"
+    args = Namespace(
+        root=str(fake_root),
+        data_dir=str(data_dir),
+        target="a" * 40,
+        branch="develop",
+        remote="origin",
+        actor="pytest",
+        run_id="run-persist",
+        health_url="http://127.0.0.1:8000/healthz",
+    )
+    runner = module.Runner(args)
+
+    monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.delenv("PERSIST_ROOT", raising=False)
+
+    with pytest.raises(RuntimeError, match="PERSIST_ROOT 未配置"):
+        runner.validate_persistence_isolation()
+
+
+def test_detached_runner_accepts_external_production_persistence(monkeypatch, tmp_path: Path):
+    from argparse import Namespace
+    from importlib.util import module_from_spec, spec_from_file_location
+
+    repo_root = Path(__file__).resolve().parents[3]
+    runner_path = repo_root / "scripts" / "system_update_runner.py"
+    spec = spec_from_file_location("system_update_runner_external_persistence_test_module", runner_path)
+    assert spec is not None and spec.loader is not None
+    module = module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    fake_root = tmp_path / "repo"
+    fake_root.mkdir()
+    persist = tmp_path / "persistent" / "production"
+    data_dir = persist / "data"
+    args = Namespace(
+        root=str(fake_root),
+        data_dir=str(data_dir),
+        target="a" * 40,
+        branch="develop",
+        remote="origin",
+        actor="pytest",
+        run_id="run-persist-ok",
+        health_url="http://127.0.0.1:8000/healthz",
+    )
+    runner = module.Runner(args)
+
+    monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.setenv("PERSIST_ROOT", str(persist))
+    monkeypatch.setenv("BACKUP_DIR", str(persist / "backups"))
+    monkeypatch.setenv("LOG_DIR", str(persist / "logs"))
+
+    runner.validate_persistence_isolation()
+

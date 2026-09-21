@@ -41,6 +41,76 @@ def _repo_root() -> Path:
     return Path(__file__).resolve().parents[3]
 
 
+def _resolve_runtime_path(raw: str, *, root: Path, fallback: Path) -> Path:
+    value = (raw or "").strip()
+    path = Path(value).expanduser() if value else fallback
+    if not path.is_absolute():
+        path = root / path
+    return path.resolve()
+
+
+def _is_path_inside_repo(path: Path, root: Path) -> bool:
+    resolved_root = root.resolve()
+    resolved_path = path.resolve()
+    return resolved_path == resolved_root or resolved_root in resolved_path.parents
+
+
+def _production_persistence_policy(root: Path) -> dict[str, Any]:
+    """Return the production data-separation contract without mutating the filesystem."""
+    root = root.resolve()
+    persist_raw = (settings.PERSIST_ROOT or "").strip()
+    persist_root = (
+        _resolve_runtime_path(persist_raw, root=root, fallback=root)
+        if persist_raw
+        else None
+    )
+    data_dir = _resolve_runtime_path(
+        settings.DATA_DIR,
+        root=root,
+        fallback=(persist_root / "data" if persist_root else root / "data"),
+    )
+    backup_dir = _resolve_runtime_path(
+        settings.BACKUP_DIR,
+        root=root,
+        fallback=(persist_root / "backups" if persist_root else root / "backups"),
+    )
+    log_dir = _resolve_runtime_path(
+        settings.LOG_DIR,
+        root=root,
+        fallback=(persist_root / "logs" if persist_root else root / "logs"),
+    )
+
+    issues: list[str] = []
+    if persist_root is None:
+        issues.append("PERSIST_ROOT 未配置")
+    elif _is_path_inside_repo(persist_root, root):
+        issues.append(f"PERSIST_ROOT 位于代码目录内：{persist_root}")
+
+    for label, path in (
+        ("DATA_DIR", data_dir),
+        ("BACKUP_DIR", backup_dir),
+        ("LOG_DIR", log_dir),
+    ):
+        if _is_path_inside_repo(path, root):
+            issues.append(f"{label} 位于代码目录内：{path}")
+
+    database_url = (settings.DATABASE_URL or "").strip().lower()
+    if not (
+        database_url.startswith("postgresql://")
+        or database_url.startswith("postgresql+")
+    ):
+        issues.append("DATABASE_URL 不是独立 PostgreSQL 数据库")
+
+    return {
+        "ok": not issues,
+        "issues": issues,
+        "persistRoot": str(persist_root) if persist_root else "",
+        "dataDir": str(data_dir),
+        "backupDir": str(backup_dir),
+        "logDir": str(log_dir),
+    }
+
+
 def _remote_repository_name(remote_url: str) -> str:
     """Extract the repository name from HTTPS/SSH Git remotes."""
     value = (remote_url or "").strip().rstrip("/")
@@ -609,6 +679,28 @@ def update_readiness() -> dict[str, Any]:
         "ok" if git_dir.exists() else "error",
         str(root) if git_dir.exists() else f"{root} 不是 Git 工作区",
         blocking=not git_dir.exists(),
+    )
+
+    persistence = _production_persistence_policy(root)
+    strict_persistence = settings.APP_ENV == "production"
+    persistence_ok = bool(persistence["ok"])
+    if persistence_ok:
+        persistence_detail = (
+            f"PERSIST_ROOT={persistence['persistRoot']} · "
+            f"DATA_DIR={persistence['dataDir']} · "
+            f"BACKUP_DIR={persistence['backupDir']} · "
+            f"LOG_DIR={persistence['logDir']} · PostgreSQL 独立"
+        )
+        persistence_status = "ok"
+    else:
+        persistence_detail = "；".join(str(item) for item in persistence["issues"])
+        persistence_status = "error" if strict_persistence else "warn"
+    add(
+        "persistence_isolation",
+        "程序 / 数据分离",
+        persistence_status,
+        persistence_detail,
+        blocking=strict_persistence and not persistence_ok,
     )
 
     current_branch = ""

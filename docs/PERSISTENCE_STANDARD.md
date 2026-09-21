@@ -31,9 +31,21 @@
 
 正式环境与测试环境不得共用 data、backup、log，也不得共用数据库。
 
+## Production 硬门禁
+
+当 `APP_ENV=production` 时：
+
+- `PERSIST_ROOT` 必须显式配置；
+- `PERSIST_ROOT`、`DATA_DIR`、`BACKUP_DIR`、`LOG_DIR` 均不得位于 Git 代码目录内；
+- `DATABASE_URL` 必须指向独立 PostgreSQL，而不是 SQLite / 代码目录内文件数据库；
+- 更新中心环境自检发现上述任一问题时，必须阻止系统升级；
+- detached update runner 在真正切换 Git 版本前再次执行持久化目录校验，不能只依赖 UI/API 门禁。
+
+因此，正常目标状态是：整个 `ecommerce-workspace` 代码目录都可以删除并重新 clone，只要 PostgreSQL、持久化目录与部署密钥仍在，业务数据就不丢失。
+
 ## 兼容迁移
 
-当前版本保留旧目录回退逻辑，因此标准化不能直接移动真实数据。
+运行层仍保留旧目录回退逻辑，便于历史实例读取和迁移；但 production 在完成数据外置前不得继续执行系统升级，标准化不能直接移动真实数据。
 
 迁移时必须：
 

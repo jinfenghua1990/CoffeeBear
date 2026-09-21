@@ -201,10 +201,61 @@ class Runner:
             time.sleep(delay)
         return False
 
+    @staticmethod
+    def _path_inside_repo(path: Path, root: Path) -> bool:
+        resolved_path = path.resolve()
+        resolved_root = root.resolve()
+        return resolved_path == resolved_root or resolved_root in resolved_path.parents
+
+    def _runtime_path(self, raw: str, fallback: Path) -> Path:
+        value = (raw or "").strip()
+        path = Path(value).expanduser() if value else fallback
+        if not path.is_absolute():
+            path = self.root / path
+        return path.resolve()
+
+    def validate_persistence_isolation(self) -> None:
+        """Second-line production guard executed by the detached updater itself."""
+        if (os.environ.get("APP_ENV") or "development").strip().lower() != "production":
+            return
+
+        persist_raw = (os.environ.get("PERSIST_ROOT") or "").strip()
+        if not persist_raw:
+            raise RuntimeError(
+                "生产环境持久化目录未完全分离：PERSIST_ROOT 未配置；"
+                "请先把业务文件、备份和日志迁移到代码目录外"
+            )
+
+        persist_root = self._runtime_path(persist_raw, self.root)
+        backup_dir = self._runtime_path(
+            os.environ.get("BACKUP_DIR") or "",
+            persist_root / "backups",
+        )
+        log_dir = self._runtime_path(
+            os.environ.get("LOG_DIR") or "",
+            persist_root / "logs",
+        )
+        paths = (
+            ("PERSIST_ROOT", persist_root),
+            ("DATA_DIR", self.data_dir),
+            ("BACKUP_DIR", backup_dir),
+            ("LOG_DIR", log_dir),
+        )
+        violations = [
+            f"{label} 位于代码目录内：{path.resolve()}"
+            for label, path in paths
+            if self._path_inside_repo(path, self.root)
+        ]
+        if violations:
+            raise RuntimeError(
+                "生产环境持久化目录未完全分离：" + "；".join(violations)
+            )
+
     def preflight(self) -> None:
         self.status("preflight", 5, "校验本地仓库和目标版本")
         if not SHA_RE.fullmatch(self.args.target):
             raise RuntimeError("目标 commit 格式无效")
+        self.validate_persistence_isolation()
         if not self.venv_python.is_file():
             raise RuntimeError("backend/.venv 不存在，无法安全执行更新")
         current_branch = self.git("branch", "--show-current")

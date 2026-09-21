@@ -45,7 +45,11 @@ class Settings(BaseSettings):
     DATABASE_URL: str = "postgresql+psycopg://ecommerce:CHANGE_ME@postgres:5432/ecommerce"
     REDIS_URL: str = "redis://redis:6379/0"
 
+    # 持久化目录与应用代码分离。production 自更新会把这组配置作为硬门禁检查。
+    PERSIST_ROOT: str = ""
     DATA_DIR: str = "/data"
+    BACKUP_DIR: str = ""
+    LOG_DIR: str = ""
     # 上传文件按字节流分段读取，避免单个请求占满应用内存；如财务原件确实更大可只在 .env 调整。
     MAX_UPLOAD_BYTES: int = 100 * 1024 * 1024
     # 吉客云客户端导出文件在 HTTP 请求内同步解析，单独收紧体积和行数上限。
