@@ -14,6 +14,7 @@ from app.api.v1 import (
     finance,
     foreign_trade,
     integrations,
+    inventory_stocktakes,
     jackyun_files,
     logistics,
     jky_orders,
@@ -45,6 +46,7 @@ api_router = APIRouter(prefix="/api/v1")
 api_router.include_router(auth.router)
 api_router.include_router(system.router)
 api_router.include_router(integrations.router)
+api_router.include_router(inventory_stocktakes.router)
 api_router.include_router(jackyun_files.router)
 api_router.include_router(logistics.router)
 api_router.include_router(jky_orders.router)

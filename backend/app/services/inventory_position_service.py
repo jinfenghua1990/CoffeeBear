@@ -16,6 +16,7 @@ from sqlalchemy.orm import Session
 
 from app.models.catalog import Product, ProductSku, Warehouse
 from app.models.jackyun import JackyunGoodsDocument, JackyunGoodsDocumentItem
+from app.models.inventory_stocktake import InventoryStocktakeItem, InventoryStocktakeTask
 from app.utils.money import to_decimal
 
 
@@ -141,6 +142,31 @@ def current_positions(db: Session) -> dict[str, Any]:
             applied_outbound += quantity
     applied_documents = len(seen_documents)
 
+    # 已完成盘点的正品差异是本地库存调整事实；只在确认后进入运算库存。
+    stocktake_rows = (
+        db.query(InventoryStocktakeItem, InventoryStocktakeTask)
+        .join(InventoryStocktakeTask, InventoryStocktakeTask.id == InventoryStocktakeItem.task_id)
+        .filter(
+            InventoryStocktakeTask.status == "completed",
+            InventoryStocktakeItem.item_kind == "goods",
+            InventoryStocktakeItem.difference_qty.is_not(None),
+        )
+        .order_by(InventoryStocktakeTask.confirmed_at, InventoryStocktakeTask.id, InventoryStocktakeItem.id)
+        .all()
+    )
+    stocktake_adjustment_count = 0
+    for item, task in stocktake_rows:
+        diff = to_decimal(item.difference_qty)
+        if diff == 0:
+            continue
+        bucket = by_sku_warehouse[item.ref_id]
+        bucket[item.warehouse_id] = bucket.get(item.warehouse_id, Decimal("0")) + diff
+        by_sku[item.ref_id] += diff
+        seen_skus.add(item.ref_id)
+        stocktake_adjustment_count += 1
+        if task.confirmed_at is not None and (last_at is None or task.confirmed_at > last_at):
+            last_at = task.confirmed_at
+
     return {
         "by_sku": dict(by_sku),
         "by_sku_warehouse": {sku_id: dict(values) for sku_id, values in by_sku_warehouse.items()},
@@ -150,9 +176,10 @@ def current_positions(db: Session) -> dict[str, Any]:
         "applied_document_count": applied_documents,
         "applied_item_count": applied_items,
         "unmatched_item_count": unmatched_items,
+        "stocktake_adjustment_count": stocktake_adjustment_count,
         "applied_inbound_quantity": applied_inbound,
         "applied_outbound_quantity": applied_outbound,
-        "source": "documents_only",
+        "source": "documents_plus_stocktakes",
     }
 
 
@@ -210,6 +237,45 @@ def sku_transactions(db: Session, sku_id: int, limit: int = 500) -> dict[str, An
             "matchedSkuId": item.matched_sku_id,
             "matchStatus": item.match_status or "",
         })
+
+    stocktake_rows = (
+        db.query(InventoryStocktakeItem, InventoryStocktakeTask, Warehouse)
+        .join(InventoryStocktakeTask, InventoryStocktakeTask.id == InventoryStocktakeItem.task_id)
+        .join(Warehouse, Warehouse.id == InventoryStocktakeItem.warehouse_id)
+        .filter(
+            InventoryStocktakeTask.status == "completed",
+            InventoryStocktakeItem.item_kind == "goods",
+            InventoryStocktakeItem.ref_id == sku_id,
+            InventoryStocktakeItem.difference_qty.is_not(None),
+        )
+        .all()
+    )
+    for item, task, warehouse in stocktake_rows:
+        diff = to_decimal(item.difference_qty)
+        if diff == 0:
+            continue
+        movements.append({
+            "occurredAt": task.confirmed_at.isoformat() if task.confirmed_at else None,
+            "direction": "stocktake",
+            "documentNo": task.number,
+            "warehouseId": warehouse.id,
+            "warehouseName": warehouse.name,
+            "quantity": float(diff),
+            "balanceBefore": 0.0,
+            "balanceAfter": 0.0,
+            "supplierName": "",
+            "companyName": "",
+            "matchedSkuId": sku_id,
+            "matchStatus": "stocktake",
+        })
+
+    movements.sort(key=lambda row: (row.get("occurredAt") or "", row.get("documentNo") or ""))
+    balance = Decimal("0")
+    for movement in movements:
+        before = balance
+        balance += to_decimal(movement["quantity"])
+        movement["balanceBefore"] = float(before)
+        movement["balanceAfter"] = float(balance)
 
     movements.reverse()
     return {

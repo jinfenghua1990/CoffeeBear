@@ -1035,6 +1035,97 @@ export const consumablesApi = {
   deletePurchase: (id: number) => jsonFetch<{ ok: boolean; purchaseId: number }>(`/api/v1/consumables/purchases/${id}`, { method: "DELETE" }),
 };
 
+export type InventoryStocktakeCandidate = {
+  kind: "goods" | "consumable";
+  id: number;
+  code: string;
+  name: string;
+  goodsName: string;
+  category: string;
+  unit: string;
+  bookQty: string;
+  warehouseId: number;
+  warehouseName: string;
+};
+
+export type InventoryStocktakeItem = {
+  id: number;
+  kind: "goods" | "consumable";
+  refId: number;
+  code: string;
+  name: string;
+  goodsName: string;
+  category: string;
+  unit: string;
+  bookQty: string;
+  actualQty: string | null;
+  differenceQty: string | null;
+  reason: string;
+};
+
+export type InventoryStocktakeTask = {
+  id: number;
+  number: string;
+  scope: "all" | "partial";
+  scopeLabel: string;
+  status: "pending" | "counting" | "review" | "completed" | "cancelled";
+  statusLabel: string;
+  warehouseId: number;
+  warehouseName: string;
+  itemKinds: Array<"goods" | "consumable">;
+  searchText: string;
+  categoryFilter: string;
+  note: string;
+  createdBy: string;
+  confirmedBy: string;
+  confirmedAt: string | null;
+  createdAt: string | null;
+  updatedAt: string | null;
+  itemCount: number;
+  countedCount: number;
+  differenceCount: number;
+  differenceAbsQty: string;
+  items?: InventoryStocktakeItem[];
+};
+
+export const inventoryStocktakeApi = {
+  list: (status = "") =>
+    jsonFetch<InventoryStocktakeTask[]>(`/api/v1/inventory/stocktakes${status ? `?status=${encodeURIComponent(status)}` : ""}`),
+  candidates: (warehouseId: number, kinds: Array<"goods" | "consumable">, search = "", category = "") => {
+    const q = new URLSearchParams({
+      warehouse_id: String(warehouseId),
+      kinds: kinds.join(","),
+      search,
+      category,
+    });
+    return jsonFetch<InventoryStocktakeCandidate[]>(`/api/v1/inventory/stocktakes/candidates?${q}`);
+  },
+  create: (body: {
+    scope: "all" | "partial";
+    warehouse_id: number;
+    item_kinds: Array<"goods" | "consumable">;
+    selected_items?: Array<{ kind: "goods" | "consumable"; id: number }>;
+    search?: string;
+    category?: string;
+    note?: string;
+  }) =>
+    jsonFetch<InventoryStocktakeTask>("/api/v1/inventory/stocktakes", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  detail: (id: number) =>
+    jsonFetch<InventoryStocktakeTask>(`/api/v1/inventory/stocktakes/${id}`),
+  saveCounts: (id: number, items: Array<{ id: number; actual_qty: string | null; reason: string }>) =>
+    jsonFetch<InventoryStocktakeTask>(`/api/v1/inventory/stocktakes/${id}/counts`, {
+      method: "POST",
+      body: JSON.stringify({ items }),
+    }),
+  confirm: (id: number) =>
+    jsonFetch<InventoryStocktakeTask>(`/api/v1/inventory/stocktakes/${id}/confirm`, { method: "POST" }),
+  cancel: (id: number) =>
+    jsonFetch<InventoryStocktakeTask>(`/api/v1/inventory/stocktakes/${id}/cancel`, { method: "POST" }),
+};
+
 export const warehousesApi = {
   list: (includeInactive = false) =>
     jsonFetch<WarehouseRow[]>(`/api/v1/warehouses?include_inactive=${includeInactive ? "true" : "false"}`),
