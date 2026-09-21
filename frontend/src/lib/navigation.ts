@@ -37,7 +37,7 @@ const WORKBENCH = "/purchase/workbench";
 export const MODULES: ModuleDef[] = [
   {
     key: "home",
-    label: "经营",
+    label: "经营中心",
     title: "经营中心",
     href: "/",
     match: (p) => p === "/",
@@ -45,7 +45,7 @@ export const MODULES: ModuleDef[] = [
   },
   {
     key: "sales",
-    label: "销售",
+    label: "销售中心",
     title: "销售中心",
     href: "/sales",
     match: (p) => p.startsWith("/sales"),
@@ -67,13 +67,14 @@ export const MODULES: ModuleDef[] = [
         label: "基础档案",
         items: [
           { href: "/products", label: "货品档案", icon: "box" },
+          { href: "/products?tab=bundles", label: "套装档案", icon: "box" },
         ],
       },
     ],
   },
   {
     key: "inventory",
-    label: "库存",
+    label: "库存中心",
     title: "库存中心",
     href: "/inventory",
     match: (p) =>
@@ -81,60 +82,73 @@ export const MODULES: ModuleDef[] = [
       || p.startsWith("/products/inventory-goods")
       || p.startsWith("/products/inventory-consumables")
       || p.startsWith("/supply-chain/warehouses")
+      || p.startsWith("/supply-chain/receiving")
+      || p.startsWith("/supply-chain/material-flow")
       || p.startsWith("/settings/warehouses"),
     items: [
       { href: "/inventory", label: "库存总览", icon: "inventory" },
       { href: "/supply-chain/warehouses", label: "仓库档案", icon: "warehouse" },
+      { href: "/supply-chain/receiving", label: "到仓入库", icon: "receive" },
+      { href: "/supply-chain/material-flow", label: "耗材流转", icon: "flow" },
       { href: "/inventory/transactions", label: "库存流水", icon: "flow" },
-      { href: "/inventory/adjustments", label: "库存调整", icon: "settings" },
+      { href: "/inventory/adjustments", label: "库存盘点", icon: "settings" },
     ],
   },
   {
-    key: "supply",
-    label: "供应链",
-    title: "供应链中心",
-    href: "/supply-chain",
-    match: (p) =>
-      p.startsWith("/supply-chain")
-      || p.startsWith("/purchase")
-      || p.startsWith("/procurement")
-      || p.startsWith("/suppliers")
-      || p.startsWith("/data-center-import"),
+    key: "suppliers",
+    label: "供应商",
+    title: "供应商档案",
+    href: "/suppliers",
+    match: (p) => p.startsWith("/suppliers"),
     items: [
-      { href: "/supply-chain", label: "供应链总览", icon: "home" },
       { href: "/suppliers", label: "供应商档案", icon: "box" },
-      { href: "/data-center-import?tab=alibaba1688", label: "采购接入", icon: "import", activeByPath: true },
-      { href: `${WORKBENCH}?view=orders`, label: "采购管理", icon: "cart", activeByPath: true },
+    ],
+  },
+  {
+    key: "purchase",
+    label: "采购中心",
+    title: "采购中心",
+    href: `${WORKBENCH}?view=orders`,
+    match: (p) =>
+      p.startsWith("/purchase")
+      || p.startsWith("/procurement")
+      || p.startsWith("/supply-chain/production"),
+    items: [
+      { href: `${WORKBENCH}?view=orders`, label: "采购订单", icon: "cart", activeByPath: true },
       { href: "/supply-chain/production", label: "生产订单", icon: "factory" },
-      { href: "/supply-chain/receiving", label: "到仓入库单", icon: "receive" },
-      { href: "/supply-chain/material-flow", label: "耗材流转", icon: "flow" },
     ],
   },
   {
     key: "finance",
-    label: "财务",
+    label: "财务中心",
     title: "财务中心",
     href: "/finance",
-    match: (p) => p.startsWith("/finance") || p.startsWith("/payments") || p.startsWith("/profit"),
+    match: (p) =>
+      p.startsWith("/finance")
+      || p.startsWith("/payments")
+      || p.startsWith("/profit")
+      || p.startsWith("/logistics/bills"),
     items: [
       { href: "/finance", label: "财务工作台", icon: "finance" },
       { href: "/finance/monthly-send", label: "月结中心", icon: "mail" },
-      { href: "/finance/bank-transactions?view=summary", label: "银行", icon: "wallet", activeByPath: true },
+      { href: "/finance/bank-transactions?view=summary", label: "银行账务", icon: "wallet", activeByPath: true },
       { href: "/finance/invoices", label: "发票管理", icon: "tax" },
       { href: "/finance/partners", label: "往来单位", icon: "box" },
+      { href: "/finance/product-categories?productTab=tax-rules", label: "财务分类", icon: "tax", activeByPath: true },
+      { href: "/logistics/bills", label: "物流对账", icon: "wallet" },
       { href: "/finance/tax-accounting", label: "税务数据", icon: "tax" },
       { href: "/finance/opening", label: "期初数据", icon: "wallet" },
     ],
   },
   {
     key: "logistics",
-    label: "快递物流",
-    title: "快递物流",
+    label: "物流工具",
+    title: "物流工具",
     href: "/logistics/workbench",
-    match: (p) => p.startsWith("/logistics"),
+    showInTop: false,
+    match: (p) => p.startsWith("/logistics/workbench"),
     items: [
       { href: "/logistics/workbench", label: "物流工作台", icon: "truck" },
-      { href: "/logistics/bills", label: "物流账单", icon: "wallet" },
     ],
   },
   {
@@ -153,6 +167,17 @@ export const MODULES: ModuleDef[] = [
       { href: "/foreign-trade/fulfillment", label: "履约中心", icon: "truck" },
       { href: "/finance?scope=foreign_trade", label: "财务", icon: "wallet" },
       { href: "/foreign-trade/alsvid", label: "Alsvid", icon: "factory" },
+    ],
+  },
+  {
+    key: "imports",
+    label: "数据接入",
+    title: "数据接入",
+    href: "/data-center-import",
+    showInTop: false,
+    match: (p) => p.startsWith("/data-center-import"),
+    items: [
+      { href: "/data-center-import", label: "数据导入", icon: "import", activeByPath: true },
     ],
   },
   {
@@ -182,7 +207,7 @@ export const MODULES: ModuleDef[] = [
 ];
 
 /** 解析当前一级模块。顺序敏感：库存路由要先于 products / supply 判断。 */
-const RESOLVE_ORDER = ["foreign", "home", "sales", "inventory", "products", "supply", "finance", "logistics", "system", "data"];
+const RESOLVE_ORDER = ["foreign", "home", "sales", "inventory", "products", "suppliers", "purchase", "finance", "logistics", "imports", "system", "data"];
 
 export function resolveModule(pathname: string, search?: SearchParamReader | null): ModuleDef {
   // /finance 是内外贸共用底层页面；scope=foreign_trade 时导航必须留在外贸工作台。
@@ -205,7 +230,11 @@ export function moduleWorkspace(module: ModuleDef): WorkspaceKey {
  * overview/detail、summary/transactions 等视图必须放页面内部 TAB、筛选或弹窗。
  */
 function canonicalSidebarPath(href: string) {
-  const pathname = href.split("?", 1)[0];
+  const [pathname, query = ""] = href.split("?", 2);
+  if (pathname === "/products") {
+    const params = new URLSearchParams(query);
+    if (params.get("tab") === "bundles") return "/products#bundles";
+  }
   const legacyAliases: Record<string, string> = {
     "/finance/bank-summary": "/finance/bank-transactions",
     "/foreign-trade/finance": "/finance",
@@ -248,7 +277,13 @@ export function isSecondaryActive(item: SecondaryItem, pathname: string, search:
   if (path === "/inventory" && pathname.startsWith("/inventory/operations")) return true;
   if (pathname !== path) return false;
   if (item.activeByPath) return true;
-  if (!query) return true;
+  if (!query) {
+    if (path === "/products") {
+      const promoted = search.get("tab") || search.get("productTab");
+      return promoted !== "bundles" && promoted !== "taxRules" && promoted !== "tax-rules";
+    }
+    return true;
+  }
   const expected = new URLSearchParams(query);
   for (const [key, value] of expected.entries()) {
     if (search.get(key) !== value) return false;

@@ -135,7 +135,7 @@ const ROUTES: RouteEntry[] = [
   },
   {
     pathname: "/inventory/adjustments",
-    title: "库存调整",
+    title: "库存盘点",
     businessType: "master",
     load: () => import("@/app/inventory/adjustments/page"),
   },
@@ -250,6 +250,12 @@ const ROUTES: RouteEntry[] = [
     load: () => import("@/app/finance/page"),
   },
   {
+    pathname: "/finance/product-categories",
+    title: "财务分类",
+    businessType: "master",
+    load: () => import("@/app/finance/product-categories/page"),
+  },
+  {
     pathname: "/finance/monthly-send",
     title: "月度资料",
     businessType: "master",
@@ -287,7 +293,7 @@ const ROUTES: RouteEntry[] = [
   },
   {
     pathname: "/logistics/bills",
-    title: "物流账单",
+    title: "物流对账",
     businessType: "master",
     load: () => import("@/app/logistics/bills/page"),
   },
@@ -313,6 +319,7 @@ const ENTRY_BY_PATH = new Map(ROUTES.map((entry) => [entry.pathname, entry]));
  */
 const IN_PAGE_REDIRECTS: Record<string, string> = {
   "/settings": "/settings/backup",
+  "/supply-chain": "/purchase/workbench?view=orders",
   "/foreign-trade/finance": "/finance?scope=foreign_trade",
   "/supply-chain/receiving/jackyun": "/supply-chain/receiving?panel=jackyun",
   // 这两个旧导入地址必须直连数据中心：经采购工作台的 imports 视图会先开一个「数据接入」Tab
@@ -324,7 +331,7 @@ const IN_PAGE_REDIRECTS: Record<string, string> = {
   "/tax-invoices": "/finance/invoices",
   "/finance/bank-summary": "/finance/bank-transactions?view=summary",
   "/settings/warehouses": "/supply-chain/warehouses",
-  "/finance/tax-accounting/categories": "/products?productTab=tax-rules",
+  "/finance/tax-accounting/categories": "/finance/product-categories?productTab=tax-rules",
   "/products/inventory-goods": "/inventory?tab=goods",
   "/products/inventory-consumables": "/inventory?tab=consumables",
 };
