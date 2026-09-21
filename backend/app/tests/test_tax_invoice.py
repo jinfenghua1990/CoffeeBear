@@ -1,4 +1,5 @@
 from decimal import Decimal
+from io import BytesIO
 
 import pytest
 
@@ -22,6 +23,52 @@ def test_tax_export_auto_detects_fields_and_direction():
     assert parsed.mapping["total_amount"] == "价税合计"
     assert parsed.direction_hint == "unknown"
     assert len(parsed.rows) == 2
+
+
+def test_tax_xlsx_uses_base_sheet_and_validates_summary_only():
+    from openpyxl import Workbook
+
+    workbook = Workbook()
+    summary = workbook.active
+    summary.title = "信息汇总表"
+    summary.append(["序号", "发票号码", "销方识别号", "销方名称", "开票日期", "金额", "税额", "价税合计"])
+    summary.append([1, "INV-BASE-001", "91330000000000001A", "供应商甲", "2026-09-01", 100, 13, 113])
+    summary.append(["合计行", None, None, None, None, 100, 13, 113])
+
+    base = workbook.create_sheet("发票基础信息")
+    base.append(["序号", "发票号码", "销方识别号", "销方名称", "开票日期", "金额", "税额", "价税合计", "发票状态"])
+    base.append([1, "INV-BASE-001", "91330000000000001A", "供应商甲", "2026-09-01", 100, 13, 113, "正常"])
+    base.append(["合计行", None, None, None, None, 100, 13, 113, None])
+
+    output = BytesIO()
+    workbook.save(output)
+    workbook.close()
+
+    parsed = parse_tax_invoice_export(output.getvalue(), "tax-base.xlsx", max_rows=100)
+
+    assert parsed.sheet_name == "发票基础信息"
+    assert len(parsed.rows) == 1
+    assert parsed.rows[0]["发票号码"] == "INV-BASE-001"
+    assert parsed.ignored_row_count == 1
+    assert parsed.summary_sheet_name == "信息汇总表"
+    assert parsed.summary_validation["status"] == "matched"
+    assert parsed.summary_validation["baseInvoiceCount"] == 1
+    assert parsed.summary_validation["summaryInvoiceCount"] == 1
+    assert parsed.summary_validation["baseTotals"]["total_amount"] == "113.00"
+
+
+def test_tax_xlsx_rejects_summary_without_base_sheet():
+    from openpyxl import Workbook
+
+    workbook = Workbook()
+    workbook.active.title = "信息汇总表"
+    workbook.active.append(["发票号码", "金额", "税额", "价税合计"])
+    output = BytesIO()
+    workbook.save(output)
+    workbook.close()
+
+    with pytest.raises(ValueError, match="必须包含「发票基础信息」"):
+        parse_tax_invoice_export(output.getvalue(), "summary-only.xlsx", max_rows=100)
 
 
 def test_tax_import_normalizes_rows_is_idempotent_and_links_explicit_order(

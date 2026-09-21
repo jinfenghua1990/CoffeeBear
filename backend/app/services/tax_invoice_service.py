@@ -6,6 +6,7 @@ import hashlib
 import mimetypes
 import re
 from collections import Counter
+from dataclasses import replace
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -2033,6 +2034,11 @@ def _ingest_rows(
         record.row_index: record
         for record in db.query(TaxInvoiceImportRecord).filter_by(import_id=batch.id).all()
     }
+    # 明细 Sheet 属于可重建的辅助层；重处理时旧明细行保留审计痕迹，但不再参与展示合计。
+    for record in records_by_index.values():
+        payload = record.payload if isinstance(record.payload, dict) else {}
+        if payload.get("__sheetRole") == "detail":
+            record.row_status = "deleted"
     recognized = 0
     matched = 0
     needs_review = 0
@@ -2188,15 +2194,77 @@ def _ingest_rows(
                     record.recognition_status = "needs_review"
                     record.error_summary = review_reason
 
+    detail_needs_review = 0
+    if parsed.detail_rows:
+        detail_parsed = replace(
+            parsed,
+            sheet_name=parsed.detail_sheet_name,
+            headers=parsed.detail_headers,
+            mapping=parsed.detail_mapping,
+            rows=parsed.detail_rows,
+        )
+        detail_start = len(parsed.rows)
+        for detail_index, raw in enumerate(parsed.detail_rows, start=1):
+            row_index = detail_start + detail_index
+            record = records_by_index.get(row_index)
+            if record is None:
+                record = TaxInvoiceImportRecord(import_id=batch.id, row_index=row_index)
+                db.add(record)
+                records_by_index[row_index] = record
+            normalized, error = _normalize_row(raw, detail_parsed)
+            record.payload = {
+                **raw,
+                "__sheetRole": "detail",
+                "__sheetName": parsed.detail_sheet_name,
+            }
+            record.row_status = "active"
+            record.error_summary = error
+            if error:
+                record.recognition_status = "needs_review"
+                record.invoice_id = None
+                detail_needs_review += 1
+                continue
+            invoice = processed_invoices.get(normalized["invoice_key"])
+            if invoice is None:
+                invoice = db.query(TaxInvoice).filter_by(invoice_key=normalized["invoice_key"]).first()
+            if invoice is None:
+                record.recognition_status = "needs_review"
+                record.invoice_id = None
+                record.error_summary = "明细行未找到对应的发票基础信息"
+                detail_needs_review += 1
+                continue
+            record.recognition_status = "detail"
+            record.invoice_id = invoice.id
+            record.error_summary = ""
+    needs_review += detail_needs_review
+
     batch.sheet_name = parsed.sheet_name
     batch.headers = parsed.headers
-    batch.mapping = parsed.mapping
+    batch.mapping = {
+        **parsed.mapping,
+        "__ignoredRowCount": parsed.ignored_row_count,
+        "__sheetRoles": {
+            "primary": parsed.sheet_name,
+            "summary": parsed.summary_sheet_name,
+            "detail": parsed.detail_sheet_name,
+        },
+        "__summaryValidation": parsed.summary_validation,
+    }
+    if parsed.detail_sheet_name:
+        batch.mapping["__detailHeaders"] = parsed.detail_headers
     batch.row_count = len(parsed.rows)
     batch.recognized_row_count = recognized
     batch.matched_row_count = matched
     batch.needs_review_count = needs_review
     batch.status = "needs_review" if needs_review else "parsed"
-    batch.error_summary = f"{needs_review} 行需要人工核对" if needs_review else ""
+    errors: list[str] = []
+    if needs_review:
+        errors.append(f"{needs_review} 行需要人工核对")
+    if parsed.summary_validation.get("status") == "mismatch":
+        mismatches = parsed.summary_validation.get("mismatches") or []
+        errors.append("税局数据校验异常：" + "；".join(str(item) for item in mismatches))
+        batch.status = "needs_review"
+    batch.error_summary = "；".join(errors)
     return recognized, matched, needs_review
 
 

@@ -11,7 +11,7 @@ import io
 import re
 import unicodedata
 import zipfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -47,6 +47,15 @@ class ParsedTaxInvoiceExport:
     rows: list[dict[str, str]]
     mapping: dict[str, str]
     direction_hint: str
+    ignored_row_count: int = 0
+    summary_sheet_name: str = ""
+    summary_headers: list[str] = field(default_factory=list)
+    summary_mapping: dict[str, str] = field(default_factory=dict)
+    summary_validation: dict[str, Any] = field(default_factory=dict)
+    detail_sheet_name: str = ""
+    detail_headers: list[str] = field(default_factory=list)
+    detail_mapping: dict[str, str] = field(default_factory=dict)
+    detail_rows: list[dict[str, str]] = field(default_factory=list)
 
 
 def normalize_header(value: object) -> str:
@@ -64,6 +73,20 @@ def cell_text(value: Any) -> str:
     if isinstance(value, Decimal):
         return format(value, "f")
     return str(value).strip()
+
+
+def _decimal_value(value: object) -> Decimal | None:
+    text = cell_text(value).replace(",", "").replace("￥", "").replace("¥", "")
+    if not text or text in {"-", "--", "/", "—", "――", "－"}:
+        return None
+    negative = text.startswith("(") and text.endswith(")")
+    if negative:
+        text = text[1:-1].strip()
+    try:
+        number = Decimal(text)
+    except Exception:
+        return None
+    return -number if negative else number
 
 
 def resolve_mapping(headers: list[str]) -> dict[str, str]:
@@ -171,7 +194,106 @@ def _validate_xlsx(content: bytes) -> None:
         raise ValueError("XLSX 解压后的内容超过安全上限")
 
 
-def _parse_xlsx(content: bytes, *, max_rows: int) -> tuple[str, list[str], list[dict[str, str]]]:
+def _sheet_totals(
+    rows: list[dict[str, str]], mapping: dict[str, str], *, unique_invoices: bool
+) -> tuple[int, dict[str, Decimal | None]]:
+    invoice_keys: set[str] = set()
+    totals: dict[str, Decimal | None] = {
+        "amount_excl_tax": None,
+        "tax_amount": None,
+        "total_amount": None,
+    }
+    for row in rows:
+        invoice_code = row.get(mapping.get("invoice_code", ""), "")
+        invoice_number = row.get(mapping.get("invoice_number", ""), "")
+        invoice_key = f"{invoice_code}|{invoice_number}".strip("|")
+        if not invoice_key:
+            continue
+        already_seen = bool(invoice_key and invoice_key in invoice_keys)
+        if invoice_key:
+            invoice_keys.add(invoice_key)
+        if unique_invoices and already_seen:
+            continue
+        for field in totals:
+            column = mapping.get(field)
+            value = _decimal_value(row.get(column, "")) if column else None
+            if value is None:
+                continue
+            totals[field] = (totals[field] or Decimal("0")) + value
+    return len(invoice_keys), totals
+
+
+def _validate_summary(
+    base_rows: list[dict[str, str]],
+    base_mapping: dict[str, str],
+    summary_rows: list[dict[str, str]],
+    summary_mapping: dict[str, str],
+    summary_sheet_name: str,
+) -> dict[str, Any]:
+    if not summary_sheet_name:
+        return {
+            "status": "not_available",
+            "reason": "未找到信息汇总表",
+        }
+    if not summary_rows:
+        return {
+            "status": "not_available",
+            "sheetName": summary_sheet_name,
+            "reason": "信息汇总表没有可校验数据行",
+        }
+
+    base_count, base_totals = _sheet_totals(base_rows, base_mapping, unique_invoices=True)
+    summary_count, summary_totals = _sheet_totals(summary_rows, summary_mapping, unique_invoices=False)
+    fields = ("amount_excl_tax", "tax_amount", "total_amount")
+    labels = {
+        "amount_excl_tax": "金额",
+        "tax_amount": "税额",
+        "total_amount": "价税合计",
+    }
+    mismatches: list[str] = []
+    if base_count != summary_count:
+        mismatches.append(f"发票张数：基础信息={base_count}，信息汇总表={summary_count}")
+    for field in fields:
+        base_value = base_totals[field]
+        summary_value = summary_totals[field]
+        if base_value is None or summary_value is None:
+            continue
+        if abs(base_value - summary_value) > Decimal("0.02"):
+            mismatches.append(
+                f"{labels[field]}：基础信息={base_value.quantize(Decimal('0.01'))}，"
+                f"信息汇总表={summary_value.quantize(Decimal('0.01'))}"
+            )
+    return {
+        "status": "mismatch" if mismatches else "matched",
+        "sheetName": summary_sheet_name,
+        "baseInvoiceCount": base_count,
+        "summaryInvoiceCount": summary_count,
+        "baseTotals": {
+            field: str(value.quantize(Decimal("0.01"))) if value is not None else None
+            for field, value in base_totals.items()
+        },
+        "summaryTotals": {
+            field: str(value.quantize(Decimal("0.01"))) if value is not None else None
+            for field, value in summary_totals.items()
+        },
+        "mismatches": mismatches,
+    }
+
+
+def _parse_xlsx(content: bytes, *, max_rows: int) -> tuple[
+    str,
+    list[str],
+    list[dict[str, str]],
+    int,
+    str,
+    list[str],
+    dict[str, str],
+    dict[str, Any],
+    str,
+    list[str],
+    dict[str, str],
+    list[dict[str, str]],
+]:
     from openpyxl import load_workbook
 
     _validate_xlsx(content)
@@ -179,25 +301,105 @@ def _parse_xlsx(content: bytes, *, max_rows: int) -> tuple[str, list[str], list[
         workbook = load_workbook(io.BytesIO(content), read_only=True, data_only=True)
     except Exception as exc:
         raise ValueError("无法读取 XLSX 文件") from exc
-    best: tuple[int, str, list[list[object]]] | None = None
-    try:
-        for worksheet in workbook.worksheets:
-            sample = [list(row) for row in worksheet.iter_rows(max_row=20, values_only=True)]
-            score = max((_header_score(row) for row in sample), default=-1)
-            if best is None or score > best[0]:
-                best = (score, worksheet.title, sample)
-        if best is None or best[0] < 5:
-            raise ValueError("未找到含发票表头的工作表")
-        _, sheet_name, sample = best
-        worksheet = workbook[sheet_name]
+    def parse_worksheet(worksheet) -> tuple[list[str], list[dict[str, str]]]:
+        sample = [list(row) for row in worksheet.iter_rows(max_row=20, values_only=True)]
         headers, rows = _rows_to_records(
             worksheet.iter_rows(values_only=True),
             header_index=_find_header_row(sample),
             max_rows=max_rows,
         )
+        return headers, rows
+
+    def role(title: str) -> str:
+        normalized = normalize_header(title)
+        if "发票基础信息" in normalized:
+            return "primary"
+        if "信息汇总" in normalized:
+            return "summary"
+        if "发票明细" in normalized or "明细信息" in normalized:
+            return "detail"
+        return "other"
+
+    try:
+        primary = [worksheet for worksheet in workbook.worksheets if role(worksheet.title) == "primary"]
+        if len(primary) > 1:
+            raise ValueError("税局文件包含多个「发票基础信息」Sheet，无法确定主表")
+        if primary:
+            primary_sheet = primary[0]
+        else:
+            raise ValueError("税局 XLSX 必须包含「发票基础信息」Sheet，不能使用「信息汇总表」作为发票主数据")
+
+        headers, rows = parse_worksheet(primary_sheet)
+        primary_mapping = resolve_mapping(headers)
+        filtered_rows: list[dict[str, str]] = []
+        ignored_row_count = 0
+        total_markers = {"合计行", "总计", "合计"}
+        for row in rows:
+            invoice_code = row.get(primary_mapping.get("invoice_code", ""), "")
+            invoice_number = row.get(primary_mapping.get("invoice_number", ""), "")
+            row_text = " ".join(row.values())
+            if any(token in row_text for token in total_markers) and (
+                (not invoice_code and not invoice_number)
+                or invoice_code in total_markers
+                or invoice_number in total_markers
+            ):
+                ignored_row_count += 1
+                continue
+            filtered_rows.append(row)
+        rows = filtered_rows
+
+        summary_sheets = [worksheet for worksheet in workbook.worksheets if role(worksheet.title) == "summary"]
+        summary_headers: list[str] = []
+        summary_rows: list[dict[str, str]] = []
+        summary_sheet_names: list[str] = []
+        for worksheet in summary_sheets:
+            try:
+                current_headers, current_rows = parse_worksheet(worksheet)
+            except ValueError:
+                continue
+            if not summary_headers:
+                summary_headers = current_headers
+            summary_rows.extend(current_rows)
+            summary_sheet_names.append(worksheet.title)
+
+        detail_sheets = [worksheet for worksheet in workbook.worksheets if role(worksheet.title) == "detail"]
+        detail_headers: list[str] = []
+        detail_rows: list[dict[str, str]] = []
+        detail_sheet_names: list[str] = []
+        for worksheet in detail_sheets:
+            try:
+                current_headers, current_rows = parse_worksheet(worksheet)
+            except ValueError:
+                continue
+            if not detail_headers:
+                detail_headers = current_headers
+            detail_rows.extend(current_rows)
+            detail_sheet_names.append(worksheet.title)
     finally:
         workbook.close()
-    return sheet_name, headers, rows
+    mapping = resolve_mapping(headers)
+    summary_mapping = resolve_mapping(summary_headers)
+    summary_validation = _validate_summary(
+        rows,
+        mapping,
+        summary_rows,
+        summary_mapping,
+        "、".join(summary_sheet_names),
+    )
+    return (
+        primary_sheet.title,
+        headers,
+        rows,
+        ignored_row_count,
+        "、".join(summary_sheet_names),
+        summary_headers,
+        summary_mapping,
+        summary_validation,
+        "、".join(detail_sheet_names),
+        detail_headers,
+        resolve_mapping(detail_headers),
+        detail_rows,
+    )
 
 
 def _decode_csv(content: bytes) -> str:
@@ -228,9 +430,31 @@ def parse_tax_invoice_export(content: bytes, original_name: str, *, max_rows: in
     if extension not in ALLOWED_EXTENSIONS:
         raise ValueError("仅支持税务系统导出的 XLSX 或 CSV 文件")
     if extension == ".xlsx":
-        sheet_name, headers, rows = _parse_xlsx(content, max_rows=max_rows)
+        (
+            sheet_name,
+            headers,
+            rows,
+            ignored_row_count,
+            summary_sheet_name,
+            summary_headers,
+            summary_mapping,
+            summary_validation,
+            detail_sheet_name,
+            detail_headers,
+            detail_mapping,
+            detail_rows,
+        ) = _parse_xlsx(content, max_rows=max_rows)
     else:
         sheet_name, headers, rows = _parse_csv(content, max_rows=max_rows)
+        summary_sheet_name = ""
+        summary_headers = []
+        summary_mapping = {}
+        summary_validation = {}
+        ignored_row_count = 0
+        detail_sheet_name = ""
+        detail_headers = []
+        detail_mapping = {}
+        detail_rows = []
     mapping = resolve_mapping(headers)
     normalized_headers = " ".join(normalize_header(value) for value in headers)
     # “进销项”是税务系统常见的综合字段名，不能因为包含“销项”就误判为销项。
@@ -242,4 +466,19 @@ def parse_tax_invoice_export(content: bytes, original_name: str, *, max_rows: in
         direction_hint = "output"
     else:
         direction_hint = "unknown"
-    return ParsedTaxInvoiceExport(sheet_name, headers, rows, mapping, direction_hint)
+    return ParsedTaxInvoiceExport(
+        sheet_name,
+        headers,
+        rows,
+        mapping,
+        direction_hint,
+        ignored_row_count=ignored_row_count,
+        summary_sheet_name=summary_sheet_name,
+        summary_headers=summary_headers,
+        summary_mapping=summary_mapping,
+        summary_validation=summary_validation,
+        detail_sheet_name=detail_sheet_name,
+        detail_headers=detail_headers,
+        detail_mapping=detail_mapping,
+        detail_rows=detail_rows,
+    )
