@@ -260,7 +260,7 @@ def update_purchase(db: Session, purchase_id: int, *, supplier_name: str | None 
 
     - supplier_name / ordered_on / note：直接覆盖；
     - items：按 consumable_id 全量对齐（前端整体 PATCH），删旧 + 增新；
-      * 单价：随时可改；同步更新收货流水的成本快照，保持台账口径一致；
+      * 单价：随时可改采购单；已发生收货流水保留当时成本快照，不回写历史事实；
       * 数量：不能小于该行已收数量（小于 = 先删整单重录，收货流水不能凭空缩水）；
       * 删行：仅未收货的行可删；
       * 收货后改数量会重算状态（received ↔ partial）；
@@ -278,6 +278,16 @@ def update_purchase(db: Session, purchase_id: int, *, supplier_name: str | None 
             raise ValueError("供应商不能为空")
         row.supplier_name = trimmed
     if ordered_on is not None:
+        earliest_receipt = (
+            db.query(ConsumableReceipt)
+            .filter_by(purchase_id=purchase_id)
+            .order_by(ConsumableReceipt.received_on.asc(), ConsumableReceipt.id.asc())
+            .first()
+        )
+        if earliest_receipt is not None and ordered_on > earliest_receipt.received_on:
+            raise ValueError(
+                f"采购日期不能晚于已登记收货日期 {earliest_receipt.received_on.isoformat()}"
+            )
         row.ordered_on = ordered_on
     if note is not None:
         row.note = note.strip()
@@ -300,7 +310,6 @@ def update_purchase(db: Session, purchase_id: int, *, supplier_name: str | None 
                 raise ValueError("耗材不存在或已停用")
         by_id = {li.consumable_id: li for li in existing_items}
         seen: set[int] = set()
-        cost_changed: list[tuple[ConsumablePurchaseItem, Decimal]] = []
         for it in items:
             cid = int(it["consumable_id"])
             seen.add(cid)
@@ -312,8 +321,6 @@ def update_purchase(db: Session, purchase_id: int, *, supplier_name: str | None 
                 received = Decimal(str(li.received_qty or 0))
                 if new_qty < received:
                     raise ValueError(f"{li.name} 已收货 {received}，采购数量不能小于已收数量；如需减少请删除整单重录")
-                if li.unit_cost != new_cost:
-                    cost_changed.append((li, new_cost))
                 li.quantity = new_qty
                 li.unit_cost = new_cost
                 li.code = material.code
@@ -332,17 +339,7 @@ def update_purchase(db: Session, purchase_id: int, *, supplier_name: str | None 
                     raise ValueError(f"{li.name} 已有收货记录，不能删除该行；如需调整请删除整单重录")
                 db.delete(li)
 
-        # 单价变了 → 同步收货流水的成本快照，台账口径保持一致
-        if cost_changed:
-            receipt_ids = [r.id for r in db.query(ConsumableReceipt).filter_by(purchase_id=purchase_id).all()]
-            if receipt_ids:
-                for li, new_cost in cost_changed:
-                    db.query(ConsumableTransaction).filter(
-                        ConsumableTransaction.source_type == "consumable_receipt",
-                        ConsumableTransaction.source_id.in_(receipt_ids),
-                        ConsumableTransaction.consumable_id == li.consumable_id,
-                    ).update({"unit_cost": new_cost}, synchronize_session=False)
-
+        # 已发生的收货流水是历史成本快照；采购单改单价不得反写库存台账。
         # 收货后改了数量 → 重算状态（收齐=received，收过一部分=partial）
         refreshed = db.query(ConsumablePurchaseItem).filter_by(purchase_id=purchase_id).all()
         if any(Decimal(str(li.received_qty or 0)) > 0 for li in refreshed):
@@ -375,6 +372,7 @@ def delete_purchase(db: Session, purchase_id: int) -> ConsumablePurchase:
     if receipts:
         receipt_ids = [r.id for r in receipts]
         location_by_receipt = {r.id: (r.location or "own") for r in receipts}
+        warehouse_by_receipt = {r.id: r.warehouse_id for r in receipts}
         number_by_receipt = {r.id: r.number for r in receipts}
         txs = db.query(ConsumableTransaction).filter(
             ConsumableTransaction.source_type == "consumable_receipt",
@@ -386,8 +384,9 @@ def delete_purchase(db: Session, purchase_id: int) -> ConsumablePurchase:
                 db, consumable_id=tx.consumable_id, transaction_type="manual",
                 quantity=str(-Decimal(str(tx.quantity))),
                 unit_cost=str(tx.unit_cost) if tx.unit_cost is not None else None,
-                source_type="manual", source_id=None,
+                source_type="consumable_receipt_reversal", source_id=tx.id,
                 location=location_by_receipt.get(tx.source_id or 0, "own"),
+                warehouse_id=warehouse_by_receipt.get(tx.source_id or 0),
                 note=f"删除 {row.number} 冲销入库 / {number_by_receipt.get(tx.source_id or 0, '')}",
                 commit=False,
             )

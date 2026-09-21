@@ -463,6 +463,14 @@ def _consumable_inbound_rows(db: Session) -> list[dict[str, Any]]:
 
     groups: dict[tuple[str, int | None], list[ConsumableTransaction]] = {}
     for tx in transactions:
+        # 删除耗材采购单时，原 purchase 流水按审计要求保留，并通过反向流水冲销。
+        # 这类流水的 consumable_receipt 已不存在，不能继续在“到仓入库单”里显示成有效入库。
+        if (
+            tx.source_type == "consumable_receipt"
+            and tx.source_id is not None
+            and tx.source_id not in receipts
+        ):
+            continue
         groups.setdefault((tx.source_type or "manual", tx.source_id), []).append(tx)
 
     rows: list[dict[str, Any]] = []

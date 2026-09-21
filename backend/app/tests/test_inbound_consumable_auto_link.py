@@ -2,12 +2,13 @@ from decimal import Decimal
 from uuid import uuid4
 
 from app.models.catalog import ProductSku
-from app.models.consumable import Consumable, ConsumableSkuMapping, InboundConsumableUsage
+from app.models.consumable import Consumable, ConsumableSkuMapping, ConsumableTransaction, InboundConsumableUsage
 from app.models.jackyun import JackyunGoodsDocument, JackyunGoodsDocumentItem
 from app.models.procurement_chain import ProcurementChainLink
 from app.models.purchase import ExternalPurchaseOrder, PurchaseAllocationItem
 from app.services.consumable_service import (
     auto_apply_inbound_usage,
+    set_inbound_usage,
     suggest_inbound_usage,
     upsert_mapping,
 )
@@ -224,3 +225,54 @@ def test_explicit_manual_usage_is_not_replaced_by_mapping_backfill(db_session):
     db_session.refresh(material)
     assert usage.quantity == Decimal("3.0000")
     assert material.used_qty == Decimal("3.0000")
+
+
+def test_recomputing_inbound_usage_keeps_append_only_inventory_ledger(db_session):
+    sku = _sku(db_session, "RECALC")
+    material = _material(db_session, "RECALC", stock="100")
+    _, _, _, link, _ = _chain(db_session, "RECALC", sku, "10")
+    link.match_method = "manual"
+    db_session.flush()
+
+    set_inbound_usage(
+        db_session,
+        link_id=link.id,
+        enabled=True,
+        items=[{"consumable_id": material.id, "quantity": "3"}],
+        note="首次耗材登记",
+    )
+    first_tx = db_session.query(ConsumableTransaction).filter_by(
+        source_type="inbound_usage",
+        consumable_id=material.id,
+        transaction_type="consume",
+    ).one()
+    first_tx_id = first_tx.id
+
+    set_inbound_usage(
+        db_session,
+        link_id=link.id,
+        enabled=True,
+        items=[{"consumable_id": material.id, "quantity": "4"}],
+        note="重新核算耗材",
+    )
+
+    db_session.refresh(material)
+    assert material.stock_qty == Decimal("96.0000")
+    assert material.used_qty == Decimal("4.0000")
+    assert db_session.get(ConsumableTransaction, first_tx_id) is not None
+
+    consume_rows = db_session.query(ConsumableTransaction).filter_by(
+        consumable_id=material.id,
+        transaction_type="consume",
+    ).order_by(ConsumableTransaction.id).all()
+    reversal_rows = db_session.query(ConsumableTransaction).filter_by(
+        consumable_id=material.id,
+        source_type="inbound_usage_reversal",
+    ).all()
+
+    assert [row.quantity for row in consume_rows] == [
+        Decimal("3.0000"),
+        Decimal("4.0000"),
+    ]
+    assert len(reversal_rows) == 1
+    assert reversal_rows[0].quantity == Decimal("3.0000")

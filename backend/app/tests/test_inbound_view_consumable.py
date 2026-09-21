@@ -175,3 +175,30 @@ def test_search_matches_consumable_sku_and_material_name(db_session):
 
     miss = list_inbound_documents(db_session, q="PYTEST-NO-SUCH-TERM", limit=500)
     assert all(row["source"] != "consumable" for row in miss["rows"])
+
+
+def test_deleted_consumable_receipt_does_not_leave_ghost_inbound(db_session):
+    warehouse = _warehouse(db_session, "DELETED")
+    material = _material(db_session, "DELETED")
+    purchase, receipt = _consumable_purchase(db_session, "DELETED", warehouse)
+    tx = _tx(
+        db_session, "DELETED", material, warehouse,
+        tx_type="purchase", quantity="5", receipt=receipt,
+    )
+    db_session.flush()
+
+    # 删除采购/收货时库存台账保留原 purchase 流水用于审计，但收货事实本身已撤销。
+    # 与正式 delete_purchase 相同：先解除/删除子收货事实，再删除采购主单。
+    db_session.delete(receipt)
+    db_session.flush()
+    db_session.delete(purchase)
+    db_session.flush()
+
+    payload = list_inbound_documents(db_session, limit=500)
+
+    assert db_session.get(ConsumableTransaction, tx.id) is not None
+    assert all(
+        row["id"] != -tx.id
+        for row in payload["rows"]
+        if row["source"] == "consumable"
+    )

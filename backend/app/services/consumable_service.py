@@ -366,6 +366,29 @@ def record_transaction(
             source_type=source_type, source_id=source_id, consumable_id=consumable_id
         ).first()
         if existing:
+            expected_location = (
+                None
+                if transaction_type == "send_factory"
+                else "factory"
+                if transaction_type == "factory_receive"
+                else location
+            )
+            if (
+                existing.transaction_type,
+                to_decimal(existing.quantity),
+                to_decimal(existing.unit_cost) if existing.unit_cost is not None else None,
+                existing.warehouse_id,
+                existing.location or None,
+                existing.note or "",
+            ) != (
+                transaction_type,
+                qty,
+                cost,
+                warehouse_id,
+                expected_location,
+                note.strip(),
+            ):
+                raise ValueError("同一业务来源已经写入不同的耗材流水，请先核对原始单据")
             return existing
 
     stock_before = to_decimal(row.stock_qty)
@@ -381,7 +404,9 @@ def record_transaction(
             row.stock_qty = stock_before + qty
         row.purchased_qty = to_decimal(row.purchased_qty) + qty
     elif transaction_type == "send_factory":
-        # 发往工厂：自有仓 → 在途
+        # 发往工厂是实际库存转移，不能像历史补录 consume 一样允许负库存。
+        if stock_before - qty < 0:
+            raise ValueError(f"自有仓库存不足（当前库存 {stock_before}），不能发往工厂 {qty}")
         row.stock_qty = stock_before - qty
         row.transit_qty = transit + qty
     elif transaction_type == "factory_receive":
@@ -408,6 +433,8 @@ def record_transaction(
                 raise ValueError(f"工厂库存不足（当前工厂库存 {factory_before}），不能报损 {qty}")
             row.factory_qty = factory_before - qty
         else:
+            if stock_before - qty < 0:
+                raise ValueError(f"自有仓库存不足（当前库存 {stock_before}），不能报损 {qty}")
             row.stock_qty = stock_before - qty
     else:  # stocktake / adjustment / manual：有符号差额
         tx_location = location
@@ -636,28 +663,60 @@ def inbound_usage_rows(db: Session, link_id: int) -> list[dict]:
 
 
 def _reverse_inbound_usage(db: Session, link_id: int) -> None:
-    """撤销一条入库关联的耗材扣减，供更换/解除/重新编辑使用。"""
+    """撤销一条入库关联的耗材扣减，但保留原库存流水作为审计事实。"""
     from app.models.procurement_chain import ProcurementChainLink
+
     db.scalar(select(ProcurementChainLink).where(ProcurementChainLink.id == link_id).with_for_update())
-    usages = db.query(InboundConsumableUsage).filter_by(link_id=link_id).order_by(InboundConsumableUsage.consumable_id).all()
+    usages = db.query(InboundConsumableUsage).filter_by(
+        link_id=link_id
+    ).order_by(InboundConsumableUsage.consumable_id).all()
     for usage in usages:
-        material = db.scalar(select(Consumable).where(Consumable.id == usage.consumable_id).with_for_update().execution_options(populate_existing=True))
+        material = db.scalar(
+            select(Consumable)
+            .where(Consumable.id == usage.consumable_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        # 新流水以 usage.id 作为幂等来源；同时兼容历史 inbound_link/link_id 流水。
         tx = db.query(ConsumableTransaction).filter_by(
-            source_type="inbound_link", source_id=link_id, consumable_id=usage.consumable_id
+            source_type="inbound_usage",
+            source_id=usage.id,
+            consumable_id=usage.consumable_id,
         ).first()
+        if tx is None:
+            tx = db.query(ConsumableTransaction).filter_by(
+                source_type="inbound_link",
+                source_id=link_id,
+                consumable_id=usage.consumable_id,
+            ).first()
+
         tx_warehouse = db.get(Warehouse, tx.warehouse_id) if tx is not None and tx.warehouse_id else None
         is_factory = tx is not None and (
             tx.location == "factory"
             or (tx_warehouse is not None and tx_warehouse.warehouse_type == "factory")
         )
+        quantity = to_decimal(usage.quantity)
+
+        # 真实库存流水必须 append-only：保留原 consume，新增等量正向冲销流水。
+        record_transaction(
+            db,
+            consumable_id=usage.consumable_id,
+            transaction_type="manual",
+            quantity=str(quantity),
+            unit_cost=str(tx.unit_cost) if tx is not None and tx.unit_cost is not None else None,
+            source_type="inbound_usage_reversal",
+            source_id=usage.id,
+            note=f"撤销入库关联 #{link_id} 耗材使用"
+            + (f"；原流水 #{tx.id}" if tx is not None else ""),
+            location="factory" if is_factory else "own",
+            warehouse_id=tx.warehouse_id if tx is not None else None,
+            commit=False,
+        )
         if material is not None:
-            if is_factory:
-                material.factory_qty = to_decimal(material.factory_qty) + to_decimal(usage.quantity)
-            else:
-                material.stock_qty = to_decimal(material.stock_qty) + to_decimal(usage.quantity)
-            material.used_qty = max(Decimal("0"), to_decimal(material.used_qty) - to_decimal(usage.quantity))
-        if tx is not None:
-            db.delete(tx)
+            material.used_qty = max(
+                Decimal("0"),
+                to_decimal(material.used_qty) - quantity,
+            )
         db.delete(usage)
 
 
@@ -747,21 +806,23 @@ def set_inbound_usage(
                 )
                 usage_warehouse = receipt_match[1] if receipt_match else None
             usage_location = "factory" if usage_warehouse is not None and usage_warehouse.warehouse_type == "factory" else "own"
-            db.add(InboundConsumableUsage(
+            usage = InboundConsumableUsage(
                 link_id=link_id,
                 inbound_document_id=link.target_id,
                 consumable_id=material_id,
                 quantity=quantity,
                 note=note.strip(),
-            ))
+            )
+            db.add(usage)
+            db.flush()
             record_transaction(
                 db,
                 consumable_id=material_id,
                 transaction_type="consume",
                 quantity=str(quantity),
                 unit_cost=str(material.purchase_unit_cost) if material.purchase_unit_cost is not None else None,
-                source_type="inbound_link",
-                source_id=link_id,
+                source_type="inbound_usage",
+                source_id=usage.id,
                 note=note.strip() or f"入库单关联 #{link.target_id} 确认耗材出库",
                 location=usage_location,
                 warehouse_id=usage_warehouse.id if usage_warehouse is not None else None,
@@ -782,8 +843,18 @@ def list_transactions(db: Session, consumable_id: int, limit: int = 100) -> list
     ).limit(limit).all()
     receipt_ids = [row.source_id for row in rows if row.source_type == "consumable_receipt"]
     receipts = {r.id: r for r in db.query(ConsumableReceipt).filter(ConsumableReceipt.id.in_(receipt_ids)).all()} if receipt_ids else {}
-    link_ids = [row.source_id for row in rows if row.source_type == "inbound_link"]
-    links = {link.id: link for link in db.query(ProcurementChainLink).filter(ProcurementChainLink.id.in_(link_ids)).all()} if link_ids else {}
+    legacy_link_ids = [row.source_id for row in rows if row.source_type == "inbound_link"]
+    usage_ids = [row.source_id for row in rows if row.source_type == "inbound_usage"]
+    usages = {
+        usage.id: usage
+        for usage in db.query(InboundConsumableUsage).filter(InboundConsumableUsage.id.in_(usage_ids)).all()
+    } if usage_ids else {}
+    usage_link_ids = [usage.link_id for usage in usages.values()]
+    link_ids = sorted(set(legacy_link_ids + usage_link_ids))
+    links = {
+        link.id: link
+        for link in db.query(ProcurementChainLink).filter(ProcurementChainLink.id.in_(link_ids)).all()
+    } if link_ids else {}
     inbound_document_ids = {link.target_id for link in links.values() if link.target_id is not None}
     inbound_documents = {
         document.id: document
@@ -794,6 +865,14 @@ def list_transactions(db: Session, consumable_id: int, limit: int = 100) -> list
         warehouse.id: warehouse
         for warehouse in db.query(Warehouse).filter(Warehouse.id.in_(warehouse_ids)).all()
     } if warehouse_ids else {}
+
+    def _source_link(row: ConsumableTransaction):
+        if row.source_type == "inbound_link" and row.source_id in links:
+            return links[row.source_id]
+        if row.source_type == "inbound_usage" and row.source_id in usages:
+            return links.get(usages[row.source_id].link_id)
+        return None
+
     return [
         {
             "id": row.id,
@@ -813,34 +892,30 @@ def list_transactions(db: Session, consumable_id: int, limit: int = 100) -> list
             "note": row.note,
             "occurredAt": row.occurred_at.isoformat() if row.occurred_at else None,
             "purchaseId": receipts[row.source_id].purchase_id if row.source_type == "consumable_receipt" and row.source_id in receipts else None,
-            "orderId": links[row.source_id].workbench_order_id if row.source_type == "inbound_link" and row.source_id in links else None,
+            "orderId": _source_link(row).workbench_order_id if _source_link(row) is not None else None,
             "inboundDocumentId": (
-                inbound_documents[links[row.source_id].target_id].id
-                if row.source_type == "inbound_link"
-                and row.source_id in links
-                and links[row.source_id].target_id in inbound_documents
+                inbound_documents[_source_link(row).target_id].id
+                if _source_link(row) is not None
+                and _source_link(row).target_id in inbound_documents
                 else None
             ),
             "inboundDocumentNo": (
-                inbound_documents[links[row.source_id].target_id].goodsdoc_no
-                if row.source_type == "inbound_link"
-                and row.source_id in links
-                and links[row.source_id].target_id in inbound_documents
+                inbound_documents[_source_link(row).target_id].goodsdoc_no
+                if _source_link(row) is not None
+                and _source_link(row).target_id in inbound_documents
                 else ""
             ),
             "inboundDocumentAt": (
-                inbound_documents[links[row.source_id].target_id].document_at.isoformat()
-                if row.source_type == "inbound_link"
-                and row.source_id in links
-                and links[row.source_id].target_id in inbound_documents
-                and inbound_documents[links[row.source_id].target_id].document_at is not None
+                inbound_documents[_source_link(row).target_id].document_at.isoformat()
+                if _source_link(row) is not None
+                and _source_link(row).target_id in inbound_documents
+                and inbound_documents[_source_link(row).target_id].document_at is not None
                 else None
             ),
             "inboundWarehouseName": (
-                inbound_documents[links[row.source_id].target_id].warehouse_name
-                if row.source_type == "inbound_link"
-                and row.source_id in links
-                and links[row.source_id].target_id in inbound_documents
+                inbound_documents[_source_link(row).target_id].warehouse_name
+                if _source_link(row) is not None
+                and _source_link(row).target_id in inbound_documents
                 else ""
             ),
         }
