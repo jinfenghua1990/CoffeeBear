@@ -679,21 +679,26 @@ def _sync_bank_sources(ctx: SyncContext) -> None:
         evidence: dict[str, Any] = {"direction": txn.direction or ""}
         if invoice_partner_ids:
             evidence["invoicePartnerIds"] = invoice_partner_ids
+        raw_name = str(txn.counterparty_name or "").strip()
+        raw_account_no = str(txn.counterparty_account or "").strip()
+        # 利息、手续费等没有对方户名和账号的流水不属于任何往来单位，既不建档也不进待确认。
+        if not raw_name and not raw_account_no and not invoice_partner_ids:
+            continue
         if len(invoice_partner_ids) == 1:
             _write_link(
                 ctx,
                 source_type="bank_transaction",
                 source_id=txn.id,
                 relation_role="counterparty",
-                raw_name=txn.counterparty_name,
-                raw_account_no=txn.counterparty_account,
+                raw_name=raw_name,
+                raw_account_no=raw_account_no,
                 roles=["counterparty"],
                 force_partner=ctx.index.partners[invoice_partner_ids[0]],
                 force_method="invoice_payment_link",
                 force_evidence=evidence,
             )
             continue
-        resolution = ctx.index.resolve(name=txn.counterparty_name, account_no=txn.counterparty_account)
+        resolution = ctx.index.resolve(name=raw_name, account_no=raw_account_no)
         if len(invoice_partner_ids) > 1:
             resolution = Resolution(None, candidates=invoice_partner_ids)
         _write_link(
@@ -701,8 +706,8 @@ def _sync_bank_sources(ctx: SyncContext) -> None:
             source_type="bank_transaction",
             source_id=txn.id,
             relation_role="counterparty",
-            raw_name=txn.counterparty_name,
-            raw_account_no=txn.counterparty_account,
+            raw_name=raw_name,
+            raw_account_no=raw_account_no,
             roles=["counterparty"],
             resolution=resolution,
             force_evidence=evidence,

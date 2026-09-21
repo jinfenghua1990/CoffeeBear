@@ -147,3 +147,20 @@ def test_confirmed_invoice_payment_relation_connects_bank_when_names_differ(db_s
     ).one()
     assert link.partner_id == partner["id"]
     assert link.match_method == "invoice_payment_link"
+
+
+def test_bank_row_without_counterparty_identity_is_skipped(db_session):
+    """利息、手续费等没有对方户名和账号的流水不能建档，也不能让同步报错。"""
+    txn = _bank_txn(db_session, name="", account="", amount="1.26")
+    txn.summary = "利息"
+    db_session.flush()
+
+    service.sync_business_partners(db_session)
+
+    assert service.list_partners(db_session)["total"] == 0
+    assert (
+        db_session.query(BusinessPartnerLink)
+        .filter_by(source_type="bank_transaction", source_id=txn.id)
+        .count()
+        == 0
+    )
