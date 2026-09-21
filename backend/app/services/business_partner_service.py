@@ -880,20 +880,32 @@ def _sync_sales_sources(ctx: SyncContext) -> None:
             )
 
 
-def sync_business_partners(db: Session) -> dict[str, int]:
-    """从所有已落库事实增量回填往来单位和关联，不提交事务。"""
+def sync_business_partners(db: Session) -> dict[str, Any]:
+    """从所有已落库事实增量回填统一主体，并物化到业务表 partner 外键。
+
+    BusinessPartnerLink 继续保留审计证据；V2 正常查询路径使用各业务表自己的
+    partner_id/supplier_partner_id/customer_partner_id。
+    """
     ctx = SyncContext(db)
     _sync_supplier_master(ctx)
     _sync_procurement_sources(ctx)
     _sync_invoice_sources(ctx)
     _sync_bank_sources(ctx)
     _sync_sales_sources(ctx)
+
+    # 局部导入避免 partner_reference_service 反向导入本模块形成循环。
+    from app.services.partner_reference_service import materialize_partner_references
+
+    materialized = materialize_partner_references(db)
     return {
         "createdPartners": ctx.created_partners,
         "updatedPartners": ctx.updated_partners,
         "createdLinks": ctx.created_links,
         "updatedLinks": ctx.updated_links,
         "needsReview": ctx.needs_review,
+        "materializedRefs": int(materialized.get("materialized", 0)),
+        "roleRowsCreated": int(materialized.get("rolesCreated", 0)),
+        "bankAccountsChanged": int(materialized.get("bankAccountsChanged", 0)),
     }
 
 
