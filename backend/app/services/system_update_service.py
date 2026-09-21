@@ -901,6 +901,7 @@ def check_for_updates(*, actor: str = "system", automatic: bool = False) -> dict
                 # 成功完成一次版本核对后，旧安装失败属于历史记录，不再作为
                 # 当前“需要处理”的运行态错误。历史结果仍保留在 lastInstall* / history。
                 "error": "",
+                "rollbackCause": "",
                 "rollbackErrors": [],
                 "lastAutoError": "",
                 "lastAutoErrorAt": "",
