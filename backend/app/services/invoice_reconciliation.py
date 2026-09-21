@@ -34,9 +34,23 @@ TOLERANCE = Decimal("0.05")
 _TRANS = str.maketrans({"（": "(", "）": ")", "　": "", "：": ":", "，": ","})
 
 
+_LEGAL_SUFFIXES = (
+    "有限责任公司", "股份有限公司", "集团有限公司", "有限公司", "股份公司", "公司"
+)
+
+
 def normalize_supplier(name: str | None) -> str:
-    """供应商名归一化：去空白、全角括号/标点转半角、大写。"""
-    return re.sub(r"\s+", "", (name or "").translate(_TRANS)).upper()
+    """供应商名归一化：仅去格式差异与明确企业后缀，不做任意前缀猜测。"""
+    text = re.sub(r"\s+", "", (name or "").translate(_TRANS)).upper()
+    changed = True
+    while text and changed:
+        changed = False
+        for suffix in _LEGAL_SUFFIXES:
+            if text.endswith(suffix) and len(text) > len(suffix):
+                text = text[:-len(suffix)]
+                changed = True
+                break
+    return text
 
 
 def _dec(value: Decimal | float | int | None) -> Decimal:
@@ -44,11 +58,8 @@ def _dec(value: Decimal | float | int | None) -> Decimal:
 
 
 def _matches(name_norm: str, target_norm: str) -> bool:
-    """供应商名宽松匹配：全等，或一方是另一方的前缀（处理"河北鸿鲲食品" vs
-    "河北鸿鲲食品有限公司"这类简称/全称差异）。"""
-    if not name_norm or not target_norm:
-        return False
-    return name_norm == target_norm or name_norm.startswith(target_norm) or target_norm.startswith(name_norm)
+    """只接受归一化后全等，避免简称前缀误配到另一家公司。"""
+    return bool(name_norm and target_norm and name_norm == target_norm)
 
 
 def _manual_link_map(db: Session, inv_ids: list[int], po_rows: list) -> dict[int, list[dict[str, Any]]]:
@@ -62,7 +73,11 @@ def _manual_link_map(db: Session, inv_ids: list[int], po_rows: list) -> dict[int
         return {}
     links = (
         db.query(TaxInvoiceLink)
-        .filter(TaxInvoiceLink.invoice_id.in_(inv_ids), TaxInvoiceLink.match_method == "manual")
+        .filter(
+            TaxInvoiceLink.invoice_id.in_(inv_ids),
+            TaxInvoiceLink.match_method == "manual",
+            TaxInvoiceLink.confirmed.is_(True),
+        )
         .all()
     )
     if not links:
@@ -88,7 +103,11 @@ def _manual_link_map(db: Session, inv_ids: list[int], po_rows: list) -> dict[int
             continue
         if po_id is None:
             continue
-        result.setdefault(lnk.invoice_id, []).append({"linkId": lnk.id, "poId": po_id})
+        result.setdefault(lnk.invoice_id, []).append({
+            "linkId": lnk.id,
+            "poId": po_id,
+            "allocatedAmount": _dec(lnk.allocated_amount) if lnk.allocated_amount is not None else None,
+        })
     return result
 
 
@@ -174,13 +193,24 @@ def reconcile(db: Session, supplier: str | None = None) -> dict[str, Any]:
             covered: list[dict[str, Any]] = []
             consumed_total = Decimal("0")
             remaining_need = amount
+            unknown_manual_allocation = False
             if manual_links:
-                # 手工关联 = 用户意图，按关联逐单消耗（本票不再自动 FIFO）
+                # 手工关联 = 用户意图，严格尊重 link.allocated_amount，不得重新 FIFO 改写金额。
                 for lnk in manual_links:
                     order = po_entry_by_id.get(lnk["poId"])
                     if order is None:
                         continue
-                    take = min(max(order["remaining"], Decimal("0")), remaining_need)
+                    requested = lnk.get("allocatedAmount")
+                    if requested is None:
+                        unknown_manual_allocation = True
+                        continue
+                    take = min(
+                        max(order["remaining"], Decimal("0")),
+                        max(_dec(requested), Decimal("0")),
+                        remaining_need,
+                    )
+                    if take <= 0:
+                        continue
                     covered.append({
                         "orderId": order["orderId"], "orderNo": order["orderNo"],
                         "platform": order["platform"], "date": order["date"],
@@ -193,7 +223,6 @@ def reconcile(db: Session, supplier: str | None = None) -> dict[str, Any]:
                     remaining_need -= take
                     consumed_total += take
                     if order["remaining"] <= TOLERANCE:
-                        # 吃满的订单从所有 FIFO 池移除，避免自动推导重复消耗
                         for p in po_pool.values():
                             p[:] = [o for o in p if o["orderId"] != order["orderId"]]
             else:
@@ -257,7 +286,9 @@ def reconcile(db: Session, supplier: str | None = None) -> dict[str, Any]:
                 "diff": float(diff),
                 "status": "matched" if diff >= -TOLERANCE else "short",
                 "shortReason": (
-                    "date_cutoff"
+                    "manual_allocation_missing"
+                    if diff < -TOLERANCE and manual_links and unknown_manual_allocation
+                    else "date_cutoff"
                     if diff < -TOLERANCE and future_order_count > 0
                     else "insufficient_orders"
                     if diff < -TOLERANCE

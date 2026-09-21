@@ -479,3 +479,75 @@ def test_legacy_unique_invoice_number_selection_maps_to_invoice_key(db_session):
     assert canonical == [invoice.invoice_key]
     selected = service.apply_invoice_selection(report, [invoice.invoice_number])
     assert [row["invoiceKey"] for row in selected["invoiceRows"]] == [invoice.invoice_key]
+
+def test_legacy_null_bank_allocation_uses_full_invoice_amount_in_report(db_session):
+    from app.models.bank import BankTransaction
+
+    token = uuid4().hex[:10]
+    invoice = TaxInvoice(
+        invoice_key=f"pytest-corp-legacy-null-{token}",
+        invoice_number=f"INV-NULL-{token}",
+        direction="input",
+        status="issued",
+        issue_date=datetime(2026, 8, 20, tzinfo=timezone.utc),
+        seller_name=f"历史分摊供应商-{token}",
+        total_amount=Decimal("321.00"),
+        source_system="tax_export",
+        raw={},
+    )
+    txn = BankTransaction(
+        txn_date=date(2026, 8, 21),
+        direction="out",
+        amount=Decimal("321.00"),
+        counterparty_name=invoice.seller_name,
+        fingerprint=f"pytest-corp-null-{token}",
+        raw={},
+    )
+    db_session.add_all([invoice, txn])
+    db_session.flush()
+    db_session.add(TaxInvoiceLink(
+        invoice_id=invoice.id,
+        target_type="bank_transaction",
+        target_id=txn.id,
+        allocated_amount=None,
+        match_method="manual",
+        confirmed=True,
+    ))
+    db_session.commit()
+
+    report = service.build_report(db_session, 2026, 8)
+    row = next(item for item in report["invoiceRows"] if item["invoiceId"] == invoice.id)
+    assert Decimal(row["invoiceCorporatePaidTotal"]) == Decimal("321.00")
+    assert Decimal(row["invoiceOutstandingAmount"]) == Decimal("0")
+    assert row["bankReconciliationStatus"] == "paid"
+    assert Decimal(row["payments"][0]["allocatedAmount"]) == Decimal("321.00")
+
+
+def test_corporate_report_uses_shanghai_invoice_month_boundaries(db_session):
+    from zoneinfo import ZoneInfo
+    from app.config import settings
+
+    tz = ZoneInfo(settings.TZ)
+    token = uuid4().hex[:10]
+    august = TaxInvoice(
+        invoice_key=f"pytest-corp-boundary-a-{token}",
+        invoice_number=f"INV-BOUND-A-{token}",
+        direction="input", status="issued",
+        issue_date=datetime(2026, 8, 31, 23, 30, tzinfo=tz),
+        seller_name=f"边界供应商A-{token}", total_amount=Decimal("10"),
+    )
+    september = TaxInvoice(
+        invoice_key=f"pytest-corp-boundary-s-{token}",
+        invoice_number=f"INV-BOUND-S-{token}",
+        direction="input", status="issued",
+        issue_date=datetime(2026, 9, 1, 0, 30, tzinfo=tz),
+        seller_name=f"边界供应商S-{token}", total_amount=Decimal("20"),
+    )
+    db_session.add_all([august, september])
+    db_session.commit()
+
+    august_ids = {row["invoiceId"] for row in service.build_report(db_session, 2026, 8)["invoiceRows"]}
+    september_ids = {row["invoiceId"] for row in service.build_report(db_session, 2026, 9)["invoiceRows"]}
+    assert august.id in august_ids
+    assert september.id not in august_ids
+    assert september.id in september_ids

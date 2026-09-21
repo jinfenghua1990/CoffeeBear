@@ -407,7 +407,7 @@ def test_detail_export_splits_order_amount_to_sku_lines_by_cost_ratio(client, db
 
 
 def test_import_keeps_only_deal_statuses_and_scope_condition_matches(client, db_session, tmp_path, monkeypatch):
-    """统一成交口径：正常流转状态落库并计入业绩；关闭/退货/取消/待审核一律不落库。"""
+    """统一成交口径：所有订单保留事实；只有正常流转状态计入业绩。"""
     from app.models.sales import SalesOrder
     from app.services.sales_scope import NOT_DEAL_PREFIXES, deal_orders_condition, is_deal_status
 
@@ -441,12 +441,91 @@ def test_import_keeps_only_deal_statuses_and_scope_condition_matches(client, db_
 
     scope = SalesOrder.order_no.like("JYTEST-SCOPE-%")
     kept = {row[0] for row in db_session.query(SalesOrder.order_no).filter(scope).all()}
-    assert kept == {"JYTEST-SCOPE-1", "JYTEST-SCOPE-2", "JYTEST-SCOPE-3", "JYTEST-SCOPE-4"}
+    assert kept == {no for no, _status in rows}
+    assert body["removedCancelled"] == 0
+    assert body["cancelledPreserved"] == 5
 
     assert is_deal_status("待发货-已递交") and is_deal_status("发货在途")
     assert is_deal_status("待确认收货") and is_deal_status("已完成")
     assert not any(is_deal_status(prefix) for prefix in NOT_DEAL_PREFIXES)
     counted = {row[0] for row in db_session.query(SalesOrder.order_no).filter(scope, deal_orders_condition()).all()}
-    assert counted == kept
+    assert counted == {"JYTEST-SCOPE-1", "JYTEST-SCOPE-2", "JYTEST-SCOPE-3", "JYTEST-SCOPE-4"}
 
+    _cleanup_sales_fixtures(db_session)
+
+def test_number_parser_is_decimal_and_datetime_is_shanghai_aware():
+    from decimal import Decimal
+    from zoneinfo import ZoneInfo
+
+    assert service._num("0.1") == Decimal("0.1000")
+    parsed = service._dt("2026-09-30 23:30:00")
+    assert parsed is not None
+    assert parsed.tzinfo is not None
+    assert parsed.utcoffset() == ZoneInfo(service.settings.TZ).utcoffset(parsed)
+
+
+def test_cancelled_file_fact_preserves_synced_order_and_invoice_link(client, db_session, tmp_path, monkeypatch):
+    from decimal import Decimal
+    from app.models.sales import SalesOrder
+    from app.models.tax import TaxInvoice, TaxInvoiceLink
+    from app.services import tax_invoice_service
+
+    monkeypatch.setattr(service.settings, "DATA_DIR", str(tmp_path))
+    _make_sku(db_session, "JYTEST-SKU-CANCEL", "JYTEST-SKU-CANCEL")
+    order = SalesOrder(
+        order_no="JYTEST-CANCEL-KEEP",
+        source_provider="jky_web",
+        source_order_id="remote-1",
+        order_status="已完成",
+        paid_amount=Decimal("100"),
+        raw={"_jky": {"sourceProvider": "jky_web"}},
+    )
+    db_session.add(order)
+    db_session.flush()
+    invoice = TaxInvoice(
+        invoice_key="JYTEST-CANCEL-INVOICE",
+        invoice_number="JYTEST-CANCEL-INVOICE",
+        direction="output",
+        status="issued",
+        total_amount=Decimal("100"),
+    )
+    db_session.add(invoice)
+    db_session.flush()
+    link = TaxInvoiceLink(
+        invoice_id=invoice.id,
+        target_type="sales_order",
+        target_id=order.id,
+        allocated_amount=Decimal("100"),
+        match_method="manual",
+        confirmed=True,
+    )
+    db_session.add(link)
+    db_session.commit()
+
+    content = _xlsx([
+        _ITEM_HEADER + ["付款时间"],
+        ["JYTEST-CANCEL-KEEP", "PDD", "已取消", "JYTEST-SKU-CANCEL", "取消货品", 1, 100, 100, "2026-09-30 23:30"],
+    ])
+    response = client.post(
+        "/api/v1/sales-file/import",
+        files={"file": ("销售单查询.xlsx", content, "application/octet-stream")},
+    )
+    assert response.status_code == 200, response.text
+
+    db_session.expire_all()
+    kept = db_session.query(SalesOrder).filter_by(order_no="JYTEST-CANCEL-KEEP").one()
+    assert kept.source_provider == "jky_web"
+    assert kept.order_status == "已取消"
+    assert db_session.query(TaxInvoiceLink).filter_by(invoice_id=invoice.id).count() == 1
+
+    serialized = tax_invoice_service.serialize_invoice(
+        db_session.get(TaxInvoice, invoice.id), db=db_session
+    )
+    assert serialized["businessMatchStatus"] == "needs_review"
+    assert serialized["businessMatchedAmount"] == "0.00"
+    assert serialized["invalidLinkCount"] == 1
+
+    db_session.query(TaxInvoiceLink).filter_by(invoice_id=invoice.id).delete(synchronize_session=False)
+    db_session.query(TaxInvoice).filter_by(id=invoice.id).delete(synchronize_session=False)
+    db_session.commit()
     _cleanup_sales_fixtures(db_session)

@@ -1,4 +1,5 @@
 from datetime import date
+from decimal import Decimal
 
 import pytest
 from sqlalchemy import delete
@@ -160,3 +161,53 @@ def test_settlement_match_status_ignores_other_bank_reconciliation_domains(db_se
 
     assert txn.id in rc.confirmed_txn_ids(db_session, [txn.id])
     assert txn.id not in rc.confirmed_settlement_txn_ids(db_session, [txn.id])
+
+def test_confirm_match_rejects_overpayment(db_session):
+    account_no = "PYTEST-RECON-OVERPAY"
+    actor = "pytest-reconciliation-overpay"
+    txn = settlement = None
+    try:
+        txn, _ = rc.add_transaction(
+            db_session, account_no=account_no, txn_date=date(2097, 8, 1), direction="in",
+            amount="120.00", counterparty_name="超额回款平台", voucher_no="PYTEST-OVERPAY", actor=actor,
+        )
+        settlement = rc.add_settlement(
+            db_session, platform="超额回款平台", period_year=2097, period_month=8,
+            expected_amount="100.00", actor=actor,
+        )
+        with pytest.raises(ValueError, match="超过该应收剩余金额"):
+            rc.confirm_match(db_session, txn_id=txn.id, settlement_id=settlement.id, actor=actor)
+        assert rc.settled_amount_of(db_session, settlement.id) == 0
+    finally:
+        if txn:
+            db_session.execute(delete(ReconciliationMatch).where(ReconciliationMatch.txn_id == txn.id))
+        if settlement:
+            db_session.execute(delete(SettlementRecord).where(SettlementRecord.id == settlement.id))
+        if txn:
+            db_session.execute(delete(BankTransaction).where(BankTransaction.id == txn.id))
+        db_session.execute(delete(BankAccount).where(BankAccount.account_no == account_no))
+        db_session.execute(delete(AuditLog).where(AuditLog.actor == actor))
+        db_session.commit()
+
+
+def test_overview_never_returns_negative_pending_for_historical_overpayment(db_session):
+    settlement = SettlementRecord(
+        platform="历史超额", period_year=2097, period_month=9,
+        expected_amount=Decimal("100"), source="pytest", status="settled",
+    )
+    txn = BankTransaction(
+        txn_date=date(2097, 9, 1), direction="in", amount=Decimal("120"),
+        counterparty_name="历史超额", fingerprint="pytest-historical-overpay",
+    )
+    db_session.add_all([settlement, txn])
+    db_session.flush()
+    db_session.add(ReconciliationMatch(
+        txn_id=txn.id, target_type="settlement", target_id=settlement.id,
+        score=Decimal("100"), confidence="high", status="confirmed",
+        matched_platform="历史超额", matched_by="manual",
+    ))
+    db_session.flush()
+
+    data = rc.overview(db_session)
+    assert Decimal(data["pending"]) >= 0
+    assert Decimal(data["overpaid"]) >= Decimal("20")

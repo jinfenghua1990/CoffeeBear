@@ -39,6 +39,20 @@ def month_bounds(year: int, month: int) -> tuple[datetime, datetime]:
     return start, end
 
 
+def refund_total(db: Session, start: datetime, end: datetime) -> Decimal:
+    """统一退款事实：按售后退款记录发生月统计。"""
+    refunds = (
+        db.query(AftersalesOrder)
+        .filter(
+            AftersalesOrder.type == "refund",
+            AftersalesOrder.created_at_src >= start,
+            AftersalesOrder.created_at_src < end,
+        )
+        .all()
+    )
+    return sum((to_decimal(row.refund_amount) for row in refunds), Decimal("0"))
+
+
 def sales_overview(db: Session, year: int, month: int) -> dict[str, Any]:
     """指定月份销售/退款首屏指标；不读取其他月份。"""
     start, end = month_bounds(year, month)
@@ -52,16 +66,7 @@ def sales_overview(db: Session, year: int, month: int) -> dict[str, Any]:
     paid_orders = [row for row in orders if row.paid_amount is not None]
     sales_amount = sum((to_decimal(row.paid_amount) for row in paid_orders), Decimal("0"))
 
-    refunds = (
-        db.query(AftersalesOrder)
-        .filter(
-            AftersalesOrder.type == "refund",
-            AftersalesOrder.created_at_src >= start,
-            AftersalesOrder.created_at_src < end,
-        )
-        .all()
-    )
-    refund_amount = sum((to_decimal(row.refund_amount) for row in refunds), Decimal("0"))
+    refund_amount = refund_total(db, start, end)
     net_sales = sales_amount - refund_amount
     refund_rate = None
     if sales_amount > 0:
@@ -106,10 +111,13 @@ def reconciliation_overview(db: Session, year: int, month: int) -> dict[str, Any
         agg["settled"] += settled
 
     received = sum((value["settled"] for value in per_platform.values()), Decimal("0"))
+    pending = max(receivable - received, Decimal("0"))
+    overpaid = max(received - receivable, Decimal("0"))
     return {
         "receivable": f"{receivable:f}",
         "received": f"{received:f}",
-        "pending": f"{receivable - received:f}",
+        "pending": f"{pending:f}",
+        "overpaid": f"{overpaid:f}",
         "byPlatform": {
             platform: {
                 "expected": f"{value['expected']:f}",

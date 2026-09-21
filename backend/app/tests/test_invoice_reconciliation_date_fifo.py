@@ -2,7 +2,8 @@ from datetime import datetime
 from decimal import Decimal
 
 from app.models.purchase import ExternalPurchaseOrder
-from app.models.tax import TaxInvoice
+from app.models.tax import TaxInvoice, TaxInvoiceLink
+from app.services import invoice_reconciliation
 from app.services.invoice_reconciliation import reconcile
 
 
@@ -82,3 +83,33 @@ def test_invoice_never_consumes_orders_created_after_issue_date(db_session):
     pending_by_no = {item["orderNo"]: item for item in entry["pendingOrders"]}
     assert pending_by_no["DATE-CUTOFF-PO-2"]["remaining"] == 60.0
     assert pending_by_no["DATE-CUTOFF-PO-3"]["remaining"] == 50.0
+
+def test_manual_allocation_amount_is_respected_exactly(db_session):
+    first = _po(db_session, "MANUAL-PO-1", datetime(2026, 5, 1, 10, 0), "1000")
+    second = _po(db_session, "MANUAL-PO-2", datetime(2026, 5, 2, 10, 0), "1000")
+    invoice = _invoice(db_session, "MANUAL-INV-1", datetime(2026, 5, 10, 12, 0), "1000")
+    db_session.add_all([
+        TaxInvoiceLink(
+            invoice_id=invoice.id, target_type="external_purchase_order", target_id=first.id,
+            allocated_amount=Decimal("300"), match_method="manual", confirmed=True,
+        ),
+        TaxInvoiceLink(
+            invoice_id=invoice.id, target_type="external_purchase_order", target_id=second.id,
+            allocated_amount=Decimal("700"), match_method="manual", confirmed=True,
+        ),
+    ])
+    db_session.flush()
+
+    result = reconcile(db_session, supplier=SUPPLIER)
+    invoices = [item for month in result["suppliers"][0]["months"] for item in month["invoices"]]
+    matched = next(item for item in invoices if item["invoiceId"] == invoice.id)
+    assert [item["consumed"] for item in matched["covered"]] == [300.0, 700.0]
+    assert matched["status"] == "matched"
+
+
+def test_supplier_match_does_not_accept_arbitrary_prefix():
+    assert invoice_reconciliation.normalize_supplier("河北鸿鲲食品有限公司") == invoice_reconciliation.normalize_supplier("河北鸿鲲食品")
+    assert not invoice_reconciliation._matches(
+        invoice_reconciliation.normalize_supplier("北京华"),
+        invoice_reconciliation.normalize_supplier("北京华贸世纪"),
+    )

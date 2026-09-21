@@ -62,6 +62,82 @@ def _number(db: Session, raw: str | None, inbound_at: datetime | None) -> str:
     return f"{prefix}{sequence:04d}"
 
 
+
+
+def _allocation_receipt_states(db: Session, allocation_ids: list[int]) -> dict[int, dict]:
+    """从本系统入库明细事实计算采购分配行累计已入库数量。"""
+    ids = sorted(set(int(value) for value in allocation_ids))
+    states = {
+        allocation_id: {
+            "quantity": Decimal("0"),
+            "latestDocumentId": None,
+            "baseSource": None,
+            "baseNote": None,
+        }
+        for allocation_id in ids
+    }
+    if not ids:
+        return states
+    items = (
+        db.query(JackyunGoodsDocumentItem)
+        .filter(
+            JackyunGoodsDocumentItem.raw["sourceAllocationId"].astext.in_(
+                [str(value) for value in ids]
+            )
+        )
+        .order_by(JackyunGoodsDocumentItem.id)
+        .all()
+    )
+    document_ids = {item.document_id for item in items}
+    documents = (
+        {
+            row.id: row
+            for row in db.query(JackyunGoodsDocument)
+            .filter(
+                JackyunGoodsDocument.id.in_(document_ids),
+                JackyunGoodsDocument.document_type == "inbound",
+            )
+            .all()
+        }
+        if document_ids
+        else {}
+    )
+    for item in items:
+        raw = item.raw if isinstance(item.raw, dict) else {}
+        try:
+            allocation_id = int(raw.get("sourceAllocationId"))
+        except (TypeError, ValueError):
+            continue
+        state = states.get(allocation_id)
+        document = documents.get(item.document_id)
+        document_raw = document.raw if document is not None and isinstance(document.raw, dict) else {}
+        if state is None or document_raw.get("source") != "local_purchase_inbound":
+            continue
+        state["quantity"] += to_decimal(item.quantity)
+        state["latestDocumentId"] = max(
+            int(state["latestDocumentId"] or 0), int(item.document_id)
+        )
+        if state["baseSource"] is None:
+            state["baseSource"] = str(
+                raw.get("baseAllocationSource")
+                or raw.get("previousAllocationSource")
+                or "manual"
+            )
+            state["baseNote"] = str(
+                raw.get("baseAllocationNote")
+                if raw.get("baseAllocationNote") is not None
+                else raw.get("previousAllocationNote")
+                or ""
+            )
+    return states
+
+
+def _allocation_inbound_note(received: Decimal, ordered: Decimal, latest_document_id: int) -> str:
+    if received >= ordered:
+        return f"由入库单 #{latest_document_id} 明细自动反填"
+    return f"累计入库 {received}/{ordered}；最近入库单 #{latest_document_id}"
+
+
 def create_purchase_inbound(
     db: Session,
     *,
@@ -95,16 +171,19 @@ def create_purchase_inbound(
     allocation_ids = [int(item.get("allocation_id")) for item in items]
     if len(set(allocation_ids)) != len(allocation_ids):
         raise ValueError("同一采购明细不能重复入库")
-    allocations = db.query(PurchaseAllocationItem).filter(
-        PurchaseAllocationItem.po_id == external.id,
-        PurchaseAllocationItem.id.in_(allocation_ids),
-    ).all()
+    allocations = (
+        db.query(PurchaseAllocationItem)
+        .filter(
+            PurchaseAllocationItem.po_id == external.id,
+            PurchaseAllocationItem.id.in_(allocation_ids),
+        )
+        .with_for_update()
+        .all()
+    )
     by_id = {row.id: row for row in allocations}
     if len(by_id) != len(allocation_ids):
         raise ValueError("存在不属于当前采购单的入库明细")
-    already_linked = [row for row in allocations if "由入库单 #" in (row.note or "")]
-    if already_linked:
-        raise ValueError("部分采购明细已经关联入库单，请先拆分采购明细后再建本系统入库")
+    receipt_states = _allocation_receipt_states(db, allocation_ids)
 
     sku_ids = {row.sku_id for row in allocations if row.sku_id is not None}
     sku_rows = db.query(ProductSku).filter(ProductSku.id.in_(sku_ids)).all() if sku_ids else []
@@ -120,8 +199,14 @@ def create_purchase_inbound(
         if not quantity.is_finite() or quantity <= 0:
             raise ValueError("入库数量必须大于 0")
         ordered_quantity = to_decimal(allocation.quantity)
-        if quantity > ordered_quantity:
-            raise ValueError(f"{allocation.goods_name or allocation.sku_code} 入库数量不能超过采购数量")
+        already_received = receipt_states.get(allocation.id, {}).get("quantity", Decimal("0"))
+        remaining_quantity = max(ordered_quantity - already_received, Decimal("0"))
+        if remaining_quantity <= 0:
+            raise ValueError(f"{allocation.goods_name or allocation.sku_code} 已全部入库")
+        if quantity > remaining_quantity:
+            raise ValueError(
+                f"{allocation.goods_name or allocation.sku_code} 本次入库数量不能超过剩余可入库数量 {remaining_quantity}"
+            )
         unit_price = to_decimal(payload.get("unit_price")) if payload.get("unit_price") not in (None, "") else to_decimal(allocation.unit_price)
         if not unit_price.is_finite() or unit_price < 0:
             raise ValueError("入库含税单价不能为负数")
@@ -143,6 +228,16 @@ def create_purchase_inbound(
                 "sourceAllocationId": allocation.id,
                 "previousAllocationSource": allocation.source or "manual",
                 "previousAllocationNote": allocation.note or "",
+                "baseAllocationSource": (
+                    receipt_states.get(allocation.id, {}).get("baseSource")
+                    or (allocation.source if allocation.source != "inbound_auto" else "manual")
+                    or "manual"
+                ),
+                "baseAllocationNote": (
+                    receipt_states.get(allocation.id, {}).get("baseNote")
+                    if receipt_states.get(allocation.id, {}).get("baseNote") is not None
+                    else (allocation.note or "")
+                ),
             },
         ))
         total_quantity += quantity
@@ -177,9 +272,16 @@ def create_purchase_inbound(
     for item in item_rows:
         item.document_id = document.id
         db.add(item)
+    added_by_allocation = {
+        int(payload["allocation_id"]): to_decimal(payload.get("quantity"))
+        for payload in items
+    }
     for allocation in allocations:
+        ordered_quantity = to_decimal(allocation.quantity)
+        received_before = receipt_states.get(allocation.id, {}).get("quantity", Decimal("0"))
+        received_after = received_before + added_by_allocation.get(allocation.id, Decimal("0"))
         allocation.source = "inbound_auto"
-        allocation.note = f"由入库单 #{document.id} 明细自动反填"
+        allocation.note = _allocation_inbound_note(received_after, ordered_quantity, document.id)
 
     identity = {"order_id": source.id} if source is not None else {"external_po_id": external.id}
     link = ProcurementChainLink(
@@ -229,8 +331,17 @@ def delete_local_purchase_inbound(
             continue
         allocation_ids.append(allocation_id)
         previous_allocation_values[allocation_id] = (
-            str(item_raw.get("previousAllocationSource") or "manual"),
-            str(item_raw.get("previousAllocationNote") or ""),
+            str(
+                item_raw.get("baseAllocationSource")
+                or item_raw.get("previousAllocationSource")
+                or "manual"
+            ),
+            str(
+                item_raw.get("baseAllocationNote")
+                if item_raw.get("baseAllocationNote") is not None
+                else item_raw.get("previousAllocationNote")
+                or ""
+            ),
         )
 
     links = db.query(ProcurementChainLink).filter(
@@ -249,15 +360,6 @@ def delete_local_purchase_inbound(
         _reverse_inbound_usage(db, link_id)
     db.flush()
 
-    if allocation_ids:
-        allocations = db.query(PurchaseAllocationItem).filter(
-            PurchaseAllocationItem.id.in_(allocation_ids),
-        ).all()
-        for allocation in allocations:
-            source, note = previous_allocation_values.get(allocation.id, ("manual", ""))
-            allocation.source = source
-            allocation.note = note
-
     # _reverse_inbound_usage 已删除正常/孤立 usage；再按 document_id 清理残留，
     # 确保删除后不会留下孤儿记录。
     db.query(InboundConsumableUsage).filter(
@@ -270,6 +372,29 @@ def delete_local_purchase_inbound(
     db.query(JackyunGoodsDocumentItem).filter(
         JackyunGoodsDocumentItem.document_id == document.id,
     ).delete(synchronize_session=False)
+    db.flush()
+    if allocation_ids:
+        allocations = (
+            db.query(PurchaseAllocationItem)
+            .filter(PurchaseAllocationItem.id.in_(allocation_ids))
+            .with_for_update()
+            .all()
+        )
+        remaining_states = _allocation_receipt_states(db, allocation_ids)
+        for allocation in allocations:
+            state = remaining_states.get(allocation.id, {})
+            received = state.get("quantity", Decimal("0"))
+            if received > 0:
+                allocation.source = "inbound_auto"
+                allocation.note = _allocation_inbound_note(
+                    received,
+                    to_decimal(allocation.quantity),
+                    int(state.get("latestDocumentId") or 0),
+                )
+            else:
+                source, note = previous_allocation_values.get(allocation.id, ("manual", ""))
+                allocation.source = "manual" if source == "inbound_auto" else source
+                allocation.note = note
     inbound_no = document.goodsdoc_no
     from app.services import finance_projection_service
     finance_projection_service.delete_projected_source(

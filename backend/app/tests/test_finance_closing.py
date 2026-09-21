@@ -29,7 +29,7 @@ def test_foreign_closing_profit_excludes_cash_only_import_vat(db_session):
             cash_effect=True,
             profit_effect=True,
             currency="EUR",
-            amount=Decimal("1000"),
+            amount=Decimal("1000.10"),
             tax_amount=Decimal("0"),
             value_type="actual",
             settlement_status="settled",
@@ -87,10 +87,10 @@ def test_foreign_closing_profit_excludes_cash_only_import_vat(db_session):
     eur = report["totalsByCurrency"][0]
 
     assert report["rowCount"] == 3
-    assert eur["income"] == 1000.0
+    assert eur["income"] == 1000.1
     assert eur["expense"] == 360.0
-    assert eur["profit"] == 800.0
-    assert eur["netCash"] == 640.0
+    assert eur["profit"] == 800.1
+    assert eur["netCash"] == 640.1
 
     payload = finance_closing_service.foreign_trade_xlsx(
         db_session,

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from decimal import Decimal
 from io import BytesIO
 from typing import Any
 
@@ -75,18 +76,18 @@ def foreign_trade_summary(
     rows = foreign_trade_rows(
         db, legal_entity_id=legal_entity_id, year=year, month=month
     )
-    totals: dict[str, dict[str, float]] = defaultdict(
+    totals: dict[str, dict[str, Decimal]] = defaultdict(
         lambda: {
-            "income": 0.0,
-            "expense": 0.0,
-            "profitIncome": 0.0,
-            "profitExpense": 0.0,
-            "cashIn": 0.0,
-            "cashOut": 0.0,
+            "income": Decimal("0"),
+            "expense": Decimal("0"),
+            "profitIncome": Decimal("0"),
+            "profitExpense": Decimal("0"),
+            "cashIn": Decimal("0"),
+            "cashOut": Decimal("0"),
         }
     )
     for row in rows:
-        amount = float(row["amount"] or 0)
+        amount = Decimal(str(row["amount"] or "0"))
         bucket = totals[row["currency"]]
         if row["direction"] == "income":
             bucket["income"] += amount
@@ -106,9 +107,9 @@ def foreign_trade_summary(
         "totalsByCurrency": [
             {
                 "currency": currency,
-                **values,
-                "profit": values["profitIncome"] - values["profitExpense"],
-                "netCash": values["cashIn"] - values["cashOut"],
+                **{key: float(value) for key, value in values.items()},
+                "profit": float(values["profitIncome"] - values["profitExpense"]),
+                "netCash": float(values["cashIn"] - values["cashOut"]),
             }
             for currency, values in sorted(totals.items())
         ],

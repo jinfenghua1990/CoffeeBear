@@ -18,7 +18,7 @@ from app.models.catalog import ProductSku
 from app.models.profit import CostSnapshot
 from app.models.sales import SalesOrder, SalesOrderItem
 from app.services.inbound_cost_service import resolve_sales_sku_id, sales_sku_lookup, weighted_inbound_costs
-from app.services.monthly_core import month_bounds
+from app.services.monthly_core import month_bounds, refund_total
 from app.services.sales_scope import deal_orders_condition
 from app.utils.money import quantize, to_decimal
 
@@ -236,14 +236,14 @@ def compute(db: Session, period_year: int, period_month: int) -> dict[str, Any]:
     )
     # 收入基数取客户实付金额：吉客云导出的行金额/优惠与实付对不上（同一单甚至出现负数行），
     # 只有实付是真实成交金额，且与月结/经营总览、销售明细保持同一口径。
-    net_sales = sum(
+    gross_sales = sum(
         (to_decimal(row.paid_amount) for row in orders if row.paid_amount is not None),
         Decimal("0"),
     )
+    net_sales = gross_sales - refund_total(db, period_start, next_start)
     items = (
         db.query(SalesOrderItem)
         .filter(SalesOrderItem.order_id.in_([row.id for row in orders]))
-        .filter((SalesOrderItem.amount.isnot(None)) | (SalesOrderItem.discount_amount.isnot(None)))
         .all()
     )
 
@@ -334,7 +334,7 @@ def compute(db: Session, period_year: int, period_month: int) -> dict[str, Any]:
         "costMissing": incomplete,
         "warning": warning,
         "error": error,
-        "note": "净销售收入取成交单（待发/已发/待确认收货/已完成）的客户实付金额；"
+        "note": "净销售收入统一取成交单客户实付金额减当月退款；"
                 "货品成本按本系统采购入库明细的加权平均单价乘销售数量计算；"
                 "个别 SKU 缺入库成本时按已覆盖部分出毛利并给出 warning，"
                 "全部缺成本时 error 报错不出数。",

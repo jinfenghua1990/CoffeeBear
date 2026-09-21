@@ -30,6 +30,7 @@ from app.services.import_lifecycle import (
     transition_lifecycle,
     transition_row_status,
 )
+from app.services.sales_scope import deal_orders_condition, is_deal_status
 from app.utils.money import quantize, to_decimal
 from sqlalchemy import and_, case, cast, func, or_, String
 from sqlalchemy.orm import aliased
@@ -847,34 +848,50 @@ def _invoice_business_context(db: Session, rows: list[TaxInvoice]) -> dict[int, 
         purchase_nos: list[str] = []
         inbound_nos: list[str] = []
         link_rows: list[dict] = []
+        valid_invoice_links: list[TaxInvoiceLink] = []
+        invalid_link_count = 0
         for link in invoice_links:
             target = target_maps.get(link.target_type, {}).get(link.target_id)
+            target_exists = target is not None
+            target_valid = target_exists and (
+                link.target_type != "sales_order" or is_deal_status(target.order_status)
+            )
+            if target_valid:
+                valid_invoice_links.append(link)
+            else:
+                invalid_link_count += 1
             if link.target_type == "alibaba1688_order":
                 target_no = target.external_order_id if target else f"#{link.target_id}"
                 target_label = f"1688采购单 {target_no}"
-                purchase_nos.append(target_no)
+                if target_valid:
+                    purchase_nos.append(target_no)
             elif link.target_type == "external_purchase_order":
                 target_no = target.external_order_id if target else f"#{link.target_id}"
                 target_label = f"采购单 {target_no}"
-                purchase_nos.append(target_no)
+                if target_valid:
+                    purchase_nos.append(target_no)
             elif link.target_type == "jackyun_purchase_order":
                 target_no = (target.purch_no or target.jackyun_purch_id) if target else f"#{link.target_id}"
                 target_label = f"吉客云采购单 {target_no}"
-                purchase_nos.append(target_no)
+                if target_valid:
+                    purchase_nos.append(target_no)
             elif link.target_type == "sales_order":
                 target_no = target.order_no if target else f"#{link.target_id}"
                 target_label = f"销售单 {target_no}"
             else:
                 target_no = f"#{link.target_id}"
                 target_label = f"业务单 {target_no}"
-            inbound_nos.extend(inbound_by_target.get((link.target_type, link.target_id), []))
+            if target_valid:
+                inbound_nos.extend(inbound_by_target.get((link.target_type, link.target_id), []))
             link_rows.append({
                 "id": link.id,
                 "targetType": link.target_type,
                 "targetId": link.target_id,
                 "targetNo": target_no,
                 "targetLabel": target_label,
-                "allocatedAmount": float(link.allocated_amount) if link.allocated_amount is not None else None,
+                "targetExists": target_exists,
+                "targetValid": target_valid,
+                "allocatedAmount": str(quantize(to_decimal(link.allocated_amount))) if link.allocated_amount is not None else None,
                 "matchMethod": link.match_method,
                 "confirmed": bool(link.confirmed),
                 "note": link.note or "",
@@ -883,16 +900,16 @@ def _invoice_business_context(db: Session, rows: list[TaxInvoice]) -> dict[int, 
         explicit_allocated = sum(
             (
                 quantize(to_decimal(link.allocated_amount))
-                for link in invoice_links
+                for link in valid_invoice_links
                 if link.allocated_amount is not None
             ),
             Decimal("0"),
         )
-        has_unknown_allocation = any(link.allocated_amount is None for link in invoice_links)
+        has_unknown_allocation = any(link.allocated_amount is None for link in valid_invoice_links)
         if invoice_total > 0:
             business_matched = min(max(explicit_allocated, Decimal("0")), invoice_total)
             business_remaining = max(invoice_total - business_matched, Decimal("0"))
-            if has_unknown_allocation:
+            if invalid_link_count or has_unknown_allocation:
                 business_status = "needs_review"
             elif business_matched <= Decimal("0"):
                 business_status = "needs_review" if invoice.match_status == "needs_review" else "unmatched"
@@ -912,6 +929,7 @@ def _invoice_business_context(db: Session, rows: list[TaxInvoice]) -> dict[int, 
             "businessMatchStatus": business_status,
             "businessMatchedAmount": str(quantize(business_matched)),
             "businessRemainingAmount": str(quantize(business_remaining)),
+            "invalidLinkCount": invalid_link_count,
         }
     return result
 
@@ -1868,7 +1886,7 @@ def _sales_link_candidates(db: Session, invoice: TaxInvoice, keyword: str, limit
     invoice_amount = Decimal(str(invoice.total_amount)) if invoice.total_amount is not None else None
     occupancy = _purchase_link_occupancy(db)
 
-    query = db.query(SalesOrder)
+    query = db.query(SalesOrder).filter(deal_orders_condition())
     if needle:
         rows = (
             query.filter(
@@ -2105,6 +2123,8 @@ def link_purchase_order(
         target = db.get(SalesOrder, target_id)
         if target is None:
             raise LookupError(f"销售订单不存在：#{target_id}")
+        if not is_deal_status(target.order_status):
+            raise ValueError("已取消/关闭/退款等非成交销售订单不能关联销项发票")
         order_no = target.order_no
         default_note = "人工关联销售订单"
         audit_action = "tax_invoice.link_sales"

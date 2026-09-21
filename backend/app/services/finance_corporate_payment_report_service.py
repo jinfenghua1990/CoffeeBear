@@ -7,7 +7,6 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from datetime import date
 from decimal import Decimal
 from io import BytesIO
 from typing import Any
@@ -24,6 +23,7 @@ from app.models.finance import FinanceCorporatePaymentAdjustment
 from app.models.purchase import ExternalPurchaseOrder, PurchaseAllocationItem, Supplier
 from app.models.tax import TaxInvoice, TaxInvoiceLink
 from app.services import invoice_reconciliation, tax_invoice_service
+from app.services.monthly_core import month_bounds
 
 TOLERANCE = Decimal("0.05")
 TARGET_TYPE = "bank_transaction"
@@ -37,12 +37,18 @@ def _dec(value: Decimal | float | int | str | None) -> Decimal:
     return Decimal(str(value))
 
 
-def _month_range(year: int, month: int) -> tuple[date, date]:
-    if month < 1 or month > 12:
-        raise ValueError("月份必须在 1-12")
-    start = date(year, month, 1)
-    end = date(year + (month == 12), 1 if month == 12 else month + 1, 1)
-    return start, end
+def _month_range(year: int, month: int):
+    """统一使用 Asia/Shanghai 业务自然月 [start, end)。"""
+    return month_bounds(year, month)
+
+
+def _link_amount(link: TaxInvoiceLink, invoice: TaxInvoice | None) -> Decimal:
+    """历史 NULL 分摊统一解释为旧版本“整票关联”，与付款核对服务同口径。"""
+    if link.allocated_amount is not None:
+        return _dec(link.allocated_amount)
+    if invoice is not None:
+        return _dec(invoice.total_amount)
+    return Decimal("0")
 
 
 def _active_bank_links(db: Session, *, invoice_ids: list[int] | None = None) -> list[TaxInvoiceLink]:
@@ -170,7 +176,7 @@ def build_report(
     txn_bank_total: dict[int, Decimal] = defaultdict(Decimal)
     links_by_invoice: dict[int, list[TaxInvoiceLink]] = defaultdict(list)
     for link in links:
-        amount = _dec(link.allocated_amount)
+        amount = _link_amount(link, invoice_map.get(link.invoice_id))
         invoice_bank_total[link.invoice_id] += amount
         txn_bank_total[link.target_id] += amount
         links_by_invoice[link.invoice_id].append(link)
@@ -210,7 +216,10 @@ def build_report(
     flat_rows: list[dict[str, Any]] = []
     for inv in invoices:
         inv_total = _dec(inv.total_amount)
-        paid_total = invoice_bank_total.get(inv.id, Decimal("0"))
+        paid_total = min(
+            max(invoice_bank_total.get(inv.id, Decimal("0")), Decimal("0")),
+            max(inv_total, Decimal("0")),
+        )
         status, outstanding, reconciliation_applicable, reconciliation_reason = _bank_reconciliation_meta(
             inv, paid_total
         )
@@ -223,9 +232,12 @@ def build_report(
             if txn is None:
                 continue
             account = account_map.get(txn.account_id)
-            allocated = _dec(link.allocated_amount)
+            allocated = _link_amount(link, inv)
             txn_total = _dec(txn.amount)
-            txn_allocated = txn_bank_total.get(txn.id, Decimal("0"))
+            txn_allocated = min(
+                max(txn_bank_total.get(txn.id, Decimal("0")), Decimal("0")),
+                max(txn_total, Decimal("0")),
+            )
             payment = {
                 "linkId": link.id,
                 "paymentId": txn.id,

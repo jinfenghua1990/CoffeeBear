@@ -506,3 +506,20 @@ def test_auto_split_allows_exact_multi_invoice_total(db_session):
     assert sum((row.allocated_amount for row in links), Decimal("0")) == Decimal("5000.0000")
     status = pm.txn_reconciliation_statuses(db_session, [txn.id])[txn.id]
     assert status["status"] == "matched"
+
+def test_invoice_pool_uses_asia_shanghai_month_boundaries(db_session):
+    from zoneinfo import ZoneInfo
+    from app.config import settings
+
+    tz = ZoneInfo(settings.TZ)
+    august = _invoice(db_session, seller="月末边界供应商", amount="10.00")
+    august.issue_date = datetime(2026, 8, 31, 23, 30, tzinfo=tz)
+    september = _invoice(db_session, seller="月初边界供应商", amount="20.00", month=9, day=1)
+    september.issue_date = datetime(2026, 9, 1, 0, 30, tzinfo=tz)
+    db_session.commit()
+
+    august_ids = {row["id"] for row in pm.overview(db_session, 2026, 8)["invoicePool"]}
+    september_ids = {row["id"] for row in pm.overview(db_session, 2026, 9)["invoicePool"]}
+    assert august.id in august_ids
+    assert september.id not in august_ids
+    assert september.id in september_ids
