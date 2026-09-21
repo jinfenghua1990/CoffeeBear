@@ -122,8 +122,8 @@ export default function SupplyChainPage() {
             <h2 className="text-base font-semibold text-slate-900">业务入口</h2>
             <p className="mt-1 text-xs text-slate-500">不做折叠，常用功能全部直接展示；能在一页完成的操作尽量不拆步骤。</p>
           </div>
-          <Link href="/suppliers" className="text-xs font-medium text-indigo-600 hover:text-indigo-700">
-            供应商档案 →
+          <Link href="/finance/partners?role=supplier" className="text-xs font-medium text-indigo-600 hover:text-indigo-700">
+            财务往来单位档案 →
           </Link>
         </div>
 

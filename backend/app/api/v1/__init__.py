@@ -5,6 +5,7 @@ from app.api.v1 import (
     alibaba1688_browser,
     auth,
     automation,
+    business_partners,
     closing,
     consumables,
     data_export,
@@ -56,6 +57,7 @@ api_router.include_router(procurement_workbench.router)
 api_router.include_router(procurement_board.router)
 api_router.include_router(exceptions.router)
 api_router.include_router(finance.router)
+api_router.include_router(business_partners.router)
 api_router.include_router(foreign_trade.router)
 api_router.include_router(purchase.router)
 api_router.include_router(purchase_consistency.router)

@@ -1,6 +1,7 @@
 from app.models import (
     alibaba1688_import,
     bank,
+    business_partner,
     jky_web,
     catalog,
     consumable,
@@ -41,6 +42,7 @@ __all__ = [
     "purchase",
     "tax",
     "bank",
+    "business_partner",
     "payment",
     "profit",
     "finance",

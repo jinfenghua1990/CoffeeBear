@@ -1,0 +1,102 @@
+"""统一往来单位主档及其与业务事实的可审计关联。
+
+采购、发票、银行流水和销售来源各自保留原始名称、税号和账号；本模块只维护
+"这些原始事实归属哪个往来单位"，不复制、更不改写来源事实。这样同一单位的
+历史别名可以收敛到一个档案，同时名称相似但证据不足的记录仍可留在待确认队列。
+"""
+
+from sqlalchemy import BigInteger, Boolean, ForeignKey, String, Text, UniqueConstraint
+from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.orm import Mapped, mapped_column
+
+from app.models.base import Base, PkMixin, TimestampMixin
+
+
+class BusinessPartner(Base, PkMixin, TimestampMixin):
+    """供应商、客户及其他收付款对象共用的唯一主档。"""
+
+    __tablename__ = "business_partners"
+
+    # 旧供应商档案只作为历史入口，不再承担跨财务来源的唯一身份。
+    legacy_supplier_id: Mapped[int | None] = mapped_column(
+        BigInteger,
+        ForeignKey("suppliers.id", ondelete="SET NULL"),
+        nullable=True,
+        unique=True,
+        index=True,
+    )
+    name: Mapped[str] = mapped_column(String(256), nullable=False, index=True)
+    normalized_name: Mapped[str] = mapped_column(String(256), nullable=False, index=True)
+    tax_no: Mapped[str] = mapped_column(String(64), default="", index=True)
+    contact: Mapped[str] = mapped_column(String(256), default="")
+    phone: Mapped[str] = mapped_column(String(64), default="")
+    address: Mapped[str] = mapped_column(String(512), default="")
+    bank_name: Mapped[str] = mapped_column(String(128), default="")
+    bank_account_no: Mapped[str] = mapped_column(String(128), default="", index=True)
+    bank_account_name: Mapped[str] = mapped_column(String(256), default="")
+    # supplier / customer / counterparty；角色可以并存，不以菜单位置决定身份。
+    roles: Mapped[list] = mapped_column(JSONB, default=list)
+    status: Mapped[str] = mapped_column(String(16), default="active", index=True)
+    notes: Mapped[str] = mapped_column(Text, default="")
+
+
+class BusinessPartnerIdentifier(Base, PkMixin, TimestampMixin):
+    """往来单位的名称别名、税号、银行账号、客户编码等识别证据。"""
+
+    __tablename__ = "business_partner_identifiers"
+    __table_args__ = (
+        UniqueConstraint(
+            "partner_id", "kind", "normalized_value",
+            name="uq_business_partner_identifier_value",
+        ),
+    )
+
+    partner_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("business_partners.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    # name / alias / tax_no / bank_account / customer_code
+    kind: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    value: Mapped[str] = mapped_column(String(512), nullable=False)
+    normalized_value: Mapped[str] = mapped_column(String(512), nullable=False, index=True)
+    is_primary: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    source: Mapped[str] = mapped_column(String(32), default="system")
+
+
+class BusinessPartnerLink(Base, PkMixin, TimestampMixin):
+    """一条来源业务事实与往来单位的关联（或待确认关联）。"""
+
+    __tablename__ = "business_partner_links"
+    __table_args__ = (
+        UniqueConstraint(
+            "source_type", "source_id", "relation_role",
+            name="uq_business_partner_link_source_role",
+        ),
+    )
+
+    partner_id: Mapped[int | None] = mapped_column(
+        BigInteger,
+        ForeignKey("business_partners.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    # external_purchase_order / alibaba1688_order / inbound_document /
+    # tax_invoice / bank_transaction / sales_order 等。
+    source_type: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    source_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
+    # supplier / customer / counterparty / seller / buyer，允许同一张发票的两侧分别归档。
+    relation_role: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    raw_name: Mapped[str] = mapped_column(String(256), default="")
+    raw_tax_no: Mapped[str] = mapped_column(String(64), default="")
+    raw_account_no: Mapped[str] = mapped_column(String(128), default="")
+    # linked / needs_review / ignored；待确认记录不强行归入任何档案。
+    status: Mapped[str] = mapped_column(String(24), default="linked", index=True)
+    # legacy_supplier / tax_no / bank_account / exact_name / alias / manual / source_created
+    match_method: Mapped[str] = mapped_column(String(32), default="")
+    confidence: Mapped[float | None] = mapped_column(nullable=True)
+    confirmed: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False, index=True)
+    candidate_partner_ids: Mapped[list] = mapped_column(JSONB, default=list)
+    evidence: Mapped[dict] = mapped_column(JSONB, default=dict)
+    note: Mapped[str] = mapped_column(Text, default="")

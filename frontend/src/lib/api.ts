@@ -1217,6 +1217,122 @@ export const supplierApi = {
     ),
 };
 
+// ---------- 财务中心：统一往来单位档案 ----------
+
+export type BusinessPartnerRole = "supplier" | "customer" | "counterparty";
+
+export type BusinessPartnerIdentifier = {
+  id: number;
+  kind: "name" | "alias" | "tax_no" | "bank_account" | "customer_code" | string;
+  value: string;
+  isPrimary: boolean;
+  source: string;
+};
+
+export type BusinessPartnerSummary = {
+  purchaseOrderCount: number;
+  purchaseAmount: number;
+  inboundCount: number;
+  inboundAmount: number;
+  invoiceCount: number;
+  invoiceAmount: number;
+  bankTransactionCount: number;
+  bankPaidAmount: number;
+  bankReceivedAmount: number;
+  purchasePaymentDifference: number;
+  invoicePaymentDifference: number;
+  salesOrderCount: number;
+  salesReceivedAmount: number;
+  needsReviewCount: number;
+};
+
+export type BusinessPartnerListItem = {
+  id: number;
+  name: string;
+  taxNo: string;
+  roles: BusinessPartnerRole[];
+  status: string;
+  identifiers: BusinessPartnerIdentifier[];
+  legacySupplierId: number | null;
+  summary: BusinessPartnerSummary;
+};
+
+export type BusinessPartnerDetail = BusinessPartnerListItem & {
+  contact: string;
+  phone: string;
+  address: string;
+  bankName: string;
+  bankAccountNo: string;
+  bankAccountName: string;
+  notes: string;
+  createdAt: string | null;
+  updatedAt: string | null;
+  purchases: Array<{
+    sourceType: string; id: number; no: string; platform: string; title: string; date: string | null;
+    amount: number; paidAmount: number; status: string;
+  }>;
+  inbounds: Array<{
+    sourceType: string; id: number; no: string; date: string | null; warehouse: string;
+    quantity: number; amount: number;
+  }>;
+  invoices: Array<{
+    id: number; no: string; date: string | null; direction: string; status: string;
+    sellerName: string; buyerName: string; amount: number; bankPaidAmount: number;
+    bankRemainingAmount: number; matchStatus: string; category: string; verified: boolean;
+  }>;
+  payments: Array<{
+    id: number; date: string | null; transactionTime: string | null; direction: string; amount: number;
+    counterpartyName: string; counterpartyAccount: string; summary: string; serialNo: string;
+    voucherNo: string; sourceRowNumber: number | null; rawAvailable: boolean; rawUrl: string;
+    invoices: Array<{ invoiceId: number; invoiceNo: string; allocatedAmount: number }>;
+  }>;
+  sales: Array<{
+    id: number; no: string; sourceNo: string; date: string | null; paidAt: string | null;
+    platform: string; customerCode: string; amount: number; paidAmount: number; status: string;
+  }>;
+  reviewItems: Array<{
+    linkId: number; sourceType: string; sourceLabel: string; sourceId: number; relationRole: string;
+    rawName: string; rawTaxNo: string; rawAccountNo: string; candidatePartnerIds: number[];
+    evidence: Record<string, unknown>; no: string; date: string | null; amount: number;
+  }>;
+};
+
+export type BusinessPartnerInput = {
+  name: string;
+  roles: BusinessPartnerRole[];
+  taxNo?: string;
+  contact?: string;
+  phone?: string;
+  address?: string;
+  bankName?: string;
+  bankAccountNo?: string;
+  bankAccountName?: string;
+  notes?: string;
+};
+
+export const businessPartnerApi = {
+  list: (keyword = "", role: "all" | BusinessPartnerRole = "all") =>
+    jsonFetch<{ total: number; items: BusinessPartnerListItem[] }>(
+      `/api/v1/finance/partners?keyword=${encodeURIComponent(keyword)}&role=${encodeURIComponent(role)}`,
+    ),
+  detail: (id: number) => jsonFetch<BusinessPartnerDetail>(`/api/v1/finance/partners/${id}`),
+  sync: () => jsonFetch<{ ok: boolean; createdPartners: number; updatedPartners: number; createdLinks: number; updatedLinks: number; needsReview: number }>(
+    "/api/v1/finance/partners/sync", { method: "POST" },
+  ),
+  create: (body: BusinessPartnerInput) =>
+    jsonFetch<BusinessPartnerDetail>("/api/v1/finance/partners", { method: "POST", body: JSON.stringify(body) }),
+  update: (id: number, body: BusinessPartnerInput) =>
+    jsonFetch<BusinessPartnerDetail>(`/api/v1/finance/partners/${id}`, { method: "PUT", body: JSON.stringify(body) }),
+  addIdentifier: (id: number, kind: BusinessPartnerIdentifier["kind"], value: string) =>
+    jsonFetch<BusinessPartnerDetail>(`/api/v1/finance/partners/${id}/identifiers`, {
+      method: "POST", body: JSON.stringify({ kind, value }),
+    }),
+  claimReview: (id: number, linkId: number, note = "") =>
+    jsonFetch<BusinessPartnerDetail>(`/api/v1/finance/partners/${id}/review-links/${linkId}/claim`, {
+      method: "POST", body: JSON.stringify({ note }),
+    }),
+};
+
 export const jackyunFileApi = {
   imports: (lifecycle?: string) => {
     const q = lifecycle ? `?lifecycle=${encodeURIComponent(lifecycle)}` : "";
