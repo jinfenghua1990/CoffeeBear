@@ -11,7 +11,6 @@ from app.api.deps import current_actor
 from app.db import get_db
 from app.services import tax_invoice_service as service
 from app.services.import_lifecycle import LifecycleTransitionError
-from app.services.procurement_chain_service import ProcurementChainMatcher
 from app.utils.uploads import UploadTooLargeError, read_upload_limited
 
 router = APIRouter(prefix="/tax-invoices", tags=["tax-invoices"])
@@ -229,15 +228,20 @@ def bulk_verify_invoices(
     """
     if not body.invoice_ids:
         return {"ok": True, "processed": 0, "items": []}
-    matcher = ProcurementChainMatcher(db)
     items: list[dict] = []
+    actor = current_actor(request)
     for invoice_id in body.invoice_ids:
         try:
-            inv = matcher.set_invoice_verified(invoice_id, body.verified, body.verified_month)
+            inv = service.set_invoice_verified(
+                db,
+                invoice_id,
+                body.verified,
+                body.verified_month,
+                actor=actor,
+            )
             items.append({"invoiceId": inv.id, "verified": inv.verified, "verifiedMonth": inv.verified_month or ""})
-        except ValueError as exc:
+        except (LookupError, ValueError) as exc:
             items.append({"invoiceId": invoice_id, "error": str(exc)})
-    db.commit()
     return {"ok": True, "processed": len(items), "items": items}
 
 
