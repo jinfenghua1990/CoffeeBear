@@ -165,7 +165,37 @@ def test_import_rejects_default_alias_when_file_has_no_real_account(client):
         data={"account_no": "ZJRC-001", "period_year": "2097", "period_month": "6"},
     )
     assert response.status_code == 400
-    assert "禁止使用系统别名" in response.json()["detail"]
+    assert "尚未配置真实银行账号" in response.json()["detail"]
+
+
+def test_import_resolves_configured_internal_alias_to_real_account(client, db_session):
+    db_session.add(BankAccount(
+        account_no="201000260611394",
+        internal_code="ZJRC-001",
+        account_name="浙江柴本网络科技有限公司",
+        bank_name="浙江农信",
+    ))
+    db_session.commit()
+    content = _make_xlsx(
+        ["交易日期", "对方户名", "支出金额", "流水号"],
+        [["2097-06-03", "合锦(广州)供应链有限公司", 3080, "ALIAS-2097-001"]],
+    )
+    response = client.post(
+        "/api/v1/reconciliation/import-bank",
+        files={"file": ("内部编号.xlsx", content, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
+        data={"account_no": "ZJRC-001", "period_year": "2097", "period_month": "6"},
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["accountNo"] == "201000260611394"
+    assert body["internalCode"] == "ZJRC-001"
+    assert body["accountSource"] == "internal_code"
+    txn = db_session.query(BankTransaction).filter_by(serial_no="ALIAS-2097-001").one()
+    account = db_session.get(BankAccount, txn.account_id)
+    assert account.account_no == "201000260611394"
+    assert account.internal_code == "ZJRC-001"
+    assert txn.raw["resolvedAccountNo"] == "201000260611394"
+    assert txn.raw["internalAccountCode"] == "ZJRC-001"
 
 
 def test_import_uses_file_account_and_raw_endpoint(client, db_session, tmp_path, monkeypatch):

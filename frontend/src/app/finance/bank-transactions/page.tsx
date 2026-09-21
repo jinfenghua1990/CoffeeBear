@@ -18,6 +18,7 @@ type BankRawDetail = {
   voucherNo: string;
   sourceRowNumber: number | null;
   importBatchId: number | null;
+  accountCode: string;
   raw: {
     sheet?: string;
     rowNumber?: number;
@@ -102,7 +103,7 @@ export default function BankTransactionsPage() {
   const [query, setQuery] = useTabScopedState("bank.search", "");
   const [period, setPeriod] = useTabScopedState("bank.period", previousMonth);
   const [accountFilter, setAccountFilter] = useTabScopedState("bank.account", "");
-  const [manualAccountNo, setManualAccountNo] = useState("");
+  const [manualAccountNo, setManualAccountNo] = useState("ZJRC-001");
   const [loading, setLoading] = useState(true);
   const [uploading, setUploading] = useState(false);
   const [error, setError] = useState("");
@@ -306,7 +307,7 @@ export default function BankTransactionsPage() {
           <div className="flex flex-wrap items-center gap-2">
             <input ref={fileRef} type="file" accept=".xlsx" className="hidden" onChange={(event) => { const file = event.target.files?.[0]; if (file) void uploadBank(file); }} />
             <input type="month" value={period} onChange={(event) => setPeriod(event.target.value)} aria-label="银行流水账期" className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs text-slate-600 outline-none focus:border-blue-400" />
-            <input value={manualAccountNo} onChange={(event) => setManualAccountNo(event.target.value)} aria-label="无账号文件时的真实银行账号" placeholder="文件无账号时填写真实账号" className="w-44 rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs text-slate-600 outline-none placeholder:text-slate-400 focus:border-blue-400" />
+            <input value={manualAccountNo} onChange={(event) => setManualAccountNo(event.target.value)} aria-label="无账号文件时填写内部编号或真实银行账号" placeholder="内部编号或真实银行账号" className="w-44 rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs text-slate-600 outline-none placeholder:text-slate-400 focus:border-blue-400" />
             <button type="button" onClick={() => fileRef.current?.click()} disabled={uploading} className="rounded-lg bg-blue-600 px-3.5 py-2 text-xs font-medium text-white shadow-sm hover:bg-blue-700 disabled:cursor-wait disabled:opacity-50">{uploading ? "导入中…" : "上传银行流水"}</button>
             <button type="button" onClick={() => void load()} disabled={loading} className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs text-slate-600 hover:bg-slate-50 disabled:opacity-50">刷新</button>
           </div>
@@ -394,7 +395,7 @@ export default function BankTransactionsPage() {
                     <td className="max-w-[240px] truncate px-4 py-3 text-xs text-slate-500">{row.summary || "—"}</td>
                     <td className="px-4 py-3 font-mono text-xs text-slate-500">{row.serialNo || "—"}</td>
                     <td className="px-4 py-3 font-mono text-xs text-slate-400">{row.voucherNo || "—"}</td>
-                    <td className="px-4 py-3 text-xs text-slate-500">{row.accountName || row.accountNo || "浙江农信"}</td>
+                    <td className="px-4 py-3 text-xs text-slate-500"><div>{row.accountName || "浙江农信"}</div><div className="mt-0.5 font-mono text-[10px] text-slate-400">{row.accountNo || "未绑定账号"}{row.accountCode ? ` · ${row.accountCode}` : ""}</div></td>
                     <td className="px-4 py-3"><span className={`inline-flex rounded-full px-2 py-1 text-[11px] font-medium ring-1 ring-inset ${matchClass(row)}`}>{matchText(row)}</span></td>
                     <td className="px-4 py-3">
                       <button type="button" onClick={() => void openRawDetail(row)} disabled={!row.rawAvailable || rawLoading} className="whitespace-nowrap rounded-md border border-blue-200 px-2.5 py-1.5 text-[11px] font-medium text-blue-600 hover:bg-blue-50 disabled:cursor-not-allowed disabled:border-slate-200 disabled:text-slate-400">
@@ -416,7 +417,7 @@ export default function BankTransactionsPage() {
             <div className="flex items-start justify-between border-b border-slate-200 px-5 py-4">
               <div>
                 <h2 className="text-base font-semibold text-slate-900">原始银行记录</h2>
-                <p className="mt-1 text-xs text-slate-500">第 {rawDetail.sourceRowNumber ?? rawDetail.raw.rowNumber ?? "—"} 行 · {rawDetail.accountNo || "未识别账号"} · 流水号 {rawDetail.serialNo || "—"}</p>
+                <p className="mt-1 text-xs text-slate-500">第 {rawDetail.sourceRowNumber ?? rawDetail.raw.rowNumber ?? "—"} 行 · {rawDetail.accountNo || "未识别账号"}{rawDetail.accountCode ? ` · ${rawDetail.accountCode}` : ""} · 流水号 {rawDetail.serialNo || "—"}</p>
               </div>
               <button type="button" onClick={() => setRawDetail(null)} className="rounded-md px-2 py-1 text-lg text-slate-400 hover:bg-slate-100 hover:text-slate-700" aria-label="关闭">×</button>
             </div>

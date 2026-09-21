@@ -8,6 +8,7 @@ import { useTabScopedState } from "@/lib/workspace/tab-store";
 type BankAccountSummary = {
   accountId: number | null;
   accountNo: string;
+  accountCode: string;
   accountName: string;
   bankName: string;
   currency: string;
@@ -57,7 +58,7 @@ function money(value: string | number | null | undefined) {
 }
 
 function accountLabel(row: BankAccountSummary) {
-  return row.accountName || row.accountNo || "未归属账户";
+  return row.accountName || row.accountNo || row.accountCode || "未归属账户";
 }
 
 export function BankSummaryPanel({
@@ -194,7 +195,7 @@ export function BankSummaryPanel({
                   <tr key={row.accountId ?? `unknown-${index}`} className="hover:bg-blue-50/30">
                     <td className="px-4 py-3">
                       <div className="font-medium text-slate-800">{accountLabel(row)}</div>
-                      <div className="mt-0.5 font-mono text-[11px] text-slate-400">{row.accountNo || "未绑定账号"}</div>
+                      <div className="mt-0.5 font-mono text-[11px] text-slate-400">{row.accountNo || "未绑定账号"}{row.accountCode ? ` · 内部编号 ${row.accountCode}` : ""}</div>
                     </td>
                     <td className="px-4 py-3 text-xs text-slate-500">{row.bankName || "—"}</td>
                     <td className="px-4 py-3 text-right font-semibold tabular-nums text-slate-800">{money(row.systemBalance)}</td>

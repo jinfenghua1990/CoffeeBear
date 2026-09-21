@@ -16,6 +16,8 @@ class BankAccount(Base, PkMixin, TimestampMixin):
     __tablename__ = "bank_accounts"
 
     account_no: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
+    # 面向系统内部的稳定编号；account_no 始终保存真实银行账号。
+    internal_code: Mapped[str | None] = mapped_column(String(64), unique=True, nullable=True)
     account_name: Mapped[str] = mapped_column(String(256), default="")
     bank_name: Mapped[str] = mapped_column(String(256), default="")
     currency: Mapped[str] = mapped_column(String(8), default="CNY")

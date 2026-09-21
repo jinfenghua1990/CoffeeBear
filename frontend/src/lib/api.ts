@@ -513,6 +513,7 @@ export type ReconTxn = {
   direction: string;
   amount: string;
   accountNo?: string;
+  accountCode?: string;
   accountName?: string;
   bankName?: string;
   counterpartyName: string;

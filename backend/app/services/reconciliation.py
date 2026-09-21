@@ -149,19 +149,55 @@ def delete_rule(db: Session, rule_id: int, actor: str = "system") -> None:
               {"pattern": row.match_pattern, "platform": row.platform})
 
 
-def ensure_account(db: Session, account_no: str, account_name: str = "") -> BankAccount:
+DEFAULT_INTERNAL_ACCOUNT_CODE = "ZJRC-001"
+
+
+def resolve_account_reference(db: Session, value: str) -> tuple[str, str, str]:
+    """把真实账号或内部编号解析为真实账号。
+
+    返回 ``(real_account_no, internal_code, source)``；account_no 永远不保存内部别名。
+    """
+    account_ref = (value or "").strip()
+    if not account_ref:
+        raise ValueError("银行真实账号不能为空；请从流水文件读取或明确填写真实账号")
+
+    row = db.query(BankAccount).filter_by(account_no=account_ref).first()
+    if row is not None:
+        return row.account_no, row.internal_code or "", "account_no"
+
+    row = db.query(BankAccount).filter_by(internal_code=account_ref).first()
+    if row is not None:
+        return row.account_no, row.internal_code or account_ref, "internal_code"
+
+    return account_ref, "", "account_no"
+
+
+def ensure_account(
+    db: Session,
+    account_no: str,
+    account_name: str = "",
+    internal_code: str = "",
+) -> BankAccount:
     account_no = (account_no or "").strip()
+    internal_code = (internal_code or "").strip()
     if not account_no:
         raise ValueError("银行真实账号不能为空；请从流水文件读取或明确填写真实账号")
     row = db.query(BankAccount).filter_by(account_no=account_no).first()
     if not row:
         row = BankAccount(account_no=account_no, account_name=account_name or account_no,
-                          bank_name="浙江农信")
+                          bank_name="浙江农信", internal_code=internal_code or None)
         db.add(row)
         db.commit()
-    elif account_name and (not row.account_name or row.account_name == row.account_no):
-        row.account_name = account_name
-        db.commit()
+    else:
+        changed = False
+        if internal_code and not row.internal_code:
+            row.internal_code = internal_code
+            changed = True
+        if account_name and (not row.account_name or row.account_name == row.account_no):
+            row.account_name = account_name
+            changed = True
+        if changed:
+            db.commit()
     return row
 
 
@@ -236,6 +272,7 @@ def add_transaction(db: Session, *, account_no: str, txn_date: date, direction: 
                     account_name: str = "", transaction_time: datetime | None = None,
                     source_row_number: int | None = None, raw: dict | None = None,
                     import_batch_id: int | None = None,
+                    internal_code: str = "",
                     actor: str = "system") -> tuple[BankTransaction, bool]:
     """登记银行流水并保留原始来源。重复导入会补齐来源，不会清空 raw。"""
     if direction not in ("in", "out"):
@@ -246,7 +283,14 @@ def add_transaction(db: Session, *, account_no: str, txn_date: date, direction: 
     counterparty_name = counterparty_name or ""
     counterparty_account = counterparty_account or ""
     summary = summary or ""
-    account = ensure_account(db, account_no, account_name=account_name)
+    requested_account = account_no
+    account_no, mapped_internal_code, resolution = resolve_account_reference(db, requested_account)
+    if requested_account == DEFAULT_INTERNAL_ACCOUNT_CODE and resolution != "internal_code":
+        raise ValueError("内部编号 ZJRC-001 尚未配置真实银行账号，请先配置账户映射")
+    internal_code = (internal_code or mapped_internal_code).strip()
+    account = ensure_account(
+        db, account_no, account_name=account_name, internal_code=internal_code,
+    )
     amount_value = quantize(to_decimal(amount), Decimal("0.01"))
     fp = build_fingerprint(account_no, txn_date.isoformat(), amount, voucher_no,
                            counterparty_name, summary, serial_no=serial_no)
@@ -295,8 +339,9 @@ def import_bank_xlsx(db: Session, *, account_no: str = "", content: bytes,
                      actor: str = "system") -> dict:
     """解析并导入银行流水，同时保存真实账户和每一行原始来源。
 
-    文件中识别到的我方账号优先级高于接口传入值。只有文件确实没有我方账号时，
-    才允许调用方明确传入人工确认的真实账号；旧的 ``ZJRC-001`` 不能再作为默认账号。
+    文件中识别到的我方真实账号优先级高于接口传入值。文件没有我方账号时，
+    可以传入已配置的内部编号（例如 ``ZJRC-001``），系统会解析成真实账号；
+    数据库最终只保存真实账号，内部编号单独保存。
     """
     from datetime import date
 
@@ -344,17 +389,28 @@ def import_bank_xlsx(db: Session, *, account_no: str = "", content: bytes,
 
     manual_account = (account_no or "").strip()
     if source_accounts:
-        resolved_account_no = source_accounts[0]
+        source_account = source_accounts[0]
+        resolved_account_no, internal_code, _ = resolve_account_reference(db, source_account)
+        if source_account == DEFAULT_INTERNAL_ACCOUNT_CODE and not internal_code:
+            batch.status = "failed"
+            db.commit()
+            raise ValueError("文件中的我方账号是系统别名，请先配置对应的真实银行账号")
         account_source = "file"
     else:
-        if not manual_account or manual_account == "ZJRC-001":
+        if not manual_account:
             batch.status = "failed"
             db.commit()
             audit(db, actor, "bank.import.xlsx.failed", "bank_import_batches", batch.id,
                   {"archiveFileId": archive_file_id, "reason": "文件没有真实我方账号"})
-            raise ValueError("文件未识别我方交易账号，请填写真实账号；禁止使用系统别名作为默认账号")
-        resolved_account_no = manual_account
-        account_source = "manual"
+            raise ValueError("文件未识别我方交易账号，请填写真实账号或已配置的内部编号")
+        resolved_account_no, internal_code, resolution = resolve_account_reference(db, manual_account)
+        if manual_account == DEFAULT_INTERNAL_ACCOUNT_CODE and resolution != "internal_code":
+            batch.status = "failed"
+            db.commit()
+            audit(db, actor, "bank.import.xlsx.failed", "bank_import_batches", batch.id,
+                  {"archiveFileId": archive_file_id, "reason": "内部编号未配置真实账号"})
+            raise ValueError("内部编号 ZJRC-001 尚未配置真实银行账号，请先配置账户映射")
+        account_source = "internal_code" if resolution == "internal_code" else "manual"
 
     account_names = sorted({(r.get("account_name") or "").strip() for r in rows if r.get("account_name")})
     account_name = account_names[0] if len(account_names) == 1 else ""
@@ -382,6 +438,7 @@ def import_bank_xlsx(db: Session, *, account_no: str = "", content: bytes,
             "importBatchId": batch.id,
             "accountSource": account_source,
             "resolvedAccountNo": resolved_account_no,
+            "internalAccountCode": internal_code,
         })
         try:
             txn_date = date.fromisoformat(r["txn_date"])
@@ -394,7 +451,7 @@ def import_bank_xlsx(db: Session, *, account_no: str = "", content: bytes,
                 voucher_no=r.get("voucher_no") or "",
                 transaction_time=_parse_transaction_time(r.get("transaction_time")),
                 source_row_number=(r.get("raw") or {}).get("rowNumber"), raw=raw,
-                import_batch_id=batch.id, actor=actor,
+                import_batch_id=batch.id, internal_code=internal_code, actor=actor,
             )
         except (TypeError, ValueError):
             skipped += 1
@@ -417,6 +474,7 @@ def import_bank_xlsx(db: Session, *, account_no: str = "", content: bytes,
     return {
         "batchId": batch.id, "archiveFileId": archive_file_id,
         "accountNo": resolved_account_no, "accountSource": account_source,
+        "internalCode": internal_code,
         "sourceAccounts": source_accounts, "parsed": len(rows),
         "created": created, "duplicates": duplicates,
         "rawStored": raw_stored, "skipped": skipped,

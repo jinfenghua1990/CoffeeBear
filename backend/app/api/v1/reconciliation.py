@@ -202,6 +202,7 @@ def list_transactions(
                 else None
             ),
             "accountNo": accounts[r.account_id].account_no if r.account_id in accounts else "",
+            "accountCode": accounts[r.account_id].internal_code if r.account_id in accounts else "",
             "accountName": accounts[r.account_id].account_name if r.account_id in accounts else "",
             "bankName": accounts[r.account_id].bank_name if r.account_id in accounts else "",
         }
@@ -223,6 +224,7 @@ def get_transaction_raw(txn_id: int, db: Session = Depends(get_db)) -> dict[str,
         "txnDate": row.txn_date.isoformat(),
         "transactionTime": row.transaction_time.isoformat() if row.transaction_time else None,
         "accountNo": account.account_no if account else "",
+        "accountCode": account.internal_code if account else "",
         "serialNo": row.serial_no,
         "voucherNo": row.voucher_no,
         "sourceRowNumber": row.source_row_number,

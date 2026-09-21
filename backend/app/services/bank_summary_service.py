@@ -103,6 +103,7 @@ def build_summary(db: Session, *, year: int, month: int) -> dict[str, Any]:
         rows.append({
             "accountId": account.id if account else None,
             "accountNo": account.account_no if account else "",
+            "accountCode": account.internal_code if account else "",
             "accountName": account.account_name if account else "未归属账户",
             "bankName": account.bank_name if account else "",
             "currency": account.currency if account else "CNY",
