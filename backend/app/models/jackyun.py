@@ -7,7 +7,7 @@
 from datetime import datetime
 from decimal import Decimal
 
-from sqlalchemy import BigInteger, DateTime, Index, Integer, Numeric, String, Text, UniqueConstraint
+from sqlalchemy import BigInteger, DateTime, ForeignKey, Index, Integer, Numeric, String, Text, UniqueConstraint
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -21,6 +21,9 @@ class JackyunPurchaseSettlement(Base, PkMixin, TimestampMixin):
 
     __tablename__ = "jackyun_purchase_settlements"
 
+    supplier_partner_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("business_partners.id", ondelete="SET NULL"), nullable=True, index=True,
+    )
     settlement_no: Mapped[str] = mapped_column(String(128), unique=True, nullable=False)
     settlement_date: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
     supplier_name: Mapped[str] = mapped_column(String(256), default="", index=True)
@@ -39,6 +42,9 @@ class JackyunPurchaseReturn(Base, PkMixin, TimestampMixin):
 
     __tablename__ = "jackyun_purchase_returns"
 
+    supplier_partner_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("business_partners.id", ondelete="SET NULL"), nullable=True, index=True,
+    )
     return_no: Mapped[str] = mapped_column(String(128), unique=True, nullable=False)
     purchase_no: Mapped[str] = mapped_column(String(128), default="", index=True)
     supplier_name: Mapped[str] = mapped_column(String(256), default="", index=True)
@@ -65,6 +71,9 @@ class JackyunGoodsDocument(Base, PkMixin, TimestampMixin):
     company_name: Mapped[str] = mapped_column(String(256), default="")
     # 供应商名称：吉客云入库单接口有该字段，接口受限时留空，恢复后由同步逻辑从 raw 补齐
     supplier_name: Mapped[str] = mapped_column(String(256), default="", index=True)
+    supplier_partner_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("business_partners.id", ondelete="SET NULL"), nullable=True, index=True,
+    )
     total_quantity: Mapped[Decimal | None] = mapped_column(QUANTITY, nullable=True)
     # 金额维度：文件导入通道补充（API 接口无此字段时从 Excel 导入）
     total_amount: Mapped[Decimal | None] = mapped_column(MONEY, nullable=True)
