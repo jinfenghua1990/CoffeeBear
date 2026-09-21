@@ -317,7 +317,7 @@ export default function BusinessPartnersPage() {
             {loading && <div className="px-3 py-8 text-center text-sm text-slate-400">正在建立来源关联…</div>}
             {!loading && items.length === 0 && <div className="px-3 py-8 text-center text-sm text-slate-400">暂无匹配的往来单位</div>}
             {items.map((item) => <button key={item.id} type="button" onClick={() => { setSelectedId(item.id); setTab("overview"); }} className={`mb-1 w-full rounded-lg px-3 py-2.5 text-left transition ${selectedId === item.id ? "bg-blue-50 ring-1 ring-blue-200" : "hover:bg-slate-50"}`}>
-              <div className="flex gap-2"><div className="min-w-0 flex-1"><div className="truncate text-sm font-medium text-slate-800">{item.name}</div><div className="mt-1"><RoleBadges roles={item.roles} /></div></div>{item.summary.needsReviewCount > 0 && <span className="mt-0.5 h-fit rounded-full bg-amber-100 px-1.5 py-0.5 text-[10px] font-semibold text-amber-700">待确认 {item.summary.needsReviewCount}</span>}</div>
+              <div className="flex gap-2"><div className="min-w-0 flex-1"><div className="truncate text-sm font-medium text-slate-800">{item.name}</div><div className="mt-1"><RoleBadges roles={item.roles} /></div></div>{item.summary.needsReviewCount > 0 && <span className="mt-0.5 h-fit rounded-full bg-amber-100 px-1.5 py-0.5 text-[10px] font-semibold text-amber-700">待确认 {item.summary.needsReviewCount}</span>}{item.possibleDuplicateCount > 0 && <span className="mt-0.5 h-fit rounded-full bg-rose-50 px-1.5 py-0.5 text-[10px] font-semibold text-rose-600">疑似重复 {item.possibleDuplicateCount}</span>}</div>
               <div className="mt-2 grid grid-cols-3 gap-1 text-[10px] text-slate-500"><span>采购 {money(item.summary.purchaseAmount)}</span><span>发票 {money(item.summary.invoiceAmount)}</span><span>付款 {money(item.summary.bankPaidAmount)}</span></div>
             </button>)}
           </div>
@@ -329,6 +329,17 @@ export default function BusinessPartnersPage() {
           {detail && !detailLoading && <>
             <div className="border-b border-slate-100 px-5 py-4">
               <div className="flex flex-wrap items-start justify-between gap-3"><div className="min-w-0"><div className="flex flex-wrap items-center gap-2"><h2 className="max-w-[650px] truncate text-xl font-semibold text-slate-900">{detail.name}</h2><RoleBadges roles={detail.roles} /></div><div className="mt-1 flex flex-wrap gap-x-4 gap-y-1 text-xs text-slate-500"><span>税号：{detail.taxNo || "待补充"}</span><span>主账号：{detail.bankAccountNo || "待补充"}</span>{detail.legacySupplierId && <Link href="/suppliers" className="font-medium text-blue-600 hover:text-blue-700">已承接原供应商档案，查看供应商档案 →</Link>}</div></div><div className="flex gap-2"><button type="button" onClick={() => { setForm(partnerToForm(detail)); setEditingId(detail.id); }} className="rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50">编辑档案</button><Link href="/finance/bank-transactions?view=transactions" className="rounded-lg border border-blue-200 px-3 py-1.5 text-xs font-medium text-blue-600 hover:bg-blue-50">银行流水</Link></div></div>
+              {detail.possibleDuplicates.length > 0 && (
+                <div className="mt-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-[11px] text-amber-700">
+                  <span className="font-medium">疑似同一主体：</span>
+                  {detail.possibleDuplicates.map((item) => (
+                    <Link key={item.id} href={`/finance/partners?partnerId=${item.id}`} className="mr-2 font-medium text-amber-800 underline hover:text-amber-900">
+                      {item.name}{item.taxNo ? `（税号 ${item.taxNo}）` : "（无税号）"}
+                    </Link>
+                  ))}
+                  <span className="text-amber-600">名称去括号与后缀后相同，按规则不自动合并，请人工判断。</span>
+                </div>
+              )}
               <div className="mt-4 flex gap-1 overflow-x-auto border-b border-slate-100 -mb-4"><div className="flex min-w-max gap-1">{tabs.map(([key, label, count]) => <button key={key} type="button" onClick={() => setTab(key)} className={`relative px-3 py-2.5 text-xs font-medium ${tab === key ? "text-blue-600" : "text-slate-500 hover:text-slate-700"}`}>{label}{count ? <span className="ml-1 rounded-full bg-amber-100 px-1.5 py-0.5 text-[9px] text-amber-700">{count}</span> : null}{tab === key && <span className="absolute inset-x-2 bottom-0 h-0.5 rounded bg-blue-600" />}</button>)}</div></div>
             </div>
 

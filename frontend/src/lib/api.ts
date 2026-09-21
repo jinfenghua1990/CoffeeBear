@@ -1255,9 +1255,17 @@ export type BusinessPartnerListItem = {
   identifiers: BusinessPartnerIdentifier[];
   legacySupplierId: number | null;
   summary: BusinessPartnerSummary;
+  possibleDuplicateCount: number;
+};
+
+export type BusinessPartnerDuplicate = {
+  id: number;
+  name: string;
+  taxNo: string;
 };
 
 export type BusinessPartnerDetail = BusinessPartnerListItem & {
+  possibleDuplicates: BusinessPartnerDuplicate[];
   contact: string;
   phone: string;
   address: string;

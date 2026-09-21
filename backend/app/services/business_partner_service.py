@@ -1080,7 +1080,41 @@ def _fact_preview(db: Session, link: BusinessPartnerLink) -> dict[str, Any]:
     return {"no": str(getattr(source, "number", "") or getattr(source, "purch_no", "") or getattr(source, "settlement_no", "") or getattr(source, "return_no", "")), "date": _iso(getattr(source, "ordered_on", None) or getattr(source, "settlement_date", None) or getattr(source, "returned_at_src", None)), "amount": _number(getattr(source, "amount", None) or getattr(source, "settlement_amount", None) or getattr(source, "return_amount", None))}
 
 
-def partner_detail(db: Session, partner_id: int) -> dict[str, Any] | None:
+def _duplicate_map(db: Session) -> dict[str, list[tuple[int, str, str]]]:
+    """按松名称键归组，只用于提示“疑似同一主体”，不作为自动合并依据。"""
+    groups: dict[str, list[tuple[int, str, str]]] = {}
+    rows = (
+        db.query(BusinessPartner.id, BusinessPartner.name, BusinessPartner.tax_no)
+        .filter(BusinessPartner.status != "archived")
+        .all()
+    )
+    for row in rows:
+        key = loose_name_key(row.name)
+        if len(key) < 4:
+            continue
+        groups.setdefault(key, []).append((row.id, row.name or "", row.tax_no or ""))
+    return {key: members for key, members in groups.items() if len(members) > 1}
+
+
+def _possible_duplicates(
+    partner: BusinessPartner, duplicate_map: dict[str, list[tuple[int, str, str]]]
+) -> list[dict[str, Any]]:
+    key = loose_name_key(partner.name)
+    if len(key) < 4:
+        return []
+    return [
+        {"id": member_id, "name": name, "taxNo": tax_no}
+        for member_id, name, tax_no in duplicate_map.get(key, [])
+        if member_id != partner.id
+    ]
+
+
+def partner_detail(
+    db: Session,
+    partner_id: int,
+    *,
+    duplicate_map: dict[str, list[tuple[int, str, str]]] | None = None,
+) -> dict[str, Any] | None:
     partner = db.get(BusinessPartner, partner_id)
     if partner is None or partner.status == "archived":
         return None
@@ -1103,6 +1137,7 @@ def partner_detail(db: Session, partner_id: int) -> dict[str, Any] | None:
     bank_paid = sum((_decimal(row["amount"]) for row in payments if row["direction"] == "out"), Decimal("0"))
     bank_received = sum((_decimal(row["amount"]) for row in payments if row["direction"] == "in"), Decimal("0"))
     sales_amount = sum((_decimal(row["paidAmount"]) for row in sales), Decimal("0"))
+    duplicates = _possible_duplicates(partner, duplicate_map if duplicate_map is not None else _duplicate_map(db))
     return {
         **_partner_core(db, partner),
         "summary": {
@@ -1128,6 +1163,8 @@ def partner_detail(db: Session, partner_id: int) -> dict[str, Any] | None:
         "payments": payments,
         "sales": sales,
         "reviewItems": _review_rows(db, partner.id),
+        # 只提示不合并：疑似同一主体的其他档案，等人工决定
+        "possibleDuplicates": duplicates,
     }
 
 
@@ -1146,11 +1183,12 @@ def list_partners(
         .all()
     )
     needle = normalize_name(keyword)
+    duplicate_map = _duplicate_map(db)
     items = []
     for row in rows:
         if role in PARTNER_ROLES and role not in set(row.roles or []):
             continue
-        detail = partner_detail(db, row.id)
+        detail = partner_detail(db, row.id, duplicate_map=duplicate_map)
         if detail is None:
             continue
         searchable = " ".join(
@@ -1166,6 +1204,7 @@ def list_partners(
         items.append({
             **{key: detail[key] for key in ("id", "name", "taxNo", "roles", "status", "identifiers", "legacySupplierId")},
             "summary": detail["summary"],
+            "possibleDuplicateCount": len(detail["possibleDuplicates"]),
         })
     items.sort(
         key=lambda row: (

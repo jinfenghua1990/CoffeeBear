@@ -118,6 +118,28 @@ def test_similar_legal_name_needs_manual_confirmation_then_becomes_alias(db_sess
     assert "义乌市档案注塑厂（个体工商户）" in aliases
 
 
+def test_same_entity_two_supplier_records_are_flagged_not_merged(db_session):
+    """同一主体的两条供应商记录不自动合并，但双方都要给出“疑似同一主体”提示。"""
+    plain = Supplier(name="义乌市聚科注塑厂")
+    licensed = Supplier(name="义乌市聚科注塑厂（个体工商户）", tax_no="92330782MAEBFPHX0W")
+    db_session.add_all([plain, licensed])
+    db_session.flush()
+
+    service.sync_business_partners(db_session)
+
+    items = service.list_partners(db_session, keyword="聚科")["items"]
+    assert len(items) == 2
+    assert {row["possibleDuplicateCount"] for row in items} == {1}
+
+    partner_ids = {row["id"] for row in items}
+    for partner_id in partner_ids:
+        detail = service.partner_detail(db_session, partner_id)
+        assert detail is not None
+        other_ids = {item["id"] for item in detail["possibleDuplicates"]}
+        assert other_ids == partner_ids - {partner_id}
+        assert detail["possibleDuplicates"][0]["taxNo"] in ("", "92330782MAEBFPHX0W")
+
+
 def test_confirmed_invoice_payment_relation_connects_bank_when_names_differ(db_session):
     supplier = Supplier(name="付款关联供应商", tax_no="91330100PARTNER002")
     db_session.add(supplier)
