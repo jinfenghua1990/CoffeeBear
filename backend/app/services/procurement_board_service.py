@@ -24,8 +24,7 @@ from app.services.procurement_chain_service import (
     chain_snapshot,
     supplier_detail,
 )
-from app.services.procurement_workbench_service import _pending_queue, _step_states
-from app.utils.money import to_decimal
+from app.services.procurement_workbench_service import _pending_queue, _step_states, _view_decimal
 
 
 # ---------- 顶部统计卡 ----------
@@ -46,7 +45,7 @@ def overview(db: Session) -> dict:
     yesterday_count = 0   # 昨日新增订单（用于真实 delta 计算）
 
     for row in rows:
-        amount = to_decimal(row.get("amount"))
+        amount = _view_decimal(row.get("amount"))
         total_amount += amount
         # 今日 / 昨日新增订单（按 order_date 兜底 created_at）
         d = row.get("orderDate")
@@ -94,24 +93,25 @@ def _first_undone_label(row: dict) -> str | None:
     return _pending_queue(row)
 
 
-def _paid_amount(row: dict, cap: Decimal | None = None) -> Decimal:
+def _paid_amount(row: dict, cap=None) -> Decimal:
     """合并吉客云结算与 1688 已付款事实；金额计算全程 Decimal。"""
     settlement_paid = sum(
         (
-            to_decimal(item.get("paidAmount") or item.get("amount"))
+            _view_decimal(item.get("paidAmount") or item.get("amount"))
             for item in row.get("settlement") or []
             if item.get("paid")
         ),
         Decimal("0"),
     )
     platform_paid = (
-        to_decimal(row.get("paidAmount") or row.get("amount"))
+        _view_decimal(row.get("paidAmount") or row.get("amount"))
         if row.get("paidOn1688")
         else Decimal("0")
     )
     paid = max(settlement_paid, platform_paid)
     if cap is not None:
-        paid = min(paid, max(Decimal("0"), cap))
+        cap_value = _view_decimal(cap)
+        paid = min(paid, max(Decimal("0"), cap_value))
     return paid
 
 
@@ -351,7 +351,7 @@ def _supplier_often_skus(db: Session, supplier_name: str) -> list[dict]:
             "qty": count,             # 数量（次数即数量）
             "unitPrice": meta["unitPrice"],
             "amount": float(
-                (Decimal(count) * to_decimal(meta["unitPrice"])).quantize(Decimal("0.01"))
+                (Decimal(count) * _view_decimal(meta["unitPrice"])).quantize(Decimal("0.01"))
             ),
         })
     return result
@@ -360,13 +360,13 @@ def _supplier_often_skus(db: Session, supplier_name: str) -> list[dict]:
 def _payment_breakdown(row: dict) -> dict:
     """金额与付款分层 8 列。"""
     # 商品金额优先用 1688 订单的 goods_total，否则回退为实付款额
-    goods_total = to_decimal(row.get("goodsTotal") or row.get("amount"))
-    freight = to_decimal(row.get("freight"))
+    goods_total = _view_decimal(row.get("goodsTotal") or row.get("amount"))
+    freight = _view_decimal(row.get("freight"))
     extra = sum(
-        (to_decimal(item.get("amount")) for item in row.get("expenses") or []),
+        (_view_decimal(item.get("amount")) for item in row.get("expenses") or []),
         Decimal("0"),
     )
-    discount = to_decimal(row.get("discount"))
+    discount = _view_decimal(row.get("discount"))
     total_due = goods_total + freight + extra - discount
     paid_amount = _paid_amount(row, cap=total_due)
     unpaid_amount = max(Decimal("0"), total_due - paid_amount)

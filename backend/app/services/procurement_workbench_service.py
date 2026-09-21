@@ -82,6 +82,17 @@ def _number(value: Any) -> float | None:
         return None
 
 
+def _view_decimal(value: Any) -> Decimal:
+    """把链路序列化视图值恢复为 Decimal；仅用于内部 view-dict → 业务计算边界。
+
+    _order_row 为兼容前端会输出 JSON 数字（float），这里立即通过其十进制文本表示
+    恢复 Decimal。全局 money.to_decimal 继续严格拒绝 float，避免业务层误用二进制金额。
+    """
+    if isinstance(value, float):
+        return Decimal(str(value))
+    return to_decimal(value)
+
+
 def _channel_key(platform: str | None) -> str:
     value = (platform or "").strip().lower()
     if value == "1688" or "阿里" in value:
@@ -566,7 +577,7 @@ def _pending_queue(row: dict) -> str | None:
             return "inbound"
 
     invoice_status = str(row.get("invoiceStatus") or "").strip().lower()
-    invoice_outstanding = to_decimal(row.get("invoiceOutstanding"))
+    invoice_outstanding = _view_decimal(row.get("invoiceOutstanding"))
     invoice_done = (
         bool(row.get("invoice"))
         and invoice_status == "done"
@@ -577,24 +588,25 @@ def _pending_queue(row: dict) -> str | None:
     return None
 
 
-def _paid_amount(row: dict, cap: Decimal | None = None) -> Decimal:
+def _paid_amount(row: dict, cap: Any = None) -> Decimal:
     """合并结算与平台付款事实；金额计算全程 Decimal。"""
     settlement_paid = sum(
         (
-            to_decimal(item.get("paidAmount") or item.get("amount"))
+            _view_decimal(item.get("paidAmount") or item.get("amount"))
             for item in row.get("settlement") or []
             if item.get("paid")
         ),
         Decimal("0"),
     )
     platform_paid = (
-        to_decimal(row.get("paidAmount") or row.get("amount"))
+        _view_decimal(row.get("paidAmount") or row.get("amount"))
         if row.get("paidOn1688")
         else Decimal("0")
     )
     paid = max(settlement_paid, platform_paid)
     if cap is not None:
-        paid = min(paid, max(Decimal("0"), cap))
+        cap_value = _view_decimal(cap)
+        paid = min(paid, max(Decimal("0"), cap_value))
     return paid
 
 
@@ -620,7 +632,7 @@ def summary(db: Session) -> dict:
     paid_amount = Decimal("0")
     total_amount = Decimal("0")
     for row in rows:
-        amount = to_decimal(row.get("amount"))
+        amount = _view_decimal(row.get("amount"))
         total_amount += amount
         paid_amount += _paid_amount(row, cap=amount)
 
@@ -1056,7 +1068,7 @@ def _warehouse_block(db: Session, row: dict[str, Any]) -> dict[str, Any]:
     allocations = row.get("allocations") or []
     sku_ids = [a.get("skuId") for a in allocations if a.get("skuId")]
     ordered_qty = sum(
-        (to_decimal(a.get("quantity")) for a in allocations),
+        (_view_decimal(a.get("quantity")) for a in allocations),
         Decimal("0"),
     )
 

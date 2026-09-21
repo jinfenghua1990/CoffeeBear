@@ -110,7 +110,7 @@ def test_consumable_receipt_groups_into_inbound_documents(db_session):
     assert row["actualQuantity"] == 15.0
     assert row["arrivedQuantity"] == 15.0
     assert row["difference"] == 0.0
-    assert row["inboundAt"] is not None and row["inboundAt"].startswith("2025-04-28T10:00")
+    assert row["inboundAt"] is not None and row["inboundAt"].startswith("2025-04-28T18:00+08:00")
     assert [item["sku"] for item in row["items"]] == [material_a.code, material_b.code]
     assert all(item["matchStatus"] == "matched" and item["difference"] == 0.0 for item in row["items"])
     assert row["refs"] == [{
