@@ -43,6 +43,52 @@ class BusinessPartner(Base, PkMixin, TimestampMixin):
     notes: Mapped[str] = mapped_column(Text, default="")
 
 
+class BusinessPartnerRole(Base, PkMixin, TimestampMixin):
+    """一个真实主体可同时扮演 supplier/customer/counterparty 等多个角色。"""
+
+    __tablename__ = "business_partner_roles"
+    __table_args__ = (
+        UniqueConstraint("partner_id", "role", name="uq_business_partner_role"),
+    )
+
+    partner_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("business_partners.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    role: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    source: Mapped[str] = mapped_column(String(32), default="system", nullable=False)
+    confirmed: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+
+
+class BusinessPartnerBankAccount(Base, PkMixin, TimestampMixin):
+    """往来主体的结构化多银行账户；JSON 字段仅保留兼容，不再作为最终事实源。"""
+
+    __tablename__ = "business_partner_bank_accounts"
+    __table_args__ = (
+        UniqueConstraint(
+            "partner_id", "normalized_account_no",
+            name="uq_business_partner_bank_account",
+        ),
+    )
+
+    partner_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("business_partners.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    bank_name: Mapped[str] = mapped_column(String(128), default="", nullable=False)
+    account_no: Mapped[str] = mapped_column(String(128), nullable=False)
+    normalized_account_no: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    account_name: Mapped[str] = mapped_column(String(256), default="", nullable=False)
+    is_primary: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    status: Mapped[str] = mapped_column(String(16), default="active", nullable=False, index=True)
+    source: Mapped[str] = mapped_column(String(32), default="system", nullable=False)
+    verified: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+
+
 class BusinessPartnerIdentifier(Base, PkMixin, TimestampMixin):
     """往来单位的名称别名、税号、银行账号、客户编码等识别证据。"""
 
