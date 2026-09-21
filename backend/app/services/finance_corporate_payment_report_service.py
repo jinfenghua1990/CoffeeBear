@@ -890,7 +890,7 @@ def corporate_payment_xlsx(report: dict[str, Any]) -> bytes:
     # 保留工作表名兼容历史交付包；列结构升级为财务主视图。
     ws.title = "已收票对公核对"
     headers = [
-        "发票日期", "供应商", "供应商税号", "发票号码", "发票类型",
+        "发票日期", "供应商", "供应商税号", "发票号码", "发票类型", "发票属性",
         "票据状态", "对应红/蓝发票", "原蓝票账期", "红冲金额", "财务净额",
         "红冲结算状态", "红冲待处理金额", "进项抵扣状态", "进项税转出状态", "进项税转出金额",
         "费用性质", "支付方式", "支付判断依据",
@@ -913,6 +913,13 @@ def corporate_payment_xlsx(report: dict[str, Any]) -> bytes:
             row["supplierTaxId"],
             row["invoiceNumber"],
             row["invoiceType"],
+            (
+                "红字发票"
+                if row.get("invoiceColor") == "red"
+                else "蓝字发票"
+                if row.get("invoiceColor") == "blue"
+                else "票据待确认"
+            ),
             row.get("invoiceStatusLabel") or "",
             row.get("redRelatedInvoiceNo") or "",
             row.get("redRelatedInvoicePeriod") or "",

@@ -122,7 +122,10 @@ def test_build_report_links_bank_invoice_purchase_and_product(db_session):
     blob = service.corporate_payment_xlsx(report)
     wb = load_workbook(BytesIO(blob), read_only=True)
     assert wb.sheetnames == ["月度汇总", "已收票对公核对", "商品明细"]
-    assert wb["已收票对公核对"]["D2"].value == invoice.invoice_number
+    invoice_ws = wb["已收票对公核对"]
+    headers = {cell.value: cell.column for cell in invoice_ws[1]}
+    assert invoice_ws["D2"].value == invoice.invoice_number
+    assert invoice_ws.cell(2, headers["发票属性"]).value == "蓝字发票"
     assert wb["商品明细"]["G2"].value == item.sku_code
 
 
@@ -294,6 +297,7 @@ def test_negative_red_invoice_is_not_misclassified_as_bank_reconciled(db_session
     wb = load_workbook(BytesIO(service.corporate_payment_xlsx(report)), read_only=True)
     ws = wb["已收票对公核对"]
     headers = {cell.value: cell.column for cell in ws[1]}
+    assert ws.cell(2, headers["发票属性"]).value == "红字发票"
     assert ws.cell(2, headers["票据状态"]).value == "红字发票（待关联蓝字）"
     assert ws.cell(2, headers["支付方式"]).value == "不适用"
     assert ws.cell(2, headers["银行匹配状态"]).value == "不适用"

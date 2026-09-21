@@ -253,6 +253,8 @@ type CorporateInvoiceRow = {
   expenseNature: string;
   expenseNatureLabel: string;
   expenseNatureBasis?: string;
+  invoiceColor?: "blue" | "red" | "unknown" | string;
+  invoiceStatusLabel?: string;
   redStatus?: string;
   redRelatedInvoiceNo?: string;
   redRelatedInvoicePeriod?: string;
@@ -346,6 +348,37 @@ function bankMatchStatusLabel(status: string) {
   if (status === "matched") return "银行付款已核对";
   if (status === "partial") return "银行付款部分核对";
   return "待核对银行付款";
+}
+
+function invoiceColorLabel(row: CorporateInvoiceRow) {
+  if (row.invoiceColor === "red") return "红字发票";
+  if (row.invoiceColor === "blue") return "蓝字发票";
+  return "票据待确认";
+}
+
+function invoiceLifecycleLabel(row: CorporateInvoiceRow) {
+  if (row.redStatus === "fully_red_offset") return "已全额红冲";
+  if (row.redStatus === "partially_red_offset") return "部分红冲";
+  if (row.redStatus === "over_red_offset") return "红冲金额异常";
+  if (row.redStatus === "blue_red_pending") return "已红冲 · 待关联红字票";
+  if (row.redStatus === "red_invoice") return "红冲";
+  if (row.redStatus === "red_invoice_unpaired") return "红冲 · 待关联蓝字票";
+  if (row.redStatus === "red_invoice_ambiguous") return "红冲 · 蓝字票关联歧义";
+  if (row.invoiceColor === "blue") return "有效";
+  return row.invoiceStatusLabel || "";
+}
+
+function invoiceColorBadgeClass(row: CorporateInvoiceRow) {
+  if (row.invoiceColor === "red") return "bg-rose-100 text-rose-700 ring-rose-200";
+  if (row.invoiceColor === "blue") return "bg-sky-100 text-sky-700 ring-sky-200";
+  return "bg-slate-100 text-slate-500 ring-slate-200";
+}
+
+function invoiceLifecycleBadgeClass(row: CorporateInvoiceRow) {
+  if (row.invoiceColor === "red" || row.redStatus === "over_red_offset") return "bg-rose-50 text-rose-700 ring-rose-100";
+  if (row.redStatus === "fully_red_offset") return "bg-violet-50 text-violet-700 ring-violet-100";
+  if (row.redStatus === "partially_red_offset" || row.redStatus === "blue_red_pending") return "bg-amber-50 text-amber-700 ring-amber-100";
+  return "bg-slate-50 text-slate-500 ring-slate-100";
 }
 
 function previousMonthValue() {
@@ -1141,21 +1174,28 @@ export default function MonthlySendPage() {
         </div>}
         {!corporatePayment ? <div className="px-4 py-12 text-center text-sm text-slate-400">正在生成发票核对清单…</div> : !viewInvoices.length ? <div className="px-4 py-12 text-center text-sm text-slate-400">{readOnly && corporatePayment.adjusted ? "当前保存版本没有可发送的进项发票，请返回调整明细。" : "当前账期没有收到进项发票。"}</div> : <>
           <div className="overflow-x-auto border-b border-slate-200">
-            <table className="w-full min-w-[1500px] text-xs">
+            <table className="w-full min-w-[1640px] text-xs">
               <thead className="bg-slate-50 text-left text-slate-500"><tr>
                 {selection && <th className="w-10 px-3 py-2.5 font-medium"><input type="checkbox" checked={corporateAllSelected} onChange={selection.onToggleAll} aria-label="全选发票" className="h-4 w-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500" /></th>}
-                <th className="px-3 py-2.5 font-medium">发票日期</th><th className="px-3 py-2.5 font-medium">供应商</th><th className="px-3 py-2.5 font-medium">发票号码</th><th className="px-3 py-2.5 font-medium">费用性质</th><th className="px-3 py-2.5 font-medium">支付方式</th><th className="px-3 py-2.5 text-right font-medium">价税合计</th><th className="px-3 py-2.5 text-right font-medium">对公支付金额</th><th className="px-3 py-2.5 font-medium">银行付款信息</th><th className="px-3 py-2.5 font-medium">采购订单</th><th className="px-3 py-2.5 text-right font-medium">操作</th>
+                <th className="px-3 py-2.5 font-medium">发票日期</th><th className="px-3 py-2.5 font-medium">供应商</th><th className="px-3 py-2.5 font-medium">发票号码</th><th className="px-3 py-2.5 font-medium">发票属性</th><th className="px-3 py-2.5 font-medium">费用性质</th><th className="px-3 py-2.5 font-medium">支付方式</th><th className="px-3 py-2.5 text-right font-medium">价税合计</th><th className="px-3 py-2.5 text-right font-medium">对公支付金额</th><th className="px-3 py-2.5 font-medium">银行付款信息</th><th className="px-3 py-2.5 font-medium">采购订单</th><th className="px-3 py-2.5 text-right font-medium">操作</th>
               </tr></thead>
               <tbody className="divide-y divide-slate-100">{viewInvoices.map((row) => {
                 const checked = selection ? selection.selected.includes(row.invoiceKey) : true;
-                return <tr key={row.invoiceId} className={selection && !checked ? "bg-slate-50/70 text-slate-400" : row.paymentSource === "personal" ? "bg-amber-50/25" : ""}>
+                return <tr key={row.invoiceId} className={selection && !checked ? "bg-slate-50/70 text-slate-400" : row.invoiceColor === "red" ? "bg-rose-50/35" : row.redStatus === "fully_red_offset" ? "bg-violet-50/25" : row.paymentSource === "personal" ? "bg-amber-50/25" : ""}>
                 {selection && <td className="px-3 py-2.5"><input type="checkbox" checked={checked} onChange={() => selection.onToggle(row.invoiceKey)} aria-label={`选择发票 ${row.invoiceNumber}`} className="h-4 w-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500" /></td>}
                 <td className="whitespace-nowrap px-3 py-2.5 text-slate-600">{row.invoiceDate || "—"}</td>
                 <td className="max-w-[220px] px-3 py-2.5"><div className="truncate font-medium text-slate-800">{row.supplierName || "—"}</div><div className="mt-0.5 truncate font-mono text-[10px] text-slate-400">{row.supplierTaxId || ""}</div></td>
                 <td className="px-3 py-2.5 font-mono text-[11px] text-slate-600">{row.invoiceNumber || "—"}</td>
-                <td className="px-3 py-2.5"><div className="font-medium text-slate-700">{row.expenseNatureLabel || "待分类"}</div><div className="mt-0.5 text-[10px] text-slate-400">{row.expenseNatureBasis || ""}</div></td>
+                <td className="min-w-[150px] px-3 py-2.5">
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <span className={`inline-flex rounded-full px-2 py-1 text-[10px] font-semibold ring-1 ${invoiceColorBadgeClass(row)}`}>{invoiceColorLabel(row)}</span>
+                    {invoiceLifecycleLabel(row) && <span className={`inline-flex rounded-full px-2 py-1 text-[10px] font-medium ring-1 ${invoiceLifecycleBadgeClass(row)}`}>{invoiceLifecycleLabel(row)}</span>}
+                  </div>
+                  {row.redRelatedInvoiceNo && <div className="mt-1 text-[10px] text-slate-400">{row.invoiceColor === "red" ? "冲销蓝票" : "对应红票"} · <span className="font-mono">{row.redRelatedInvoiceNo}</span></div>}
+                </td>
+                <td className="px-3 py-2.5"><div className="font-medium text-slate-700">{row.expenseNatureLabel || "待分类"}</div><div className="mt-0.5 text-[10px] text-slate-400">{row.invoiceColor === "red" ? "红冲 · " : ""}{row.expenseNatureBasis || ""}</div></td>
                 <td className="px-3 py-2.5"><span className={`rounded-full px-2 py-1 text-[10px] font-medium ${row.paymentSource === "corporate" ? "bg-emerald-50 text-emerald-700" : row.paymentSource === "personal" ? "bg-amber-50 text-amber-700" : row.paymentSource === "mixed" ? "bg-blue-50 text-blue-700" : "bg-slate-100 text-slate-500"}`}>{row.paymentSourceLabel || "—"}</span></td>
-                <td className="px-3 py-2.5 text-right font-semibold tabular-nums text-slate-800">{money(row.invoiceTotalAmount)}</td>
+                <td className={`px-3 py-2.5 text-right font-semibold tabular-nums ${row.invoiceColor === "red" ? "text-rose-700" : "text-slate-800"}`}>{money(row.invoiceTotalAmount)}</td>
                 <td className="px-3 py-2.5 text-right tabular-nums text-emerald-700">{row.paymentSource === "not_applicable" ? <span className="text-slate-300">—</span> : money(row.invoiceCorporatePaidTotal)}</td>
                 <td className="px-3 py-2.5"><div className="space-y-1">{row.payments.length ? row.payments.map((payment) => <div key={payment.linkId} className="text-[11px] text-slate-600"><span>{payment.paymentDate}</span><span className="mx-1 text-slate-300">·</span><span>{money(payment.allocatedAmount)}</span><div className="text-[10px] text-slate-400">{payment.paymentAccount || payment.paymentAccountName || "未记录账户"}{payment.voucherNo ? ` · ${payment.voucherNo}` : ""}</div></div>) : row.paymentSource === "personal" ? <span className="text-amber-600">无对公流水 · 按个人支付</span> : row.paymentSource === "not_applicable" ? <span className="text-slate-400" title={row.bankReconciliationReason || "该发票不参与银行付款核对"}>不适用</span> : <span className="text-slate-300">未记录银行付款</span>}{corporateBankStatus(row) === "overpaid_after_red" && <div className="rounded bg-rose-50 px-2 py-1 text-[10px] font-medium text-rose-700">红冲后历史超额 {money(row.invoiceOverpaidAmount)} · 当前待处理 {money(row.invoiceOverpaidUnsettledAmount || row.invoiceOverpaidAmount)}</div>}{corporateBankStatus(row) === "red_overpayment_settled" && <div className="rounded bg-emerald-50 px-2 py-1 text-[10px] font-medium text-emerald-700">红冲超额 {money(row.invoiceOverpaidAmount)} 已完成退款/冲抵</div>}{row.redCrossPeriod && <div className="text-[10px] text-violet-600">跨期红冲 · 原蓝票账期 {row.redRelatedInvoicePeriod || "待核"}</div>}</div></td>
                 <td className="max-w-[260px] px-3 py-2.5 text-slate-600">{row.purchaseOrderNos.join("、") || "—"}</td>
