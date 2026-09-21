@@ -775,3 +775,40 @@ def test_invoice_pool_uses_asia_shanghai_month_boundaries(db_session):
     assert august.id in august_ids
     assert september.id not in august_ids
     assert september.id in september_ids
+
+
+
+def test_auto_match_all_periods_reconciles_historical_bank_months(db_session):
+    """“全部来源”总核对必须覆盖历史银行账期，而不是只处理当前月份。"""
+    july_txn = _txn(
+        db_session, year=2026, month=7, day=22,
+        amount="3080.00", name="合锦（广州）供应链有限公司",
+    )
+    july_inv = _invoice(
+        db_session, year=2026, month=7, day=24,
+        amount="3080.00", seller="合锦（广州）供应链有限公司",
+    )
+    april_txn = _txn(
+        db_session, year=2026, month=4, day=20,
+        amount="2310.00", name="合锦（广州）供应链有限公司",
+    )
+    april_inv = _invoice(
+        db_session, year=2026, month=4, day=21,
+        amount="2310.00", seller="合锦（广州）供应链有限公司",
+    )
+    db_session.commit()
+
+    result = pm.auto_match_all_periods(db_session, actor="pytest")
+
+    assert result["periodCount"] >= 2
+    assert result["matchedLinks"] >= 2
+    assert {"2026-04", "2026-07"}.issubset(set(result["periods"]))
+    links = db_session.query(TaxInvoiceLink).filter(
+        TaxInvoiceLink.target_type == "bank_transaction",
+        TaxInvoiceLink.confirmed.is_(True),
+        TaxInvoiceLink.invoice_id.in_([july_inv.id, april_inv.id]),
+    ).all()
+    assert {(row.invoice_id, row.target_id) for row in links} == {
+        (july_inv.id, july_txn.id),
+        (april_inv.id, april_txn.id),
+    }

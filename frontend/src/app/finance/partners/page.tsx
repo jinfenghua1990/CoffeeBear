@@ -223,7 +223,13 @@ export default function BusinessPartnersPage() {
     setError("");
     try {
       const result = await businessPartnerApi.sync();
-      setMessage(`已核对全部来源：新增 ${result.createdPartners} 个档案，新增 ${result.createdLinks} 条关联，待确认 ${result.needsReview} 条。`);
+      setMessage(
+        `已核对全部来源：新增 ${result.createdPartners} 个档案，新增 ${result.createdLinks} 条来源关联；` +
+        `银行↔发票自动匹配 ${result.bankInvoiceMatchesCreated} 条` +
+        (result.bankInvoiceRepaired ? `，纠正历史错配 ${result.bankInvoiceRepaired} 条` : "") +
+        (result.bankInvoiceAmbiguous ? `，另有 ${result.bankInvoiceAmbiguous} 组歧义待人工确认` : "") +
+        `；往来来源待确认 ${result.needsReview} 条。`,
+      );
       await loadList();
       await loadDetail(selectedId);
     } catch (caught) {

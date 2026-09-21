@@ -294,3 +294,35 @@ def test_duplicate_decision_same_keeps_plain_name_sources_linked(db_session):
     assert detail is not None
     assert detail["reviewItems"] == []
     assert detail["summary"]["purchaseOrderCount"] == 1
+
+
+
+def test_partner_sync_endpoint_also_runs_bank_invoice_reconciliation(client, db_session):
+    """回归：核对全部来源不能只归档发票/流水，还必须建立两者之间的付款关联。"""
+    name = "合锦（广州）供应链有限公司"
+    invoice = _invoice(db_session, seller=name, amount="3080.00")
+    txn = _bank_txn(db_session, name=name, amount="3080.00")
+    invoice.issue_date = datetime(2026, 7, 24, tzinfo=timezone.utc)
+    txn.txn_date = date(2026, 7, 22)
+    db_session.commit()
+
+    response = client.post("/api/v1/finance/partners/sync")
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["bankInvoicePeriods"] >= 1
+    assert payload["bankInvoiceMatchesCreated"] >= 1
+
+    link = db_session.query(TaxInvoiceLink).filter_by(
+        invoice_id=invoice.id,
+        target_type="bank_transaction",
+        target_id=txn.id,
+    ).one()
+    assert link.confirmed is True
+    assert link.allocated_amount == Decimal("3080.0000")
+
+    partner = service.list_partners(db_session, keyword=name)["items"][0]
+    detail = service.partner_detail(db_session, partner["id"])
+    assert detail is not None
+    invoice_row = next(row for row in detail["invoices"] if row["id"] == invoice.id)
+    assert invoice_row["bankPaidAmount"] == 3080.0
+    assert invoice_row["bankRemainingAmount"] == 0.0

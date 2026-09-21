@@ -853,6 +853,55 @@ def _split_match_txn_to_invoices(
     return count, allocated
 
 
+def auto_match_all_periods(db: Session, actor: str = "system") -> dict[str, Any]:
+    """对所有历史银行支出账期执行一次安全的付款↔进项发票自动核对。
+
+    这是“核对全部来源”使用的总入口。只按银行流水实际存在的年月遍历，
+    每个月仍复用 auto_match 的安全边界：名称/账号证据、金额一致、唯一最近日期，
+    歧义候选不落库，人工确认/拒绝不会被覆盖。
+    """
+    date_rows = (
+        db.query(BankTransaction.txn_date)
+        .filter(BankTransaction.direction == "out")
+        .all()
+    )
+    periods = sorted({
+        (value.year, value.month)
+        for (value,) in date_rows
+        if value is not None
+    })
+
+    results: list[dict[str, Any]] = []
+    totals = {
+        "matched": 0,
+        "splitMatched": 0,
+        "bigTxnSplitMatched": 0,
+        "supplierMatched": 0,
+        "repaired": 0,
+        "ambiguous": 0,
+        "skipped": 0,
+    }
+    for year, month in periods:
+        result = auto_match(db, year=year, month=month, actor=actor)
+        results.append(result)
+        for key in totals:
+            totals[key] += int(result.get(key, 0) or 0)
+
+    created_links = (
+        totals["matched"]
+        + totals["splitMatched"]
+        + totals["bigTxnSplitMatched"]
+        + totals["supplierMatched"]
+    )
+    return {
+        "periodCount": len(periods),
+        "periods": [f"{year:04d}-{month:02d}" for year, month in periods],
+        "matchedLinks": created_links,
+        **totals,
+        "results": results,
+    }
+
+
 def auto_match(db: Session, year: int, month: int, actor: str = "system") -> dict[str, Any]:
     """自动匹配当月银行付款 ↔ 进项发票。
 
