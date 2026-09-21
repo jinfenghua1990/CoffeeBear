@@ -339,7 +339,13 @@ function exportOrders(items: WorkbenchOrderItem[]) {
   if (typeof window === "undefined" || items.length === 0) return;
   const rows = items.map((item) => [
     fmtDateTime(item.orderDate), CHANNELS[channelOf(item.platform)].label, item.orderKind === "consumable" ? "耗材" : "正品", item.orderNo, item.supplier, item.amount ?? "",
-    item.invoiceStatus === "done" ? "已开票" : (item.invoiceOutstanding ?? "") === "" ? "" : `未开票 ${item.invoiceOutstanding ?? 0}`,
+    item.invoiceStatus === "done"
+      ? "已开票"
+      : item.invoiceStatus === "needs_review"
+        ? "发票需复核"
+        : (item.invoiceOutstanding ?? "") === ""
+          ? ""
+          : `未开票 ${item.invoiceOutstanding ?? 0}`,
     statusLabel(item), item.orderStatus,
   ]);
   const csvRows = [["采购时间", "渠道", "类型", "订单号", "供应商", "订单金额", "开票（未开票）", "当前状态", "订单状态"], ...rows];
@@ -2406,6 +2412,7 @@ async function saveInboundAmount(documentId: number, value: string, note: string
     switch (order.invoiceStatus) {
       case "done": return "已开票";
       case "partial": return "部分开票";
+      case "needs_review": return "发票需复核";
       case "pending": return "待开票";
       case "none": return "无票";
       default: return "待匹配";
@@ -2413,22 +2420,29 @@ async function saveInboundAmount(documentId: number, value: string, note: string
   })();
   const invoiceStatusClass = order.invoiceStatus === "done"
     ? "bg-emerald-50 text-emerald-700"
-    : order.invoiceStatus === "partial"
-      ? "bg-amber-50 text-amber-700"
-      : "bg-slate-100 text-slate-500";
+    : order.invoiceStatus === "needs_review"
+      ? "bg-rose-50 text-rose-700"
+      : order.invoiceStatus === "partial"
+        ? "bg-amber-50 text-amber-700"
+        : "bg-slate-100 text-slate-500";
 
   const invoiceOutstanding = order.invoiceOutstanding ?? 0;
   const invoicedAmount = order.invoicedAmount ?? 0;
   const orderAmount = order.amount ?? 0;
   const invoiceHasGap = invoiceOutstanding > 0 || invoicedAmount < orderAmount;
-  const topInvoiceStatusText = order.invoiceStatus === "pending"
-    ? "待供应商开票"
-    : invoiceHasGap || order.invoiceStatus === "partial"
-      ? "待开票"
-      : invoiceStatusText;
-  const topInvoiceStatusClass = invoiceHasGap
-    ? "bg-amber-50 text-amber-700"
-    : invoiceStatusClass;
+  const topInvoiceStatusText = order.invoiceStatus === "needs_review"
+    ? "发票需复核"
+    : order.invoiceStatus === "pending"
+      ? "待供应商开票"
+      : invoiceHasGap || order.invoiceStatus === "partial"
+        ? "待开票"
+        : invoiceStatusText;
+  const topInvoiceStatusClass = order.invoiceStatus === "needs_review"
+    ? "bg-rose-50 text-rose-700"
+    : invoiceHasGap
+      ? "bg-amber-50 text-amber-700"
+      : invoiceStatusClass;
+  const invoiceReviewTitle = (order.invoiceReviewReasons ?? []).join("；");
   const currentWarehouseName = actualWarehouseName || targetWarehouseName || order.warehouseName || "";
   const currentWarehouseId = detail.warehouse?.warehouseId ?? detail.warehouse?.targetWarehouseId ?? order.warehouseId ?? null;
 
@@ -2548,8 +2562,22 @@ async function saveInboundAmount(documentId: number, value: string, note: string
               <div className="grid grid-cols-1 gap-2.5 md:grid-cols-[minmax(180px,1fr)_minmax(0,1.4fr)]">
                 <div className="flex min-w-0 items-center gap-2">
                   <label className="w-[5.5em] shrink-0 whitespace-nowrap text-[11px] text-slate-500">发票匹配状态</label>
-                  <div title="由发票池自动匹配，只读" className={cx("flex min-h-8 min-w-0 flex-1 items-center rounded-md border px-2 text-[11px] font-medium", invoiceHasGap ? "border-amber-100 bg-amber-50 text-amber-700" : invoiceStatusClass)}>
-                    {invoiceHasGap ? "金额不足 " + fmtMoney(invoicedAmount) + " / " + fmtMoney(orderAmount) : invoiceStatusText}
+                  <div
+                    title={invoiceReviewTitle || "由发票池自动匹配，只读"}
+                    className={cx(
+                      "flex min-h-8 min-w-0 flex-1 items-center rounded-md border px-2 text-[11px] font-medium",
+                      order.invoiceStatus === "needs_review"
+                        ? "border-rose-100 bg-rose-50 text-rose-700"
+                        : invoiceHasGap
+                          ? "border-amber-100 bg-amber-50 text-amber-700"
+                          : invoiceStatusClass,
+                    )}
+                  >
+                    {order.invoiceStatus === "needs_review"
+                      ? "需复核" + (invoiceReviewTitle ? "：" + invoiceReviewTitle : "")
+                      : invoiceHasGap
+                        ? "金额不足 " + fmtMoney(invoicedAmount) + " / " + fmtMoney(orderAmount)
+                        : invoiceStatusText}
                   </div>
                 </div>
                 <div className="flex min-w-0 items-center gap-2">

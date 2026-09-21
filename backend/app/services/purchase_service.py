@@ -12,6 +12,7 @@ from decimal import Decimal
 from typing import Any
 from zoneinfo import ZoneInfo
 
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from app.config import settings
@@ -28,6 +29,7 @@ from app.models.purchase import (
     PurchaseInvoiceLink,
     InboundLink,
 )
+from app.services import purchase_invoice_truth_service as invoice_truth
 from app.services.allocation import balance_check
 from app.utils.money import money_sum, to_decimal
 
@@ -910,6 +912,33 @@ def bypass_jackyun_po_inbound_closed(db: Session, actor: str = "system", dry_run
 
 # ---------- 发票（规格 7.5：与采购状态分离，多对多） ----------
 
+def _official_tax_invoice_by_manual_number(db: Session, invoice_no: str):
+    """旧手工发票入口不得复制正式税务台账中的同一张票。"""
+    from app.models.tax import TaxInvoice
+    from app.services.tax_invoice_service import filter_visible_invoices
+
+    number = "".join(str(invoice_no or "").split())
+    if not number:
+        return None
+    query = filter_visible_invoices(
+        db.query(TaxInvoice).filter(
+            or_(
+                TaxInvoice.invoice_number == number,
+                (TaxInvoice.invoice_code + TaxInvoice.invoice_number) == number,
+            )
+        )
+    )
+    return query.order_by(TaxInvoice.id.desc()).first()
+
+
+def _reject_if_official_tax_invoice_exists(db: Session, invoice_no: str) -> None:
+    official = _official_tax_invoice_by_manual_number(db, invoice_no)
+    if official is not None:
+        raise ValueError(
+            f"发票 {invoice_no} 已存在于正式税务发票台账，请直接关联正式发票，不能重复登记旧手工发票"
+        )
+
+
 def register_order_invoice(db: Session, po: ExternalPurchaseOrder, *, invoice_no: str,
                            invoice_amount, allocated_amount=None, invoice_date=None,
                            supplier_name: str = "", actor: str = "system") -> PurchaseInvoiceLink:
@@ -921,6 +950,7 @@ def register_order_invoice(db: Session, po: ExternalPurchaseOrder, *, invoice_no
     invoice_no = invoice_no.strip()
     if not invoice_no:
         raise ValueError("请填写真实发票号码")
+    _reject_if_official_tax_invoice_exists(db, invoice_no)
     # 锁定订单，避免并发登记将同一订单超额分摊。
     db.refresh(po, with_for_update=True)
     invoice = db.query(PurchaseInvoice).filter_by(invoice_no=invoice_no).with_for_update().first()
@@ -928,10 +958,13 @@ def register_order_invoice(db: Session, po: ExternalPurchaseOrder, *, invoice_no
         raise ValueError("同号码发票的票面金额不一致，请核对原票")
     if invoice and db.query(PurchaseInvoiceLink).filter_by(invoice_id=invoice.id, po_id=po.id).first():
         raise ValueError("该发票已关联当前订单，请先解除错误关联")
-    existing_total = money_sum(l.allocated_amount for l in db.query(PurchaseInvoiceLink).filter_by(po_id=po.id).all())
-    limit = po.paid_amount if po.paid_amount is not None else po.order_amount
-    if limit is not None and existing_total + alloc > limit:
-        raise ValueError("本单累计发票分摊超过采购总额")
+    current_truth = invoice_truth.purchase_invoice_truth(db, external=po)
+    existing_total = to_decimal(current_truth["invoicedAmount"])
+    limit = current_truth["targetAmount"]
+    if current_truth["needsReview"]:
+        raise ValueError("当前采购单发票事实存在待复核冲突，请先处理后再登记手工发票")
+    if limit is not None and existing_total + alloc > to_decimal(limit):
+        raise ValueError("本单累计有效发票分摊超过采购应开票金额")
     if invoice:
         used = money_sum(l.allocated_amount for l in db.query(PurchaseInvoiceLink).filter_by(invoice_id=invoice.id).all())
         if used + alloc > total:
@@ -944,7 +977,9 @@ def register_order_invoice(db: Session, po: ExternalPurchaseOrder, *, invoice_no
         db.flush()
     link = PurchaseInvoiceLink(invoice_id=invoice.id, po_id=po.id, allocated_amount=alloc)
     db.add(link)
-    po.invoice_status = derive_invoice_status(limit, existing_total + alloc, po.invoice_status)
+    db.flush()
+    summary = invoice_truth.purchase_invoice_truth(db, external=po)
+    po.invoice_status = invoice_truth.compatibility_invoice_status(summary["status"])
     db.commit()
     audit(db, actor, "purchase.invoice.register", "purchase_invoice_links", link.id,
           {"poId": po.id, "invoiceId": invoice.id, "allocated": str(alloc)})
@@ -956,6 +991,7 @@ def create_invoice(db: Session, *, invoice_no: str, invoice_amount, invoice_date
     amount = to_decimal(invoice_amount)
     if not number:
         raise ValueError("请填写真实发票号码")
+    _reject_if_official_tax_invoice_exists(db, number)
     if not amount.is_finite() or amount <= 0:
         raise ValueError("发票金额必须大于 0")
     existing = db.query(PurchaseInvoice).filter(PurchaseInvoice.invoice_no == number).first()
@@ -980,6 +1016,7 @@ def link_invoice(db: Session, invoice: PurchaseInvoice, po: ExternalPurchaseOrde
     alloc = to_decimal(allocated_amount)
     if not alloc.is_finite() or alloc <= 0:
         raise ValueError("分摊金额必须大于 0")
+    _reject_if_official_tax_invoice_exists(db, invoice.invoice_no)
 
     # 同时锁住订单和发票，避免两个并发请求分别通过“剩余额度”检查后共同造成超额。
     db.refresh(po, with_for_update=True)
@@ -989,11 +1026,11 @@ def link_invoice(db: Session, invoice: PurchaseInvoice, po: ExternalPurchaseOrde
     if exists:
         raise ValueError("该发票已关联此订单")
 
-    po_limit = po.paid_amount if po.paid_amount is not None else po.order_amount
-    po_existing = money_sum(
-        link.allocated_amount
-        for link in db.query(PurchaseInvoiceLink).filter_by(po_id=po.id).all()
-    )
+    current_truth = invoice_truth.purchase_invoice_truth(db, external=po)
+    po_limit = current_truth["targetAmount"]
+    po_existing = to_decimal(current_truth["invoicedAmount"])
+    if current_truth["needsReview"]:
+        raise ValueError("当前采购单发票事实存在待复核冲突，请先处理后再关联手工发票")
     if po_limit is not None and po_existing + alloc > to_decimal(po_limit):
         _ensure_exception(
             db, "INVOICE_OVER_PO", "采购单累计发票分摊超额",
@@ -1023,8 +1060,9 @@ def link_invoice(db: Session, invoice: PurchaseInvoice, po: ExternalPurchaseOrde
 
     link = PurchaseInvoiceLink(invoice_id=invoice.id, po_id=po.id, allocated_amount=alloc)
     db.add(link)
-    po_total = po_existing + alloc
-    po.invoice_status = derive_invoice_status(po_limit, po_total, po.invoice_status)
+    db.flush()
+    summary = invoice_truth.purchase_invoice_truth(db, external=po)
+    po.invoice_status = invoice_truth.compatibility_invoice_status(summary["status"])
     db.commit()
     audit(db, actor, "purchase.invoice.link", "purchase_invoice_links", link.id,
           {"invoiceId": invoice.id, "poId": po.id, "allocated": str(alloc),
@@ -1034,9 +1072,5 @@ def link_invoice(db: Session, invoice: PurchaseInvoice, po: ExternalPurchaseOrde
 
 def set_invoice_status(db: Session, po: ExternalPurchaseOrder, status: str,
                        actor: str = "system") -> None:
-    if status not in INVOICE_FLOW:
-        raise ValueError(f"非法发票状态: {status}")
-    po.invoice_status = status
-    db.commit()
-    audit(db, actor, "purchase.po.invoice_status", "external_purchase_orders", po.id,
-          {"to": status})
+    """旧接口保留兼容路由，但发票状态已改为只读派生事实。"""
+    raise ValueError("发票状态由正式税务发票/有效历史手工发票关联自动计算，不支持手工修改")

@@ -2488,10 +2488,14 @@ export type WorkbenchOrderItem = {
   closeoutStage?: string | null;
   /** 供应商待开发票：pending=完全未开票 / partial=部分 / done=已开够 / none=无实付可比 */
   invoiceStatus?: "pending" | "partial" | "done" | "none" | string;
-  /** 已收票金额（关联分摊额优先，未分摊用票面全额） */
+  /** 已收票金额（正式税票优先；红冲按有效蓝字净额；旧手工票仅兼容兜底） */
   invoicedAmount?: number | null;
-  /** 未开票金额 = 实付 - 已收票（负数归 0） */
+  /** 未开票金额 = 应开票目标 - 有效已收票（负数归 0） */
   invoiceOutstanding?: number | null;
+  /** 发票事实是否存在冲突/歧义，需要财务或采购人工复核。 */
+  invoiceNeedsReview?: boolean;
+  /** 需复核原因；例如一票多单红冲后无法自动判断重新分摊。 */
+  invoiceReviewReasons?: string[];
   /** 供应链工作台表格：由已确认 SKU / 原始商品行汇总得到。 */
   productName?: string;
   productQuantity?: number | null;
@@ -2547,9 +2551,11 @@ export type WorkbenchOrder = {
   /** 后端根据入库/发票/付款事实计算出的收尾卡点。 */
   closeoutStage?: string | null;
   /** 发票池自动匹配结果：采购订单详情只读展示，不在订单弹窗内人工维护。 */
-  invoiceStatus?: "pending" | "partial" | "done" | "none" | string;
+  invoiceStatus?: "pending" | "partial" | "done" | "needs_review" | "none" | string;
   invoicedAmount?: number | null;
   invoiceOutstanding?: number | null;
+  invoiceNeedsReview?: boolean;
+  invoiceReviewReasons?: string[];
   /** 采购单步骤按 Excel 口径跳过（吉客云未建采购单、入库闭环即放行） */
   jackyunPoBypassed?: boolean;
   title: string | null;

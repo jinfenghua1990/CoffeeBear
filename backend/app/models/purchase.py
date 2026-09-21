@@ -73,7 +73,8 @@ class ExternalPurchaseOrder(Base, PkMixin, TimestampMixin):
     logistics: Mapped[dict] = mapped_column(JSONB, default=dict)
     # 采购状态机（规格 7.5）
     purchase_status: Mapped[str] = mapped_column(String(32), default="pending_refine", index=True)
-    # 发票状态与采购状态分离
+    # 历史兼容缓存：不得作为发票事实源。正式结论统一由
+    # purchase_invoice_truth_service 根据 TaxInvoice/TaxInvoiceLink + 兼容手工票动态派生。
     invoice_status: Mapped[str] = mapped_column(String(32), default="unverified", index=True)
     allocated_goods_amount: Mapped[Decimal | None] = mapped_column(MONEY, nullable=True)
     allocated_expense_amount: Mapped[Decimal | None] = mapped_column(MONEY, nullable=True)

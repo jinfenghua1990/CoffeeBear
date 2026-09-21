@@ -35,10 +35,12 @@ from app.models.tax import TaxInvoice, TaxInvoiceLink
 from app.services.allocation import balance_check
 from app.services.import_lifecycle import filter_active_import, filter_active_rows
 from app.services.inbound_allocation_seed import seed_allocations_for_link
+from app.services import purchase_invoice_truth_service as invoice_truth
 from app.services.tax_invoice_service import (
     PURCHASE_LINK_TARGET_TYPES,
     filter_visible_invoices,
     purchase_alias_target_refs,
+    red_accounting_context,
     set_invoice_verified as set_tax_invoice_verified,
     sync_business_match_status,
     unlink_purchase as unlink_tax_invoice_purchase,
@@ -1628,7 +1630,12 @@ class ChainPrefetch:
     - 发票只按已被链路引用的 ID 取，不做全表 328 张（含 raw）的无谓解码。
     """
 
-    def __init__(self, db: Session, externals: list[ExternalPurchaseOrder] | None = None):
+    def __init__(
+        self,
+        db: Session,
+        externals: list[ExternalPurchaseOrder] | None = None,
+        pairs: list[tuple[Alibaba1688Order | None, ExternalPurchaseOrder | None]] | None = None,
+    ):
         # 工作台会同时遍历订单、入库、发票和耗材关系。集中批量加载，
         # 避免 _order_row 在每张订单上重复点查同一组关联表。
         self.warehouses_by_id = {
@@ -1636,8 +1643,17 @@ class ChainPrefetch:
         }
         if externals is None:
             externals = db.query(ExternalPurchaseOrder).all()
+        self.external_by_id = {po.id: po for po in externals}
         self.external_by_no = {
             po.external_order_id: po for po in externals
+        }
+        if pairs is None:
+            alibaba_orders = db.query(Alibaba1688Order).all()
+        else:
+            alibaba_orders = [order for order, _ in pairs if order is not None]
+        self.alibaba_orders = {order.id: order for order in alibaba_orders}
+        self.alibaba_by_no = {
+            order.external_order_id: order for order in alibaba_orders
         }
         self.docs = {
             d.id: d for d in db.query(JackyunGoodsDocument).filter_by(document_type="inbound").all()
@@ -1651,14 +1667,16 @@ class ChainPrefetch:
             self.chain_links.setdefault(link.workbench_order_id, []).append(link)
 
         self.invoice_links: dict[tuple[str, int], list[TaxInvoiceLink]] = {}
+        self.invoice_links_by_invoice: dict[int, list[TaxInvoiceLink]] = {}
         for link in db.query(TaxInvoiceLink).filter(
-            TaxInvoiceLink.target_type.in_(("alibaba1688_order", "external_purchase_order"))
+            TaxInvoiceLink.target_type.in_(PURCHASE_LINK_TARGET_TYPES)
         ).all():
             self.invoice_links.setdefault((link.target_type, link.target_id), []).append(link)
+            self.invoice_links_by_invoice.setdefault(link.invoice_id, []).append(link)
 
         # 发票只服务于「已被链路引用的那几张」（_order_row 按 link.invoice_id 查），
         # 全表加载会把 300+ 张票的 raw JSONB 一起解码，纯属浪费。
-        referenced_invoice_ids = {link.invoice_id for links in self.invoice_links.values() for link in links}
+        referenced_invoice_ids = set(self.invoice_links_by_invoice)
         self.invoices = {}
         if referenced_invoice_ids:
             self.invoices = {
@@ -1666,6 +1684,10 @@ class ChainPrefetch:
                     db.query(TaxInvoice).filter(TaxInvoice.id.in_(referenced_invoice_ids))
                 ).all()
             }
+        self.invoice_red_context = (
+            red_accounting_context(db, list(self.invoices.values()))
+            if self.invoices else {}
+        )
 
         self.inbound_links: dict[int, list[InboundLink]] = {}
         for link in db.query(InboundLink).all():
@@ -1764,7 +1786,11 @@ def chain_snapshot(db: Session) -> tuple[
     if cached is not None:
         return cached
     externals = db.query(ExternalPurchaseOrder).all()
-    snapshot = (_source_pairs(db, externals=externals), ChainPrefetch(db, externals=externals))
+    pairs = _source_pairs(db, externals=externals)
+    snapshot = (
+        pairs,
+        ChainPrefetch(db, externals=externals, pairs=pairs),
+    )
     db.info[_SNAPSHOT_KEY] = snapshot
     return snapshot
 
@@ -2222,51 +2248,15 @@ def _order_row(
             "note": link.note or "",
         })
 
-    invoice_info: list[dict] = []
-    verified = False
-    seen_invoice_ids: set[int] = set()
-    # 已收票金额：优先用关联的分摊额（一票挂多单场景），未分摊才用票面全额。
-    invoiced_amount = Decimal("0")
-    for link in invoice_links:
-        inv = _invoice_of(db, pf, link.invoice_id)
-        if inv is None or inv.id in seen_invoice_ids:
-            continue
-        seen_invoice_ids.add(inv.id)
-        if inv.verified:
-            verified = True
-        share = link.allocated_amount if link.allocated_amount is not None else inv.total_amount
-        if share is not None:
-            invoiced_amount += Decimal(str(share))
-        invoice_info.append({
-            **_serialize_invoice(inv),
-            "linkId": link.id,
-            "invoiceKind": "tax",
-            "confirmed": True,
-            "matchMethod": link.match_method or "",
-            "confidence": _num(link.confidence),
-            "note": link.note or "",
-        })
-
-    if external is not None:
-        tax_numbers = {str(inv.get("invoiceNo")) for inv in invoice_info}
-        manual_invoice_links = (
-            pf.purchase_invoice_links.get(external.id, [])
-            if pf is not None
-            else db.query(PurchaseInvoiceLink, PurchaseInvoice).join(
-                PurchaseInvoice, PurchaseInvoice.id == PurchaseInvoiceLink.invoice_id
-            ).filter(PurchaseInvoiceLink.po_id == external.id).all()
-        )
-        for link, inv in manual_invoice_links:
-            if inv.invoice_no and inv.invoice_no in tax_numbers:
-                continue  # 税务原始清单优先，避免登记副本重复计票。
-            invoice_info.append({"invoiceId": inv.id, "linkId": link.id, "invoiceKind": "manual",
-                                 "invoiceNo": inv.invoice_no, "amount": _num(link.allocated_amount),
-                                 "issueDate": inv.invoice_date.isoformat() if inv.invoice_date else None,
-                                 "verified": False, "verifiedMonth": "", "confirmed": True,
-                                 "matchMethod": "manual", "confidence": 1, "note": "采购单手工登记发票"})
-            if link.allocated_amount is not None:
-                invoiced_amount += Decimal(str(link.allocated_amount))
-    verified = bool(invoice_info) and all(i["verified"] for i in invoice_info)
+    invoice_truth_row = invoice_truth.purchase_invoice_truth(
+        db,
+        order=order,
+        external=external,
+        prefetch=pf,
+    )
+    invoice_info = invoice_truth_row["entries"]
+    invoiced_amount = Decimal(str(invoice_truth_row["invoicedAmount"]))
+    verified = bool(invoice_truth_row["verified"])
 
     allocations: list[dict] = []
     purchase_orders: list[dict] = []
@@ -2310,22 +2300,13 @@ def _order_row(
         purchase_status = external.purchase_status or ""
         purchase_content_complete = purchase_status != "pending_refine"
 
-    amount = parse_decimal(order.actual_payment) if order is not None else None
-    if amount is None and external is not None:
-        amount = parse_decimal(external.paid_amount) or parse_decimal(external.order_amount)
-    # 未开票金额 = 实付 - 已收票。采购员只负责催开票，认证（勾选抵扣）归财务，
-    # 因此这里的口径只看票有没有开够，不看是否认证（2026-09-07 用户口径）。
-    invoice_outstanding = None
-    invoice_status = "none"
-    if amount is not None:
-        gap = Decimal(str(amount)) - invoiced_amount
-        invoice_outstanding = float(gap) if gap > 0 else 0.0
-        if invoiced_amount <= 0:
-            invoice_status = "pending"        # 完全未开票 → 待供应商开票
-        elif gap > 0:
-            invoice_status = "partial"        # 部分开票 → 还差一部分
-        else:
-            invoice_status = "done"           # 票已开够
+    amount = invoice_truth_row["targetAmount"]
+    invoice_outstanding = (
+        float(invoice_truth_row["outstandingAmount"])
+        if invoice_truth_row["outstandingAmount"] is not None
+        else None
+    )
+    invoice_status = str(invoice_truth_row["status"])
     order_date = _order_date_str(order) if order is not None else None
     # 1688 导出文件常见缺失 order_time 字段：用导入时间 created_at 兜底，
     # 保证列表页时间分组与排序在测试数据上也能展示出顺序。
@@ -2398,11 +2379,13 @@ def _order_row(
         # 物流只读取采购主单已有 JSON；无来源时保持空值，不用状态机推测运单。
         "logistics": (external.logistics or {}) if external is not None else {},
         "shipStatus": (external.ship_status or "") if external is not None else "",
-        # 开票进度（采购员口径：只看票开没开够，认证归财务）。
-        # pending=完全未开票 / partial=部分开票 / done=已开够 / none=无实付金额可比
+        # 开票进度统一来自采购发票事实投影：
+        # pending=完全未开票 / partial=部分 / done=已开够 / needs_review=事实冲突待复核 / none=无金额可比。
         "invoiceStatus": invoice_status,
         "invoicedAmount": float(invoiced_amount),
         "invoiceOutstanding": invoice_outstanding,
+        "invoiceNeedsReview": bool(invoice_truth_row["needsReview"]),
+        "invoiceReviewReasons": list(invoice_truth_row["reviewReasons"]),
         # 1688 原始报文里的货品明细（含编号/品名/数量/单价）。
         # 「确认采购内容」环节在没有入库单反填的分配行时用它兜底展示编号，
         # 避免用户看到空的「待确认采购内容」（2026-09-07）。
@@ -2547,9 +2530,21 @@ def _stage_states(row: dict) -> list[dict]:
             None,
         ),
         "invoice": (
-            bool(invoice),
-            f"{len(invoice)} 张发票" if invoice else "未收票",
-            sum(i.get("amount") or 0 for i in invoice) or None,
+            row.get("invoiceStatus") == "done",
+            (
+                "发票事实需复核：" + "；".join(row.get("invoiceReviewReasons") or [])
+                if row.get("invoiceStatus") == "needs_review"
+                else (
+                    f"已开够，共 {len(invoice)} 张"
+                    if row.get("invoiceStatus") == "done"
+                    else (
+                        f"部分开票，尚差 {row.get('invoiceOutstanding') or 0:.2f}"
+                        if row.get("invoiceStatus") == "partial"
+                        else ("待供应商开票" if row.get("invoiceStatus") == "pending" else "未收票")
+                    )
+                )
+            ),
+            row.get("invoicedAmount") or None,
         ),
         "paid": (
             bool(paid_rows) or paid_on_1688,
@@ -2557,8 +2552,19 @@ def _stage_states(row: dict) -> list[dict]:
             paid_amount or (row.get("paidAmount") if paid_on_1688 else None),
         ),
         "verified": (
-            bool(verified_rows),
-            f"已认证 {verified_rows[0].get('verifiedMonth') or ''}".strip() if verified_rows else "未认证",
+            row.get("invoiceStatus") == "done" and bool(row.get("verified")),
+            (
+                "发票尚未开齐，暂不能视为认证完成"
+                if row.get("invoiceStatus") != "done"
+                else (
+                    "全部发票已认证"
+                    if row.get("verified")
+                    else (
+                        f"已认证 {len(verified_rows)}/{len(invoice)} 张"
+                        if verified_rows else "未认证"
+                    )
+                )
+            ),
             sum(i.get("amount") or 0 for i in verified_rows) or None,
         ),
     }

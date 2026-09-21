@@ -869,3 +869,110 @@ def test_auto_invoice_match_respects_rejected_link_on_1688_alias(db_session):
     assert matcher._existing_invoice_link(
         "alibaba1688_order", raw_order.id, invoice.id
     ) is True
+
+
+def test_chain_invoice_stage_uses_red_net_and_requires_full_coverage(db_session):
+    """采购链批量预取也必须按红冲净额算；有票但未开够不能把第⑤环节标完成。"""
+    token = "CHAIN-RED-NET"
+    po = ExternalPurchaseOrder(
+        external_order_id=token,
+        platform="other",
+        supplier_name="链路红冲供应商",
+        paid_amount=Decimal("100"),
+        order_amount=Decimal("100"),
+        purchase_status="confirmed",
+    )
+    blue = TaxInvoice(
+        invoice_key="chain-red-net-blue",
+        invoice_number="CHAIN-RED-NET-BLUE",
+        direction="input",
+        status="issued",
+        total_amount=Decimal("100"),
+        raw={"是否正数发票": "是"},
+    )
+    red = TaxInvoice(
+        invoice_key="chain-red-net-red",
+        invoice_number="CHAIN-RED-NET-RED",
+        direction="input",
+        status="red",
+        total_amount=Decimal("-40"),
+        raw={
+            "是否正数发票": "否",
+            "备注": "被红冲蓝字发票号码：CHAIN-RED-NET-BLUE",
+        },
+    )
+    db_session.add_all([po, blue, red])
+    db_session.flush()
+    db_session.add(TaxInvoiceLink(
+        invoice_id=blue.id,
+        target_type="external_purchase_order",
+        target_id=po.id,
+        allocated_amount=Decimal("100"),
+        match_method="manual",
+        confirmed=True,
+    ))
+    db_session.commit()
+
+    payload = service.list_chain(db_session, limit=500)
+    row = next(item for item in payload["items"] if item["orderNo"] == token)
+
+    assert row["invoiceStatus"] == "partial"
+    assert row["invoicedAmount"] == 60.0
+    assert row["invoiceOutstanding"] == 40.0
+    invoice_stage = next(stage for stage in row["stages"] if stage["key"] == "invoice")
+    assert invoice_stage["done"] is False
+    assert "部分开票" in invoice_stage["detail"]
+
+
+def test_chain_invoice_review_state_blocks_invoice_stage_completion():
+    row = {
+        "orderNo": "REVIEW-ROW",
+        "amount": 100.0,
+        "allocations": [],
+        "purchaseOrders": [],
+        "inbound": [],
+        "invoice": [{"amount": 50.0, "verified": False}],
+        "settlement": [],
+        "consumable": {},
+        "paidOn1688": False,
+        "invoiceStatus": "needs_review",
+        "invoicedAmount": 0.0,
+        "invoiceOutstanding": 100.0,
+        "invoiceReviewReasons": ["一票多单红冲后原分摊超过有效蓝字净额，需人工重新分摊"],
+    }
+
+    stages = service._stage_states(row)
+    invoice_stage = next(stage for stage in stages if stage["key"] == "invoice")
+
+    assert invoice_stage["done"] is False
+    assert "需复核" in invoice_stage["detail"]
+
+
+def test_chain_verification_stage_requires_all_invoices_verified():
+    row = {
+        "orderNo": "VERIFY-ROW",
+        "amount": 100.0,
+        "allocations": [],
+        "purchaseOrders": [],
+        "inbound": [],
+        "invoice": [
+            {"amount": 50.0, "verified": True, "verifiedMonth": "2026-09"},
+            {"amount": 50.0, "verified": False, "verifiedMonth": ""},
+        ],
+        "settlement": [],
+        "consumable": {},
+        "paidOn1688": False,
+        "invoiceStatus": "done",
+        "invoicedAmount": 100.0,
+        "invoiceOutstanding": 0.0,
+        "invoiceReviewReasons": [],
+        "verified": False,
+    }
+
+    stages = service._stage_states(row)
+    invoice_stage = next(stage for stage in stages if stage["key"] == "invoice")
+    verified_stage = next(stage for stage in stages if stage["key"] == "verified")
+
+    assert invoice_stage["done"] is True
+    assert verified_stage["done"] is False
+    assert "1/2" in verified_stage["detail"]

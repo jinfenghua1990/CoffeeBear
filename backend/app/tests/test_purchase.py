@@ -1,4 +1,6 @@
+from datetime import datetime, timezone
 from decimal import Decimal
+from uuid import uuid4
 
 import pytest
 
@@ -8,11 +10,18 @@ from app.models.purchase import (
     InboundLink,
     JackyunPurchaseOrder,
     JackyunPurchaseOrderLink,
+    PurchaseInvoice,
+    PurchaseInvoiceLink,
 )
+from app.models.tax import TaxInvoice, TaxInvoiceLink
+from app.services import purchase_invoice_truth_service as invoice_truth
 from app.services.purchase_service import (
     _has_actual_inbound,
     create_external_po,
+    create_invoice,
     derive_invoice_status,
+    register_order_invoice,
+    set_invoice_status,
     unlink_jackyun_po_link,
     update_external_po,
     validate_transition,
@@ -229,3 +238,316 @@ def test_late_purchase_state_cannot_drop_jackyun_link_directly(db_session):
 
     assert db_session.get(JackyunPurchaseOrderLink, link.id) is not None
     assert po.purchase_status == "inbound"
+
+
+def test_invoice_truth_ignores_stale_cache_and_unconfirmed_candidate(db_session):
+    token = uuid4().hex[:10]
+    po = ExternalPurchaseOrder(
+        external_order_id=f"TRUTH-PENDING-{token}",
+        platform="other",
+        paid_amount=Decimal("100"),
+        order_amount=Decimal("100"),
+        invoice_status="full",  # 历史缓存故意写错，不能影响最终结论
+    )
+    invoice = TaxInvoice(
+        invoice_key=f"truth-pending-{token}",
+        invoice_number=f"INV-TRUTH-PENDING-{token}",
+        direction="input",
+        status="issued",
+        total_amount=Decimal("100"),
+    )
+    db_session.add_all([po, invoice])
+    db_session.flush()
+    db_session.add(TaxInvoiceLink(
+        invoice_id=invoice.id,
+        target_type="external_purchase_order",
+        target_id=po.id,
+        allocated_amount=Decimal("100"),
+        match_method="auto",
+        confirmed=False,
+    ))
+    db_session.flush()
+
+    result = invoice_truth.purchase_invoice_truth(db_session, external=po)
+
+    assert result["status"] == "pending"
+    assert result["invoicedAmount"] == Decimal("0")
+    assert result["outstandingAmount"] == Decimal("100")
+    assert result["taxInvoiceCount"] == 0
+
+
+def test_official_tax_invoice_replaces_same_number_legacy_manual_fact(db_session):
+    token = uuid4().hex[:10]
+    invoice_no = f"INV-DUAL-{token}"
+    po = ExternalPurchaseOrder(
+        external_order_id=f"PO-DUAL-{token}",
+        platform="other",
+        paid_amount=Decimal("100"),
+        order_amount=Decimal("100"),
+    )
+    legacy = PurchaseInvoice(
+        invoice_no=invoice_no,
+        invoice_amount=Decimal("100"),
+        supplier_name="双事实供应商",
+    )
+    official = TaxInvoice(
+        invoice_key=f"|{invoice_no}",
+        invoice_number=invoice_no,
+        direction="input",
+        status="issued",
+        total_amount=Decimal("100"),
+    )
+    db_session.add_all([po, legacy, official])
+    db_session.flush()
+    db_session.add_all([
+        PurchaseInvoiceLink(
+            invoice_id=legacy.id,
+            po_id=po.id,
+            allocated_amount=Decimal("100"),
+        ),
+        TaxInvoiceLink(
+            invoice_id=official.id,
+            target_type="external_purchase_order",
+            target_id=po.id,
+            allocated_amount=Decimal("100"),
+            match_method="manual",
+            confirmed=True,
+        ),
+    ])
+    db_session.flush()
+
+    result = invoice_truth.purchase_invoice_truth(db_session, external=po)
+
+    assert result["status"] == "done"
+    assert result["invoicedAmount"] == Decimal("100")
+    assert result["taxInvoiceCount"] == 1
+    assert result["legacyInvoiceCount"] == 0
+    assert [row["invoiceKind"] for row in result["entries"]] == ["tax"]
+
+
+def test_single_order_partial_red_uses_blue_invoice_net_amount(db_session):
+    token = uuid4().hex[:10]
+    blue_no = f"BLUE-TRUTH-{token}"
+    po = ExternalPurchaseOrder(
+        external_order_id=f"PO-RED-NET-{token}",
+        platform="other",
+        paid_amount=Decimal("100"),
+        order_amount=Decimal("100"),
+    )
+    blue = TaxInvoice(
+        invoice_key=f"blue-truth-{token}",
+        invoice_number=blue_no,
+        direction="input",
+        status="issued",
+        issue_date=datetime(2026, 9, 1, tzinfo=timezone.utc),
+        total_amount=Decimal("100"),
+        raw={"是否正数发票": "是"},
+    )
+    red = TaxInvoice(
+        invoice_key=f"red-truth-{token}",
+        invoice_number=f"RED-TRUTH-{token}",
+        direction="input",
+        status="red",
+        issue_date=datetime(2026, 9, 2, tzinfo=timezone.utc),
+        total_amount=Decimal("-40"),
+        raw={"是否正数发票": "否", "备注": f"被红冲蓝字发票号码：{blue_no}"},
+    )
+    db_session.add_all([po, blue, red])
+    db_session.flush()
+    db_session.add(TaxInvoiceLink(
+        invoice_id=blue.id,
+        target_type="external_purchase_order",
+        target_id=po.id,
+        allocated_amount=Decimal("100"),
+        match_method="manual",
+        confirmed=True,
+    ))
+    db_session.flush()
+
+    result = invoice_truth.purchase_invoice_truth(db_session, external=po)
+
+    assert result["status"] == "partial"
+    assert result["invoicedAmount"] == Decimal("60")
+    assert result["outstandingAmount"] == Decimal("40")
+    assert result["needsReview"] is False
+    assert result["entries"][0]["redAdjusted"] is True
+    assert Decimal(str(result["entries"][0]["amount"])) == Decimal("60")
+
+
+def test_multi_order_partial_red_requires_reallocation_review(db_session):
+    token = uuid4().hex[:10]
+    blue_no = f"BLUE-SPLIT-{token}"
+    po_a = ExternalPurchaseOrder(
+        external_order_id=f"PO-SPLIT-A-{token}",
+        platform="other",
+        paid_amount=Decimal("60"),
+        order_amount=Decimal("60"),
+    )
+    po_b = ExternalPurchaseOrder(
+        external_order_id=f"PO-SPLIT-B-{token}",
+        platform="other",
+        paid_amount=Decimal("40"),
+        order_amount=Decimal("40"),
+    )
+    blue = TaxInvoice(
+        invoice_key=f"blue-split-{token}",
+        invoice_number=blue_no,
+        direction="input",
+        status="issued",
+        total_amount=Decimal("100"),
+        raw={"是否正数发票": "是"},
+    )
+    red = TaxInvoice(
+        invoice_key=f"red-split-{token}",
+        invoice_number=f"RED-SPLIT-{token}",
+        direction="input",
+        status="red",
+        total_amount=Decimal("-30"),
+        raw={"是否正数发票": "否", "备注": f"被红冲蓝字发票号码：{blue_no}"},
+    )
+    db_session.add_all([po_a, po_b, blue, red])
+    db_session.flush()
+    db_session.add_all([
+        TaxInvoiceLink(
+            invoice_id=blue.id,
+            target_type="external_purchase_order",
+            target_id=po_a.id,
+            allocated_amount=Decimal("60"),
+            match_method="manual",
+            confirmed=True,
+        ),
+        TaxInvoiceLink(
+            invoice_id=blue.id,
+            target_type="external_purchase_order",
+            target_id=po_b.id,
+            allocated_amount=Decimal("40"),
+            match_method="manual",
+            confirmed=True,
+        ),
+    ])
+    db_session.flush()
+
+    result = invoice_truth.purchase_invoice_truth(db_session, external=po_a)
+
+    assert result["status"] == "needs_review"
+    assert result["needsReview"] is True
+    assert result["invoicedAmount"] == Decimal("0")
+    assert any("一票多单红冲" in reason for reason in result["reviewReasons"])
+
+
+def test_legacy_manual_invoice_cannot_duplicate_official_tax_invoice(db_session):
+    token = uuid4().hex[:10]
+    invoice_no = f"INV-OFFICIAL-{token}"
+    official = TaxInvoice(
+        invoice_key=f"|{invoice_no}",
+        invoice_number=invoice_no,
+        direction="input",
+        status="issued",
+        total_amount=Decimal("88"),
+    )
+    db_session.add(official)
+    db_session.flush()
+
+    with pytest.raises(ValueError, match="正式税务发票台账"):
+        create_invoice(
+            db_session,
+            invoice_no=invoice_no,
+            invoice_amount="88",
+            actor="pytest",
+        )
+
+
+def test_legacy_invoice_status_is_read_only_derived_fact(db_session):
+    po = ExternalPurchaseOrder(
+        external_order_id=f"PO-INVOICE-STATUS-{uuid4().hex[:10]}",
+        platform="other",
+    )
+    db_session.add(po)
+    db_session.flush()
+
+    with pytest.raises(ValueError, match="自动计算"):
+        set_invoice_status(db_session, po, "full", actor="pytest")
+
+
+def test_canonical_invoice_truth_flags_order_overcoverage(db_session):
+    token = uuid4().hex[:10]
+    po = ExternalPurchaseOrder(
+        external_order_id=f"PO-OVER-COVER-{token}",
+        platform="other",
+        paid_amount=Decimal("100"),
+        order_amount=Decimal("100"),
+    )
+    official = TaxInvoice(
+        invoice_key=f"official-over-{token}",
+        invoice_number=f"INV-OFFICIAL-OVER-{token}",
+        direction="input",
+        status="issued",
+        total_amount=Decimal("80"),
+    )
+    legacy = PurchaseInvoice(
+        invoice_no=f"INV-LEGACY-OVER-{token}",
+        invoice_amount=Decimal("30"),
+    )
+    db_session.add_all([po, official, legacy])
+    db_session.flush()
+    db_session.add_all([
+        TaxInvoiceLink(
+            invoice_id=official.id,
+            target_type="external_purchase_order",
+            target_id=po.id,
+            allocated_amount=Decimal("80"),
+            match_method="manual",
+            confirmed=True,
+        ),
+        PurchaseInvoiceLink(
+            invoice_id=legacy.id,
+            po_id=po.id,
+            allocated_amount=Decimal("30"),
+        ),
+    ])
+    db_session.flush()
+
+    result = invoice_truth.purchase_invoice_truth(db_session, external=po)
+
+    assert result["status"] == "needs_review"
+    assert result["invoicedAmount"] == Decimal("110")
+    assert result["outstandingAmount"] == Decimal("0")
+    assert any("超过应开票金额" in reason for reason in result["reviewReasons"])
+
+
+def test_legacy_manual_write_cannot_ignore_existing_official_tax_coverage(db_session):
+    token = uuid4().hex[:10]
+    po = ExternalPurchaseOrder(
+        external_order_id=f"PO-WRITE-COVER-{token}",
+        platform="other",
+        paid_amount=Decimal("100"),
+        order_amount=Decimal("100"),
+    )
+    official = TaxInvoice(
+        invoice_key=f"official-write-{token}",
+        invoice_number=f"INV-OFFICIAL-WRITE-{token}",
+        direction="input",
+        status="issued",
+        total_amount=Decimal("80"),
+    )
+    db_session.add_all([po, official])
+    db_session.flush()
+    db_session.add(TaxInvoiceLink(
+        invoice_id=official.id,
+        target_type="external_purchase_order",
+        target_id=po.id,
+        allocated_amount=Decimal("80"),
+        match_method="manual",
+        confirmed=True,
+    ))
+    db_session.flush()
+
+    with pytest.raises(ValueError, match="超过采购应开票金额"):
+        register_order_invoice(
+            db_session,
+            po,
+            invoice_no=f"INV-LEGACY-WRITE-{token}",
+            invoice_amount="30",
+            allocated_amount="30",
+            actor="pytest",
+        )

@@ -130,6 +130,9 @@ PostgreSQL / Redis 只属于基础设施，不作为公开业务端口。
 - `TaxInvoiceLink(target_type=bank_transaction)` 是银行对公付款证据；银行匹配服务只能维护该链接及分摊金额，不得直接改写 `TaxInvoice.payment_method`、`match_status` 或认证状态；
 - `TaxInvoice.payment_method=personal` 只保留人工补充/审计事实；最终付款方式统一从银行付款证据派生：全额银行匹配=corporate、部分银行匹配=mixed、无银行匹配=personal，不得由报表或其他模块反写；
 - `TaxInvoice.match_status` 是发票↔采购/销售业务链接的缓存状态，只能由发票域按 confirmed `TaxInvoiceLink` + `allocated_amount` 重算；
+- 正式采购发票事实以 `TaxInvoice + TaxInvoiceLink` 为主；`PurchaseInvoice + PurchaseInvoiceLink` 仅保留历史手工登记兼容，同号正式税务票出现后不得重复计票。采购页的“已收票金额/未开票金额/开票状态”统一通过 `purchase_invoice_truth_service` 派生，禁止直接读取 `ExternalPurchaseOrder.invoice_status`；
+- 红冲后的采购已收票金额必须使用蓝字票有效净额。单一逻辑采购单可直接按净额回退；一票多单发生红冲且原分摊超过有效净额时必须进入 `needs_review`，禁止擅自猜测红冲应落在哪张采购单；
+- 采购链第⑤“发票”只有在有效已收票金额覆盖应开票目标时才算完成；第⑦“税务认证”必须同时满足发票已开齐且相关发票全部认证，不能以“存在一张票/认证一张票”代替完成；
 - 同一 1688 订单的 `Alibaba1688Order` 原始实体与 `ExternalPurchaseOrder(platform=1688)` 工作流副本属于同一逻辑采购单；发票占用、订单开票额度、人工拒绝和自动匹配必须跨两种实体共享，禁止把 alias 当成两笔业务重复计票；
 - 未确认候选关系不得占用采购单开票额度；缺失 `allocated_amount` 的历史关系只能进入待复核，不能直接算 matched；
 - 红字/已红冲/作废发票属于会计事实，不得重新进入采购自动匹配或银行付款待核对池；

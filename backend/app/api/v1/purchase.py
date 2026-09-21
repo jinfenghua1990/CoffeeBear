@@ -4,7 +4,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
-from sqlalchemy import and_, exists, func, or_
+from sqlalchemy import and_, exists, or_
 from sqlalchemy.orm import Session
 
 from app.api.deps import current_actor
@@ -21,7 +21,7 @@ from app.models.purchase import (
     PurchaseInvoice,
     PurchaseInvoiceLink,
 )
-from app.models.tax import TaxInvoice, TaxInvoiceImport, TaxInvoiceImportRecord, TaxInvoiceLink
+from app.services import purchase_invoice_truth_service as invoice_truth
 from app.services import purchase_service as svc
 from app.services.allocation import balance_check
 from app.services.procurement_chain_service import _source_pairs
@@ -127,17 +127,6 @@ def list_orders(
         PurchaseExtraExpense.po_id.in_(po_ids)
     ).all() if po_ids else []:
         expenses_by_po.setdefault(expense.po_id, []).append(expense)
-    tax_invoice_counts = {
-        po_id: count
-        for po_id, count in db.query(
-            TaxInvoiceLink.target_id, func.count(TaxInvoiceLink.id)
-        ).filter(
-            TaxInvoiceLink.target_type == "external_purchase_order",
-            TaxInvoiceLink.target_id.in_(po_ids),
-            TaxInvoiceLink.match_method != "rejected",
-        ).group_by(TaxInvoiceLink.target_id).all()
-    } if po_ids else {}
-
     out = []
     for po in pos:
         bal = balance_check(
@@ -145,7 +134,7 @@ def list_orders(
             [item.amount for item in allocations_by_po.get(po.id, [])],
             [expense.amount for expense in expenses_by_po.get(po.id, [])],
         )
-        tax_invoice_count = tax_invoice_counts.get(po.id, 0)
+        invoice_summary = invoice_truth.purchase_invoice_truth(db, external=po)
         out.append({
             "id": po.id, "externalOrderId": po.external_order_id, "supplierName": po.supplier_name,
             "platform": po.platform or "other", "buyerAccount": po.buyer_account or "",
@@ -153,10 +142,18 @@ def list_orders(
             "orderAmount": str(po.order_amount) if po.order_amount is not None else None,
             "orderedAt": po.ordered_at.isoformat() if po.ordered_at else None,
             "orderStatus": po.order_status or "",
-            "purchaseStatus": po.purchase_status, "invoiceStatus": po.invoice_status,
+            "purchaseStatus": po.purchase_status,
+            "invoiceStatus": invoice_summary["status"],
+            "invoicedAmount": str(invoice_summary["invoicedAmount"]),
+            "invoiceOutstanding": (
+                str(invoice_summary["outstandingAmount"])
+                if invoice_summary["outstandingAmount"] is not None else None
+            ),
+            "invoiceNeedsReview": invoice_summary["needsReview"],
+            "invoiceReviewReasons": invoice_summary["reviewReasons"],
             "goodsAllocated": str(bal["goods_allocated"]), "expenseAllocated": str(bal["expense_allocated"]),
             "unallocated": str(bal["unallocated"]), "balanced": bal["balanced"],
-            "taxInvoiceCount": tax_invoice_count,
+            "taxInvoiceCount": invoice_summary["taxInvoiceCount"],
             "source": (po.raw or {}).get("source") or "manual",
             "sourceImportId": (po.raw or {}).get("sourceImportId"),
         })
@@ -514,7 +511,17 @@ def register_order_invoice(po_id: int, body: OrderInvoiceBody, request: Request,
         link = svc.register_order_invoice(db, po, **body.model_dump(), actor=current_actor(request))
     except ValueError as exc:
         raise HTTPException(400, str(exc))
-    return {"id": link.id, "invoiceId": link.invoice_id, "invoiceStatus": po.invoice_status}
+    summary = invoice_truth.purchase_invoice_truth(db, external=po)
+    return {
+        "id": link.id,
+        "invoiceId": link.invoice_id,
+        "invoiceStatus": summary["status"],
+        "invoicedAmount": str(summary["invoicedAmount"]),
+        "invoiceOutstanding": (
+            str(summary["outstandingAmount"])
+            if summary["outstandingAmount"] is not None else None
+        ),
+    }
 
 
 @router.delete("/invoice-links/{link_id}")
@@ -525,11 +532,19 @@ def unlink_registered_invoice(link_id: int, request: Request, db: Session = Depe
     po = _po_or_404(db, link.po_id)
     db.delete(link)
     db.flush()
-    total = sum((l.allocated_amount or Decimal(0)) for l in db.query(PurchaseInvoiceLink).filter_by(po_id=po.id).all())
-    po.invoice_status = svc.derive_invoice_status(po.paid_amount, total, "unverified")
+    summary = invoice_truth.purchase_invoice_truth(db, external=po)
+    po.invoice_status = invoice_truth.compatibility_invoice_status(summary["status"])
     db.commit()
     audit(db, current_actor(request), "purchase.invoice.unlink", "purchase_invoice_links", link_id, {"poId": po.id})
-    return {"ok": True}
+    return {
+        "ok": True,
+        "invoiceStatus": summary["status"],
+        "invoicedAmount": str(summary["invoicedAmount"]),
+        "invoiceOutstanding": (
+            str(summary["outstandingAmount"])
+            if summary["outstandingAmount"] is not None else None
+        ),
+    }
 
 
 @router.post("/invoices")
@@ -563,7 +578,16 @@ def link_invoice(invoice_id: int, body: InvoiceLinkBody, request: Request,
     except ValueError as exc:
         db.rollback()
         raise HTTPException(400, str(exc))
-    return {"ok": True, "poInvoiceStatus": po.invoice_status}
+    summary = invoice_truth.purchase_invoice_truth(db, external=po)
+    return {
+        "ok": True,
+        "invoiceStatus": summary["status"],
+        "invoicedAmount": str(summary["invoicedAmount"]),
+        "invoiceOutstanding": (
+            str(summary["outstandingAmount"])
+            if summary["outstandingAmount"] is not None else None
+        ),
+    }
 
 
 class InvoiceStatusBody(BaseModel):
@@ -586,66 +610,56 @@ def order_detail(po_id: int, db: Session = Depends(get_db)) -> dict[str, Any]:
     po = _po_or_404(db, po_id)
     items = db.query(PurchaseAllocationItem).filter_by(po_id=po.id).all()
     expenses = db.query(PurchaseExtraExpense).filter_by(po_id=po.id).all()
-    links = db.query(PurchaseInvoiceLink).filter_by(po_id=po.id).all()
-    invoices = []
-    for l in links:
-        inv = db.get(PurchaseInvoice, l.invoice_id)
-        if inv:
-            invoices.append({
-                "id": inv.id, "invoiceNo": inv.invoice_no,
-                "invoiceAmount": str(inv.invoice_amount) if inv.invoice_amount is not None else None,
-                "allocatedAmount": str(l.allocated_amount) if l.allocated_amount is not None else None,
-                "invoiceDate": inv.invoice_date.isoformat() if inv.invoice_date else None,
-            })
-    tax_links = (
-        db.query(TaxInvoiceLink)
-        .filter_by(target_type="external_purchase_order", target_id=po.id)
-        .order_by(TaxInvoiceLink.id.desc())
-        .all()
-    )
-    tax_invoices = []
-    for link in tax_links:
-        # 已拒绝的历史候选不是有效关联，不能继续出现在采购单详情或票数统计中。
-        if link.match_method == "rejected":
-            continue
-        invoice = db.get(TaxInvoice, link.invoice_id)
-        if invoice is None:
-            continue
-        # 软删除或未确认的导入带来的发票不展示在采购详情里
-        if invoice.source_import_id is not None:
-            src = db.get(TaxInvoiceImport, invoice.source_import_id)
-            if src is not None and src.lifecycle != "active":
-                continue
-            # 明细核对中被用户删除的来源行，其发票同样隐藏
-            if invoice.source_row_index is not None:
-                rec = (
-                    db.query(TaxInvoiceImportRecord)
-                    .filter_by(
-                        import_id=invoice.source_import_id,
-                        row_index=invoice.source_row_index,
-                    )
-                    .first()
-                )
-                if rec is not None and rec.row_status == "deleted":
-                    continue
-            tax_invoices.append({
-                "id": invoice.id,
-                "invoiceNumber": invoice.invoice_number,
-                "invoiceCode": invoice.invoice_code,
-                "direction": invoice.direction,
-                "status": invoice.status,
-                "totalAmount": str(invoice.total_amount) if invoice.total_amount is not None else None,
-                "issueDate": invoice.issue_date.isoformat() if invoice.issue_date else None,
-                "matchMethod": link.match_method,
-                "confirmed": link.confirmed,
-            })
+    invoice_summary = invoice_truth.purchase_invoice_truth(db, external=po)
+    invoices = [
+        {
+            "id": row["invoiceId"],
+            "invoiceNo": row["invoiceNo"],
+            "invoiceAmount": str(row["originalAmount"]) if row["originalAmount"] is not None else None,
+            "allocatedAmount": str(row["allocatedAmount"]) if row["allocatedAmount"] is not None else None,
+            "effectiveAllocatedAmount": str(row["amount"]),
+            "invoiceDate": row["issueDate"],
+            "invoiceKind": row["invoiceKind"],
+        }
+        for row in invoice_summary["entries"]
+        if row["invoiceKind"] == "manual"
+    ]
+    tax_invoices = [
+        {
+            "id": row["invoiceId"],
+            "invoiceNumber": row["invoiceNo"],
+            "status": row["status"],
+            "totalAmount": str(row["originalAmount"]),
+            "effectiveInvoiceAmount": str(row["effectiveInvoiceAmount"]),
+            "allocatedAmount": (
+                str(row["allocatedAmount"]) if row["allocatedAmount"] is not None else None
+            ),
+            "effectiveAllocatedAmount": str(row["amount"]),
+            "issueDate": row["issueDate"],
+            "matchMethod": row["matchMethod"],
+            "confirmed": True,
+            "redAdjusted": row["redAdjusted"],
+            "needsReview": row["needsReview"],
+            "reviewReason": row["reviewReason"],
+        }
+        for row in invoice_summary["entries"]
+        if row["invoiceKind"] == "tax"
+    ]
     return {
         "id": po.id, "externalOrderId": po.external_order_id, "platform": po.platform,
         "supplierName": po.supplier_name, "title": po.title,
         "orderAmount": str(po.order_amount) if po.order_amount is not None else None,
         "paidAmount": str(po.paid_amount) if po.paid_amount is not None else None,
         "orderedAt": po.ordered_at.isoformat() if po.ordered_at else None,
-        "purchaseStatus": po.purchase_status, "invoiceStatus": po.invoice_status,
+        "purchaseStatus": po.purchase_status,
+        "invoiceStatus": invoice_summary["status"],
+        "invoicedAmount": str(invoice_summary["invoicedAmount"]),
+        "invoiceOutstanding": (
+            str(invoice_summary["outstandingAmount"])
+            if invoice_summary["outstandingAmount"] is not None else None
+        ),
+        "invoiceNeedsReview": invoice_summary["needsReview"],
+        "invoiceReviewReasons": invoice_summary["reviewReasons"],
         "allocations": [
             {"id": i.id, "skuId": i.sku_id, "skuCode": i.sku_code, "goodsName": i.goods_name,
              "quantity": str(i.quantity) if i.quantity is not None else None,
