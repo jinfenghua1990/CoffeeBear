@@ -1514,6 +1514,20 @@ export const businessPartnerApi = {
       `/api/v1/finance/partners?keyword=${encodeURIComponent(keyword)}&role=${encodeURIComponent(role)}`,
     ),
   detail: (id: number) => jsonFetch<BusinessPartnerDetail>(`/api/v1/finance/partners/${id}`),
+  recheck: (id: number) => jsonFetch<{
+    ok: boolean;
+    partnerId: number;
+    createdLinks: number;
+    updatedLinks: number;
+    needsReview: number;
+    partnerMatchesAdded: number;
+    partnerInvoicePaidBefore: number;
+    partnerInvoicePaidAfter: number;
+    bankInvoiceMatchesCreated: number;
+    bankInvoiceRepaired: number;
+    bankInvoiceAmbiguous: number;
+    detail: BusinessPartnerDetail;
+  }>(`/api/v1/finance/partners/${id}/recheck`, { method: "POST" }),
   sync: () => jsonFetch<{
     ok: boolean;
     createdPartners: number;

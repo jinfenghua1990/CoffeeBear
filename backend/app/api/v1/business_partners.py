@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 from app.api.deps import current_actor
 from app.core.audit import audit
 from app.db import get_db
+from app.models.business_partner import BusinessPartner
 from app.services import business_partner_service as partner_service
 from app.services import payment_invoice_match_service as payment_match_service
 
@@ -105,6 +106,59 @@ def sync_partners(request: Request, db: Session = Depends(get_db)) -> dict[str, 
         {**result, "paymentPeriods": payment.get("periods", [])},
     )
     return {"ok": True, **result}
+
+
+@router.post("/{partner_id}/recheck")
+def recheck_partner_matches(
+    partner_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    """重新核对当前档案的来源归属，并重跑银行付款 ↔ 发票匹配。
+
+    匹配引擎仍按全局唯一性运行，避免同一张发票/同一笔流水在不同往来单位之间
+    被重复占用；人工确认、人工拒绝和拆分关系继续由底层匹配器保护，不会自动搬动。
+    """
+    partner = db.get(BusinessPartner, partner_id)
+    if partner is None or partner.status == "archived":
+        raise HTTPException(404, "往来单位不存在")
+
+    before = partner_service.partner_detail(db, partner_id) or {}
+    first = _sync_and_commit(db)
+    payment = payment_match_service.auto_match_all_periods(db, actor=current_actor(request))
+    second = partner_service.sync_business_partners(db)
+    db.commit()
+    after = partner_service.partner_detail(db, partner_id) or {}
+
+    before_summary = before.get("summary") or {}
+    after_summary = after.get("summary") or {}
+    before_invoice_paid = sum(float(row.get("bankPaidAmount", 0) or 0) for row in before.get("invoices", []))
+    after_invoice_paid = sum(float(row.get("bankPaidAmount", 0) or 0) for row in after.get("invoices", []))
+    before_match_count = sum(len(row.get("invoices", [])) for row in before.get("payments", []))
+    after_match_count = sum(len(row.get("invoices", [])) for row in after.get("payments", []))
+    result = {
+        "ok": True,
+        "partnerId": partner_id,
+        "createdLinks": int(first.get("createdLinks", 0)) + int(second.get("createdLinks", 0)),
+        "updatedLinks": int(first.get("updatedLinks", 0)) + int(second.get("updatedLinks", 0)),
+        "needsReview": int(after_summary.get("needsReviewCount", 0)),
+        "partnerMatchesAdded": max(0, after_match_count - before_match_count),
+        "partnerInvoicePaidBefore": before_invoice_paid,
+        "partnerInvoicePaidAfter": after_invoice_paid,
+        "bankInvoiceMatchesCreated": int(payment.get("matchedLinks", 0)),
+        "bankInvoiceRepaired": int(payment.get("repaired", 0)),
+        "bankInvoiceAmbiguous": int(payment.get("ambiguous", 0)),
+        "detail": after,
+    }
+    audit(
+        db,
+        current_actor(request),
+        "business_partner.rechecked",
+        "business_partner",
+        str(partner_id),
+        {key: value for key, value in result.items() if key != "detail"},
+    )
+    return result
 
 
 @router.post("")

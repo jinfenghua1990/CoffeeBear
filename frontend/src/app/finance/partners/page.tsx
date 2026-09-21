@@ -116,6 +116,7 @@ export default function BusinessPartnersPage() {
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
   const [syncing, setSyncing] = useState(false);
+  const [rechecking, setRechecking] = useState(false);
   const [form, setForm] = useState<BusinessPartnerInput | null>(null);
   const [editingId, setEditingId] = useState<number | null>(null);
   const [saving, setSaving] = useState(false);
@@ -239,6 +240,30 @@ export default function BusinessPartnersPage() {
     }
   }
 
+  async function recheckSelected() {
+    if (!detail) return;
+    setRechecking(true);
+    setMessage("");
+    setError("");
+    try {
+      const result = await businessPartnerApi.recheck(detail.id);
+      setDetail(result.detail);
+      const delta = result.partnerInvoicePaidAfter - result.partnerInvoicePaidBefore;
+      setMessage(
+        `已重新核对「${result.detail.name}」：本档案新增匹配关系 ${result.partnerMatchesAdded} 条` +
+        (Math.abs(delta) > 0.005 ? `，发票银行关联金额变化 ${money(delta)}` : "") +
+        (result.bankInvoiceRepaired ? `；全局匹配器纠正历史自动错配 ${result.bankInvoiceRepaired} 条` : "") +
+        (result.bankInvoiceAmbiguous ? `；${result.bankInvoiceAmbiguous} 组歧义保留人工确认` : "") +
+        `；当前待确认 ${result.needsReview} 条。`,
+      );
+      await loadList();
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "重新核对失败");
+    } finally {
+      setRechecking(false);
+    }
+  }
+
   async function saveForm() {
     if (!form) return;
     setSaving(true);
@@ -345,48 +370,72 @@ export default function BusinessPartnersPage() {
   ] : [];
 
   return (
-    <div className="mx-auto max-w-[1680px] space-y-4">
-      <header className="sticky top-0 z-20 -mx-8 -mt-6 border-b border-slate-200 bg-white/95 px-8 py-4 backdrop-blur">
-        <div className="flex flex-wrap items-end justify-between gap-3">
+    <div className="mx-auto max-w-[1720px] space-y-3">
+      <header className="sticky top-0 z-20 -mx-8 -mt-6 border-b border-slate-200 bg-white/95 px-8 py-3 backdrop-blur">
+        <div className="flex flex-wrap items-center justify-between gap-3">
           <div>
-            <div className="text-[11px] font-semibold tracking-wide text-blue-600">财务中心 / 往来单位档案</div>
-            <h1 className="mt-1 text-2xl font-semibold tracking-tight text-slate-900">往来单位档案</h1>
-            <p className="mt-1 text-sm text-slate-500">一个档案串联采购、入库、发票、银行支付和销售；来源原始记录保持不变。</p>
+            <div className="text-[10px] font-semibold tracking-wide text-blue-600">财务中心 / 往来单位</div>
+            <div className="mt-0.5 flex flex-wrap items-baseline gap-x-3 gap-y-1">
+              <h1 className="text-xl font-semibold tracking-tight text-slate-900">往来单位档案</h1>
+              <p className="text-xs text-slate-500">统一查看采购、入库、发票、银行与销售来源；原始记录不改写。</p>
+            </div>
           </div>
           <div className="flex flex-wrap gap-2">
-            <button type="button" onClick={() => { setForm({ ...emptyForm }); setEditingId(null); }} className="rounded-lg border border-slate-200 px-3 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50">新增往来单位</button>
-            <button type="button" onClick={() => void syncAll()} disabled={syncing} className="rounded-lg bg-blue-600 px-3 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-60">{syncing ? "正在核对…" : "核对全部来源"}</button>
+            <button type="button" onClick={() => void syncAll()} disabled={syncing || rechecking} className="rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-medium text-slate-600 hover:bg-slate-50 disabled:opacity-60">{syncing ? "全量核对中…" : "全量核对"}</button>
+            <button type="button" onClick={() => { setForm({ ...emptyForm }); setEditingId(null); }} className="rounded-lg bg-blue-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-blue-700">新增往来单位</button>
           </div>
         </div>
       </header>
 
       {(message || error) && <div className={`rounded-lg border px-3 py-2 text-xs ${error ? "border-red-200 bg-red-50 text-red-700" : "border-emerald-200 bg-emerald-50 text-emerald-700"}`}>{error || message}</div>}
 
-      <div className="grid gap-4 xl:grid-cols-[370px_minmax(0,1fr)]">
-        <aside className="min-w-0 overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
+      <div className="grid gap-3 xl:grid-cols-[320px_minmax(0,1fr)]">
+        <aside className="min-w-0 overflow-hidden rounded-xl border border-slate-200 bg-white">
           <div className="border-b border-slate-100 p-3">
             <div className="flex items-center justify-between gap-2"><div className="text-sm font-semibold text-slate-800">全部往来单位</div><span className={totalReview ? "rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-medium text-amber-700" : "rounded-full bg-slate-100 px-2 py-0.5 text-[10px] text-slate-500"}>{totalReview ? `${totalReview} 条待确认` : `${items.length} 个档案`}</span></div>
-            <input value={keywordInput} onChange={(event) => setKeywordInput(event.target.value)} placeholder="名称、税号、账号或别名" className="mt-3 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm outline-none placeholder:text-slate-400 focus:border-blue-400" />
+            <input value={keywordInput} onChange={(event) => setKeywordInput(event.target.value)} placeholder="搜索名称 / 税号 / 账号 / 别名" className="mt-2.5 w-full rounded-lg border border-slate-200 bg-slate-50/60 px-3 py-1.5 text-xs outline-none placeholder:text-slate-400 focus:border-blue-400 focus:bg-white" />
             <div className="mt-2 flex flex-wrap gap-1">
               {(["all", "supplier", "customer", "counterparty"] as RoleFilter[]).map((key) => <button key={key} type="button" onClick={() => setRole(key)} className={`rounded-md px-2 py-1 text-[11px] ${role === key ? "bg-blue-600 text-white" : "bg-slate-100 text-slate-600 hover:bg-slate-200"}`}>{key === "all" ? "全部" : roleLabels[key]}</button>)}
             </div>
           </div>
-          <div className="max-h-[calc(100vh-250px)] overflow-y-auto p-1.5">
+          <div className="max-h-[calc(100vh-214px)] overflow-y-auto p-1.5">
             {loading && <div className="px-3 py-8 text-center text-sm text-slate-400">正在建立来源关联…</div>}
             {!loading && items.length === 0 && <div className="px-3 py-8 text-center text-sm text-slate-400">暂无匹配的往来单位</div>}
-            {items.map((item) => <button key={item.id} type="button" onClick={() => { setSelectedId(item.id); setTab("overview"); }} className={`mb-1 w-full rounded-lg px-3 py-2.5 text-left transition ${selectedId === item.id ? "bg-blue-50 ring-1 ring-blue-200" : "hover:bg-slate-50"}`}>
+            {items.map((item) => <button key={item.id} type="button" onClick={() => { setSelectedId(item.id); setTab("overview"); }} className={`mb-1 w-full rounded-lg border px-2.5 py-2 text-left transition ${selectedId === item.id ? "border-blue-200 bg-blue-50/80" : "border-transparent hover:border-slate-200 hover:bg-slate-50"}`}>
               <div className="flex gap-2"><div className="min-w-0 flex-1"><div className="truncate text-sm font-medium text-slate-800">{item.name}</div><div className="mt-1"><RoleBadges roles={item.roles} /></div></div>{item.summary.needsReviewCount > 0 && <span className="mt-0.5 h-fit rounded-full bg-amber-100 px-1.5 py-0.5 text-[10px] font-semibold text-amber-700">待确认 {item.summary.needsReviewCount}</span>}{item.possibleDuplicateCount > 0 && <span className="mt-0.5 h-fit rounded-full bg-rose-50 px-1.5 py-0.5 text-[10px] font-semibold text-rose-600">疑似重复 {item.possibleDuplicateCount}</span>}</div>
-              <div className="mt-2 grid grid-cols-3 gap-1 text-[10px] text-slate-500"><span>采购 {money(item.summary.purchaseAmount)}</span><span>发票 {money(item.summary.invoiceAmount)}</span><span>付款 {money(item.summary.bankPaidAmount)}</span></div>
+              <div className="mt-1.5 flex items-center gap-2 overflow-hidden text-[10px] tabular-nums text-slate-500"><span className="truncate">采购 {money(item.summary.purchaseAmount)}</span><span className="text-slate-300">·</span><span className="truncate">发票 {money(item.summary.invoiceAmount)}</span><span className="text-slate-300">·</span><span className="truncate">付款 {money(item.summary.bankPaidAmount)}</span></div>
             </button>)}
           </div>
         </aside>
 
-        <main className="min-w-0 rounded-xl border border-slate-200 bg-white shadow-sm">
+        <main className="min-w-0 overflow-hidden rounded-xl border border-slate-200 bg-white">
           {!selectedId && <div className="flex min-h-[560px] flex-col items-center justify-center text-slate-400"><div className="text-base">选择一个往来单位</div><div className="mt-1 text-sm">查看它的采购、发票、银行支付和销售往来</div></div>}
           {selectedId && detailLoading && <div className="flex min-h-[560px] items-center justify-center text-sm text-slate-400">正在汇总往来数据…</div>}
           {detail && !detailLoading && <>
-            <div className="border-b border-slate-100 px-5 py-4">
-              <div className="flex flex-wrap items-start justify-between gap-3"><div className="min-w-0"><div className="flex flex-wrap items-center gap-2"><h2 className="max-w-[650px] truncate text-xl font-semibold text-slate-900">{detail.name}</h2><RoleBadges roles={detail.roles} /></div><div className="mt-1 flex flex-wrap gap-x-4 gap-y-1 text-xs text-slate-500"><span>税号：{detail.taxNo || "待补充"}</span><span>主账号：{detail.bankAccountNo || "待补充"}</span>{detail.formerNames.length > 0 && <span>曾用名：{detail.formerNames.join("、")}</span>}{detail.legacySupplierId && <Link href="/suppliers" className="font-medium text-blue-600 hover:text-blue-700">已承接原供应商档案，查看供应商档案 →</Link>}</div></div><div className="flex gap-2"><button type="button" onClick={() => { setForm(partnerToForm(detail)); setEditingId(detail.id); }} className="rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50">编辑档案</button><Link href="/finance/bank-transactions?view=transactions" className="rounded-lg border border-blue-200 px-3 py-1.5 text-xs font-medium text-blue-600 hover:bg-blue-50">银行流水</Link></div></div>
+            <div className="border-b border-slate-100 px-4 py-3">
+              <div className="flex flex-wrap items-start justify-between gap-3">
+                <div className="min-w-0 flex-1">
+                  <div className="flex flex-wrap items-center gap-2"><h2 className="max-w-[720px] truncate text-lg font-semibold text-slate-900">{detail.name}</h2><RoleBadges roles={detail.roles} /></div>
+                  <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-slate-500">
+                    <span>税号 <span className="font-mono text-slate-700">{detail.taxNo || "待补充"}</span></span>
+                    <span className="text-slate-300">|</span>
+                    <span>主账号 <span className="font-mono text-slate-700">{detail.bankAccountNo || "待补充"}</span></span>
+                    {detail.formerNames.length > 0 && <><span className="text-slate-300">|</span><span>曾用名 {detail.formerNames.join("、")}</span></>}
+                    {detail.legacySupplierId && <Link href="/suppliers" className="font-medium text-blue-600 hover:text-blue-700">查看供应商档案 →</Link>}
+                  </div>
+                  <div className="mt-2 flex flex-wrap items-center gap-1.5 text-[10px]">
+                    <span className={detail.taxNo ? "rounded bg-emerald-50 px-2 py-1 font-medium text-emerald-700" : "rounded bg-slate-100 px-2 py-1 text-slate-400"}>税号{detail.taxNo ? "已识别" : "待补"}</span>
+                    <span className={detail.bankAccountNo ? "rounded bg-emerald-50 px-2 py-1 font-medium text-emerald-700" : "rounded bg-slate-100 px-2 py-1 text-slate-400"}>银行账号{detail.bankAccountNo ? "已识别" : "待补"}</span>
+                    <span className={detail.identifiers.some((row) => row.kind === "alias" || row.kind === "former_name") ? "rounded bg-blue-50 px-2 py-1 font-medium text-blue-700" : "rounded bg-slate-100 px-2 py-1 text-slate-400"}>别名/曾用名 {detail.identifiers.filter((row) => row.kind === "alias" || row.kind === "former_name").length}</span>
+                    {detail.summary.needsReviewCount > 0 && <button type="button" onClick={() => setTab("review")} className="rounded bg-amber-50 px-2 py-1 font-medium text-amber-700 hover:bg-amber-100">待确认 {detail.summary.needsReviewCount}</button>}
+                  </div>
+                </div>
+                <div className="flex flex-wrap justify-end gap-2">
+                  <button type="button" onClick={() => void recheckSelected()} disabled={rechecking || syncing} className="rounded-lg bg-blue-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-blue-700 disabled:opacity-60">{rechecking ? "重新核对中…" : "重新核对匹配关系"}</button>
+                  <button type="button" onClick={() => { setForm(partnerToForm(detail)); setEditingId(detail.id); }} className="rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50">编辑档案</button>
+                  <Link href="/finance/bank-transactions?view=transactions" className="rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-medium text-slate-600 hover:bg-slate-50">银行流水</Link>
+                </div>
+              </div>
               {detail.possibleDuplicates.length > 0 && (
                 <div className="mt-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-[11px] text-amber-700">
                   <span className="font-medium">疑似同一主体：</span>
@@ -398,10 +447,10 @@ export default function BusinessPartnersPage() {
                   <span className="text-amber-600">名称去括号与后缀后相同，按规则不自动合并，请人工判断。</span>
                 </div>
               )}
-              <div className="mt-4 flex gap-1 overflow-x-auto border-b border-slate-100 -mb-4"><div className="flex min-w-max gap-1">{tabs.map(([key, label, count]) => <button key={key} type="button" onClick={() => setTab(key)} className={`relative px-3 py-2.5 text-xs font-medium ${tab === key ? "text-blue-600" : "text-slate-500 hover:text-slate-700"}`}>{label}{count ? <span className="ml-1 rounded-full bg-amber-100 px-1.5 py-0.5 text-[9px] text-amber-700">{count}</span> : null}{tab === key && <span className="absolute inset-x-2 bottom-0 h-0.5 rounded bg-blue-600" />}</button>)}</div></div>
+              <div className="mt-3 flex gap-1 overflow-x-auto border-b border-slate-100 -mb-3"><div className="flex min-w-max gap-0.5">{tabs.map(([key, label, count]) => <button key={key} type="button" onClick={() => setTab(key)} className={`relative px-2.5 py-2 text-[11px] font-medium ${tab === key ? "text-blue-600" : "text-slate-500 hover:text-slate-700"}`}>{label}{count ? <span className="ml-1 rounded-full bg-amber-100 px-1.5 py-0.5 text-[9px] text-amber-700">{count}</span> : null}{tab === key && <span className="absolute inset-x-2 bottom-0 h-0.5 rounded bg-blue-600" />}</button>)}</div></div>
             </div>
 
-            <div className="p-5">
+            <div className="p-4">
               {tab === "overview" && <Overview detail={detail} onTab={setTab} />}
               {tab === "purchases" && <Purchases rows={detail.purchases} />}
               {tab === "inbounds" && <Inbounds rows={detail.inbounds} />}
@@ -453,7 +502,47 @@ function Inbounds({ rows }: { rows: BusinessPartnerDetail["inbounds"] }) {
 
 function Invoices({ rows }: { rows: BusinessPartnerDetail["invoices"] }) {
   if (!rows.length) return <Empty text="暂无已关联发票" />;
-  return <div className="overflow-x-auto rounded-xl border border-slate-200"><table className="min-w-[980px] w-full text-left text-xs"><thead className="bg-slate-50 text-slate-500"><tr><th className="px-3 py-2.5">发票号码</th><th className="px-3 py-2.5">日期</th><th className="px-3 py-2.5">开票双方</th><th className="px-3 py-2.5 text-right">价税合计</th><th className="px-3 py-2.5 text-right">银行已关联</th><th className="px-3 py-2.5 text-right">待核对</th><th className="px-3 py-2.5">状态</th></tr></thead><tbody className="divide-y divide-slate-100">{rows.map((row) => <tr key={row.id}><td className="px-3 py-2.5 font-mono text-slate-700">{row.no || "—"}</td><td className="px-3 py-2.5 text-slate-600">{dateText(row.date)}</td><td className="max-w-[330px] px-3 py-2.5"><div className="truncate text-slate-700">销方：{row.sellerName || "—"}</div><div className="mt-0.5 truncate text-[10px] text-slate-400">购方：{row.buyerName || "—"}</div></td><td className="px-3 py-2.5 text-right tabular-nums text-slate-800">{money(row.amount)}</td><td className="px-3 py-2.5 text-right tabular-nums text-emerald-700">{money(row.bankPaidAmount)}</td><td className="px-3 py-2.5 text-right tabular-nums text-amber-700">{money(row.bankRemainingAmount)}</td><td className="px-3 py-2.5 text-slate-500">{row.verified ? "已认证" : row.matchStatus || "待核对"}</td></tr>)}</tbody></table></div>;
+  return <div className="overflow-x-auto rounded-xl border border-slate-200">
+    <table className="min-w-[980px] w-full text-left text-[11px]">
+      <thead className="bg-slate-50 text-slate-500">
+        <tr>
+          <th className="px-3 py-2">日期 / 发票号</th>
+          <th className="px-3 py-2">开票双方</th>
+          <th className="px-3 py-2 text-right">价税合计</th>
+          <th className="px-3 py-2 text-right">银行已关联</th>
+          <th className="px-3 py-2 text-right">待匹配</th>
+          <th className="px-3 py-2">匹配状态</th>
+        </tr>
+      </thead>
+      <tbody className="divide-y divide-slate-100">
+        {rows.map((row) => {
+          const remaining = Math.max(0, Number(row.bankRemainingAmount || 0));
+          const paid = Number(row.bankPaidAmount || 0);
+          const settled = remaining <= 0.005 && Number(row.amount || 0) > 0;
+          const partial = paid > 0.005 && !settled;
+          return <tr key={row.id} className="hover:bg-slate-50/60">
+            <td className="px-3 py-2.5">
+              <div className="text-slate-600">{dateText(row.date)}</div>
+              <div className="mt-0.5 font-mono text-[10px] text-slate-500">{row.no || "—"}</div>
+            </td>
+            <td className="max-w-[360px] px-3 py-2.5">
+              <div className="truncate font-medium text-slate-700">销方：{row.sellerName || "—"}</div>
+              <div className="mt-0.5 truncate text-[10px] text-slate-400">购方：{row.buyerName || "—"}</div>
+            </td>
+            <td className="px-3 py-2.5 text-right font-medium tabular-nums text-slate-800">{money(row.amount)}</td>
+            <td className="px-3 py-2.5 text-right tabular-nums text-emerald-700">{money(row.bankPaidAmount)}</td>
+            <td className={`px-3 py-2.5 text-right tabular-nums ${remaining > 0.005 ? "font-medium text-amber-700" : "text-slate-400"}`}>{money(remaining)}</td>
+            <td className="px-3 py-2.5">
+              <span className={settled ? "rounded-md bg-emerald-50 px-2 py-1 font-medium text-emerald-700" : partial ? "rounded-md bg-blue-50 px-2 py-1 font-medium text-blue-700" : "rounded-md bg-amber-50 px-2 py-1 font-medium text-amber-700"}>
+                {settled ? "已匹配" : partial ? "部分匹配" : "待匹配"}
+              </span>
+              {row.verified && <span className="ml-1.5 text-[10px] text-slate-400">已认证</span>}
+            </td>
+          </tr>;
+        })}
+      </tbody>
+    </table>
+  </div>;
 }
 
 function Payments({ rows, rawLoading, onRaw }: { rows: BusinessPartnerDetail["payments"]; rawLoading: boolean; onRaw: (url: string) => void }) {
