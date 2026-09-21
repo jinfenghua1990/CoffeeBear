@@ -328,8 +328,6 @@ def test_invoice_business_match_and_bank_payment_status_are_independent(db_sessi
     assert payload["bankPaymentStatus"] == "unmatched"
     assert payload["bankPaidAmount"] == "0.00"
 
-
-
 def test_list_invoices_match_filter_uses_live_business_domain_not_cached_status(db_session):
     """服务端筛选必须与页面实时 businessMatchStatus 完全一致，银行链接不得参与。"""
     from app.models.purchase import ExternalPurchaseOrder
@@ -414,8 +412,6 @@ def test_list_invoices_match_filter_uses_live_business_domain_not_cached_status(
         )
     }
     assert invoice.id in unmatched_ids
-
-
 
 def test_multiline_tax_invoice_links_only_after_final_amount(db_session, monkeypatch, tmp_path):
     """一票多行必须先汇总整票金额，再按订单号只关联一次。"""
@@ -616,6 +612,413 @@ def test_noneligible_invoice_deactivates_historical_source_ref(db_session):
     assert outcome is False
     assert stale.confirmed is False
     assert invoice.match_status == "unmatched"
+
+
+def test_red_blue_pairing_partial_then_full_uses_accounting_net(db_session):
+    """蓝字+红字分别留存；部分红冲只剩未冲余额，全额红冲余额归零，红字分类继承蓝字。"""
+    from datetime import datetime, timezone
+
+    from app.models.tax import TaxInvoice
+
+    token = uuid4().hex[:10]
+    blue_no = f"BLUE-{token}"
+    blue = TaxInvoice(
+        invoice_key=f"pytest-blue-{token}",
+        invoice_number=blue_no,
+        direction="input",
+        status="issued",
+        issue_date=datetime(2026, 7, 1, tzinfo=timezone.utc),
+        seller_name=f"红冲测试供应商-{token}",
+        seller_tax_id=f"TAX-{token}",
+        buyer_name="测试公司",
+        total_amount=Decimal("1000.00"),
+        category="goods",
+        processing_status="required",
+        raw={"是否正数发票": "是", "发票状态": "正常"},
+    )
+    red_a = TaxInvoice(
+        invoice_key=f"pytest-red-a-{token}",
+        invoice_number=f"RED-A-{token}",
+        direction="input",
+        status="red",
+        issue_date=datetime(2026, 7, 5, tzinfo=timezone.utc),
+        seller_name=blue.seller_name,
+        seller_tax_id=blue.seller_tax_id,
+        buyer_name=blue.buyer_name,
+        total_amount=Decimal("-300.00"),
+        raw={
+            "是否正数发票": "否",
+            "备注": f"被红冲蓝字数电发票号码：{blue_no} 红字发票信息确认单编号：HZ-A-{token}",
+        },
+    )
+    db_session.add_all([blue, red_a])
+    db_session.commit()
+
+    context = service.red_accounting_context(db_session, [blue, red_a])
+    assert context[blue.id]["invoiceColor"] == "blue"
+    assert context[blue.id]["redStatus"] == "partially_red_offset"
+    assert context[blue.id]["invoiceStatusLabel"] == "蓝字发票（部分红冲）"
+    assert Decimal(context[blue.id]["redOffsetAmount"]) == Decimal("300.00")
+    assert Decimal(context[blue.id]["remainingAfterRedAmount"]) == Decimal("700.00")
+    assert context[red_a.id]["invoiceColor"] == "red"
+    assert context[red_a.id]["redStatus"] == "red_invoice"
+    assert context[red_a.id]["redRelatedInvoiceId"] == blue.id
+    assert service.effective_invoice_amount_after_red(db_session, blue) == Decimal("700.00")
+    assert service.effective_invoice_amount_after_red(db_session, red_a) == Decimal("0")
+    assert service.is_bank_payment_reconciliation_eligible(blue, db=db_session) is True
+
+    red_payload = service.serialize_invoice(red_a, db=db_session)
+    assert red_payload["category"] == "goods"
+    assert red_payload["categoryInherited"] is True
+    assert red_payload["categoryInheritedFromInvoiceId"] == blue.id
+    with pytest.raises(ValueError, match="必须继承对应蓝字发票"):
+        service.set_invoice_categories(db_session, [red_a.id], "reimburse_operating", actor="pytest")
+
+    red_b = TaxInvoice(
+        invoice_key=f"pytest-red-b-{token}",
+        invoice_number=f"RED-B-{token}",
+        direction="input",
+        status="red",
+        issue_date=datetime(2026, 7, 6, tzinfo=timezone.utc),
+        seller_name=blue.seller_name,
+        seller_tax_id=blue.seller_tax_id,
+        buyer_name=blue.buyer_name,
+        total_amount=Decimal("-700.00"),
+        raw={
+            "是否正数发票": "否",
+            "备注": f"被红冲蓝字发票号码：{blue_no} 红字发票信息确认单编号：HZ-B-{token}",
+        },
+    )
+    db_session.add(red_b)
+    db_session.commit()
+
+    context = service.red_accounting_context(db_session, [blue, red_a, red_b])
+    assert context[blue.id]["redStatus"] == "fully_red_offset"
+    assert context[blue.id]["invoiceStatusLabel"] == "蓝字发票（已全额红冲）"
+    assert Decimal(context[blue.id]["redOffsetAmount"]) == Decimal("1000.00")
+    assert Decimal(context[blue.id]["remainingAfterRedAmount"]) == Decimal("0.00")
+    assert service.effective_invoice_amount_after_red(db_session, blue) == Decimal("0")
+    assert service.is_bank_payment_reconciliation_eligible(blue, db=db_session) is False
+    assert "已全额红冲" in service.bank_payment_reconciliation_ineligible_reason(blue, db=db_session)
+
+
+def test_red_invoice_without_blue_is_kept_but_flagged(db_session):
+    """红字票不能丢；找不到蓝字原票时保留真实负数，并明确标记待关联异常。"""
+    from datetime import datetime, timezone
+
+    from app.models.tax import TaxInvoice
+
+    token = uuid4().hex[:10]
+    red = TaxInvoice(
+        invoice_key=f"pytest-red-unpaired-{token}",
+        invoice_number=f"RED-U-{token}",
+        direction="input",
+        status="red",
+        issue_date=datetime(2026, 7, 10, tzinfo=timezone.utc),
+        seller_name=f"未配对供应商-{token}",
+        total_amount=Decimal("-123.45"),
+        raw={
+            "是否正数发票": "否",
+            "备注": f"被红冲蓝字数电发票号码：MISSING-{token}",
+        },
+    )
+    db_session.add(red)
+    db_session.commit()
+
+    context = service.red_accounting_context(db_session, [red])[red.id]
+    assert context["invoiceStatusLabel"] == "红字发票（待关联蓝字）"
+    assert context["redPairStatus"] == "unpaired"
+    assert context["accountingNetIncluded"] is True
+    assert Decimal(context["accountingNetAmount"]) == Decimal("-123.45")
+    assert "未识别到对应蓝字" in context["accountingException"]
+
+
+def test_positive_blue_marked_red_offset_is_not_misparsed_as_red_document():
+    """“已红冲”是蓝字票生命周期，不等于这张凭证本身就是红字票。"""
+    assert service._status(
+        "已红冲",
+        Decimal("100.00"),
+        None,
+        "该蓝字发票已红冲",
+    ) == "issued"
+    assert service._status(
+        "正常",
+        Decimal("-100.00"),
+        None,
+        "被红冲蓝字数电发票号码：123456",
+    ) == "red"
+
+
+def test_purchase_reconciliation_uses_remaining_amount_after_partial_red(db_session):
+    """采购对账只配蓝字票红冲后的剩余有效金额，不能继续按原票金额重复计入。"""
+    from datetime import datetime, timezone
+
+    from app.models.purchase import ExternalPurchaseOrder
+    from app.models.tax import TaxInvoice
+    from app.services import invoice_reconciliation
+
+    token = uuid4().hex[:10]
+    seller = f"净额供应商-{token}"
+    blue_no = f"BLUE-PO-{token}"
+    po = ExternalPurchaseOrder(
+        external_order_id=f"PO-NET-{token}",
+        platform="other",
+        supplier_name=seller,
+        ordered_at=datetime(2026, 7, 1, tzinfo=timezone.utc),
+        order_amount=Decimal("700.00"),
+        paid_amount=Decimal("700.00"),
+        currency="CNY",
+        raw={},
+    )
+    blue = TaxInvoice(
+        invoice_key=f"pytest-blue-po-{token}",
+        invoice_number=blue_no,
+        direction="input",
+        status="issued",
+        issue_date=datetime(2026, 7, 5, tzinfo=timezone.utc),
+        seller_name=seller,
+        total_amount=Decimal("1000.00"),
+        raw={"是否正数发票": "是"},
+    )
+    red = TaxInvoice(
+        invoice_key=f"pytest-red-po-{token}",
+        invoice_number=f"RED-PO-{token}",
+        direction="input",
+        status="red",
+        issue_date=datetime(2026, 7, 6, tzinfo=timezone.utc),
+        seller_name=seller,
+        total_amount=Decimal("-300.00"),
+        raw={"是否正数发票": "否", "备注": f"被红冲蓝字发票号码：{blue_no}"},
+    )
+    db_session.add_all([po, blue, red])
+    db_session.commit()
+
+    report = invoice_reconciliation.reconcile(db_session, supplier=seller)
+    assert len(report["suppliers"]) == 1
+    invoice_row = report["suppliers"][0]["months"][0]["invoices"][0]
+    assert invoice_row["invoiceId"] == blue.id
+    assert Decimal(str(invoice_row["originalAmount"])) == Decimal("1000.0")
+    assert Decimal(str(invoice_row["redOffsetAmount"])) == Decimal("300.0")
+    assert Decimal(str(invoice_row["amount"])) == Decimal("700.0")
+    assert invoice_row["status"] == "matched"
+
+
+def test_manual_red_blue_relation_overrides_missing_official_reference_and_is_audited(db_session):
+    from datetime import datetime, timezone
+    from app.models.tax import TaxInvoice
+
+    token = uuid4().hex[:10]
+    blue = TaxInvoice(
+        invoice_key=f"manual-blue-{token}", invoice_number=f"B-{token}",
+        direction="input", status="issued",
+        issue_date=datetime(2026, 7, 1, tzinfo=timezone.utc),
+        seller_name=f"人工红冲供应商-{token}", seller_tax_id=f"SELL-{token}",
+        buyer_tax_id=f"BUY-{token}", total_amount=Decimal("500.00"),
+        raw={"是否正数发票": "是"},
+    )
+    red = TaxInvoice(
+        invoice_key=f"manual-red-{token}", invoice_number=f"R-{token}",
+        direction="input", status="red",
+        issue_date=datetime(2026, 8, 2, tzinfo=timezone.utc),
+        seller_name=blue.seller_name, seller_tax_id=blue.seller_tax_id,
+        buyer_tax_id=blue.buyer_tax_id, total_amount=Decimal("-120.00"),
+        raw={"是否正数发票": "否", "备注": "原始导出未提供可识别蓝票号码"},
+    )
+    db_session.add_all([blue, red])
+    db_session.commit()
+
+    before = service.red_accounting_context(db_session, [red])[red.id]
+    assert before["redPairStatus"] == "unpaired"
+
+    service.set_manual_red_blue_relation(db_session, red.id, blue.id, actor="pytest")
+    paired = service.red_accounting_context(db_session, [red])[red.id]
+    assert paired["redPairStatus"] == "paired_manual"
+    assert paired["redPairMethod"] == "manual"
+    assert paired["redRelatedInvoiceId"] == blue.id
+    assert paired["redCrossPeriod"] is True
+    assert paired["redRelatedInvoicePeriod"] == "2026-07"
+
+    service.clear_manual_red_blue_relation(db_session, red.id, actor="pytest")
+    cleared = service.red_accounting_context(db_session, [red])[red.id]
+    assert cleared["redPairStatus"] == "unpaired"
+
+
+def test_red_settlement_bank_refund_cannot_be_overallocated(db_session):
+    from datetime import date, datetime, timezone
+    from app.models.bank import BankTransaction
+    from app.models.tax import TaxInvoice
+
+    token = uuid4().hex[:10]
+    red = TaxInvoice(
+        invoice_key=f"settle-red-{token}", invoice_number=f"R-{token}",
+        direction="input", status="red",
+        issue_date=datetime(2026, 8, 2, tzinfo=timezone.utc),
+        seller_name=f"退款供应商-{token}", total_amount=Decimal("-300.00"),
+        raw={"是否正数发票": "否"},
+    )
+    txn = BankTransaction(
+        txn_date=date(2026, 8, 8), direction="in", amount=Decimal("300.00"),
+        counterparty_name=red.seller_name, voucher_no=f"REF-{token}",
+        fingerprint=f"pytest-refund-{token}", raw={},
+    )
+    db_session.add_all([red, txn])
+    db_session.commit()
+
+    result = service.add_red_settlement(
+        db_session, red.id, service.RED_BANK_REFUND_TARGET_TYPE, Decimal("200.00"),
+        target_id=txn.id, actor="pytest",
+    )
+    assert result["redSettlementStatus"] == "partial"
+    assert Decimal(result["redSettlementRemainingAmount"]) == Decimal("100.00")
+
+    with pytest.raises(ValueError, match="已经登记|可用金额不足"):
+        service.add_red_settlement(
+            db_session, red.id, service.RED_BANK_REFUND_TARGET_TYPE, Decimal("150.00"),
+            target_id=txn.id, actor="pytest",
+        )
+
+    service.remove_red_settlement(db_session, red.id, result["redSettlements"][0]["linkId"], actor="pytest")
+    after = service._red_settlement_context(db_session, [red])[red.id]
+    assert after["redSettlementStatus"] == "unsettled"
+    assert Decimal(after["redSettlementRemainingAmount"]) == Decimal("300.00")
+
+
+def test_future_invoice_offset_respects_supplier_date_and_available_amount(db_session):
+    from datetime import datetime, timezone
+    from app.models.tax import TaxInvoice
+
+    token = uuid4().hex[:10]
+    seller_tax = f"SELL-{token}"
+    red = TaxInvoice(
+        invoice_key=f"future-red-{token}", invoice_number=f"R-{token}",
+        direction="input", status="red", issue_date=datetime(2026, 8, 2, tzinfo=timezone.utc),
+        seller_name=f"冲抵供应商-{token}", seller_tax_id=seller_tax,
+        total_amount=Decimal("-300.00"), raw={"是否正数发票": "否"},
+    )
+    future = TaxInvoice(
+        invoice_key=f"future-blue-{token}", invoice_number=f"B-{token}",
+        direction="input", status="issued", issue_date=datetime(2026, 9, 2, tzinfo=timezone.utc),
+        seller_name=red.seller_name, seller_tax_id=seller_tax,
+        total_amount=Decimal("250.00"), raw={"是否正数发票": "是"},
+    )
+    db_session.add_all([red, future])
+    db_session.commit()
+
+    with pytest.raises(ValueError, match="可抵扣余额不足"):
+        service.add_red_settlement(
+            db_session, red.id, service.RED_FUTURE_OFFSET_TARGET_TYPE, Decimal("300.00"),
+            target_id=future.id, actor="pytest",
+        )
+
+    result = service.add_red_settlement(
+        db_session, red.id, service.RED_FUTURE_OFFSET_TARGET_TYPE, Decimal("250.00"),
+        target_id=future.id, actor="pytest",
+    )
+    assert Decimal(result["redSettlementRemainingAmount"]) == Decimal("50.00")
+
+
+def test_vat_context_marks_meal_nondeductible_and_verified_red_transfer_pending(db_session):
+    from datetime import datetime, timezone
+    from app.models.tax import TaxInvoice
+
+    token = uuid4().hex[:10]
+    meal = TaxInvoice(
+        invoice_key=f"vat-meal-{token}", invoice_number=f"M-{token}",
+        direction="input", status="issued", issue_date=datetime(2026, 8, 1, tzinfo=timezone.utc),
+        total_amount=Decimal("106.00"), tax_amount=Decimal("6.00"),
+        raw={"是否正数发票": "是", "货物或应税劳务、服务名称": "*餐饮服务*餐费"},
+    )
+    blue = TaxInvoice(
+        invoice_key=f"vat-blue-{token}", invoice_number=f"VB-{token}",
+        direction="input", status="issued", issue_date=datetime(2026, 7, 1, tzinfo=timezone.utc),
+        seller_tax_id=f"S-{token}", buyer_tax_id=f"B-{token}",
+        total_amount=Decimal("1130.00"), tax_amount=Decimal("130.00"),
+        verified=True, raw={"是否正数发票": "是"},
+    )
+    red = TaxInvoice(
+        invoice_key=f"vat-red-{token}", invoice_number=f"VR-{token}",
+        direction="input", status="red", issue_date=datetime(2026, 8, 5, tzinfo=timezone.utc),
+        seller_tax_id=blue.seller_tax_id, buyer_tax_id=blue.buyer_tax_id,
+        total_amount=Decimal("-226.00"), tax_amount=Decimal("-26.00"),
+        raw={"是否正数发票": "否", "备注": f"被红冲蓝字发票号码：{blue.invoice_number}"},
+    )
+    db_session.add_all([meal, blue, red])
+    db_session.commit()
+
+    meal_payload = service.serialize_invoice(meal, db=db_session)
+    assert meal_payload["vatDeductibleStatus"] == "non_deductible"
+    assert Decimal(meal_payload["vatDeductibleAmount"]) == Decimal("0.00")
+
+    red_payload = service.serialize_invoice(red, db=db_session)
+    assert red_payload["inputVatTransferStatus"] == "required_confirmation"
+    assert Decimal(red_payload["inputVatTransferAmount"]) == Decimal("26.00")
+
+    confirmed = service.set_vat_review(
+        db_session,
+        red.id,
+        input_vat_transfer_status="completed",
+        input_vat_transfer_amount=Decimal("26.00"),
+        actor="pytest",
+    )
+    assert confirmed["inputVatTransferStatus"] == "completed"
+    assert confirmed["inputVatTransferManual"] is True
+    red_payload = service.serialize_invoice(red, db=db_session)
+    assert red_payload["inputVatTransferStatus"] == "completed"
+    assert Decimal(red_payload["inputVatTransferAmount"]) == Decimal("26.00")
+
+    with pytest.raises(ValueError, match="不可抵扣"):
+        service.set_vat_review(
+            db_session,
+            meal.id,
+            vat_deductible_status="deductible",
+            actor="pytest",
+        )
+    reviewed_meal = service.set_vat_review(
+        db_session,
+        meal.id,
+        vat_deductible_status="non_deductible",
+        actor="pytest",
+    )
+    assert reviewed_meal["vatDeductibleStatus"] == "non_deductible"
+    assert reviewed_meal["vatDeductibleManual"] is True
+
+
+def test_red_after_historical_business_link_marks_overmatched_for_review(db_session):
+    from datetime import datetime, timezone
+    from app.models.purchase import ExternalPurchaseOrder
+    from app.models.tax import TaxInvoice, TaxInvoiceLink
+
+    token = uuid4().hex[:10]
+    blue_no = f"BO-{token}"
+    blue = TaxInvoice(
+        invoice_key=f"bo-blue-{token}", invoice_number=blue_no,
+        direction="input", status="issued", issue_date=datetime(2026, 7, 1, tzinfo=timezone.utc),
+        seller_name=f"超配供应商-{token}", total_amount=Decimal("1000.00"),
+        raw={"是否正数发票": "是"},
+    )
+    red = TaxInvoice(
+        invoice_key=f"bo-red-{token}", invoice_number=f"BR-{token}",
+        direction="input", status="red", issue_date=datetime(2026, 8, 1, tzinfo=timezone.utc),
+        seller_name=blue.seller_name, total_amount=Decimal("-300.00"),
+        raw={"是否正数发票": "否", "备注": f"被红冲蓝字发票号码：{blue_no}"},
+    )
+    po = ExternalPurchaseOrder(
+        external_order_id=f"PO-{token}", platform="other",
+        supplier_name=blue.seller_name, order_amount=Decimal("1000.00"), paid_amount=Decimal("1000.00"),
+    )
+    db_session.add_all([blue, red, po])
+    db_session.flush()
+    db_session.add(TaxInvoiceLink(
+        invoice_id=blue.id, target_type="external_purchase_order", target_id=po.id,
+        allocated_amount=Decimal("1000.00"), match_method="manual", confirmed=True,
+    ))
+    db_session.commit()
+
+    payload = service.serialize_invoice(blue, db=db_session)
+    assert payload["businessMatchStatus"] == "needs_review"
+    assert Decimal(payload["businessOvermatchedAmount"]) == Decimal("300.00")
+    assert "超额" in payload["businessMatchException"]
+
 
 def test_orphan_business_link_is_needs_review_in_serialization_and_filter(db_session):
     from app.models.tax import TaxInvoice, TaxInvoiceLink

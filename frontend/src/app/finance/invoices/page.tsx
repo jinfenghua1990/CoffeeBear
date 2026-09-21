@@ -7,7 +7,7 @@ import { useTabActive, useTabScopedState } from "@/lib/workspace/tab-store";
 
 type FilterValue = "input" | "output";
 type MatchFilter = "all" | "matched" | "partial" | "unmatched" | "needs_review" | "pending";
-type InvoiceStatusFilter = "all" | "issued" | "red" | "void" | "unknown";
+type InvoiceStatusFilter = "all" | "blue_active" | "partially_red_offset" | "fully_red_offset" | "red_invoice" | "exception" | "void" | "unknown";
 /** v2 分类筛选：6 个分类 + ""=待判断 + 派生组伪值（计入运营成本） */
 type TypeFilter = "all" | TaxInvoiceCategoryV2 | TaxInvoiceCategoryOutput | "" | "group:operating";
 
@@ -58,6 +58,8 @@ function businessMatchStatus(row: TaxInvoiceRow) {
 
 function bankPaymentLabel(row: TaxInvoiceRow) {
   if (row.direction !== "input" || row.bankPaymentStatus === "not_applicable") return "—";
+  if (row.bankPaymentStatus === "overpaid_after_red") return "红冲后超额付款";
+  if (row.bankPaymentStatus === "red_overpayment_settled") return "红冲超额已处理";
   if (row.bankPaymentStatus === "matched") return "已付清核对";
   if (row.bankPaymentStatus === "partial") return "部分付款核对";
   return "待付款核对";
@@ -65,9 +67,31 @@ function bankPaymentLabel(row: TaxInvoiceRow) {
 
 function bankPaymentClass(row: TaxInvoiceRow) {
   if (row.direction !== "input" || row.bankPaymentStatus === "not_applicable") return "text-slate-300";
+  if (row.bankPaymentStatus === "overpaid_after_red") return "bg-rose-100 text-rose-800";
+  if (row.bankPaymentStatus === "red_overpayment_settled") return "bg-emerald-100 text-emerald-800";
   if (row.bankPaymentStatus === "matched") return "bg-emerald-50 text-emerald-700";
   if (row.bankPaymentStatus === "partial") return "bg-blue-50 text-blue-700";
   return "bg-amber-50 text-amber-700";
+}
+
+function matchesInvoiceLifecycle(row: TaxInvoiceRow, filter: InvoiceStatusFilter) {
+  if (filter === "all") return true;
+  if (filter === "blue_active") return row.invoiceColor === "blue" && row.redStatus === "none";
+  if (filter === "partially_red_offset") return row.redStatus === "partially_red_offset";
+  if (filter === "fully_red_offset") return row.redStatus === "fully_red_offset";
+  if (filter === "red_invoice") return row.invoiceColor === "red";
+  if (filter === "exception") return Boolean(row.accountingException);
+  if (filter === "void") return row.redStatus === "void" || row.status === "void";
+  return row.redStatus === "unknown" || row.status === "unknown";
+}
+
+function invoiceLifecycleClass(row: TaxInvoiceRow) {
+  if (row.accountingException) return "bg-rose-100 text-rose-800";
+  if (row.invoiceColor === "red") return "bg-rose-50 text-rose-700";
+  if (row.redStatus === "fully_red_offset") return "bg-orange-100 text-orange-800";
+  if (row.redStatus === "partially_red_offset") return "bg-amber-50 text-amber-700";
+  if (row.redStatus === "none" && row.invoiceColor === "blue") return "bg-emerald-50 text-emerald-700";
+  return "bg-slate-100 text-slate-500";
 }
 
 function matchClass(value: string) {
@@ -261,7 +285,7 @@ export default function InvoiceManagementPage() {
     const needle = query.trim().toLowerCase();
     return rows.filter((row) => {
       if (row.direction !== direction) return false;
-      if (invoiceStatus !== "all" && row.status !== invoiceStatus) return false;
+      if (!matchesInvoiceLifecycle(row, invoiceStatus)) return false;
       if (matchStatus === "pending") {
         if (!["unmatched", "partial", "needs_review"].includes(businessMatchStatus(row))) return false;
       } else if (matchStatus !== "all" && businessMatchStatus(row) !== matchStatus) return false;
@@ -280,7 +304,7 @@ export default function InvoiceManagementPage() {
 
   const selected = rows.find((row) => row.id === selectedId) ?? null;
   const visibleTotalAmount = useMemo(
-    () => visibleRows.reduce((sum, row) => sum + (Number(row.totalAmount) || 0), 0),
+    () => visibleRows.reduce((sum, row) => sum + (Number(row.accountingNetAmount) || 0), 0),
     [visibleRows],
   );
   const categoryCounts = useMemo(() => {
@@ -431,10 +455,23 @@ export default function InvoiceManagementPage() {
             {query && <button type="button" onClick={() => setQuery("")} title="清空关键词" className="absolute right-2 top-1/2 -translate-y-1/2 rounded px-1 text-slate-400 transition hover:text-slate-700">✕</button>}
           </div>
           <select value={matchStatus} onChange={(event) => setMatchStatus(event.target.value as MatchFilter)} className="rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs text-slate-600 outline-none"><option value="all">全部业务匹配</option><option value="pending">业务待匹配（未匹配+部分匹配+待核对）</option><option value="matched">已匹配</option><option value="partial">部分匹配</option><option value="unmatched">未匹配</option><option value="needs_review">待核对</option></select>
-          <select value={invoiceStatus} onChange={(event) => setInvoiceStatus(event.target.value as InvoiceStatusFilter)} className="rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs text-slate-600 outline-none"><option value="all">全部票据状态</option><option value="issued">有效</option><option value="red">红冲相关</option><option value="void">作废</option><option value="unknown">待确认</option></select>
-          {direction === "input" && !!summary?.byStatus?.red && (
-            <button type="button" onClick={() => setInvoiceStatus(invoiceStatus === "red" ? "all" : "red")} title={`蓝字票和红字票都保留展示并按净额核算；未识别到对应红字票的已红冲蓝字金额 ${money(String(summary.excludedRedAmount ?? 0))} 暂不计入有效进项金额`} className={`rounded-full border px-2.5 py-1 text-[11px] transition ${invoiceStatus === "red" ? "border-rose-300 bg-rose-50 font-medium text-rose-700 ring-1 ring-rose-200" : "border-rose-200 bg-white text-rose-600 hover:bg-rose-50"}`}>红冲相关 <span className="tabular-nums">{summary.byStatus.red}</span></button>
+          <select value={invoiceStatus} onChange={(event) => setInvoiceStatus(event.target.value as InvoiceStatusFilter)} className="rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs text-slate-600 outline-none">
+            <option value="all">全部票据状态</option>
+            <option value="blue_active">蓝字发票（有效）</option>
+            <option value="partially_red_offset">蓝字发票（部分红冲）</option>
+            <option value="fully_red_offset">蓝字发票（已全额红冲）</option>
+            <option value="red_invoice">红字发票（冲销）</option>
+            <option value="exception">红冲关联异常</option>
+            <option value="void">作废发票</option>
+            <option value="unknown">待确认发票</option>
+          </select>
+          {direction === "input" && ((summary?.redInvoiceCount || 0) + (summary?.partiallyRedOffsetBlueCount || 0) + (summary?.fullyRedOffsetBlueCount || 0) > 0) && (
+            <button type="button" onClick={() => setInvoiceStatus(invoiceStatus === "red_invoice" ? "all" : "red_invoice")} title="蓝字原票与红字冲销票分别留存；财务统计按正负金额净额抵消，部分红冲保留蓝票剩余有效金额。" className={`rounded-full border px-2.5 py-1 text-[11px] transition ${invoiceStatus === "red_invoice" ? "border-rose-300 bg-rose-50 font-medium text-rose-700 ring-1 ring-rose-200" : "border-rose-200 bg-white text-rose-600 hover:bg-rose-50"}`}>红字发票 <span className="tabular-nums">{summary?.redInvoiceCount || 0}</span></button>
           )}
+          {!!summary?.redPairExceptionCount && (
+            <button type="button" onClick={() => setInvoiceStatus(invoiceStatus === "exception" ? "all" : "exception")} className={`rounded-full border px-2.5 py-1 text-[11px] transition ${invoiceStatus === "exception" ? "border-rose-400 bg-rose-100 font-medium text-rose-800" : "border-rose-200 bg-white text-rose-600 hover:bg-rose-50"}`}>红冲异常 <span className="tabular-nums">{summary.redPairExceptionCount}</span></button>
+          )}
+          <span className="text-[11px] font-medium text-slate-400">分类</span>
           <span className="text-[11px] font-medium text-slate-400">分类</span>
           <button type="button" onClick={() => setTypeFilter("all")} className={`rounded-full border px-2.5 py-1 text-[11px] transition ${typeFilter === "all" ? "border-indigo-300 bg-indigo-50 text-indigo-700 ring-1 ring-indigo-200" : "border-slate-200 bg-white text-slate-600 hover:bg-slate-50"}`}>全部 <span className="tabular-nums">{rows.filter((row) => row.direction === direction).length}</span></button>
           {(direction === "output" ? (["buyer_sales", "platform_service", ""] as const) : (["goods", "platform_fee", "operating_other", "reimburse_advance", "reimburse_operating", "excluded", ""] as const)).map((value) => (
@@ -457,7 +494,7 @@ export default function InvoiceManagementPage() {
 
       <section className="mt-3 overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
         <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-100 bg-slate-50/40 px-4 py-1.5 text-[11px] text-slate-400">
-          <span>共 <span className="tabular-nums text-slate-600">{visibleRows.length}</span> 张 · 价税合计 <span className="tabular-nums text-slate-600">{money(String(visibleTotalAmount))}</span></span>
+          <span>共 <span className="tabular-nums text-slate-600">{visibleRows.length}</span> 张 · 财务净额 <span className="tabular-nums text-slate-600">{money(String(visibleTotalAmount))}</span></span>
           <span>{typeFilter !== "all" ? `分类：${direction === "output" ? outputCategoryLabel(typeFilter as string) : typeFilter === "group:operating" ? "计入运营成本（货款/平台服务费/其他）" : categoryLabel(typeFilter)}` : ""}</span>
         </div>
 
@@ -505,7 +542,7 @@ export default function InvoiceManagementPage() {
                 const category = rowCategoryValue(row);
                 return (
                 <tr key={row.id} className={`transition hover:bg-indigo-50/40 ${selectedId === row.id ? "bg-indigo-50/60" : ""}`}>
-                  <td className="px-4 py-2.5"><input type="checkbox" checked={selectedIds.has(row.id)} onChange={() => toggleRowSelected(row.id)} onClick={(event) => event.stopPropagation()} className="h-3.5 w-3.5 accent-indigo-600" /></td>
+                  <td className="px-4 py-2.5"><input type="checkbox" checked={selectedIds.has(row.id)} disabled={row.invoiceColor === "red"} onChange={() => toggleRowSelected(row.id)} onClick={(event) => event.stopPropagation()} title={row.invoiceColor === "red" ? "红字发票分类继承蓝字票，不单独批量分类" : undefined} className="h-3.5 w-3.5 accent-indigo-600 disabled:opacity-30" /></td>
                   <td className="px-3 py-2.5"><div className="font-mono font-medium text-slate-800">{invoiceNo(row)}</div></td>
                   <td className="max-w-[210px] truncate px-3 py-2.5 text-slate-700" title={row.direction === "output" ? `销项抬头：${row.buyerName || "未记录购买方"} · 本单位：${row.sellerName || "—"}` : row.sellerName}>{row.direction === "output" ? <><span className="mr-1 inline-block rounded border border-violet-200 bg-violet-50 px-1 align-[-1px] text-[10px] leading-4 text-violet-700">购方</span><span className="font-medium">{row.buyerName || "未记录购买方"}</span><div className="mt-0.5 truncate text-[10px] text-slate-400">本单位：{row.sellerName || "—"}</div></> : (row.sellerName || "未记录开票方")}</td>
                   <td className="whitespace-nowrap px-3 py-2.5 text-slate-500">{dateText(row.issueDate)}</td>
@@ -513,14 +550,15 @@ export default function InvoiceManagementPage() {
                   <td className="max-w-[320px] truncate px-3 py-2.5 text-slate-700" title={lineSummary(row)}>{lineSummary(row)}</td>
                   <td className="px-3 py-2.5"><span className={`whitespace-nowrap rounded-full border px-2 py-0.5 text-[10px] font-medium ${invoiceKindClass(row)}`}>{invoiceKindLabel(row)}</span></td>
                   <td className="px-3 py-2.5 text-right font-medium tabular-nums text-slate-700">{money(row.totalAmount)}</td>
-                  <td className="px-3 py-2.5"><span className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${row.redStatus === "red_offset" ? "bg-rose-50 text-rose-700" : row.redStatus === "voided_blue" ? "bg-orange-50 text-orange-700" : row.status === "issued" ? "bg-emerald-50 text-emerald-700" : "bg-slate-100 text-slate-500"}`}>{row.invoiceStatusLabel}</span>{row.redRelatedInvoiceNo && <div className="mt-1 max-w-[150px] truncate text-[10px] text-rose-600" title={row.redRelatedInvoiceNo}>对应 {row.redRelatedInvoiceNo}</div>}</td>
+                  <td className="px-3 py-2.5"><span className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${invoiceLifecycleClass(row)}`}>{row.invoiceStatusLabel}</span>{row.redRelatedInvoiceNo && <div className="mt-1 max-w-[180px] truncate text-[10px] text-rose-600" title={row.redRelatedInvoiceNo}>对应 {row.redRelatedInvoiceNo}</div>}{row.accountingException && <div className="mt-1 max-w-[220px] text-[10px] text-rose-600" title={row.accountingException}>{row.accountingException}</div>}</td>
                   <td className="px-3 py-2.5">
                     <div className="relative inline-flex items-center" onClick={(event) => event.stopPropagation()}>
                       <select
                         value={category}
                         onChange={(event) => void changeCategory(row.id, event.target.value)}
-                        title="点击修改分类"
-                        className={`cursor-pointer appearance-none whitespace-nowrap rounded-full border py-0.5 pl-2 pr-5 text-[10px] font-medium outline-none transition hover:opacity-80 ${rowCategoryClass(row, category)} ${category === "" ? "border-dashed" : ""}`}
+                        disabled={Boolean(row.categoryInherited) || row.invoiceColor === "red"}
+                        title={row.categoryInherited ? "红字发票类别继承对应蓝字发票，请修改蓝字原票" : row.invoiceColor === "red" ? "红字发票需先关联对应蓝字票，不能独立分类" : "点击修改分类"}
+                        className={`cursor-pointer appearance-none whitespace-nowrap rounded-full border py-0.5 pl-2 pr-5 text-[10px] font-medium outline-none transition hover:opacity-80 disabled:cursor-not-allowed disabled:opacity-70 ${rowCategoryClass(row, category)} ${category === "" ? "border-dashed" : ""}`}
                       >
                         {rowCategoryOptions(row).map((value) => (
                           <option key={value || "pending"} value={value}>{rowCategoryLabel(row, value)}</option>
@@ -729,16 +767,92 @@ function InvoiceDetailModal({ row, onRefresh, onClose }: { row: TaxInvoiceRow; o
     }
   }
 
+  async function handleResolveRedBlue() {
+    setActionError("");
+    try {
+      const found = await taxInvoiceApi.redBlueCandidates(row.id, row.sellerName || "");
+      if (!found.length) { setActionError("没有找到可选蓝字发票，请先确认蓝票已经导入。"); return; }
+      const preview = found.slice(0, 8).map((item) => `#${item.invoiceId} ${item.invoiceNumber} ${money(item.totalAmount)} ${item.taxPartyMatched ? "税号一致" : "税号待核"}`).join("\n");
+      const input = window.prompt(`输入要关联的蓝字发票 ID：\n${preview}`, String(found[0].invoiceId));
+      if (!input) return;
+      const blueId = Number(input);
+      if (!Number.isInteger(blueId) || blueId <= 0) { setActionError("蓝字发票 ID 无效"); return; }
+      await taxInvoiceApi.setRedBlueLink(row.id, blueId, "财务人工确认红蓝关系");
+      await onRefresh();
+    } catch (caught) { setActionError(caught instanceof Error ? caught.message : String(caught)); }
+  }
+
+  async function handleClearRedBlue() {
+    if (!window.confirm("确认解除人工红蓝关联？解除后系统会重新按官方发票号码自动识别。")) return;
+    setActionError("");
+    try { await taxInvoiceApi.clearRedBlueLink(row.id); await onRefresh(); }
+    catch (caught) { setActionError(caught instanceof Error ? caught.message : String(caught)); }
+  }
+
+  async function handleAddRedSettlement(type: "bank_refund_transaction" | "future_invoice_offset" | "personal_refund" | "other_red_settlement") {
+    setActionError("");
+    try {
+      const defaultAmount = row.redSettlementRemainingAmount || row.redSettlementTargetAmount || String(Math.abs(Number(row.totalAmount || 0)));
+      let targetId: number | null = null;
+      if (type === "bank_refund_transaction") {
+        const found = await taxInvoiceApi.refundCandidates(row.id, row.sellerName || "");
+        if (!found.length) { setActionError("没有找到银行收入流水，请先导入银行流水或改用其他处理方式。"); return; }
+        const preview = found.slice(0, 8).map((item) => `#${item.txnId} ${item.txnDate} ${money(item.amount)} ${item.counterpartyName || "未记录对方"}${item.amountMatched ? " · 金额一致" : ""}`).join("\n");
+        const input = window.prompt(`输入供应商退款银行流水 ID：\n${preview}`, String(found[0].txnId));
+        if (!input) return; targetId = Number(input);
+      } else if (type === "future_invoice_offset") {
+        const found = await taxInvoiceApi.redBlueCandidates(row.id, row.sellerName || "");
+        const preview = found.slice(0, 8).map((item) => `#${item.invoiceId} ${item.invoiceNumber} ${money(item.totalAmount)}`).join("\n");
+        const input = window.prompt(`输入用于冲抵的后续蓝字进项发票 ID：\n${preview}`, found[0] ? String(found[0].invoiceId) : "");
+        if (!input) return; targetId = Number(input);
+      }
+      if (targetId !== null && (!Number.isInteger(targetId) || targetId <= 0)) { setActionError("目标 ID 无效"); return; }
+      const amountText = window.prompt("输入本次处理金额：", defaultAmount);
+      if (!amountText) return;
+      const amount = Number(amountText);
+      if (!Number.isFinite(amount) || amount <= 0) { setActionError("处理金额必须大于 0"); return; }
+      const note = window.prompt("备注（可选）：", "") || "";
+      await taxInvoiceApi.addRedSettlement(row.id, { settlementType: type, amount, targetId, note });
+      await onRefresh();
+    } catch (caught) { setActionError(caught instanceof Error ? caught.message : String(caught)); }
+  }
+
+  async function handleRemoveRedSettlement(linkId: number) {
+    if (!window.confirm("确认解除这条红冲结算记录？审计历史会保留。")) return;
+    setActionError("");
+    try { await taxInvoiceApi.removeRedSettlement(row.id, linkId); await onRefresh(); }
+    catch (caught) { setActionError(caught instanceof Error ? caught.message : String(caught)); }
+  }
+
+  async function handleVatDeductible(status: "pending" | "deductible" | "non_deductible") {
+    setActionError("");
+    try {
+      await taxInvoiceApi.setVatReview(row.id, { vatDeductibleStatus: status });
+      await onRefresh();
+    } catch (caught) { setActionError(caught instanceof Error ? caught.message : String(caught)); }
+  }
+
+  async function handleVatTransfer(status: "required_confirmation" | "completed") {
+    setActionError("");
+    try {
+      await taxInvoiceApi.setVatReview(row.id, {
+        inputVatTransferStatus: status,
+        inputVatTransferAmount: row.inputVatTransferAmount || "0",
+      });
+      await onRefresh();
+    } catch (caught) { setActionError(caught instanceof Error ? caught.message : String(caught)); }
+  }
+
   return (
     <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-slate-900/45 p-4 sm:p-8" onClick={onClose}>
       <div className="w-full max-w-4xl overflow-hidden rounded-xl bg-white shadow-xl" onClick={(event) => event.stopPropagation()}>
         <div className="flex items-start justify-between gap-4 border-b border-slate-100 px-5 py-4">
           <div>
-            <div className="flex flex-wrap items-center gap-2"><h2 className="font-mono text-sm font-semibold text-slate-900">{invoiceNo(row)}</h2><span className={`rounded-full border px-2 py-0.5 text-[10px] font-medium ${directionClass(row.direction)}`}>{directionLabel(row.direction)}</span><span className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${matchClass(businessMatchStatus(row))}`}>{matchLabel(businessMatchStatus(row))}</span><span className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${row.redStatus === "red_offset" ? "bg-rose-50 text-rose-700" : row.redStatus === "voided_blue" ? "bg-orange-50 text-orange-700" : "bg-emerald-50 text-emerald-700"}`}>{row.invoiceStatusLabel}</span>
+            <div className="flex flex-wrap items-center gap-2"><h2 className="font-mono text-sm font-semibold text-slate-900">{invoiceNo(row)}</h2><span className={`rounded-full border px-2 py-0.5 text-[10px] font-medium ${directionClass(row.direction)}`}>{directionLabel(row.direction)}</span><span className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${matchClass(businessMatchStatus(row))}`}>{matchLabel(businessMatchStatus(row))}</span><span className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${invoiceLifecycleClass(row)}`}>{row.invoiceStatusLabel}</span>
             {row.direction === "input" && (
               <>
                 <span className="relative inline-flex items-center" onClick={(event) => event.stopPropagation()}>
-                  <select value={invoiceCategory(row)} onChange={(event) => void handleCategoryChange(event.target.value)} title="点击修改分类（分类决定统计口径）" className={`cursor-pointer appearance-none whitespace-nowrap rounded-full border py-0.5 pl-2 pr-5 text-[10px] font-medium outline-none transition hover:opacity-80 ${categoryClass(invoiceCategory(row))} ${invoiceCategory(row) === "" ? "border-dashed" : ""}`}>
+                  <select value={invoiceCategory(row)} onChange={(event) => void handleCategoryChange(event.target.value)} disabled={Boolean(row.categoryInherited) || row.invoiceColor === "red"} title={row.categoryInherited ? "红字发票分类继承蓝字原票" : "点击修改分类（分类决定统计口径）"} className={`cursor-pointer appearance-none whitespace-nowrap rounded-full border py-0.5 pl-2 pr-5 text-[10px] font-medium outline-none transition hover:opacity-80 ${categoryClass(invoiceCategory(row))} ${invoiceCategory(row) === "" ? "border-dashed" : ""}`}>
                     {(["goods", "platform_fee", "operating_other", "reimburse_advance", "reimburse_operating", "excluded", ""] as const).map((value) => (
                       <option key={value || "pending"} value={value}>{categoryLabel(value)}</option>
                     ))}
@@ -750,7 +864,7 @@ function InvoiceDetailModal({ row, onRefresh, onClose }: { row: TaxInvoiceRow; o
             )}
             {row.direction === "output" && (
               <span className="relative inline-flex items-center" onClick={(event) => event.stopPropagation()}>
-                <select value={row.category || ""} onChange={(event) => void handleCategoryChange(event.target.value)} title="点击修改销项分类" className={`cursor-pointer appearance-none whitespace-nowrap rounded-full border py-0.5 pl-2 pr-5 text-[10px] font-medium outline-none transition hover:opacity-80 ${rowCategoryClass(row, row.category || "")} ${!row.category ? "border-dashed" : ""}`}>
+                <select value={row.category || ""} onChange={(event) => void handleCategoryChange(event.target.value)} disabled={Boolean(row.categoryInherited) || row.invoiceColor === "red"} title={row.categoryInherited ? "红字发票分类继承蓝字原票" : "点击修改销项分类"} className={`cursor-pointer appearance-none whitespace-nowrap rounded-full border py-0.5 pl-2 pr-5 text-[10px] font-medium outline-none transition hover:opacity-80 ${rowCategoryClass(row, row.category || "")} ${!row.category ? "border-dashed" : ""}`}>
                   {(["buyer_sales", "platform_service", ""] as const).map((value) => (
                     <option key={value || "pending"} value={value}>{outputCategoryLabel(value)}</option>
                   ))}
@@ -835,7 +949,59 @@ function InvoiceDetailModal({ row, onRefresh, onClose }: { row: TaxInvoiceRow; o
             )
           ) : null}
         </div>
-      {row.redStatus !== "none" && <div className="border-b border-rose-100 bg-rose-50/70 px-4 py-3 text-xs text-rose-800"><b>红冲提示：</b>{row.redStatus === "voided_blue" ? "这张蓝字发票已经被红冲，不能作为有效进项重复计入。" : "这是一张红字冲销发票，金额用于冲减对应蓝字发票。"}{row.redRelatedInvoiceNo ? ` 对应发票：${row.redRelatedInvoiceNo}。` : " 当前未识别到对应的另一张发票，请人工核对。"}{row.redNoticeNo ? ` 确认单：${row.redNoticeNo}` : ""}</div>}
+      {row.redStatus !== "none" && (
+        <div className={`border-b px-4 py-3 text-xs ${row.accountingException ? "border-rose-200 bg-rose-100 text-rose-900" : "border-rose-100 bg-rose-50/70 text-rose-800"}`}>
+          <div><b>红冲状态：</b>{row.invoiceStatusLabel}。{row.redStatus === "partially_red_offset" ? ` 原票 ${money(row.totalAmount)}，累计红冲 ${money(row.redOffsetAmount)}，剩余有效 ${money(row.remainingAfterRedAmount)}。` : row.redStatus === "fully_red_offset" ? ` 原票已被全额冲销，剩余有效金额 ${money(row.remainingAfterRedAmount)}。` : row.invoiceColor === "red" ? " 该红字发票以负数冲减对应蓝字原票。" : ""}{row.redRelatedInvoiceNo ? ` 对应发票：${row.redRelatedInvoiceNo}。` : ""}{row.redRelatedInvoicePeriod ? ` 原蓝票账期：${row.redRelatedInvoicePeriod}。` : ""}{row.redCrossPeriod ? "（跨期红冲）" : ""}{row.redPairMethod === "manual" ? "（人工确认关联）" : ""}{row.redNoticeNo ? ` 确认单：${row.redNoticeNo}。` : ""}{row.accountingException ? ` 异常：${row.accountingException}` : ""}</div>
+          {row.invoiceColor === "red" && (
+            <div className="mt-2 flex flex-wrap gap-2">
+              {(row.redPairStatus === "unpaired" || row.redPairStatus === "ambiguous" || !row.redRelatedInvoiceId) && <button type="button" onClick={() => void handleResolveRedBlue()} className="rounded-md border border-rose-300 bg-white px-2.5 py-1 text-[11px] font-medium text-rose-700 hover:bg-rose-50">人工指定蓝字原票</button>}
+              {row.redPairMethod === "manual" && <button type="button" onClick={() => void handleClearRedBlue()} className="rounded-md border border-slate-300 bg-white px-2.5 py-1 text-[11px] text-slate-600 hover:bg-slate-50">解除人工关联</button>}
+            </div>
+          )}
+        </div>
+      )}
+      {(Number(row.bankOverpaidAmount || 0) > 0 || Number(row.businessOvermatchedAmount || 0) > 0) && (
+        <div className="border-b border-rose-200 bg-rose-50 px-4 py-3 text-xs text-rose-800">
+          {Number(row.bankOverpaidAmount || 0) > 0 && <div><b>红冲后超额付款：</b>有效金额 {money(row.bankEffectiveInvoiceAmount)}，历史对公已付 {money(row.bankPaidAmount)}，历史超额 {money(row.bankOverpaidAmount)}，已处理 {money(row.bankOverpaidSettledAmount || "0")}，当前待退款/冲抵 {money(row.bankOverpaidUnsettledAmount || row.bankOverpaidAmount)}。</div>}
+          {Number(row.businessOvermatchedAmount || 0) > 0 && <div className="mt-1"><b>红冲后业务超额关联：</b>{row.businessMatchException || `超额 ${money(row.businessOvermatchedAmount)}`}。系统不会自动篡改历史人工关联，请核对处理。</div>}
+        </div>
+      )}
+      {row.direction === "input" && (
+        <div className="border-b border-slate-100 bg-white px-4 py-3 text-xs text-slate-600">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div>
+              <b>增值税状态：</b>
+              进项抵扣 {row.vatDeductibleStatus === "non_deductible" ? "不可抵扣" : row.vatDeductibleStatus === "deductible" ? "可抵扣（人工确认）" : row.vatDeductibleStatus === "verified_pending_tax_filing" ? "已认证，待申报事实确认" : row.vatDeductibleStatus === "pending" ? "待确认" : "不适用"}
+              {row.vatDeductibleManual && <span className="ml-1 text-indigo-500">· 人工确认</span>}
+              {row.inputVatTransferStatus === "required_confirmation" && <span className="ml-3 font-medium text-rose-700">红冲涉及进项税转出待确认 {money(row.inputVatTransferAmount)}</span>}
+              {row.inputVatTransferStatus === "completed" && <span className="ml-3 font-medium text-emerald-700">进项税转出已确认完成 {money(row.inputVatTransferAmount)}</span>}
+            </div>
+            <div className="flex flex-wrap gap-1.5">
+              {row.invoiceColor !== "red" && <>
+                <button type="button" onClick={() => void handleVatDeductible("deductible")} className="rounded border border-emerald-200 px-2 py-1 text-[11px] text-emerald-700 hover:bg-emerald-50">确认可抵扣</button>
+                <button type="button" onClick={() => void handleVatDeductible("non_deductible")} className="rounded border border-amber-200 px-2 py-1 text-[11px] text-amber-700 hover:bg-amber-50">确认不可抵扣</button>
+                <button type="button" onClick={() => void handleVatDeductible("pending")} className="rounded border border-slate-200 px-2 py-1 text-[11px] text-slate-500 hover:bg-slate-50">改回待确认</button>
+              </>}
+              {row.invoiceColor === "red" && row.inputVatTransferStatus === "required_confirmation" && <button type="button" onClick={() => void handleVatTransfer("completed")} className="rounded border border-emerald-200 bg-emerald-50 px-2 py-1 text-[11px] text-emerald-700">确认已转出</button>}
+              {row.invoiceColor === "red" && row.inputVatTransferStatus === "completed" && <button type="button" onClick={() => void handleVatTransfer("required_confirmation")} className="rounded border border-slate-200 px-2 py-1 text-[11px] text-slate-500">撤回为待确认</button>}
+            </div>
+          </div>
+        </div>
+      )}
+      {row.invoiceColor === "red" && row.direction === "input" && (
+        <div className="border-b border-slate-100 bg-slate-50/70 px-4 py-3 text-xs">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div><b className="text-slate-700">红冲资金结算：</b><span className="text-slate-500">已处理 {money(row.redSettledAmount)} / 红字金额 {money(row.redSettlementTargetAmount)} · 待处理 {money(row.redSettlementRemainingAmount)}</span></div>
+            <div className="flex flex-wrap gap-1.5">
+              <button type="button" onClick={() => void handleAddRedSettlement("bank_refund_transaction")} className="rounded-md border border-emerald-200 bg-white px-2 py-1 text-[11px] text-emerald-700 hover:bg-emerald-50">匹配供应商退款</button>
+              <button type="button" onClick={() => void handleAddRedSettlement("future_invoice_offset")} className="rounded-md border border-blue-200 bg-white px-2 py-1 text-[11px] text-blue-700 hover:bg-blue-50">抵扣后续货款</button>
+              <button type="button" onClick={() => void handleAddRedSettlement("personal_refund")} className="rounded-md border border-amber-200 bg-white px-2 py-1 text-[11px] text-amber-700 hover:bg-amber-50">退回个人垫付</button>
+              <button type="button" onClick={() => void handleAddRedSettlement("other_red_settlement")} className="rounded-md border border-slate-200 bg-white px-2 py-1 text-[11px] text-slate-600 hover:bg-slate-50">其他处理</button>
+            </div>
+          </div>
+          {!!row.redSettlements?.length && <div className="mt-2 space-y-1">{row.redSettlements.map((item) => <div key={item.linkId} className="flex items-center justify-between gap-2 rounded border border-slate-200 bg-white px-2 py-1"><span>{item.targetLabel} · {money(item.amount)}{item.note ? ` · ${item.note}` : ""}</span><button type="button" onClick={() => void handleRemoveRedSettlement(item.linkId)} className="text-rose-500 hover:text-rose-700">解除</button></div>)}</div>}
+        </div>
+      )}
       <div className="grid gap-3 border-b border-slate-100 bg-slate-50/50 px-4 py-3 text-xs sm:grid-cols-2 xl:grid-cols-4">
         <Info label="销方税号" value={row.sellerTaxId || "—"} />
         <Info label="购方" value={row.buyerName || "—"} />
@@ -845,7 +1011,7 @@ function InvoiceDetailModal({ row, onRefresh, onClose }: { row: TaxInvoiceRow; o
         <div>
           <div className="mb-2 flex items-center justify-between gap-2">
             <span className="text-xs font-semibold text-slate-700">{isOutput ? "销售订单关联" : "采购关联"}</span>
-            <button type="button" onClick={openPicker} className="rounded-md border border-indigo-200 bg-indigo-50 px-2.5 py-1 text-[11px] font-medium text-indigo-700 hover:bg-indigo-100">{isOutput ? "+ 关联销售订单" : "+ 关联采购单"}</button>
+            <button type="button" onClick={openPicker} disabled={row.invoiceColor === "red"} title={row.invoiceColor === "red" ? "红字发票业务关系继承对应蓝字票，不单独关联订单" : undefined} className="rounded-md border border-indigo-200 bg-indigo-50 px-2.5 py-1 text-[11px] font-medium text-indigo-700 hover:bg-indigo-100 disabled:cursor-not-allowed disabled:opacity-40">{isOutput ? "+ 关联销售订单" : "+ 关联采购单"}</button>
           </div>
           {actionError && <div className="mb-2 rounded-lg border border-rose-100 bg-rose-50 px-3 py-2 text-[11px] text-rose-700">{actionError}</div>}
           {purchaseLinks.length ? (

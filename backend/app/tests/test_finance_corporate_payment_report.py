@@ -112,6 +112,9 @@ def test_build_report_links_bank_invoice_purchase_and_product(db_session):
     assert report["invoiceRows"][0]["invoiceKey"] == invoice.invoice_key
     assert report["invoiceRows"][0]["invoiceNumber"] == invoice.invoice_number
     assert report["invoiceRows"][0]["payments"][0]["voucherNo"] == txn.voucher_no
+    assert report["invoiceRows"][0]["paymentSource"] == "corporate"
+    assert report["invoiceRows"][0]["paymentSourceLabel"] == "对公支付"
+    assert report["invoiceRows"][0]["expenseNatureLabel"] == "货款"
     assert po.external_order_id in report["invoiceRows"][0]["purchaseOrderNos"]
     assert report["productDetails"][0]["skuCode"] == item.sku_code
     assert Decimal(report["productDetails"][0]["unitPrice"]) == Decimal("100")
@@ -163,6 +166,8 @@ def test_report_keeps_received_invoice_even_when_bank_link_is_unconfirmed(db_ses
 
     assert [row["invoiceId"] for row in report["invoiceRows"]] == [invoice.id]
     assert report["invoiceRows"][0]["invoiceStatus"] == "unpaid"
+    assert report["invoiceRows"][0]["paymentSource"] == "personal"
+    assert report["invoiceRows"][0]["paymentSourceLabel"] == "个人支付（系统推定）"
     assert report["invoiceRows"][0]["payments"] == []
     assert Decimal(report["summary"]["invoiceTotal"]) == Decimal("300.00")
     assert Decimal(report["summary"]["outstandingTotal"]) == Decimal("300.00")
@@ -237,13 +242,14 @@ def test_corporate_payment_xlsx_keeps_one_row_per_invoice_with_multiple_payments
     ws = wb["已收票对公核对"]
 
     assert ws.max_row == 2
-    assert ws["D2"].value == "INV-A"
-    assert ws["H2"].value == 1000
-    assert ws["I2"].value == 1000
-    assert ws["J2"].value == 0
-    assert ws["L2"].value == "2026-08-15、2026-08-20"
-    assert ws["N2"].value == "V-001、V-002"
-    assert ws["P2"].value == "PO-A、PO-B"
+    headers = {cell.value: cell.column for cell in ws[1]}
+    assert ws.cell(2, headers["发票号码"]).value == "INV-A"
+    assert ws.cell(2, headers["价税合计"]).value == 1000
+    assert ws.cell(2, headers["对公匹配金额"]).value == 1000
+    assert ws.cell(2, headers["个人支付/未对公匹配金额"]).value == 0
+    assert ws.cell(2, headers["银行付款日期"]).value == "2026-08-15、2026-08-20"
+    assert ws.cell(2, headers["银行流水/凭证号"]).value == "V-001、V-002"
+    assert ws.cell(2, headers["关联采购订单"]).value == "PO-A、PO-B"
 
 
 def test_negative_red_invoice_is_not_misclassified_as_bank_reconciled(db_session):
@@ -274,6 +280,8 @@ def test_negative_red_invoice_is_not_misclassified_as_bank_reconciled(db_session
     assert row["invoiceStatus"] == "not_applicable"
     assert row["bankReconciliationStatus"] == "not_applicable"
     assert row["bankReconciliationApplicable"] is False
+    assert row["paymentSource"] == "not_applicable"
+    assert row["paymentSourceLabel"] == "不适用"
     assert "不参与银行付款核对" in row["bankReconciliationReason"]
     assert row["payments"] == []
 
@@ -284,7 +292,11 @@ def test_negative_red_invoice_is_not_misclassified_as_bank_reconciled(db_session
     assert Decimal(report["summary"]["outstandingTotal"]) == Decimal("0")
 
     wb = load_workbook(BytesIO(service.corporate_payment_xlsx(report)), read_only=True)
-    assert wb["已收票对公核对"]["K2"].value == "无需核对银行付款"
+    ws = wb["已收票对公核对"]
+    headers = {cell.value: cell.column for cell in ws[1]}
+    assert ws.cell(2, headers["票据状态"]).value == "红字发票（待关联蓝字）"
+    assert ws.cell(2, headers["支付方式"]).value == "不适用"
+    assert ws.cell(2, headers["银行匹配状态"]).value == "不适用"
 
 
 def test_small_positive_invoice_without_payment_stays_unpaid(db_session):
@@ -309,11 +321,42 @@ def test_small_positive_invoice_without_payment_stays_unpaid(db_session):
 
     assert row["bankReconciliationApplicable"] is True
     assert row["bankReconciliationStatus"] == "unpaid"
+    assert row["paymentSource"] == "personal"
+    assert row["paymentSourceLabel"] == "个人支付（系统推定）"
     assert row["invoiceCorporatePaidTotal"] == "0"
     assert Decimal(row["invoiceOutstandingAmount"]) == Decimal("0.03")
     assert report["summary"]["paidInvoiceCount"] == 0
     assert report["summary"]["unpaidInvoiceCount"] == 1
 
+
+def test_expense_nature_recognizes_meal_for_finance_view(db_session):
+    """无采购单关联时，按发票明细/原始字段把餐饮归成财务可读的“餐饮费”."""
+    token = uuid4().hex[:10]
+    invoice = TaxInvoice(
+        invoice_key=f"pytest-corp-meal-{token}",
+        invoice_number=f"INV-MEAL-{token}",
+        direction="input",
+        status="issued",
+        issue_date=datetime(2026, 7, 12, tzinfo=timezone.utc),
+        seller_name=f"餐饮供应商-{token}",
+        amount_excl_tax=Decimal("94.34"),
+        tax_amount=Decimal("5.66"),
+        total_amount=Decimal("100.00"),
+        category="reimburse_operating",
+        source_system="tax_export",
+        raw={"货物或应税劳务、服务名称": "*餐饮服务*餐费"},
+    )
+    db_session.add(invoice)
+    db_session.commit()
+
+    report = service.build_report(db_session, 2026, 7)
+    row = next(item for item in report["invoiceRows"] if item["invoiceId"] == invoice.id)
+
+    assert row["expenseNature"] == "meal"
+    assert row["expenseNatureLabel"] == "餐饮费"
+    assert row["paymentSource"] == "personal"
+    assert report["summary"]["personalInvoiceCount"] >= 1
+    assert report["summary"]["expenseNatureCounts"]["餐饮费"] >= 1
 
 def _add_adjustment_invoice(db_session, token: str, idx: int, company: str, total: str) -> TaxInvoice:
     invoice = TaxInvoice(
@@ -479,6 +522,7 @@ def test_legacy_unique_invoice_number_selection_maps_to_invoice_key(db_session):
     assert canonical == [invoice.invoice_key]
     selected = service.apply_invoice_selection(report, [invoice.invoice_number])
     assert [row["invoiceKey"] for row in selected["invoiceRows"]] == [invoice.invoice_key]
+
 
 def test_legacy_null_bank_allocation_uses_full_invoice_amount_in_report(db_session):
     from app.models.bank import BankTransaction

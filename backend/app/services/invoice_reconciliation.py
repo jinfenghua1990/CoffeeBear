@@ -11,7 +11,7 @@
 - 符合日期条件的订单按下单日期升序消耗金额，直到发票票面金额耗尽（容差 ±0.05 元）；
 - 订单可被多张发票**渐进消耗**（部分覆盖，余量留给下一张发票），严格 FIFO；
 - 金额口径：订单 = COALESCE(paid_amount, order_amount) + adjustment_amount；
-  发票 = total_amount（含税票面）；
+  发票 = 蓝字原票扣除已明确关联红字票后的剩余有效金额（含税）；全额红冲不再参与配平；
 - 0 金额订单（金额未同步）跳过，不参与配平，另行提示。
 
 纯推导展示，不落库、不修改任何关联数据；每次调用从头重算。
@@ -198,12 +198,32 @@ def reconcile(db: Session, supplier: str | None = None) -> dict[str, Any]:
         .order_by(ExternalPurchaseOrder.ordered_at.nulls_last(), ExternalPurchaseOrder.id)
         .all()
     )
-    inv_rows = (
-        db.query(TaxInvoice)
-        .filter(TaxInvoice.direction == "input", TaxInvoice.status == "issued")
+    from app.services import tax_invoice_service
+
+    inv_candidates = (
+        tax_invoice_service.filter_visible_invoices(
+            db.query(TaxInvoice).filter(
+                TaxInvoice.direction == "input",
+                TaxInvoice.status.in_(("issued", "red")),
+            )
+        )
         .order_by(TaxInvoice.issue_date.nulls_last(), TaxInvoice.id)
         .all()
     )
+    red_context = tax_invoice_service.red_accounting_context(db, inv_candidates)
+    effective_amount_by_invoice: dict[int, Decimal] = {}
+    inv_rows: list[TaxInvoice] = []
+    for invoice in inv_candidates:
+        context = red_context.get(invoice.id, {})
+        if context.get("invoiceColor") != "blue":
+            continue
+        if context.get("redStatus") in {"fully_red_offset", "blue_red_pending", "over_red_offset"}:
+            continue
+        amount = _dec(context.get("remainingAfterRedAmount"))
+        if amount <= TOLERANCE:
+            continue
+        effective_amount_by_invoice[invoice.id] = amount
+        inv_rows.append(invoice)
     if supplier:
         # 只保留与目标供应商宽松匹配的订单/发票，缩小配平范围
         po_rows = [r for r in po_rows if _matches(normalize_supplier(r.supplier_name), target_norm)]
@@ -257,7 +277,7 @@ def reconcile(db: Session, supplier: str | None = None) -> dict[str, Any]:
         inv_total = Decimal("0")
         matched_total = Decimal("0")
         for inv in invoices:
-            amount = _dec(inv.total_amount)
+            amount = effective_amount_by_invoice.get(inv.id, _dec(inv.total_amount))
             inv_total += amount
             explicit_links = explicit_map.get(inv.id, [])
             covered: list[dict[str, Any]] = []
@@ -360,6 +380,10 @@ def reconcile(db: Session, supplier: str | None = None) -> dict[str, Any]:
                 "issueDate": inv.issue_date.strftime("%Y-%m-%d") if inv.issue_date else None,
                 "seller": inv.seller_name,
                 "amount": float(amount),
+                "originalAmount": float(_dec(inv.total_amount)),
+                "redOffsetAmount": float(_dec(red_context.get(inv.id, {}).get("redOffsetAmount"))),
+                "redStatus": red_context.get(inv.id, {}).get("redStatus", "none"),
+                "invoiceStatusLabel": red_context.get(inv.id, {}).get("invoiceStatusLabel", ""),
                 "manualLinked": any(link.get("source") == "manual" for link in explicit_links),
                 "explicitLinked": bool(explicit_links),
                 "covered": covered,

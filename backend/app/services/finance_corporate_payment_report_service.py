@@ -6,9 +6,10 @@
 """
 from __future__ import annotations
 
-from collections import defaultdict
+from collections import Counter, defaultdict
 from decimal import Decimal
 from io import BytesIO
+import re
 from typing import Any
 
 from openpyxl import Workbook
@@ -28,6 +29,121 @@ from app.services.monthly_core import month_bounds
 TOLERANCE = Decimal("0.05")
 TARGET_TYPE = "bank_transaction"
 
+# 财务主视图使用“支付方式 + 费用性质”两个维度。
+# 银行流水是对公付款的唯一证据；没有已确认银行流水的有效正数进项票，
+# 在本月财务交付表中按业务约定直接归为“个人支付”，而不是继续显示成待判断。
+_PAYMENT_SOURCE_LABELS = {
+    "corporate": "对公支付",
+    "personal": "个人支付",
+    "mixed": "混合支付",
+    "not_applicable": "不适用",
+}
+
+_EXPENSE_NATURE_FALLBACK = {
+    "goods": ("goods_payment", "货款"),
+    "platform_fee": ("platform_service_fee", "平台/技术服务费"),
+    "operating_other": ("operating_other", "其他经营费用"),
+    "reimburse_advance": ("advance_payment", "代付款/垫付款"),
+    "reimburse_operating": ("reimbursement", "费用报销"),
+    "excluded": ("excluded", "不计入经营/报销"),
+}
+
+_EXPENSE_NATURE_RULES = (
+    ("meal", "餐饮费", re.compile(r"餐饮|餐费|餐厅|饭店|快餐|餐饮服务")),
+    ("lodging", "住宿费", re.compile(r"住宿|酒店|宾馆|旅店|客房")),
+    ("travel_transport", "交通费", re.compile(r"机票|航空|高铁|铁路|客运|出租车|打车|网约车|停车|过路|通行费")),
+    ("logistics", "物流运输费", re.compile(r"物流|快递|运输服务|货运|配送")),
+    ("warehouse", "仓储费", re.compile(r"仓储|仓库服务")),
+    ("advertising", "广告宣传费", re.compile(r"广告|推广|宣传|营销|投流")),
+    ("office", "办公费", re.compile(r"办公用品|文具|打印|耗材")),
+    ("rent", "租赁费", re.compile(r"房租|租金|租赁")),
+    ("utilities", "水电物业费", re.compile(r"水费|电费|物业|燃气")),
+    ("platform_service_fee", "平台/技术服务费", re.compile(r"平台服务|技术服务|信息服务|软件|云服务|服务器|网络服务|会员|商标|经纪代理")),
+)
+
+
+def _payment_source(
+    db: Session,
+    invoice: TaxInvoice,
+    bank_status: str,
+) -> tuple[str, str, str]:
+    """财务交付口径：结论和证据分开。
+
+    仍按用户业务规则把“无对公流水”的有效进项票归到个人支付，但必须注明这是系统推定；
+    只有 payment_method=personal 才显示“已确认个人支付”。这样财务能区分事实与推定。
+    """
+    if bank_status == "overpaid_after_red":
+        key, basis = "corporate", "历史对公付款超过红冲后有效金额，超额部分待退款或冲抵"
+    elif bank_status == "red_overpayment_settled":
+        key, basis = "corporate", "历史红冲超额付款已通过退款/后续冲抵完成处理"
+    elif not tax_invoice_service.is_bank_payment_reconciliation_eligible(invoice, db=db):
+        key, basis = "not_applicable", tax_invoice_service.bank_payment_reconciliation_ineligible_reason(invoice, db=db)
+    elif bank_status == "paid":
+        key, basis = "corporate", "已确认银行支出流水"
+    elif bank_status == "partial":
+        key = "mixed"
+        basis = (
+            "银行部分付款 + 已确认个人垫付"
+            if invoice.payment_method == "personal"
+            else "银行部分付款；剩余部分按无对公流水系统推定为个人支付"
+        )
+    else:
+        key = "personal"
+        basis = (
+            "人工已确认个人垫付"
+            if invoice.payment_method == "personal"
+            else "未匹配到对公银行支出流水，按月结规则系统推定"
+        )
+    label = _PAYMENT_SOURCE_LABELS[key]
+    if key == "personal" and invoice.payment_method != "personal":
+        label = "个人支付（系统推定）"
+    elif key == "personal":
+        label = "个人支付（已确认）"
+    elif key == "mixed" and invoice.payment_method != "personal":
+        label = "混合支付（系统推定）"
+    return key, label, basis
+
+
+def _expense_nature(
+    invoice: TaxInvoice,
+    covered_orders: list[dict[str, Any]],
+    line_items: list[dict[str, Any]],
+) -> tuple[str, str, str]:
+    """给财务看的费用性质。
+
+    优先级：
+    1. 已明确关联采购订单 → 货款；
+    2. 发票明细关键词 → 餐饮/住宿/交通/物流/服务费等；
+    3. 现有 category → 财务大类兜底；
+    4. 无法识别 → 待分类。
+    """
+    if covered_orders:
+        return "goods_payment", "货款", "采购订单关联"
+
+    goods_names = [
+        str(item.get("goodsName") or item.get("itemName") or "").strip()
+        for item in line_items
+        if isinstance(item, dict)
+    ]
+    text = " ".join(name for name in goods_names if name)
+    for key, label, pattern in _EXPENSE_NATURE_RULES:
+        if pattern.search(text):
+            return key, label, "发票明细"
+
+    # 发票导入 raw 中有时直接保留“货物或应税劳务、服务名称”等字段；
+    # 具体费用性质优先于宽泛 category（例如 reimburse_operating 还能继续识别为餐饮/住宿）。
+    raw = invoice.raw if isinstance(invoice.raw, dict) else {}
+    raw_text = " ".join(str(value or "") for value in raw.values())
+    for key, label, pattern in _EXPENSE_NATURE_RULES:
+        if pattern.search(raw_text):
+            return key, label, "发票原始明细"
+
+    fallback = _EXPENSE_NATURE_FALLBACK.get(invoice.category or "")
+    if fallback:
+        return fallback[0], fallback[1], "发票分类"
+
+    return "unclassified", "待分类", "未识别"
+
 
 def _dec(value: Decimal | float | int | str | None) -> Decimal:
     if value is None:
@@ -43,7 +159,7 @@ def _month_range(year: int, month: int):
 
 
 def _link_amount(link: TaxInvoiceLink, invoice: TaxInvoice | None) -> Decimal:
-    """历史 NULL 分摊统一解释为旧版本“整票关联”，与付款核对服务同口径。"""
+    """历史 NULL 分摊按旧版本“整票关联”解释，避免升级后付款事实凭空消失。"""
     if link.allocated_amount is not None:
         return _dec(link.allocated_amount)
     if invoice is not None:
@@ -76,28 +192,57 @@ def _company_matches(invoice: TaxInvoice, company: str) -> bool:
 
 
 def _bank_reconciliation_meta(
-    invoice: TaxInvoice, paid_total: Decimal
+    db: Session,
+    invoice: TaxInvoice,
+    paid_total: Decimal,
+    bank_meta: dict[str, Any] | None = None,
 ) -> tuple[str, Decimal, bool, str]:
-    """银行付款核对只适用于“有效 + 正数金额”的进项发票。
+    """月结银行核对复用发票台账的同一事实源，避免红冲结算后两处状态漂移。"""
+    bank_meta = bank_meta or tax_invoice_service._invoice_bank_payment_context(db, [invoice]).get(invoice.id, {})
+    source_status = str(bank_meta.get("bankPaymentStatus") or "")
+    total = _dec(bank_meta.get("bankEffectiveInvoiceAmount") or tax_invoice_service.effective_invoice_amount_after_red(db, invoice))
+    outstanding = _dec(bank_meta.get("bankRemainingAmount"))
+    overpaid = _dec(bank_meta.get("bankOverpaidAmount"))
+    unresolved_overpaid = _dec(bank_meta.get("bankOverpaidUnsettledAmount", overpaid))
 
-    会计上需要保留的红字/红冲发票不能因为金额 <= 0 被误判为“已付款/已核对”。
-    """
-    total = _dec(invoice.total_amount)
-    if not tax_invoice_service.is_bank_payment_reconciliation_eligible(invoice):
+    if source_status == "overpaid_after_red":
+        return (
+            "overpaid_after_red",
+            Decimal("0"),
+            True,
+            f"历史对公付款 {paid_total} 超过红冲后有效金额 {total}；历史超额 {overpaid}，当前仍待退款/冲抵 {unresolved_overpaid}",
+        )
+    if source_status == "red_overpayment_settled":
+        return (
+            "red_overpayment_settled",
+            Decimal("0"),
+            True,
+            f"历史对公付款曾超出红冲后有效金额 {overpaid}，现已通过退款/后续冲抵完成处理",
+        )
+    if source_status == "not_applicable":
         return (
             "not_applicable",
             Decimal("0"),
             False,
-            tax_invoice_service.bank_payment_reconciliation_ineligible_reason(invoice),
+            tax_invoice_service.bank_payment_reconciliation_ineligible_reason(invoice, db=db),
         )
+    if source_status == "unmatched":
+        return "unpaid", total, True, ""
+    if source_status == "partial":
+        return "partial", outstanding, True, ""
+    if source_status == "matched":
+        return "paid", Decimal("0"), True, ""
 
-    # 不能只看 outstanding <= tolerance：没有任何银行付款时，哪怕票面金额很小也必须是“待核对”。
+    # 兼容极少量历史调用：没有派生上下文时按原规则保守计算。
+    if not tax_invoice_service.is_bank_payment_reconciliation_eligible(invoice, db=db):
+        return (
+            "not_applicable", Decimal("0"), False,
+            tax_invoice_service.bank_payment_reconciliation_ineligible_reason(invoice, db=db),
+        )
     if paid_total <= 0:
         return "unpaid", total, True, ""
-
     outstanding = max(total - paid_total, Decimal("0"))
-    status = "paid" if outstanding <= TOLERANCE else "partial"
-    return status, outstanding, True, ""
+    return ("paid" if outstanding <= TOLERANCE else "partial"), outstanding, True, ""
 
 
 def _invoice_purchase_map(db: Session, invoices: list[TaxInvoice]) -> dict[int, list[dict[str, Any]]]:
@@ -123,16 +268,43 @@ def _period_invoices(db: Session, year: int, month: int, company: str) -> list[T
     """当月收到的进项发票（按公司主体隔离）；保存选择与构建报告共用同一口径。"""
     start, end = _month_range(year, month)
     invoices = (
-        db.query(TaxInvoice)
-        .filter(
-            TaxInvoice.direction == "input",
-            TaxInvoice.issue_date >= start,
-            TaxInvoice.issue_date < end,
+        tax_invoice_service.filter_visible_invoices(
+            db.query(TaxInvoice).filter(
+                TaxInvoice.direction == "input",
+                TaxInvoice.issue_date >= start,
+                TaxInvoice.issue_date < end,
+            )
         )
         .order_by(TaxInvoice.issue_date, TaxInvoice.id)
         .all()
     )
     return [inv for inv in invoices if _company_matches(inv, company)]
+
+
+
+def _period_company_mismatch_summary(db: Session, year: int, month: int, company: str) -> dict[str, Any]:
+    if not company:
+        return {"count": 0, "amount": "0.00", "invoiceNos": []}
+    start, end = _month_range(year, month)
+    rows = (
+        tax_invoice_service.filter_visible_invoices(
+            db.query(TaxInvoice).filter(
+                TaxInvoice.direction == "input",
+                TaxInvoice.issue_date >= start,
+                TaxInvoice.issue_date < end,
+            )
+        )
+        .all()
+    )
+    mismatched = [
+        row for row in rows
+        if (row.buyer_name or "").strip() and not _company_matches(row, company)
+    ]
+    return {
+        "count": len(mismatched),
+        "amount": str(sum((_dec(row.total_amount) for row in mismatched), Decimal("0"))),
+        "invoiceNos": [row.invoice_number or "" for row in mismatched[:50]],
+    }
 
 
 def build_report(
@@ -187,7 +359,29 @@ def build_report(
         if key and supplier.tax_no:
             supplier_tax.setdefault(key, supplier.tax_no)
 
-    purchase_map = _invoice_purchase_map(db, invoices) if invoices else {}
+    red_context = tax_invoice_service.red_accounting_context(db, invoices) if invoices else {}
+    bank_context = tax_invoice_service._invoice_bank_payment_context(db, invoices) if invoices else {}
+    settlement_context = tax_invoice_service._red_settlement_context(db, invoices) if invoices else {}
+    vat_context = tax_invoice_service._vat_context(db, invoices, red_context) if invoices else {}
+    company_mismatch = _period_company_mismatch_summary(db, year, month, company)
+    related_blue_ids = sorted({
+        int(ctx["redRelatedInvoiceId"])
+        for ctx in red_context.values()
+        if ctx.get("invoiceColor") == "red" and ctx.get("redRelatedInvoiceId")
+    })
+    related_blue_rows = (
+        db.query(TaxInvoice).filter(TaxInvoice.id.in_(related_blue_ids)).all()
+        if related_blue_ids else []
+    )
+    related_blue_map = {row.id: row for row in related_blue_rows}
+    classification_invoices = list(invoices) + [
+        row for row in related_blue_rows if row.id not in invoice_map
+    ]
+    purchase_map = _invoice_purchase_map(db, classification_invoices) if classification_invoices else {}
+    line_summary_map = (
+        tax_invoice_service.invoice_line_summaries(db, classification_invoices)
+        if classification_invoices else {}
+    )
     order_ids = sorted({
         int(order["orderId"])
         for covered in purchase_map.values()
@@ -216,15 +410,30 @@ def build_report(
     flat_rows: list[dict[str, Any]] = []
     for inv in invoices:
         inv_total = _dec(inv.total_amount)
-        paid_total = min(
-            max(invoice_bank_total.get(inv.id, Decimal("0")), Decimal("0")),
-            max(inv_total, Decimal("0")),
-        )
+        paid_total = invoice_bank_total.get(inv.id, Decimal("0"))
+        invoice_bank_meta = bank_context.get(inv.id, {})
         status, outstanding, reconciliation_applicable, reconciliation_reason = _bank_reconciliation_meta(
-            inv, paid_total
+            db, inv, paid_total, invoice_bank_meta
         )
-        covered = purchase_map.get(inv.id, [])
+        effective_total = _dec(invoice_bank_meta.get("bankEffectiveInvoiceAmount") or tax_invoice_service.effective_invoice_amount_after_red(db, inv))
+        overpaid_amount = _dec(invoice_bank_meta.get("bankOverpaidAmount"))
+        overpaid_settled_amount = _dec(invoice_bank_meta.get("bankOverpaidSettledAmount"))
+        overpaid_unsettled_amount = _dec(invoice_bank_meta.get("bankOverpaidUnsettledAmount", overpaid_amount))
+        red_meta = red_context.get(inv.id, {})
+        settlement_meta = settlement_context.get(inv.id, {})
+        vat_meta = vat_context.get(inv.id, {})
+        source_invoice = inv
+        if red_meta.get("invoiceColor") == "red" and red_meta.get("redRelatedInvoiceId"):
+            source_invoice = related_blue_map.get(int(red_meta["redRelatedInvoiceId"]), inv)
+        covered = purchase_map.get(source_invoice.id, [])
         order_nos = [str(x.get("orderNo") or "") for x in covered if x.get("orderNo")]
+        line_items = list((line_summary_map.get(source_invoice.id) or {}).get("lineItems") or [])
+        payment_source, payment_source_label, payment_source_basis = _payment_source(db, inv, status)
+        expense_nature, expense_nature_label, expense_nature_basis = _expense_nature(
+            source_invoice, covered, line_items
+        )
+        if source_invoice.id != inv.id:
+            expense_nature_basis = f"继承对应蓝字发票 · {expense_nature_basis}"
         payments: list[dict[str, Any]] = []
 
         for link in sorted(links_by_invoice.get(inv.id, []), key=lambda row: row.id):
@@ -270,10 +479,34 @@ def build_report(
                 "invoiceTotalAmount": str(inv_total),
                 "invoiceCorporatePaidTotal": str(paid_total),
                 "invoiceOutstandingAmount": str(outstanding),
+                "invoiceOverpaidAmount": str(overpaid_amount),
+                "invoiceOverpaidSettledAmount": str(overpaid_settled_amount),
+                "invoiceOverpaidUnsettledAmount": str(overpaid_unsettled_amount),
+                "invoiceEffectiveAmount": str(effective_total),
                 "invoiceStatus": status,
                 "bankReconciliationStatus": status,
                 "bankReconciliationApplicable": reconciliation_applicable,
                 "bankReconciliationReason": reconciliation_reason,
+                "invoiceColor": red_meta.get("invoiceColor", "unknown"),
+                "invoiceStatusLabel": red_meta.get("invoiceStatusLabel", ""),
+                "redStatus": red_meta.get("redStatus", "none"),
+                "redPairStatus": red_meta.get("redPairStatus", "none"),
+                "redRelatedInvoiceNo": red_meta.get("redRelatedInvoiceNo", ""),
+                "redRelatedInvoicePeriod": red_meta.get("redRelatedInvoicePeriod", ""),
+                "redCrossPeriod": bool(red_meta.get("redCrossPeriod")),
+                "redOffsetAmount": red_meta.get("redOffsetAmount", "0.00"),
+                "remainingAfterRedAmount": red_meta.get("remainingAfterRedAmount", "0.00"),
+                "accountingNetAmount": red_meta.get("accountingNetAmount", "0.00"),
+                "accountingException": red_meta.get("accountingException", ""),
+                "redPairMethod": red_meta.get("redPairMethod", ""),
+                **settlement_meta,
+                **vat_meta,
+                "paymentSource": payment_source,
+                "paymentSourceLabel": payment_source_label,
+                "paymentSourceBasis": payment_source_basis,
+                "expenseNature": expense_nature,
+                "expenseNatureLabel": expense_nature_label,
+                "expenseNatureBasis": expense_nature_basis,
                 "purchaseOrderNos": order_nos,
             })
 
@@ -292,10 +525,34 @@ def build_report(
             "invoiceTotalAmount": str(inv_total),
             "invoiceCorporatePaidTotal": str(paid_total),
             "invoiceOutstandingAmount": str(outstanding),
+            "invoiceOverpaidAmount": str(overpaid_amount),
+            "invoiceOverpaidSettledAmount": str(overpaid_settled_amount),
+            "invoiceOverpaidUnsettledAmount": str(overpaid_unsettled_amount),
+            "invoiceEffectiveAmount": str(effective_total),
             "invoiceStatus": status,
             "bankReconciliationStatus": status,
             "bankReconciliationApplicable": reconciliation_applicable,
             "bankReconciliationReason": reconciliation_reason,
+            "invoiceColor": red_meta.get("invoiceColor", "unknown"),
+            "invoiceStatusLabel": red_meta.get("invoiceStatusLabel", ""),
+            "redStatus": red_meta.get("redStatus", "none"),
+            "redPairStatus": red_meta.get("redPairStatus", "none"),
+            "redRelatedInvoiceNo": red_meta.get("redRelatedInvoiceNo", ""),
+            "redRelatedInvoicePeriod": red_meta.get("redRelatedInvoicePeriod", ""),
+            "redCrossPeriod": bool(red_meta.get("redCrossPeriod")),
+            "redOffsetAmount": red_meta.get("redOffsetAmount", "0.00"),
+            "remainingAfterRedAmount": red_meta.get("remainingAfterRedAmount", "0.00"),
+            "accountingNetAmount": red_meta.get("accountingNetAmount", "0.00"),
+            "accountingException": red_meta.get("accountingException", ""),
+            "redPairMethod": red_meta.get("redPairMethod", ""),
+            **settlement_meta,
+            **vat_meta,
+            "paymentSource": payment_source,
+            "paymentSourceLabel": payment_source_label,
+            "paymentSourceBasis": payment_source_basis,
+            "expenseNature": expense_nature,
+            "expenseNatureLabel": expense_nature_label,
+            "expenseNatureBasis": expense_nature_basis,
             "purchaseOrderNos": order_nos,
             "payments": payments,
         })
@@ -332,6 +589,7 @@ def build_report(
     unique_txns = {payment["paymentId"] for row in invoice_rows for payment in row["payments"]}
     payment_total = sum((_dec(txn_map[i].amount) for i in unique_txns if i in txn_map), Decimal("0"))
     invoice_total = sum((_dec(row["invoiceTotalAmount"]) for row in invoice_rows), Decimal("0"))
+    accounting_net_total = sum((_dec(row.get("accountingNetAmount")) for row in invoice_rows), Decimal("0"))
     allocated_total = sum((_dec(row["invoiceCorporatePaidTotal"]) for row in invoice_rows), Decimal("0"))
     outstanding_total = sum((_dec(row["invoiceOutstandingAmount"]) for row in invoice_rows), Decimal("0"))
 
@@ -345,12 +603,52 @@ def build_report(
             "paymentTotal": str(payment_total),
             "allocatedTotal": str(allocated_total),
             "invoiceTotal": str(invoice_total),
+            "accountingNetTotal": str(accounting_net_total),
             "outstandingTotal": str(outstanding_total),
+            "overpaidAfterRedCount": sum(1 for row in invoice_rows if row.get("bankReconciliationStatus") == "overpaid_after_red"),
+            "overpaidAfterRedAmount": str(sum((_dec(row.get("invoiceOverpaidUnsettledAmount")) for row in invoice_rows), Decimal("0"))),
+            "historicalOverpaidAfterRedAmount": str(sum((_dec(row.get("invoiceOverpaidAmount")) for row in invoice_rows), Decimal("0"))),
+            "settledOverpaidAfterRedAmount": str(sum((_dec(row.get("invoiceOverpaidSettledAmount")) for row in invoice_rows), Decimal("0"))),
+            "resolvedRedOverpaymentCount": sum(1 for row in invoice_rows if row.get("bankReconciliationStatus") == "red_overpayment_settled"),
+            "redSettlementRemainingAmount": str(sum((_dec(row.get("redSettlementRemainingAmount")) for row in invoice_rows), Decimal("0"))),
+            "companyMismatchInvoiceCount": company_mismatch["count"],
+            "companyMismatchInvoiceAmount": company_mismatch["amount"],
+            "companyMismatchInvoiceNos": company_mismatch["invoiceNos"],
+            "redInvoiceCount": sum(1 for row in invoice_rows if row.get("invoiceColor") == "red"),
+            "partiallyRedOffsetBlueCount": sum(
+                1 for row in invoice_rows if row.get("redStatus") == "partially_red_offset"
+            ),
+            "fullyRedOffsetBlueCount": sum(
+                1 for row in invoice_rows if row.get("redStatus") == "fully_red_offset"
+            ),
+            "redExceptionCount": sum(1 for row in invoice_rows if row.get("accountingException")),
+            "crossPeriodRedCount": sum(1 for row in invoice_rows if row.get("redCrossPeriod")),
+            "crossPeriodRedAmount": str(sum(
+                (abs(_dec(row.get("invoiceTotalAmount"))) for row in invoice_rows if row.get("redCrossPeriod")),
+                Decimal("0"),
+            )),
             "paidInvoiceCount": sum(1 for row in invoice_rows if row["bankReconciliationStatus"] == "paid"),
             "partialInvoiceCount": sum(1 for row in invoice_rows if row["bankReconciliationStatus"] == "partial"),
             "unpaidInvoiceCount": sum(1 for row in invoice_rows if row["bankReconciliationStatus"] == "unpaid"),
             "notApplicableInvoiceCount": sum(
                 1 for row in invoice_rows if row["bankReconciliationStatus"] == "not_applicable"
+            ),
+            "corporateInvoiceCount": sum(1 for row in invoice_rows if row["paymentSource"] == "corporate"),
+            "personalInvoiceCount": sum(1 for row in invoice_rows if row["paymentSource"] == "personal"),
+            "mixedInvoiceCount": sum(1 for row in invoice_rows if row["paymentSource"] == "mixed"),
+            "notApplicablePaymentCount": sum(
+                1 for row in invoice_rows if row["paymentSource"] == "not_applicable"
+            ),
+            "personalInferredAmount": str(sum(
+                (
+                    _dec(row["invoiceOutstandingAmount"])
+                    for row in invoice_rows
+                    if row["paymentSource"] in {"personal", "mixed"}
+                ),
+                Decimal("0"),
+            )),
+            "expenseNatureCounts": dict(
+                Counter(row["expenseNatureLabel"] for row in invoice_rows)
             ),
             "productRowCount": len(product_details),
         },
@@ -510,11 +808,51 @@ def apply_invoice_selection(report: dict[str, Any], selected_keys: list[str]) ->
         "paymentTotal": str(sum((payment_by_id[i] for i in unique_txns), Decimal("0"))),
         "allocatedTotal": str(sum((_dec(row.get("invoiceCorporatePaidTotal")) for row in invoice_rows), Decimal("0"))),
         "invoiceTotal": str(sum((_dec(row.get("invoiceTotalAmount")) for row in invoice_rows), Decimal("0"))),
+        "accountingNetTotal": str(sum((_dec(row.get("accountingNetAmount")) for row in invoice_rows), Decimal("0"))),
         "outstandingTotal": str(sum((_dec(row.get("invoiceOutstandingAmount")) for row in invoice_rows), Decimal("0"))),
+        "overpaidAfterRedCount": sum(1 for row in invoice_rows if status_of(row) == "overpaid_after_red"),
+        "overpaidAfterRedAmount": str(sum((_dec(row.get("invoiceOverpaidUnsettledAmount")) for row in invoice_rows), Decimal("0"))),
+        "historicalOverpaidAfterRedAmount": str(sum((_dec(row.get("invoiceOverpaidAmount")) for row in invoice_rows), Decimal("0"))),
+        "settledOverpaidAfterRedAmount": str(sum((_dec(row.get("invoiceOverpaidSettledAmount")) for row in invoice_rows), Decimal("0"))),
+        "resolvedRedOverpaymentCount": sum(1 for row in invoice_rows if status_of(row) == "red_overpayment_settled"),
+        "redSettlementRemainingAmount": str(sum((_dec(row.get("redSettlementRemainingAmount")) for row in invoice_rows), Decimal("0"))),
+        "companyMismatchInvoiceCount": report.get("summary", {}).get("companyMismatchInvoiceCount", 0),
+        "companyMismatchInvoiceAmount": report.get("summary", {}).get("companyMismatchInvoiceAmount", "0.00"),
+        "companyMismatchInvoiceNos": report.get("summary", {}).get("companyMismatchInvoiceNos", []),
+        "redInvoiceCount": sum(1 for row in invoice_rows if row.get("invoiceColor") == "red"),
+        "partiallyRedOffsetBlueCount": sum(
+            1 for row in invoice_rows if row.get("redStatus") == "partially_red_offset"
+        ),
+        "fullyRedOffsetBlueCount": sum(
+            1 for row in invoice_rows if row.get("redStatus") == "fully_red_offset"
+        ),
+        "redExceptionCount": sum(1 for row in invoice_rows if row.get("accountingException")),
+        "crossPeriodRedCount": sum(1 for row in invoice_rows if row.get("redCrossPeriod")),
+        "crossPeriodRedAmount": str(sum(
+            (abs(_dec(row.get("invoiceTotalAmount"))) for row in invoice_rows if row.get("redCrossPeriod")),
+            Decimal("0"),
+        )),
         "paidInvoiceCount": sum(1 for row in invoice_rows if status_of(row) == "paid"),
         "partialInvoiceCount": sum(1 for row in invoice_rows if status_of(row) == "partial"),
         "unpaidInvoiceCount": sum(1 for row in invoice_rows if status_of(row) == "unpaid"),
         "notApplicableInvoiceCount": sum(1 for row in invoice_rows if status_of(row) == "not_applicable"),
+        "corporateInvoiceCount": sum(1 for row in invoice_rows if row.get("paymentSource") == "corporate"),
+        "personalInvoiceCount": sum(1 for row in invoice_rows if row.get("paymentSource") == "personal"),
+        "mixedInvoiceCount": sum(1 for row in invoice_rows if row.get("paymentSource") == "mixed"),
+        "notApplicablePaymentCount": sum(
+            1 for row in invoice_rows if row.get("paymentSource") == "not_applicable"
+        ),
+        "personalInferredAmount": str(sum(
+            (
+                _dec(row.get("invoiceOutstandingAmount"))
+                for row in invoice_rows
+                if row.get("paymentSource") in {"personal", "mixed"}
+            ),
+            Decimal("0"),
+        )),
+        "expenseNatureCounts": dict(
+            Counter(str(row.get("expenseNatureLabel") or "待分类") for row in invoice_rows)
+        ),
         "productRowCount": len(product_details),
     }
     return {
@@ -541,35 +879,53 @@ def _style_sheet(ws) -> None:
 def corporate_payment_xlsx(report: dict[str, Any]) -> bytes:
     wb = Workbook()
     ws = wb.active
+    # 保留工作表名兼容历史交付包；列结构升级为财务主视图。
     ws.title = "已收票对公核对"
     headers = [
         "发票日期", "供应商", "供应商税号", "发票号码", "发票类型",
-        "不含税金额", "税额", "价税合计", "银行付款已核对金额", "待核对银行付款金额", "银行核对状态",
-        "付款日期", "我方付款账号", "银行流水/凭证号", "本次分摊金额", "关联采购订单",
+        "票据状态", "对应红/蓝发票", "原蓝票账期", "红冲金额", "财务净额",
+        "红冲结算状态", "红冲待处理金额", "进项抵扣状态", "进项税转出状态", "进项税转出金额",
+        "费用性质", "支付方式", "支付判断依据",
+        "不含税金额", "税额", "价税合计",
+        "对公匹配金额", "个人支付/未对公匹配金额",
+        "银行付款日期", "我方付款账号", "银行流水/凭证号", "对公分摊金额",
+        "关联采购订单", "银行匹配状态",
     ]
     ws.append(headers)
 
     for row in report.get("invoiceRows", []):
         payments = row.get("payments") or []
+        bank_status = row.get("bankReconciliationStatus") or row.get("invoiceStatus")
+        payment_source = row.get("paymentSourceLabel") or _PAYMENT_SOURCE_LABELS.get(
+            row.get("paymentSource") or "", ""
+        )
         ws.append([
             row["invoiceDate"],
             row["supplierName"],
             row["supplierTaxId"],
             row["invoiceNumber"],
             row["invoiceType"],
+            row.get("invoiceStatusLabel") or "",
+            row.get("redRelatedInvoiceNo") or "",
+            row.get("redRelatedInvoicePeriod") or "",
+            float(_dec(row.get("redOffsetAmount"))),
+            float(_dec(row.get("accountingNetAmount"))),
+            row.get("redSettlementStatus") or "",
+            float(_dec(row.get("redSettlementRemainingAmount"))),
+            row.get("vatDeductibleStatus") or "",
+            row.get("inputVatTransferStatus") or "",
+            float(_dec(row.get("inputVatTransferAmount"))),
+            row.get("expenseNatureLabel") or "待分类",
+            payment_source,
+            row.get("paymentSourceBasis") or "",
             float(_dec(row["invoiceAmountExclTax"])),
             float(_dec(row["invoiceTaxAmount"])),
             float(_dec(row["invoiceTotalAmount"])),
             float(_dec(row["invoiceCorporatePaidTotal"])),
-            float(_dec(row["invoiceOutstandingAmount"])),
             (
-                "银行付款已核对"
-                if (row.get("bankReconciliationStatus") or row.get("invoiceStatus")) == "paid"
-                else "银行付款部分核对"
-                if (row.get("bankReconciliationStatus") or row.get("invoiceStatus")) == "partial"
-                else "无需核对银行付款"
-                if (row.get("bankReconciliationStatus") or row.get("invoiceStatus")) == "not_applicable"
-                else "待核对银行付款"
+                None
+                if bank_status == "not_applicable"
+                else float(_dec(row["invoiceOutstandingAmount"]))
             ),
             "、".join(str(payment.get("paymentDate") or "") for payment in payments),
             "、".join(
@@ -579,6 +935,17 @@ def corporate_payment_xlsx(report: dict[str, Any]) -> bytes:
             "、".join(str(payment.get("voucherNo") or "") for payment in payments),
             "、".join(str(_dec(payment.get("allocatedAmount"))) for payment in payments),
             "、".join(row.get("purchaseOrderNos") or []),
+            (
+                "已匹配"
+                if bank_status == "paid"
+                else "红冲后超额付款"
+                if bank_status == "overpaid_after_red"
+                else "部分匹配"
+                if bank_status == "partial"
+                else "不适用"
+                if bank_status == "not_applicable"
+                else "未匹配（按个人支付）"
+            ),
         ])
     _style_sheet(ws)
 
@@ -602,15 +969,30 @@ def corporate_payment_xlsx(report: dict[str, Any]) -> bytes:
     s = report.get("summary", {})
     summary.append(["指标", "数值"])
     summary.append(["进项发票张数", s.get("invoiceCount", 0)])
-    summary.append(["发票价税合计", float(_dec(s.get("invoiceTotal")))])
-    summary.append(["银行付款已核对金额", float(_dec(s.get("allocatedTotal")))])
-    summary.append(["待核对银行付款金额", float(_dec(s.get("outstandingTotal")))])
-    summary.append(["银行付款已核对发票张数", s.get("paidInvoiceCount", 0)])
-    summary.append(["银行付款部分核对发票张数", s.get("partialInvoiceCount", 0)])
-    summary.append(["待核对银行付款发票张数", s.get("unpaidInvoiceCount", 0)])
-    summary.append(["无需核对银行付款发票张数", s.get("notApplicableInvoiceCount", 0)])
+    summary.append(["发票票面净合计", float(_dec(s.get("invoiceTotal")))])
+    summary.append(["财务有效净额", float(_dec(s.get("accountingNetTotal", s.get("invoiceTotal"))))])
+    summary.append(["红字发票张数", s.get("redInvoiceCount", 0)])
+    summary.append(["部分红冲蓝字发票张数", s.get("partiallyRedOffsetBlueCount", 0)])
+    summary.append(["已全额红冲蓝字发票张数", s.get("fullyRedOffsetBlueCount", 0)])
+    summary.append(["红冲关联异常张数", s.get("redExceptionCount", 0)])
+    summary.append(["跨期红字发票张数", s.get("crossPeriodRedCount", 0)])
+    summary.append(["跨期红字冲减金额", float(_dec(s.get("crossPeriodRedAmount")))])
+    summary.append(["红冲后仍待退款/冲抵金额", float(_dec(s.get("overpaidAfterRedAmount")))])
+    summary.append(["历史红冲超额付款金额", float(_dec(s.get("historicalOverpaidAfterRedAmount")))])
+    summary.append(["已处理红冲超额付款金额", float(_dec(s.get("settledOverpaidAfterRedAmount")))])
+    summary.append(["红冲待退款/冲抵金额", float(_dec(s.get("redSettlementRemainingAmount")))])
+    summary.append(["主体不符发票张数", s.get("companyMismatchInvoiceCount", 0)])
+    summary.append(["主体不符发票金额", float(_dec(s.get("companyMismatchInvoiceAmount")))])
+    summary.append(["对公支付已匹配金额", float(_dec(s.get("allocatedTotal")))])
+    summary.append(["个人支付/未对公匹配金额", float(_dec(s.get("personalInferredAmount", s.get("outstandingTotal"))))])
+    summary.append(["对公支付发票张数", s.get("corporateInvoiceCount", 0)])
+    summary.append(["个人支付发票张数", s.get("personalInvoiceCount", 0)])
+    summary.append(["混合支付发票张数", s.get("mixedInvoiceCount", 0)])
+    summary.append(["支付方式不适用发票张数", s.get("notApplicablePaymentCount", 0)])
     summary.append(["关联银行付款笔数", s.get("paymentCount", 0)])
     summary.append(["商品明细行数", s.get("productRowCount", 0)])
+    for label, count in sorted((s.get("expenseNatureCounts") or {}).items()):
+        summary.append([f"费用性质：{label}", count])
     _style_sheet(summary)
 
     out = BytesIO()

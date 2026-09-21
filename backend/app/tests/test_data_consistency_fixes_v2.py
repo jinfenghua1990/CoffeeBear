@@ -109,6 +109,7 @@ def test_tax_invoice_cumulative_invoice_limit(db_session):
         invoice_key="AUDIT-TAX-INV-1",
         direction="input",
         invoice_number="AUDIT-TAX-INV-1",
+        status="issued",
         total_amount=Decimal("100"),
     )
     db_session.add_all([po1, po2, invoice])

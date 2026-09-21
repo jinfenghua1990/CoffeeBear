@@ -1567,12 +1567,18 @@ export type TaxInvoiceRow = {
   businessMatchStatus: "matched" | "partial" | "unmatched" | "needs_review";
   businessMatchedAmount: string;
   businessRemainingAmount: string;
+  businessOvermatchedAmount: string;
+  businessMatchException: string;
   matchNote: string;
   businessMatchNote: string;
   /** 进项发票独立的银行付款核对状态，与 businessMatchStatus 完全无关。 */
-  bankPaymentStatus: "matched" | "partial" | "unmatched" | "not_applicable";
+  bankPaymentStatus: "matched" | "partial" | "unmatched" | "not_applicable" | "overpaid_after_red" | "red_overpayment_settled";
   bankPaidAmount: string;
   bankRemainingAmount: string;
+  bankOverpaidAmount: string;
+  bankOverpaidSettledAmount?: string;
+  bankOverpaidUnsettledAmount?: string;
+  bankEffectiveInvoiceAmount: string;
   processingStatus: TaxInvoiceProcessingStatus;
   /** 分类 key：进项 goods/platform_fee/operating_other/reimburse_advance/reimburse_operating/excluded；销项 buyer_sales/platform_service；空=待判断 */
   category: string;
@@ -1588,10 +1594,51 @@ export type TaxInvoiceRow = {
   paymentMethod: "corporate" | "personal" | "mixed" | "";
   /** 人工补充字段只允许 personal/空；corporate/mixed 必须由银行付款事实派生。 */
   manualPaymentMethod: "personal" | "";
+  /** 凭证颜色与红冲生命周期分离：blue=蓝字原票，red=红字冲销票。 */
+  invoiceColor: "blue" | "red" | "unknown" | string;
   invoiceStatusLabel: string;
-  redStatus: "none" | "red_offset" | "voided_blue" | string;
+  redStatus:
+    | "none"
+    | "partially_red_offset"
+    | "fully_red_offset"
+    | "over_red_offset"
+    | "blue_red_pending"
+    | "red_invoice"
+    | "red_invoice_unpaired"
+    | "red_invoice_ambiguous"
+    | "void"
+    | "unknown"
+    | string;
+  redPairStatus: "none" | "paired" | "paired_manual" | "unpaired" | "ambiguous" | "over_offset" | "counterpart_missing" | string;
+  redPairMethod: "" | "official_ref" | "manual" | string;
+  redRelatedInvoiceId: number | null;
   redRelatedInvoiceNo: string;
+  redRelatedInvoiceIds: number[];
+  redRelatedInvoiceNos: string[];
   redNoticeNo: string;
+  redRelatedInvoiceDate?: string | null;
+  redRelatedInvoicePeriod?: string;
+  redCrossPeriod?: boolean;
+  redOffsetAmount: string;
+  remainingAfterRedAmount: string;
+  accountingNetAmount: string;
+  accountingNetIncluded: boolean;
+  accountingException: string;
+  redSettlementStatus?: "not_applicable" | "unsettled" | "partial" | "settled" | "over_settled" | string;
+  redSettlementTargetAmount?: string;
+  redSettledAmount?: string;
+  redSettlementRemainingAmount?: string;
+  redSettlementOverAmount?: string;
+  redSettlements?: Array<{ linkId: number; type: string; amount: string; note: string; targetId: number | null; targetLabel: string; txnDate?: string | null; voucherNo?: string }>;
+  vatDeductibleStatus?: "not_applicable" | "non_deductible" | "deductible" | "verified_pending_tax_filing" | "pending" | string;
+  vatDeductibleAmount?: string;
+  vatDeductibleManual?: boolean;
+  inputVatTransferStatus?: "not_applicable" | "required_confirmation" | "completed" | "not_required_unverified_blue" | string;
+  inputVatTransferAmount?: string;
+  inputVatTransferManual?: boolean;
+  /** 红字票分类由对应蓝字票继承。 */
+  categoryInherited?: boolean;
+  categoryInheritedFromInvoiceId?: number | null;
   /** 发票池展示用的采购/入库关联摘要 */
   links: Array<{
     /** tax_invoice_links 主键，解除关联时使用 */
@@ -1638,6 +1685,15 @@ export type TaxInvoicePurchaseCandidate = {
   linkedInvoiceNo: string | null;
 };
 
+export type TaxInvoiceRedBlueCandidate = {
+  invoiceId: number; invoiceNumber: string; invoiceCode: string; issueDate: string | null;
+  sellerName: string; buyerName: string; totalAmount: string; taxPartyMatched: boolean; amountCanCoverRed: boolean;
+};
+
+export type TaxInvoiceRefundCandidate = {
+  txnId: number; txnDate: string; amount: string; counterpartyName: string; voucherNo: string; summary: string;
+  supplierMatched: boolean; amountMatched: boolean;
+};
 export type TaxInvoiceSummary = {
   total: number;
   byDirection: Record<string, number>;
@@ -1652,7 +1708,13 @@ export type TaxInvoiceSummary = {
   inputVerification: Record<string, number>;
   inputTotalAmount: number;
   rawInputTotalAmount: number;
+  /** 兼容字段：蓝字票已显示红冲但对应红字凭证尚未补齐时，被隔离的原票金额。 */
   excludedRedAmount: number;
+  byRedStatus?: Record<string, number>;
+  redPairExceptionCount?: number;
+  redInvoiceCount?: number;
+  partiallyRedOffsetBlueCount?: number;
+  fullyRedOffsetBlueCount?: number;
   activeBatchCount: number;
   sourceRowCount: number;
   duplicateRowCount: number;
@@ -1719,6 +1781,45 @@ export const taxInvoiceApi = {
     jsonFetch<{ ok: boolean; processed: number }>("/api/v1/tax-invoices/bulk-payment-method", {
       method: "POST",
       body: JSON.stringify({ invoice_ids: invoiceIds, payment_method: paymentMethod }),
+    }),
+  redBlueCandidates: (invoiceId: number, keyword = "") => {
+    const q = new URLSearchParams();
+    if (keyword) q.set("keyword", keyword);
+    return jsonFetch<TaxInvoiceRedBlueCandidate[]>(`/api/v1/tax-invoices/${invoiceId}/red-blue-candidates${q.toString() ? `?${q}` : ""}`);
+  },
+  setRedBlueLink: (redInvoiceId: number, blueInvoiceId: number, note = "") =>
+    jsonFetch<Record<string, unknown>>(`/api/v1/tax-invoices/${redInvoiceId}/red-blue-link`, { method: "POST", body: JSON.stringify({ blue_invoice_id: blueInvoiceId, note }) }),
+  clearRedBlueLink: (redInvoiceId: number) =>
+    jsonFetch<Record<string, unknown>>(`/api/v1/tax-invoices/${redInvoiceId}/red-blue-link`, { method: "DELETE" }),
+  refundCandidates: (invoiceId: number, keyword = "") => {
+    const q = new URLSearchParams();
+    if (keyword) q.set("keyword", keyword);
+    return jsonFetch<TaxInvoiceRefundCandidate[]>(`/api/v1/tax-invoices/${invoiceId}/refund-candidates${q.toString() ? `?${q}` : ""}`);
+  },
+  addRedSettlement: (invoiceId: number, body: { settlementType: string; amount: string | number; targetId?: number | null; note?: string }) =>
+    jsonFetch<Record<string, unknown>>(`/api/v1/tax-invoices/${invoiceId}/red-settlements`, {
+      method: "POST",
+      body: JSON.stringify({ settlement_type: body.settlementType, amount: body.amount, target_id: body.targetId ?? null, note: body.note ?? "" }),
+    }),
+  removeRedSettlement: (invoiceId: number, linkId: number) =>
+    jsonFetch<Record<string, unknown>>(`/api/v1/tax-invoices/${invoiceId}/red-settlements/${linkId}`, { method: "DELETE" }),
+  setVatReview: (
+    invoiceId: number,
+    body: {
+      vatDeductibleStatus?: "pending" | "deductible" | "non_deductible";
+      inputVatTransferStatus?: "required_confirmation" | "completed" | "not_required_unverified_blue" | "not_applicable";
+      inputVatTransferAmount?: string | number | null;
+      note?: string;
+    },
+  ) =>
+    jsonFetch<Record<string, unknown>>(`/api/v1/tax-invoices/${invoiceId}/vat-review`, {
+      method: "PATCH",
+      body: JSON.stringify({
+        vat_deductible_status: body.vatDeductibleStatus,
+        input_vat_transfer_status: body.inputVatTransferStatus,
+        input_vat_transfer_amount: body.inputVatTransferAmount ?? null,
+        note: body.note ?? "",
+      }),
     }),
   purchaseCandidates: (invoiceId: number, keyword = "") => {
     const q = new URLSearchParams();
@@ -2526,7 +2627,8 @@ export type InvoiceReconciliation = {
       orderAmount: number; remaining: number }>;
     months: Array<{ month: string; invoices: Array<{
       invoiceId: number; invoiceNo: string; issueDate: string | null; seller: string;
-      amount: number; coveredTotal: number; diff: number; status: "matched" | "short";
+      amount: number; originalAmount?: number; redOffsetAmount?: number; redStatus?: string; invoiceStatusLabel?: string;
+      coveredTotal: number; diff: number; status: "matched" | "short";
       shortReason?: "date_cutoff" | "insufficient_orders" | "explicit_link_issue" | null;
       futureOrderCount?: number;
       manualLinked: boolean;

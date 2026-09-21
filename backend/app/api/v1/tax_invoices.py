@@ -233,11 +233,7 @@ def bulk_verify_invoices(
     for invoice_id in body.invoice_ids:
         try:
             inv = service.set_invoice_verified(
-                db,
-                invoice_id,
-                body.verified,
-                body.verified_month,
-                actor=actor,
+                db, invoice_id, body.verified, body.verified_month, actor=actor
             )
             items.append({"invoiceId": inv.id, "verified": inv.verified, "verifiedMonth": inv.verified_month or ""})
         except (LookupError, ValueError) as exc:
@@ -286,6 +282,148 @@ def bulk_set_payment_method(
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
     return {"ok": True, "processed": len(updated)}
+
+
+
+class RedBlueRelationBody(BaseModel):
+    blue_invoice_id: int
+    note: str = ""
+
+
+@router.get("/{invoice_id}/red-blue-candidates")
+def get_red_blue_candidates(
+    invoice_id: int,
+    keyword: str = Query("", max_length=128),
+    limit: int = Query(30, ge=1, le=100),
+    db: Session = Depends(get_db),
+) -> list[dict]:
+    try:
+        return service.red_blue_candidates(db, invoice_id, keyword=keyword, limit=limit)
+    except LookupError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@router.post("/{invoice_id}/red-blue-link")
+def set_red_blue_link(
+    invoice_id: int,
+    body: RedBlueRelationBody,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> dict:
+    try:
+        return service.set_manual_red_blue_relation(
+            db, invoice_id, body.blue_invoice_id, note=body.note, actor=current_actor(request)
+        )
+    except LookupError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@router.delete("/{invoice_id}/red-blue-link")
+def clear_red_blue_link(
+    invoice_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> dict:
+    try:
+        return service.clear_manual_red_blue_relation(db, invoice_id, actor=current_actor(request))
+    except LookupError as exc:
+        raise HTTPException(404, str(exc)) from exc
+
+
+class RedSettlementBody(BaseModel):
+    settlement_type: str
+    amount: Decimal
+    target_id: int | None = None
+    note: str = ""
+
+
+@router.get("/{invoice_id}/refund-candidates")
+def get_refund_candidates(
+    invoice_id: int,
+    keyword: str = Query("", max_length=128),
+    limit: int = Query(30, ge=1, le=100),
+    db: Session = Depends(get_db),
+) -> list[dict]:
+    try:
+        return service.red_refund_candidates(db, invoice_id, keyword=keyword, limit=limit)
+    except LookupError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@router.post("/{invoice_id}/red-settlements")
+def create_red_settlement(
+    invoice_id: int,
+    body: RedSettlementBody,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> dict:
+    try:
+        return service.add_red_settlement(
+            db,
+            invoice_id,
+            body.settlement_type,
+            body.amount,
+            target_id=body.target_id,
+            note=body.note,
+            actor=current_actor(request),
+        )
+    except LookupError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@router.delete("/{invoice_id}/red-settlements/{link_id}")
+def delete_red_settlement(
+    invoice_id: int,
+    link_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> dict:
+    try:
+        return service.remove_red_settlement(
+            db, invoice_id, link_id, actor=current_actor(request)
+        )
+    except LookupError as exc:
+        raise HTTPException(404, str(exc)) from exc
+
+
+
+class VatReviewBody(BaseModel):
+    vat_deductible_status: str | None = None
+    input_vat_transfer_status: str | None = None
+    input_vat_transfer_amount: Decimal | None = None
+    note: str = ""
+
+
+@router.patch("/{invoice_id}/vat-review")
+def update_vat_review(
+    invoice_id: int,
+    body: VatReviewBody,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> dict:
+    """人工确认进项抵扣/红冲进项税转出事实；每次修改均保留审计。"""
+    try:
+        return service.set_vat_review(
+            db,
+            invoice_id,
+            vat_deductible_status=body.vat_deductible_status,
+            input_vat_transfer_status=body.input_vat_transfer_status,
+            input_vat_transfer_amount=body.input_vat_transfer_amount,
+            note=body.note,
+            actor=current_actor(request),
+        )
+    except LookupError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
 
 
 @router.get("/{invoice_id}/lines")

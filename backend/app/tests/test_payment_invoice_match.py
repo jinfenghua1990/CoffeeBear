@@ -507,6 +507,72 @@ def test_auto_split_allows_exact_multi_invoice_total(db_session):
     status = pm.txn_reconciliation_statuses(db_session, [txn.id])[txn.id]
     assert status["status"] == "matched"
 
+
+def test_partial_red_after_full_bank_payment_is_overpaid_not_matched(db_session):
+    blue = _invoice(db_session, seller="红冲后超付供应商", amount="1000.00", month=8, day=2)
+    txn = _txn(db_session, amount="1000.00", name="红冲后超付供应商", month=8, day=3)
+    db_session.flush()
+    pm.link(db_session, txn_id=txn.id, invoice_id=blue.id, allocated_amount="1000.00")
+
+    red = TaxInvoice(
+        invoice_key=f"pytest-pim-red|{uuid4().hex}",
+        invoice_number=f"PIM-RED-{uuid4().hex[:12]}",
+        direction="input",
+        status="red",
+        issue_date=datetime(2026, 8, 10, tzinfo=timezone.utc),
+        seller_name=blue.seller_name,
+        total_amount=Decimal("-300.00"),
+        source_system="tax_export",
+        raw={"是否正数发票": "否", "备注": f"被红冲蓝字发票号码：{blue.invoice_number}"},
+    )
+    db_session.add(red)
+    db_session.commit()
+
+    data = pm.overview(db_session, 2026, 8)
+    row = next(item for item in data["invoicePool"] if item["id"] == blue.id)
+    assert row["totalAmount"] == "700.00"
+    assert row["bankLinkedAmount"] == "1000.00"
+    assert row["remaining"] == "0.00"
+    assert row["overpaidAfterRedAmount"] == "300.00"
+    assert row["bankMatchStatus"] == "overpaid_after_red"
+    assert data["summary"]["invoiceOverpaidAfterRedCount"] == 1
+    assert data["summary"]["invoiceOverpaidAfterRedTotal"] == "300.00"
+    assert data["summary"]["invoiceOutstandingTotal"] == "0.00"
+
+    # 供应商退款登记后，历史超额事实仍保留，但当前待处理金额必须归零。
+    refund = _txn(
+        db_session,
+        direction="in",
+        amount="300.00",
+        name=blue.seller_name,
+        day=15,
+        summary="红冲退款",
+    )
+    db_session.commit()
+    from app.services import tax_invoice_service
+
+    tax_invoice_service.add_red_settlement(
+        db_session,
+        red.id,
+        tax_invoice_service.RED_BANK_REFUND_TARGET_TYPE,
+        Decimal("300.00"),
+        target_id=refund.id,
+        actor="pytest",
+    )
+
+    resolved = pm.overview(db_session, 2026, 8)
+    resolved_row = next(item for item in resolved["invoicePool"] if item["id"] == blue.id)
+    assert resolved_row["bankMatchStatus"] == "red_overpayment_settled"
+    assert resolved_row["overpaidAfterRedAmount"] == "300.00"
+    assert resolved_row["overpaidSettledAmount"] == "300.00"
+    assert resolved_row["overpaidUnsettledAmount"] == "0.00"
+    assert resolved["summary"]["invoiceOverpaidAfterRedCount"] == 0
+    assert resolved["summary"]["invoiceResolvedRedOverpaymentCount"] == 1
+    assert resolved["summary"]["invoiceOverpaidAfterRedTotal"] == "0.00"
+    assert resolved["summary"]["invoiceHistoricalOverpaidAfterRedTotal"] == "300.00"
+    assert resolved["summary"]["invoiceSettledOverpaidAfterRedTotal"] == "300.00"
+
+
 def test_invoice_pool_uses_asia_shanghai_month_boundaries(db_session):
     from zoneinfo import ZoneInfo
     from app.config import settings

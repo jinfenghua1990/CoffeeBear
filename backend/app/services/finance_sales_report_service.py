@@ -524,7 +524,7 @@ def _remaining_invoice_amount(total: Decimal, links) -> Decimal:
     return total - explicitly_allocated
 
 
-def _output_invoiced_by_group(db: Session, start, nxt) -> dict[tuple[str, str], Decimal]:
+def _output_invoiced_by_group(db: Session, start, nxt) -> tuple[dict[tuple[str, str], Decimal], dict[tuple[str, str], Decimal]]:
     """当月销项发票落到 (税务编号, 产品) 组的已开票金额。
 
     - 发票口径与 build_unbilled_income_report 完全一致：
@@ -549,13 +549,22 @@ def _output_invoiced_by_group(db: Session, start, nxt) -> dict[tuple[str, str], 
     )
     invoice_ids = [row.id for row in invoices]
     if not invoice_ids:
-        return {}
+        return {}, {}
+    from app.services import tax_invoice_service
+    red_context = tax_invoice_service.red_accounting_context(db, invoices)
+    related_blue_ids = {
+        int(ctx["redRelatedInvoiceId"])
+        for ctx in red_context.values()
+        if ctx.get("invoiceColor") == "red" and ctx.get("redRelatedInvoiceId")
+    }
+    link_invoice_ids = sorted(set(invoice_ids) | related_blue_ids)
     links = (
         db.query(TaxInvoiceLink)
         .filter(
-            TaxInvoiceLink.invoice_id.in_(invoice_ids),
+            TaxInvoiceLink.invoice_id.in_(link_invoice_ids),
             TaxInvoiceLink.target_type == "sales_order",
             TaxInvoiceLink.confirmed.is_(True),
+            TaxInvoiceLink.match_method != "rejected",
         )
         .all()
     )
@@ -571,25 +580,41 @@ def _output_invoiced_by_group(db: Session, start, nxt) -> dict[tuple[str, str], 
     }
 
     attributed: dict[tuple[str, str], Decimal] = defaultdict(Decimal)
+    red_adjusted: dict[tuple[str, str], Decimal] = defaultdict(Decimal)
 
-    def _attribute(order_id: int, amount: Decimal) -> None:
+    def _attribute(order_id: int, amount: Decimal, *, is_red: bool = False) -> None:
         groups = group_sales_by_order.get(order_id) or {}
         total_sales = order_sales.get(order_id, Decimal("0"))
         if not groups or total_sales <= 0:
             return
         for key, sales in groups.items():
-            attributed[key] += amount * sales / total_sales
+            share = amount * sales / total_sales
+            attributed[key] += share
+            if is_red:
+                red_adjusted[key] += share
 
     for invoice in invoices:
+        red_meta = red_context.get(invoice.id, {})
         invoice_links = links_by_invoice.get(invoice.id) or []
+        inherited_from_blue = False
+        if not invoice_links and red_meta.get("invoiceColor") == "red" and red_meta.get("redRelatedInvoiceId"):
+            invoice_links = links_by_invoice.get(int(red_meta["redRelatedInvoiceId"])) or []
+            inherited_from_blue = bool(invoice_links)
         if not invoice_links:
             continue
-        total = to_decimal(invoice.total_amount)
-        without_alloc = [ln for ln in invoice_links if ln.allocated_amount is None]
-        remaining = _remaining_invoice_amount(total, invoice_links)
-        for link in invoice_links:
-            if link.allocated_amount is not None:
-                _attribute(int(link.target_id), to_decimal(link.allocated_amount))
+        total = to_decimal(red_meta.get("accountingNetAmount") or 0)
+        if not red_meta.get("accountingNetIncluded", False):
+            continue
+        # 红字发票继承蓝字原票的销售订单关系，但绝不能继承蓝票的正数 allocated_amount。
+        # 红字金额按原销售订单销售额占比分摊，保证折让/退货只冲减原业务，不产生新业务。
+        without_alloc = list(invoice_links) if inherited_from_blue else [
+            ln for ln in invoice_links if ln.allocated_amount is None
+        ]
+        remaining = total if inherited_from_blue else _remaining_invoice_amount(total, invoice_links)
+        if not inherited_from_blue:
+            for link in invoice_links:
+                if link.allocated_amount is not None:
+                    _attribute(int(link.target_id), to_decimal(link.allocated_amount), is_red=invoice.status == "red")
         if not without_alloc:
             continue
         # 只把剩余未分摊金额分给 allocated_amount 为空的订单，避免重复计算。
@@ -602,8 +627,8 @@ def _output_invoiced_by_group(db: Session, start, nxt) -> dict[tuple[str, str], 
         for link in without_alloc:
             sales = order_sales.get(int(link.target_id), Decimal("0"))
             if sales > 0:
-                _attribute(int(link.target_id), remaining * sales / denom)
-    return dict(attributed)
+                _attribute(int(link.target_id), remaining * sales / denom, is_red=invoice.status == "red")
+    return dict(attributed), dict(red_adjusted)
 
 
 def _unbilled_detail_rows(db: Session, year: int, month: int) -> list[dict[str, Any]]:
@@ -618,7 +643,7 @@ def _unbilled_detail_rows(db: Session, year: int, month: int) -> list[dict[str, 
     from app.models.catalog import Product
 
     start, nxt = month_bounds(year, month)
-    invoiced_by_group = _output_invoiced_by_group(db, start, nxt)
+    invoiced_by_group, red_adjustment_by_group = _output_invoiced_by_group(db, start, nxt)
     orders = (
         db.query(SalesOrder)
         .filter(_valid_order_condition())
@@ -693,6 +718,8 @@ def _unbilled_detail_rows(db: Session, year: int, month: int) -> list[dict[str, 
     rows: list[dict[str, Any]] = []
     for (tax_code, product), agg in sorted(groups.items(), key=lambda kv: kv[1]["sales"], reverse=True):
         invoiced = invoiced_by_group.get((tax_code, product), Decimal("0"))
+        red_adjustment = red_adjustment_by_group.get((tax_code, product), Decimal("0"))
+        adjusted_sales = agg["sales"] + red_adjustment
         rows.append({
             "period": f"{year}-{month:02d}",
             "taxCode": tax_code,
@@ -700,8 +727,10 @@ def _unbilled_detail_rows(db: Session, year: int, month: int) -> list[dict[str, 
             "product": product,
             "quantity": str(agg["quantity"]),
             "sales": _string_decimal(agg["sales"]),
+            "redSalesAdjustment": _string_decimal(red_adjustment),
+            "adjustedSales": _string_decimal(adjusted_sales),
             "invoiced": _string_decimal(invoiced),
-            "unbilled": _string_decimal(max(agg["sales"] - invoiced, Decimal("0"))),
+            "unbilled": _string_decimal(max(adjusted_sales - invoiced, Decimal("0"))),
             "cost": _string_decimal(agg["cost"]),
         })
     return rows
@@ -827,8 +856,8 @@ def build_unbilled_income_report(
 
     sales = build_report(db, year, month, get_or_create_template(db, company))
     start, nxt = month_bounds(year, month)
-    invoiced_total = (
-        db.query(func.coalesce(func.sum(TaxInvoice.total_amount), 0))
+    invoice_rows = (
+        db.query(TaxInvoice)
         .filter(
             TaxInvoice.source_system == "tax_export",
             TaxInvoice.direction == "output",
@@ -836,11 +865,31 @@ def build_unbilled_income_report(
             TaxInvoice.issue_date >= start,
             TaxInvoice.issue_date < nxt,
         )
-        .scalar()
+        .all()
     )
-    invoiced_total = Decimal(invoiced_total or "0")
+    from app.services import tax_invoice_service
+    red_context = tax_invoice_service.red_accounting_context(db, invoice_rows)
+    invoiced_total = sum(
+        (
+            Decimal(str(red_context.get(row.id, {}).get("accountingNetAmount") or "0"))
+            for row in invoice_rows
+            if red_context.get(row.id, {}).get("accountingNetIncluded", False)
+        ),
+        Decimal("0"),
+    )
+    red_sales_adjustment = sum(
+        (
+            Decimal(str(red_context.get(row.id, {}).get("accountingNetAmount") or "0"))
+            for row in invoice_rows
+            if red_context.get(row.id, {}).get("invoiceColor") == "red"
+            and red_context.get(row.id, {}).get("accountingNetIncluded", False)
+        ),
+        Decimal("0"),
+    )
     sales_total = Decimal(sales["summary"]["salesAmount"] or "0")
-    unbilled = sales_total - invoiced_total
+    adjusted_sales_total = sales_total + red_sales_adjustment
+    # 红字发票同时冲减销售基数和已开票净额，因此不会制造虚假的“无票收入”。
+    unbilled = adjusted_sales_total - invoiced_total
     source_details, details, selected_keys, adjustment = _unbilled_details_for_period(
         db, company=company, year=year, month=month,
     )
@@ -856,6 +905,8 @@ def build_unbilled_income_report(
         "year": year,
         "month": month,
         "salesAmount": _string_decimal(sales_total),
+        "redSalesAdjustmentAmount": _string_decimal(red_sales_adjustment),
+        "adjustedSalesAmount": _string_decimal(adjusted_sales_total),
         "invoicedAmount": _string_decimal(invoiced_total),
         "unbilledAmount": _string_decimal(unbilled),
         "rowInvoicedTotal": _string_decimal(row_invoiced_total),
@@ -889,7 +940,9 @@ def unbilled_income_xlsx(report: dict[str, Any]) -> bytes:
     summary_rows = [
         ("月度时间", report["period"], None),
         ("销售总金额", float(report["salesAmount"]), "0.00"),
-        ("已开票金额", float(report["invoicedAmount"]), "0.00"),
+        ("销项红字调整", float(report.get("redSalesAdjustmentAmount", 0)), "0.00"),
+        ("调整后销售金额", float(report.get("adjustedSalesAmount", report["salesAmount"])), "0.00"),
+        ("已开票净额", float(report["invoicedAmount"]), "0.00"),
         ("无票收入", float(report["unbilledAmount"]), "0.00"),
     ]
     for label, value, fmt in summary_rows:
@@ -897,35 +950,39 @@ def unbilled_income_xlsx(report: dict[str, Any]) -> bytes:
         ws.cell(row=ws.max_row, column=1).font = bold
         if fmt:
             ws.cell(row=ws.max_row, column=2).number_format = fmt
-    ws.append(["口径：无票收入 = 销售总金额 − 已开票金额（销项发票价税合计）"])
+    ws.append(["口径：销项红字同时冲减销售基数与已开票净额；无票收入 = 调整后销售金额 − 已开票净额，红字折让/退货不会变成无票收入"])
     ws.cell(row=ws.max_row, column=1).font = gray
     ws.append([])
 
     details = report.get("details") or []
-    ws.append(["月度时间", "税务编号", "税收分类名称", "产品", "发货数量", "销售金额", "已开票金额", "无票收入", "销售成本"])
+    ws.append(["月度时间", "税务编号", "税收分类名称", "产品", "发货数量", "销售金额", "销项红字调整", "调整后销售金额", "已开票金额", "无票收入", "销售成本"])
 
     header_row = ws.max_row
     for cell in ws[header_row]:
         cell.font = bold
-    totals = {"quantity": 0.0, "sales": 0.0, "invoiced": 0.0, "unbilled": 0.0, "cost": 0.0}
+    totals = {"quantity": 0.0, "sales": 0.0, "red": 0.0, "adjusted": 0.0, "invoiced": 0.0, "unbilled": 0.0, "cost": 0.0}
     for d in details:
         quantity, sales, cost = float(d["quantity"]), float(d["sales"]), float(d["cost"])
+        red_adjustment = float(d.get("redSalesAdjustment") or 0)
+        adjusted_sales = float(d.get("adjustedSales") or sales)
         invoiced = float(d.get("invoiced") or 0)
         unbilled = float(d.get("unbilled") or 0)
         totals["quantity"] += quantity
         totals["sales"] += sales
+        totals["red"] += red_adjustment
+        totals["adjusted"] += adjusted_sales
         totals["invoiced"] += invoiced
         totals["unbilled"] += unbilled
         totals["cost"] += cost
-        ws.append([d["period"], d["taxCode"], d.get("taxName", ""), d["product"], quantity, sales, invoiced, unbilled, cost])
-    ws.append(["", "", "", "合计", totals["quantity"], totals["sales"], totals["invoiced"], totals["unbilled"], totals["cost"]])
+        ws.append([d["period"], d["taxCode"], d.get("taxName", ""), d["product"], quantity, sales, red_adjustment, adjusted_sales, invoiced, unbilled, cost])
+    ws.append(["", "", "", "合计", totals["quantity"], totals["sales"], totals["red"], totals["adjusted"], totals["invoiced"], totals["unbilled"], totals["cost"]])
     for cell in ws[ws.max_row]:
         cell.font = bold
-    for col in (5, 6, 7, 8, 9):
+    for col in (5, 6, 7, 8, 9, 10, 11):
         for row_idx in range(header_row, ws.max_row + 1):
             ws.cell(row=row_idx, column=col).number_format = "0.00" if col != 5 else "0.####"
 
-    for idx, width in ((1, 14), (2, 26), (3, 18), (4, 34), (5, 12), (6, 14), (7, 14), (8, 14), (9, 14)):
+    for idx, width in ((1, 14), (2, 26), (3, 18), (4, 34), (5, 12), (6, 14), (7, 14), (8, 14), (9, 14), (10, 14), (11, 14)):
         ws.column_dimensions[get_column_letter(idx)].width = width
     ws.freeze_panes = f"A{header_row + 1}"
 

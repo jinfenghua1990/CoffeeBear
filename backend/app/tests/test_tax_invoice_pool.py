@@ -82,10 +82,12 @@ def test_invoice_pool_marks_red_pair_and_excludes_voided_blue_amount(db_session)
     rows = {item["invoiceNumber"]: item for item in service.list_invoices(db_session, limit=500)}
     summary = service.summary(db_session)
 
-    assert rows["BLUE-001"]["invoiceStatusLabel"] == "已红冲"
+    assert rows["BLUE-001"]["invoiceStatusLabel"] == "蓝字发票（已全额红冲）"
     assert rows["BLUE-001"]["redRelatedInvoiceNo"] == "RED-001"
-    assert rows["RED-001"]["invoiceStatusLabel"] == "红字冲销票"
+    assert rows["BLUE-001"]["redStatus"] == "fully_red_offset"
+    assert rows["RED-001"]["invoiceStatusLabel"] == "红字发票（冲销）"
     assert rows["RED-001"]["redRelatedInvoiceNo"] == "BLUE-001"
+    assert rows["RED-001"]["redStatus"] == "red_invoice"
     assert rows["RED-001"]["redNoticeNo"] == "CONF-001"
     assert summary["inputTotalAmount"] == 0.0
     assert summary["excludedRedAmount"] == 0.0

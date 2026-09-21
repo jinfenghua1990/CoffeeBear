@@ -66,6 +66,11 @@ def _invoice_candidate_window(year: int, month: int):
 def _dec(value: Decimal | int | str | None) -> Decimal:
     return quantize(to_decimal(value), MONEY_QUANT)
 
+def _invoice_target_amount(db: Session, invoice: TaxInvoice) -> Decimal:
+    """银行付款核对以红冲后的有效蓝字余额为上限，原票金额仍保留在发票台账。"""
+    return _dec(tax_invoice_service.effective_invoice_amount_after_red(db, invoice))
+
+
 
 def _link_amount(link: TaxInvoiceLink, invoice: TaxInvoice | None) -> Decimal:
     if link.allocated_amount is not None:
@@ -245,7 +250,7 @@ def overview(db: Session, year: int, month: int) -> dict[str, Any]:
     )
     # 红冲、作废、待确认和非正数金额发票仍保留在发票/会计模块，
     # 但不能进入“银行付款核对”池，更不能因金额 <= 0 被推导成 matched。
-    pool_rows = [row for row in pool_rows if tax_invoice_service.is_bank_payment_reconciliation_eligible(row)]
+    pool_rows = [row for row in pool_rows if tax_invoice_service.is_bank_payment_reconciliation_eligible(row, db=db)]
     pool_ids = [row.id for row in pool_rows]
     pool_links: list[TaxInvoiceLink] = []
     if pool_ids:
@@ -275,10 +280,11 @@ def overview(db: Session, year: int, month: int) -> dict[str, Any]:
     for link in pool_links:
         linked_by_invoice.setdefault(link.invoice_id, []).append(link)
 
+    invoice_bank_context = tax_invoice_service._invoice_bank_payment_context(db, pool_rows)
     invoice_pool: list[dict[str, Any]] = []
     pool_by_id: dict[int, dict[str, Any]] = {}
     for invoice in pool_rows:
-        total = _dec(invoice.total_amount)
+        total = _invoice_target_amount(db, invoice)
         linked_amount = Decimal("0.0000")
         briefs: list[dict[str, Any]] = []
         for link in sorted(linked_by_invoice.get(invoice.id, []), key=lambda row: row.id):
@@ -297,8 +303,12 @@ def overview(db: Session, year: int, month: int) -> dict[str, Any]:
                 "accountNo": account.account_no if account else "",
                 "accountName": account.account_name if account else "",
             })
-        linked_amount = min(max(linked_amount, Decimal("0.0000")), total)
-        remaining = total - linked_amount
+        derived_bank = invoice_bank_context.get(invoice.id, {})
+        overpaid = _dec(derived_bank.get("bankOverpaidAmount", max(linked_amount - total, Decimal("0"))))
+        overpaid_settled = _dec(derived_bank.get("bankOverpaidSettledAmount"))
+        overpaid_unsettled = _dec(derived_bank.get("bankOverpaidUnsettledAmount", overpaid))
+        remaining = _dec(derived_bank.get("bankRemainingAmount", max(total - linked_amount, Decimal("0"))))
+        bank_status = str(derived_bank.get("bankPaymentStatus") or _status(remaining, total))
         row = {
             "id": invoice.id,
             "invoiceNumber": invoice.invoice_number,
@@ -307,7 +317,10 @@ def overview(db: Session, year: int, month: int) -> dict[str, Any]:
             "totalAmount": str(total),
             "bankLinkedAmount": str(_dec(linked_amount)),
             "remaining": str(_dec(remaining)),
-            "bankMatchStatus": _status(remaining, total),
+            "overpaidAfterRedAmount": str(_dec(overpaid)),
+            "overpaidSettledAmount": str(_dec(overpaid_settled)),
+            "overpaidUnsettledAmount": str(_dec(overpaid_unsettled)),
+            "bankMatchStatus": bank_status,
             "links": briefs,
             "suggested": False,
             "suggestedPaymentIds": [],
@@ -329,11 +342,28 @@ def overview(db: Session, year: int, month: int) -> dict[str, Any]:
                 payment["suggestedInvoiceIds"].append(row["id"])
 
     invoice_total = sum((_dec(row["totalAmount"]) for row in invoice_pool), Decimal("0.0000"))
-    invoice_matched_total = sum((_dec(row["bankLinkedAmount"]) for row in invoice_pool), Decimal("0.0000"))
+    invoice_matched_total = sum(
+        (min(_dec(row["bankLinkedAmount"]), _dec(row["totalAmount"])) for row in invoice_pool),
+        Decimal("0.0000"),
+    )
+    invoice_overpaid_total = sum(
+        (_dec(row.get("overpaidUnsettledAmount")) for row in invoice_pool),
+        Decimal("0.0000"),
+    )
+    invoice_historical_overpaid_total = sum(
+        (_dec(row.get("overpaidAfterRedAmount")) for row in invoice_pool),
+        Decimal("0.0000"),
+    )
+    invoice_settled_overpaid_total = sum(
+        (_dec(row.get("overpaidSettledAmount")) for row in invoice_pool),
+        Decimal("0.0000"),
+    )
     invoice_counts = {
         "matched": sum(1 for row in invoice_pool if row["bankMatchStatus"] == "matched"),
         "partial": sum(1 for row in invoice_pool if row["bankMatchStatus"] == "partial"),
         "unmatched": sum(1 for row in invoice_pool if row["bankMatchStatus"] == "unmatched"),
+        "overpaid_after_red": sum(1 for row in invoice_pool if row["bankMatchStatus"] == "overpaid_after_red"),
+        "red_overpayment_settled": sum(1 for row in invoice_pool if row["bankMatchStatus"] == "red_overpayment_settled"),
     }
 
     return {
@@ -351,11 +381,16 @@ def overview(db: Session, year: int, month: int) -> dict[str, Any]:
             "unmatchedCount": counts["unmatched"],
             "invoiceTotal": str(_dec(invoice_total)),
             "invoiceMatchedTotal": str(_dec(invoice_matched_total)),
-            "invoiceOutstandingTotal": str(_dec(invoice_total - invoice_matched_total)),
+            "invoiceOutstandingTotal": str(_dec(max(invoice_total - invoice_matched_total, Decimal("0")))),
+            "invoiceOverpaidAfterRedTotal": str(_dec(invoice_overpaid_total)),
+            "invoiceHistoricalOverpaidAfterRedTotal": str(_dec(invoice_historical_overpaid_total)),
+            "invoiceSettledOverpaidAfterRedTotal": str(_dec(invoice_settled_overpaid_total)),
             "invoiceCount": len(invoice_pool),
             "invoiceMatchedCount": invoice_counts["matched"],
             "invoicePartialCount": invoice_counts["partial"],
             "invoiceUnmatchedCount": invoice_counts["unmatched"],
+            "invoiceOverpaidAfterRedCount": invoice_counts["overpaid_after_red"],
+            "invoiceResolvedRedOverpaymentCount": invoice_counts["red_overpayment_settled"],
         },
     }
 
@@ -433,7 +468,7 @@ def pending_invoices(db: Session, limit: int = 500) -> list[dict[str, Any]]:
         .order_by(TaxInvoice.issue_date.desc(), TaxInvoice.id.desc())
         .all()
     )
-    rows = [row for row in rows if tax_invoice_service.is_bank_payment_reconciliation_eligible(row)]
+    rows = [row for row in rows if tax_invoice_service.is_bank_payment_reconciliation_eligible(row, db=db)]
     invoice_ids = [row.id for row in rows]
     allocated_by_invoice: dict[int, Decimal] = {}
     if invoice_ids:
@@ -456,7 +491,7 @@ def pending_invoices(db: Session, limit: int = 500) -> list[dict[str, Any]]:
 
     result: list[dict[str, Any]] = []
     for invoice in rows:
-        total = _dec(invoice.total_amount)
+        total = _invoice_target_amount(db, invoice)
         linked = allocated_by_invoice.get(invoice.id, Decimal("0"))
         remaining = total - linked
         if remaining <= TOLERANCE:
@@ -487,13 +522,13 @@ def _split_match_invoice_to_txns(
     例：发票 ¥60288，被流水 ¥3306 + ¥5402 + ... 分次付完。
     返回 (匹配流水数, 已分配金额)。
     """
-    target = _dec(invoice.total_amount)
+    target = _invoice_target_amount(db, invoice)
     allocated = (
         allocated_by_invoice.get(invoice.id, Decimal("0.0000"))
         if allocated_by_invoice is not None
         else _invoice_bank_allocated(db, invoice.id)
     )
-    if not tax_invoice_service.is_bank_payment_reconciliation_eligible(invoice):
+    if not tax_invoice_service.is_bank_payment_reconciliation_eligible(invoice, db=db):
         return 0, allocated
     count = 0
     for txn in txns:
@@ -562,9 +597,9 @@ def _split_match_txn_to_invoices(
     for invoice in invoices:
         if target - allocated <= TOLERANCE:
             break
-        if not tax_invoice_service.is_bank_payment_reconciliation_eligible(invoice):
+        if not tax_invoice_service.is_bank_payment_reconciliation_eligible(invoice, db=db):
             continue
-        inv_amount = _dec(invoice.total_amount)
+        inv_amount = _invoice_target_amount(db, invoice)
         inv_used = (
             allocated_by_invoice.get(invoice.id, Decimal("0.0000"))
             if allocated_by_invoice is not None
@@ -639,7 +674,7 @@ def auto_match(db: Session, year: int, month: int, actor: str = "system") -> dic
         )
         .all()
     )
-    invoices = [invoice for invoice in invoices if tax_invoice_service.is_bank_payment_reconciliation_eligible(invoice)]
+    invoices = [invoice for invoice in invoices if tax_invoice_service.is_bank_payment_reconciliation_eligible(invoice, db=db)]
     if not invoices:
         return {"year": year, "month": month, "matched": 0, "skipped": 0, "details": []}
 
@@ -687,7 +722,7 @@ def auto_match(db: Session, year: int, month: int, actor: str = "system") -> dic
         for invoice in invoices:
             if (invoice.id, txn.id) in existing_invoice_txn:
                 continue
-            invoice_total = _dec(invoice.total_amount)
+            invoice_total = _invoice_target_amount(db, invoice)
             invoice_remaining = invoice_total - allocated_by_invoice.get(invoice.id, Decimal("0"))
             if invoice_remaining <= TOLERANCE:
                 continue
@@ -735,7 +770,7 @@ def auto_match(db: Session, year: int, month: int, actor: str = "system") -> dic
     # 银行付款维度按“剩余未分摊金额”判断，不依赖跨业务共用的 match_status。
     leftover_invoices = [
         inv for inv in invoices
-        if _dec(inv.total_amount) - allocated_by_invoice.get(inv.id, Decimal("0")) > TOLERANCE
+        if _invoice_target_amount(db, inv) - allocated_by_invoice.get(inv.id, Decimal("0")) > TOLERANCE
     ]
     # 仍未配的流水
     leftover_txns = [t for t in txns if t.id not in existing_txn_ids]
@@ -755,7 +790,7 @@ def auto_match(db: Session, year: int, month: int, actor: str = "system") -> dic
             continue
         txn_list = sorted(txn_groups[norm], key=lambda x: x.txn_date)
         for inv in inv_list:
-            inv_total = _dec(inv.total_amount)
+            inv_total = _invoice_target_amount(db, inv)
             inv_remaining = inv_total - allocated_by_invoice.get(inv.id, Decimal("0"))
             if inv_remaining <= TOLERANCE:
                 continue
@@ -800,7 +835,7 @@ def auto_match(db: Session, year: int, month: int, actor: str = "system") -> dic
         candidates = sorted(
             [
                 inv for inv in inv_groups[norm]
-                if _dec(inv.total_amount) - allocated_by_invoice.get(inv.id, Decimal("0")) > TOLERANCE
+                if _invoice_target_amount(db, inv) - allocated_by_invoice.get(inv.id, Decimal("0")) > TOLERANCE
             ],
             key=lambda inv: (inv.issue_date or date.min, inv.id),
         )
@@ -811,7 +846,7 @@ def auto_match(db: Session, year: int, month: int, actor: str = "system") -> dic
             if selected_total >= txn_remaining - TOLERANCE:
                 break
             selected.append(inv)
-            selected_total += _dec(inv.total_amount) - allocated_by_invoice.get(inv.id, Decimal("0"))
+            selected_total += _invoice_target_amount(db, inv) - allocated_by_invoice.get(inv.id, Decimal("0"))
         # 同名多票只有合计金额精确等于当前流水剩余金额时才允许自动拆分。
         if len(selected) >= 2 and abs(selected_total - txn_remaining) <= TOLERANCE:
             cnt, allocated = _split_match_txn_to_invoices(
@@ -848,7 +883,7 @@ def auto_match(db: Session, year: int, month: int, actor: str = "system") -> dic
         for s in suppliers:
             supplier_norm = _normalize_name(s.name)
             for inv in leftover_invoices:
-                inv_total = _dec(inv.total_amount)
+                inv_total = _invoice_target_amount(db, inv)
                 inv_remaining = inv_total - allocated_by_invoice.get(inv.id, Decimal("0"))
                 txn_total = _dec(txn.amount)
                 txn_remaining = txn_total - allocated_by_txn.get(txn.id, Decimal("0"))
@@ -925,8 +960,8 @@ def link(
         raise ValueError("发票不存在")
     if invoice.direction != "input":
         raise ValueError("只能挂进项发票")
-    if not tax_invoice_service.is_bank_payment_reconciliation_eligible(invoice):
-        raise ValueError(tax_invoice_service.bank_payment_reconciliation_ineligible_reason(invoice))
+    if not tax_invoice_service.is_bank_payment_reconciliation_eligible(invoice, db=db):
+        raise ValueError(tax_invoice_service.bank_payment_reconciliation_ineligible_reason(invoice, db=db))
 
     db.refresh(txn, with_for_update=True)
     db.refresh(invoice, with_for_update=True)
@@ -936,7 +971,7 @@ def link(
         .first()
     )
     exclude_id = link.id if link is not None else None
-    invoice_total = _dec(invoice.total_amount)
+    invoice_total = _invoice_target_amount(db, invoice)
     txn_total = _dec(txn.amount)
     invoice_used = _invoice_bank_allocated(db, invoice.id, exclude_link_id=exclude_id)
     txn_used = _txn_bank_allocated(db, txn.id, exclude_link_id=exclude_id)

@@ -286,3 +286,87 @@ def test_unbilled_adjustment_persists_selected_details_and_version(db_session):
     }
     assert len(current["details"]) == 1
     assert svc.unbilled_detail_key(current["details"][0]) == selected_key
+
+
+def test_output_red_discount_adjusts_sales_basis_and_does_not_create_unbilled_income(db_session):
+    from datetime import timezone
+    from app.models.tax import TaxInvoice, TaxInvoiceLink
+
+    token = uuid4().hex[:10]
+    sku_code = f"RED-SALE-{token}"
+    sku = ProductSku(
+        jackyun_sku_id=f"red-sale-sku-{token}",
+        sku_code=sku_code,
+        sku_name="红冲测试商品",
+        tax_code="3040205000000000000",
+    )
+    order = SalesOrder(
+        order_no=_order_no("RED-DISCOUNT"),
+        platform="淘宝",
+        order_status="已完成",
+        pay_status="已支付",
+        paid_amount=Decimal("1000.00"),
+        ordered_at=datetime(2026, 8, 5, 12, 0, tzinfo=ZoneInfo(settings.TZ)),
+        raw={"warehouseName": "测试仓"},
+    )
+    db_session.add_all([sku, order])
+    db_session.flush()
+    db_session.add(SalesOrderItem(
+        order_id=order.id,
+        sku_code=sku_code,
+        goods_name="红冲测试商品",
+        quantity=Decimal("1"),
+        amount=Decimal("1000.00"),
+        discount_amount=Decimal("0"),
+        sku_id=sku.id,
+    ))
+    blue = TaxInvoice(
+        invoice_key=f"out-blue-{token}",
+        invoice_number=f"OUT-B-{token}",
+        direction="output",
+        status="issued",
+        issue_date=datetime(2026, 8, 10, tzinfo=timezone.utc),
+        seller_name="本公司",
+        buyer_name=f"客户-{token}",
+        total_amount=Decimal("1000.00"),
+        source_system="tax_export",
+        raw={"是否正数发票": "是"},
+    )
+    red = TaxInvoice(
+        invoice_key=f"out-red-{token}",
+        invoice_number=f"OUT-R-{token}",
+        direction="output",
+        status="red",
+        issue_date=datetime(2026, 8, 20, tzinfo=timezone.utc),
+        seller_name=blue.seller_name,
+        buyer_name=blue.buyer_name,
+        total_amount=Decimal("-300.00"),
+        source_system="tax_export",
+        raw={"是否正数发票": "否", "备注": f"被红冲蓝字发票号码：{blue.invoice_number}"},
+    )
+    db_session.add_all([blue, red])
+    db_session.flush()
+    db_session.add(TaxInvoiceLink(
+        invoice_id=blue.id,
+        target_type="sales_order",
+        target_id=order.id,
+        allocated_amount=Decimal("1000.00"),
+        match_method="manual",
+        confirmed=True,
+    ))
+    db_session.commit()
+
+    company = f"red-discount-company-{token}"
+    report = svc.build_unbilled_income_report(db_session, 2026, 8, company=company)
+
+    assert Decimal(report["salesAmount"]) == Decimal("1000.00")
+    assert Decimal(report["redSalesAdjustmentAmount"]) == Decimal("-300.00")
+    assert Decimal(report["adjustedSalesAmount"]) == Decimal("700.00")
+    assert Decimal(report["invoicedAmount"]) == Decimal("700.00")
+    assert Decimal(report["unbilledAmount"]) == Decimal("0.00")
+    detail = next(row for row in report["details"] if row["product"] == "红冲测试商品")
+    assert Decimal(detail["sales"]) == Decimal("1000.00")
+    assert Decimal(detail["redSalesAdjustment"]) == Decimal("-300.00")
+    assert Decimal(detail["adjustedSales"]) == Decimal("700.00")
+    assert Decimal(detail["invoiced"]) == Decimal("700.00")
+    assert Decimal(detail["unbilled"]) == Decimal("0.00")

@@ -19,6 +19,7 @@ from app.adapters.tax_invoice_file import ParsedTaxInvoiceExport, parse_tax_invo
 from app.config import settings
 from app.core.audit import audit
 from app.models.alibaba1688_import import Alibaba1688Order
+from app.models.bank import BankTransaction
 from app.models.jackyun import JackyunGoodsDocument
 from app.models.procurement_chain import ProcurementChainLink
 from app.models.purchase import ExternalPurchaseOrder, JackyunPurchaseOrder, JackyunPurchaseOrderLink
@@ -264,122 +265,1062 @@ def _infer_batch_directions(
 
 
 def _status(value: str, total: Decimal | None = None, is_positive: str | None = None, remark: str | None = None) -> str:
-    """票据状态判定。红冲必须是整张发票红冲，不能因单行折扣金额为负就误判。
-    判定优先级：是否正数发票字段 > 备注红冲文字 > 发票状态文字 > 价税合计正负（兜底）。"""
-    remark_text = str(remark or "")
-    # 1. 税务清单明确给出的"是否正数发票"是最权威的判断依据
-    if is_positive is not None:
-        pos = str(is_positive).strip()
-        if pos in ("否", "负数", "红字", "红冲"):
-            return "red"
-        if pos in ("是", "正数", "正常"):
-            # 明确是正数发票，即使单行折扣金额为负也不判红冲
-            text = str(value or "")
-            if any(token in text for token in ("作废", "无效", "失效")):
-                return "void"
-            return "issued"
-    # 2. 备注字段含红冲明确标识（被红冲蓝字/红字发票信息确认单），即使状态文字写"正常"也判红冲
-    if any(token in remark_text for token in ("被红冲", "红字发票信息确认单", "红冲蓝字")):
-        return "red"
+    """底层票据状态只表达“这张凭证本身”的性质，不再把蓝字票的红冲生命周期混入 status。
+
+    - issued：蓝字有效发票（即使后续被部分/全额红冲，蓝字凭证本身仍保留）；
+    - red：红字发票/负数发票；
+    - void：作废；
+    - unknown：待确认。
+
+    “蓝字已部分/全额红冲”由 _red_trace_context 动态派生。
+    """
     text = str(value or "")
+    remark_text = str(remark or "")
+    pos = str(is_positive).strip() if is_positive is not None else ""
+
     if any(token in text for token in ("作废", "无效", "失效")):
         return "void"
+
+    if pos in ("否", "负数", "红字", "红冲"):
+        return "red"
+    if pos in ("是", "正数", "正常"):
+        return "issued"
+
+    # 金额是最稳定的凭证颜色兜底：负数=红字，正数=蓝字。
+    if total is not None:
+        if total < 0:
+            return "red"
+        if total > 0:
+            return "issued"
+
+    # 缺金额时才退回状态/备注文字判断。备注里的“被红冲蓝字发票号码”
+    # 通常出现在红字凭证上，但没有金额时不能把它当作蓝字票“已红冲”的唯一事实。
     if any(token in text for token in ("红字", "红冲", "冲红")):
+        return "red"
+    if any(token in remark_text for token in ("红字发票信息确认单", "被红冲蓝字", "对应蓝字")):
         return "red"
     if any(token in text for token in ("正常", "有效", "已开", "开具")):
         return "issued"
-    # 3. 兜底：缺少是否正数发票字段且备注无红冲文字时，才用发票级总额正负判断
-    if total is not None and total < 0:
-        return "red"
     return "unknown"
 
 
-_RED_BLUE_REF_RE = re.compile(r"被红冲(?:蓝字)?(?:数电)?发票号码[：:]\s*([A-Za-z0-9_-]+)")
-_RED_NOTICE_RE = re.compile(r"红字发票信息确认单编号[：:]\s*([A-Za-z0-9_-]+)")
+# 红字票通常在备注中记录对应蓝字发票号码和《红字发票信息确认单》编号。
+# 兼容数电/全电/纸票导出中常见字段文案差异；不做名称/金额猜配。
+_RED_BLUE_REF_PATTERNS = (
+    re.compile(r"(?:被红冲|对应)(?:蓝字)?(?:数电|全电)?(?:发票|票)?号码[：:]\s*([A-Za-z0-9_-]+)"),
+    re.compile(r"蓝字(?:数电|全电)?发票号码[：:]\s*([A-Za-z0-9_-]+)"),
+)
+_RED_NOTICE_RE = re.compile(r"红字发票信息确认单(?:编号|号码)?[：:]\s*([A-Za-z0-9_-]+)")
+_RED_HINT_RE = re.compile(r"已红冲|部分红冲|全额红冲|被红冲|红字发票")
+_RED_TOLERANCE = Decimal("0.01")
+MANUAL_RED_BLUE_TARGET_TYPE = "red_blue_invoice"
+RED_BANK_REFUND_TARGET_TYPE = "bank_refund_transaction"
+RED_FUTURE_OFFSET_TARGET_TYPE = "future_invoice_offset"
+RED_PERSONAL_REFUND_TARGET_TYPE = "personal_refund"
+RED_OTHER_SETTLEMENT_TARGET_TYPE = "other_red_settlement"
+RED_SETTLEMENT_TARGET_TYPES = (
+    RED_BANK_REFUND_TARGET_TYPE,
+    RED_FUTURE_OFFSET_TARGET_TYPE,
+    RED_PERSONAL_REFUND_TARGET_TYPE,
+    RED_OTHER_SETTLEMENT_TARGET_TYPE,
+)
+_NON_DEDUCTIBLE_VAT_RE = re.compile(r"餐饮|餐费|娱乐|居民日常服务|贷款服务|贷款利息")
+
+_FINANCE_META_KEY = "_finance_meta"
+_VAT_DEDUCTIBLE_MANUAL_VALUES = ("pending", "deductible", "non_deductible")
+_INPUT_VAT_TRANSFER_MANUAL_VALUES = (
+    "required_confirmation", "completed", "not_required_unverified_blue", "not_applicable"
+)
 
 
-def is_effective_for_accounting(invoice: TaxInvoice) -> bool:
-    """税务底稿保留有效蓝字票和红字冲销票，让红冲成对数据自然相互抵销。"""
-    return invoice.status in {"issued", "red"}
+def _finance_meta(row: TaxInvoice) -> dict:
+    raw = row.raw if isinstance(row.raw, dict) else {}
+    meta = raw.get(_FINANCE_META_KEY)
+    return dict(meta) if isinstance(meta, dict) else {}
 
 
-def is_bank_payment_reconciliation_eligible(invoice: TaxInvoice) -> bool:
-    """银行付款核对资格的单一事实源。
+def _write_finance_meta(row: TaxInvoice, updates: dict) -> None:
+    raw = dict(row.raw) if isinstance(row.raw, dict) else {}
+    meta = _finance_meta(row)
+    for key, value in updates.items():
+        if value in (None, ""):
+            meta.pop(key, None)
+        else:
+            meta[key] = value
+    raw[_FINANCE_META_KEY] = meta
+    row.raw = raw
 
-    会计台账可以保留红字/红冲记录，但付款核对只允许“进项 + 有效 + 正数金额”发票。
-    """
-    total = Decimal(str(invoice.total_amount)) if invoice.total_amount is not None else Decimal("0")
-    return invoice.direction == "input" and invoice.status == "issued" and total > 0
 
-
-def bank_payment_reconciliation_ineligible_reason(invoice: TaxInvoice) -> str:
-    """返回不参与银行付款核对的明确业务原因。"""
-    total = Decimal(str(invoice.total_amount)) if invoice.total_amount is not None else Decimal("0")
-    if invoice.status == "red":
-        return "红冲相关发票不参与银行付款核对"
-    if invoice.status == "void":
-        return "作废发票不参与银行付款核对"
-    if invoice.status != "issued":
-        return "待确认或非有效发票不参与银行付款核对"
-    if total <= 0:
-        return "非正数金额发票不参与银行付款核对"
-    if invoice.direction != "input":
-        return "非进项发票不参与银行付款核对"
-    return "该发票不参与银行付款核对"
 
 
 def _invoice_number_text(row: TaxInvoice) -> str:
     return f"{row.invoice_code or ''}{row.invoice_number or ''}"
 
 
-def _red_trace_context(rows: list[TaxInvoice]) -> dict[int, dict]:
-    """从税务清单备注和状态中识别红冲蓝字票与红字冲销票的对应关系。"""
-    referenced_by: dict[str, list[str]] = {}
-    refs_by_invoice: dict[int, tuple[str, str]] = {}
-    for row in rows:
-        raw = row.raw if isinstance(row.raw, dict) else {}
-        note = str(raw.get("备注") or "")
-        red_ref = _RED_BLUE_REF_RE.search(note)
-        notice = _RED_NOTICE_RE.search(note)
-        if red_ref:
-            ref = red_ref.group(1)
-            refs_by_invoice[row.id] = (ref, notice.group(1) if notice else "")
-            referenced_by.setdefault(ref, []).append(_invoice_number_text(row))
+def _normalize_invoice_ref(value: str | None) -> str:
+    return re.sub(r"[^A-Za-z0-9]", "", str(value or "")).upper()
+
+
+def _raw_invoice_text(row: TaxInvoice) -> str:
+    raw = row.raw if isinstance(row.raw, dict) else {}
+    return " ".join(
+        str(value or "")
+        for key, value in raw.items()
+        if key != _FINANCE_META_KEY
+    )
+
+
+def _red_reference(row: TaxInvoice) -> str:
+    raw = row.raw if isinstance(row.raw, dict) else {}
+    direct_keys = (
+        "被红冲蓝字发票号码", "被红冲蓝字数电发票号码", "被红冲蓝字全电发票号码",
+        "对应蓝字发票号码", "蓝字发票号码",
+    )
+    for key in direct_keys:
+        value = str(raw.get(key) or "").strip()
+        if value:
+            return value
+    text = _raw_invoice_text(row)
+    for pattern in _RED_BLUE_REF_PATTERNS:
+        match = pattern.search(text)
+        if match:
+            return match.group(1)
+    return ""
+
+
+def _red_notice_number(row: TaxInvoice) -> str:
+    raw = row.raw if isinstance(row.raw, dict) else {}
+    for key in ("红字发票信息确认单编号", "红字发票信息确认单号码", "确认单编号"):
+        value = str(raw.get(key) or "").strip()
+        if value:
+            return value
+    match = _RED_NOTICE_RE.search(_raw_invoice_text(row))
+    return match.group(1) if match else ""
+
+
+def _invoice_color(row: TaxInvoice) -> str:
+    """凭证颜色：blue / red / unknown。颜色与后续是否被红冲是两个维度。"""
+    raw = row.raw if isinstance(row.raw, dict) else {}
+    pos = str(raw.get("是否正数发票") or raw.get("是否正数") or "").strip()
+    total = Decimal(str(row.total_amount)) if row.total_amount is not None else None
+    if pos in ("否", "负数", "红字", "红冲"):
+        return "red"
+    if pos in ("是", "正数", "正常"):
+        return "blue"
+    # 历史数据没有“是否正数发票”时，已有 status=red 是比金额正负更强的红冲事实；
+    # 不能仅因金额为正就擅自恢复成蓝字有效票。
+    if row.status == "red":
+        return "red"
+    if row.status == "issued":
+        return "blue"
+    if total is not None:
+        if total < 0:
+            return "red"
+        if total > 0:
+            return "blue"
+    return "unknown"
+
+
+def _blue_has_red_hint(row: TaxInvoice) -> bool:
+    if _invoice_color(row) != "blue":
+        return False
+    raw = row.raw if isinstance(row.raw, dict) else {}
+    text = " ".join(
+        str(raw.get(key) or "")
+        for key in ("发票状态", "状态", "备注", "发票备注")
+    )
+    return bool(_RED_HINT_RE.search(text))
+
+
+def is_effective_for_accounting(invoice: TaxInvoice) -> bool:
+    """静态会计凭证资格：有效蓝字/红字可入账，作废/待确认不入净额。
+
+    红蓝配对、部分/全额红冲和异常状态需要数据库上下文，使用 red_accounting_context。
+    """
+    return invoice.status not in {"void", "unknown"} and _invoice_color(invoice) in {"blue", "red"}
+
+
+def red_accounting_context(db: Session, rows: list[TaxInvoice]) -> dict[int, dict]:
+    """按税务凭证口径建立红蓝发票关系，并给出可审计的净额元数据。
+
+    原则：
+    - 蓝字原票与红字冲销票都永久保留；
+    - 仅按红字票明确记录的蓝字号码建立关系，不按名称/金额猜配；
+    - 蓝票可被多张红票部分冲销；
+    - 红字合计超过蓝字原额时标记异常，不静默截断事实金额；
+    - 蓝票显示已红冲但系统尚未取得对应红字票时，先标异常待补，不把该蓝票继续当正常有效金额。
+    """
+    if not rows:
+        return {}
+
+    # 配对必须跨筛选、跨月份、跨分页查找，因此使用整个可见发票池，而不是只看当前 rows。
+    try:
+        pool = filter_visible_invoices(db.query(TaxInvoice)).all()
+    except Exception:
+        pool = db.query(TaxInvoice).all()
+
+    color_by_id = {row.id: _invoice_color(row) for row in pool}
+    pool_by_id = {row.id: row for row in pool}
+    manual_red_links = (
+        db.query(TaxInvoiceLink)
+        .filter(
+            TaxInvoiceLink.target_type == MANUAL_RED_BLUE_TARGET_TYPE,
+            TaxInvoiceLink.match_method != "rejected",
+            TaxInvoiceLink.confirmed.is_(True),
+        )
+        .order_by(TaxInvoiceLink.id.desc())
+        .all()
+    )
+    manual_blue_by_red: dict[int, TaxInvoice] = {}
+    for link in manual_red_links:
+        red = pool_by_id.get(link.invoice_id)
+        blue = pool_by_id.get(link.target_id)
+        if red is None or blue is None:
+            continue
+        if color_by_id.get(red.id) != "red" or color_by_id.get(blue.id) != "blue":
+            continue
+        # 每张红字票只接受最新一条有效人工确认关系；设置接口会把旧关系软撤销。
+        manual_blue_by_red.setdefault(red.id, blue)
+
+    blue_index: dict[str, list[TaxInvoice]] = {}
+    for row in pool:
+        if color_by_id.get(row.id) != "blue":
+            continue
+        for candidate in (row.invoice_number, _invoice_number_text(row)):
+            key = _normalize_invoice_ref(candidate)
+            if key:
+                blue_index.setdefault(key, []).append(row)
+
+    red_to_blue: dict[int, TaxInvoice] = {}
+    red_pair_state: dict[int, str] = {}
+    reds_by_blue: dict[int, list[TaxInvoice]] = {}
+    for red in pool:
+        if color_by_id.get(red.id) != "red":
+            continue
+        manual_blue = manual_blue_by_red.get(red.id)
+        if manual_blue is not None:
+            red_to_blue[red.id] = manual_blue
+            red_pair_state[red.id] = "paired_manual"
+            reds_by_blue.setdefault(manual_blue.id, []).append(red)
+            continue
+        ref = _normalize_invoice_ref(_red_reference(red))
+        if not ref:
+            red_pair_state[red.id] = "unpaired"
+            continue
+        candidate_rows = blue_index.get(ref, [])
+        seen_candidate_ids: set[int] = set()
+        candidates = []
+        for candidate in candidate_rows:
+            if candidate.id in seen_candidate_ids:
+                continue
+            seen_candidate_ids.add(candidate.id)
+            candidates.append(candidate)
+        # 同号歧义时只用购销方税号/方向缩窄；仍不唯一就拒绝猜测。
+        if len(candidates) > 1:
+            narrowed = [
+                blue for blue in candidates
+                if blue.direction == red.direction
+                and (not red.seller_tax_id or not blue.seller_tax_id or red.seller_tax_id == blue.seller_tax_id)
+                and (not red.buyer_tax_id or not blue.buyer_tax_id or red.buyer_tax_id == blue.buyer_tax_id)
+            ]
+            if len(narrowed) == 1:
+                candidates = narrowed
+        if len(candidates) == 1:
+            blue = candidates[0]
+            red_to_blue[red.id] = blue
+            red_pair_state[red.id] = "paired"
+            reds_by_blue.setdefault(blue.id, []).append(red)
+        else:
+            red_pair_state[red.id] = "ambiguous" if candidates else "unpaired"
 
     result: dict[int, dict] = {}
     for row in rows:
-        amount = Decimal(str(row.total_amount)) if row.total_amount is not None else None
-        raw = row.raw if isinstance(row.raw, dict) else {}
-        raw_status = str(raw.get("发票状态") or "")
-        direct_ref, notice = refs_by_invoice.get(row.id, ("", ""))
-        if row.status == "red" and amount is not None and amount < 0:
+        color = _invoice_color(row)
+        amount = Decimal(str(row.total_amount or 0))
+        base = {
+            "invoiceColor": color,
+            "redStatus": "none",
+            "redPairStatus": "none",
+            "redPairMethod": "",
+            "redRelatedInvoiceId": None,
+            "redRelatedInvoiceNo": "",
+            "redRelatedInvoiceIds": [],
+            "redRelatedInvoiceNos": [],
+            "redNoticeNo": _red_notice_number(row),
+            "redRelatedInvoiceDate": None,
+            "redRelatedInvoicePeriod": "",
+            "redCrossPeriod": False,
+            "redOffsetAmount": "0.00",
+            "remainingAfterRedAmount": str(max(amount, Decimal("0")).quantize(Decimal("0.01"))),
+            "accountingNetAmount": "0.00",
+            "accountingNetIncluded": False,
+            "accountingException": "",
+        }
+
+        if row.status == "void":
             result[row.id] = {
-                "invoiceStatusLabel": "红字冲销票",
-                "redStatus": "red_offset",
-                "redRelatedInvoiceNo": direct_ref,
-                "redNoticeNo": notice,
+                **base,
+                "invoiceStatusLabel": "作废发票",
+                "redStatus": "void",
+                "remainingAfterRedAmount": "0.00",
             }
-        elif row.status == "red" and amount is not None and amount > 0:
-            related = direct_ref or (referenced_by.get(row.invoice_number) or [""])[0]
+            continue
+        if row.status == "unknown" or color == "unknown":
             result[row.id] = {
-                "invoiceStatusLabel": "已红冲" if "红冲" in raw_status else "红冲作废",
-                "redStatus": "voided_blue",
-                "redRelatedInvoiceNo": related,
-                "redNoticeNo": notice,
+                **base,
+                "invoiceStatusLabel": "待确认发票",
+                "redStatus": "unknown",
+                "remainingAfterRedAmount": "0.00",
             }
+            continue
+
+        if color == "red":
+            blue = red_to_blue.get(row.id)
+            pair_state = red_pair_state.get(row.id, "unpaired")
+            label = ("红字发票（人工确认冲销）" if pair_state == "paired_manual" else "红字发票（冲销）") if blue else (
+                "红字发票（关联歧义）" if pair_state == "ambiguous" else "红字发票（待关联蓝字）"
+            )
+            exception = "" if blue else (
+                "红字发票对应蓝字号码命中多张发票，需人工确认"
+                if pair_state == "ambiguous"
+                else "红字发票未识别到对应蓝字发票，请补充/核对蓝字票"
+            )
+            result[row.id] = {
+                **base,
+                "invoiceStatusLabel": label,
+                "redStatus": "red_invoice" if blue else f"red_invoice_{pair_state}",
+                "redPairMethod": "manual" if pair_state == "paired_manual" else ("official_ref" if blue else ""),
+                "redPairStatus": pair_state,
+                "redRelatedInvoiceId": blue.id if blue else None,
+                "redRelatedInvoiceNo": _invoice_number_text(blue) if blue else _red_reference(row),
+                "redRelatedInvoiceIds": [blue.id] if blue else [],
+                "redRelatedInvoiceNos": [_invoice_number_text(blue)] if blue else (
+                    [_red_reference(row)] if _red_reference(row) else []
+                ),
+                "redRelatedInvoiceDate": blue.issue_date.isoformat() if blue and blue.issue_date else None,
+                "redRelatedInvoicePeriod": blue.issue_date.strftime("%Y-%m") if blue and blue.issue_date else "",
+                "redCrossPeriod": bool(
+                    blue and blue.issue_date and row.issue_date
+                    and (blue.issue_date.year, blue.issue_date.month) != (row.issue_date.year, row.issue_date.month)
+                ),
+                "remainingAfterRedAmount": "0.00",
+                # 红字凭证本身按负数参与净额；即使系统暂未找到蓝票也保留真实负数事实并同时报警。
+                "accountingNetAmount": str(amount.quantize(Decimal("0.01"))),
+                "accountingNetIncluded": True,
+                "accountingException": exception,
+            }
+            continue
+
+        # 蓝字发票：根据所有明确指向它的红字票汇总冲销额。
+        reds = reds_by_blue.get(row.id, [])
+        offset = sum(
+            (abs(Decimal(str(red.total_amount or 0))) for red in reds),
+            Decimal("0"),
+        )
+        remaining = max(amount - offset, Decimal("0"))
+        related_ids = [red.id for red in reds]
+        related_nos = [_invoice_number_text(red) for red in reds]
+        notice_nos = [value for value in (_red_notice_number(red) for red in reds) if value]
+
+        if offset > amount + _RED_TOLERANCE:
+            red_status = "over_red_offset"
+            label = "蓝字发票（红冲金额异常）"
+            pair_state = "over_offset"
+            exception = f"累计红字金额 {offset} 超过蓝字原额 {amount}"
+        elif offset >= amount - _RED_TOLERANCE and offset > 0:
+            red_status = "fully_red_offset"
+            label = "蓝字发票（已全额红冲）"
+            pair_state = "paired"
+            exception = ""
+        elif offset > _RED_TOLERANCE:
+            red_status = "partially_red_offset"
+            label = "蓝字发票（部分红冲）"
+            pair_state = "paired"
+            exception = ""
+        elif _blue_has_red_hint(row):
+            red_status = "blue_red_pending"
+            label = "蓝字发票（已红冲，待关联红字票）"
+            pair_state = "counterpart_missing"
+            exception = "税务原始状态显示该蓝字票已红冲，但当前系统未找到对应红字发票"
         else:
-            result[row.id] = {
-                "invoiceStatusLabel": "有效" if row.status == "issued" else "待确认",
-                "redStatus": "none",
-                "redRelatedInvoiceNo": "",
-                "redNoticeNo": "",
-            }
-    # 红字票的备注有时不带“被红冲蓝字票”文本，补回蓝字票的反向关系。
-    for row in rows:
-        context = result[row.id]
-        if context["redStatus"] == "red_offset" and not context["redRelatedInvoiceNo"]:
-            context["redRelatedInvoiceNo"] = (referenced_by.get(row.invoice_number) or [""])[0]
+            red_status = "none"
+            label = "蓝字发票（有效）"
+            pair_state = "none"
+            exception = ""
+
+        # 如果官方原始状态已经提示红冲但缺红字票，不能继续把蓝票当正常有效金额；
+        # 先从“有效净额”中隔离，直到红字票补齐后由红蓝签名金额自动抵消。
+        include = red_status != "blue_red_pending"
+        result[row.id] = {
+            **base,
+            "invoiceStatusLabel": label,
+            "redStatus": red_status,
+            "redPairStatus": pair_state,
+            "redPairMethod": "manual" if any(red_pair_state.get(red.id) == "paired_manual" for red in reds) else ("official_ref" if reds else ""),
+            "redRelatedInvoiceId": related_ids[0] if len(related_ids) == 1 else None,
+            "redRelatedInvoiceNo": "、".join(related_nos),
+            "redRelatedInvoiceIds": related_ids,
+            "redRelatedInvoiceNos": related_nos,
+            "redNoticeNo": "、".join(dict.fromkeys(notice_nos)),
+            "redOffsetAmount": str(offset.quantize(Decimal("0.01"))),
+            "remainingAfterRedAmount": str(remaining.quantize(Decimal("0.01"))),
+            # 蓝字原额仍作为正数入账；配对红字票以负数入账，汇总时自然形成净额。
+            "accountingNetAmount": str(amount.quantize(Decimal("0.01"))) if include else "0.00",
+            "accountingNetIncluded": include,
+            "accountingException": exception,
+        }
     return result
+
+
+def _red_trace_context(rows: list[TaxInvoice], db: Session | None = None) -> dict[int, dict]:
+    """兼容入口；有 db 时使用跨账期、跨分页的标准红蓝配对。"""
+    if db is not None:
+        return red_accounting_context(db, rows)
+
+    # 无数据库上下文时只做单票静态标识，不猜红蓝关系。
+    result: dict[int, dict] = {}
+    for row in rows:
+        color = _invoice_color(row)
+        amount = Decimal(str(row.total_amount or 0))
+        if row.status == "void":
+            label, red_status = "作废发票", "void"
+        elif color == "red":
+            label, red_status = "红字发票（待关联蓝字）", "red_invoice_unpaired"
+        elif color == "blue":
+            label, red_status = "蓝字发票（有效）", "none"
+        else:
+            label, red_status = "待确认发票", "unknown"
+        result[row.id] = {
+            "invoiceColor": color,
+            "invoiceStatusLabel": label,
+            "redStatus": red_status,
+            "redPairStatus": "unpaired" if color == "red" else "none",
+            "redRelatedInvoiceId": None,
+            "redRelatedInvoiceNo": _red_reference(row) if color == "red" else "",
+            "redRelatedInvoiceIds": [],
+            "redRelatedInvoiceNos": [],
+            "redNoticeNo": _red_notice_number(row),
+            "redOffsetAmount": "0.00",
+            "remainingAfterRedAmount": str(max(amount, Decimal("0")).quantize(Decimal("0.01"))),
+            "accountingNetAmount": str(amount.quantize(Decimal("0.01"))) if is_effective_for_accounting(row) else "0.00",
+            "accountingNetIncluded": is_effective_for_accounting(row),
+            "accountingException": "红字发票未在当前上下文关联蓝字票" if color == "red" else "",
+        }
+    return result
+
+
+
+def red_blue_candidates(
+    db: Session, red_invoice_id: int, keyword: str = "", limit: int = 30
+) -> list[dict]:
+    red = db.get(TaxInvoice, red_invoice_id)
+    if red is None:
+        raise LookupError(f"tax_invoices #{red_invoice_id} 不存在")
+    if _invoice_color(red) != "red":
+        raise ValueError("只有红字发票需要人工指定对应蓝字发票")
+    query = filter_visible_invoices(
+        db.query(TaxInvoice).filter(
+            TaxInvoice.id != red.id,
+            TaxInvoice.direction == red.direction,
+        )
+    )
+    rows = query.order_by(TaxInvoice.issue_date.desc().nullslast(), TaxInvoice.id.desc()).limit(300).all()
+    needle = str(keyword or "").strip().lower()
+    result = []
+    red_amount = abs(Decimal(str(red.total_amount or 0)))
+    for blue in rows:
+        if _invoice_color(blue) != "blue":
+            continue
+        haystack = " ".join([
+            blue.invoice_number or "", blue.invoice_code or "", blue.seller_name or "",
+            blue.buyer_name or "", blue.seller_tax_id or "", blue.buyer_tax_id or "",
+        ]).lower()
+        if needle and needle not in haystack:
+            continue
+        tax_match = (
+            (not red.seller_tax_id or not blue.seller_tax_id or red.seller_tax_id == blue.seller_tax_id)
+            and (not red.buyer_tax_id or not blue.buyer_tax_id or red.buyer_tax_id == blue.buyer_tax_id)
+        )
+        amount = Decimal(str(blue.total_amount or 0))
+        result.append({
+            "invoiceId": blue.id,
+            "invoiceNumber": blue.invoice_number or "",
+            "invoiceCode": blue.invoice_code or "",
+            "issueDate": blue.issue_date.isoformat() if blue.issue_date else None,
+            "sellerName": blue.seller_name or "",
+            "buyerName": blue.buyer_name or "",
+            "totalAmount": str(quantize(amount)),
+            "taxPartyMatched": tax_match,
+            "amountCanCoverRed": amount + _RED_TOLERANCE >= red_amount,
+        })
+    result.sort(
+        key=lambda item: (
+            not item["taxPartyMatched"],
+            not item["amountCanCoverRed"],
+            abs(Decimal(item["totalAmount"]) - red_amount),
+        )
+    )
+    return result[: max(1, min(limit, 100))]
+
+
+def set_manual_red_blue_relation(
+    db: Session, red_invoice_id: int, blue_invoice_id: int, note: str = "", actor: str = "system"
+) -> dict:
+    red = db.get(TaxInvoice, red_invoice_id)
+    blue = db.get(TaxInvoice, blue_invoice_id)
+    if red is None or blue is None:
+        raise LookupError("红字或蓝字发票不存在")
+    if _invoice_color(red) != "red":
+        raise ValueError("指定来源必须是红字发票")
+    if _invoice_color(blue) != "blue":
+        raise ValueError("指定目标必须是蓝字发票")
+    if red.direction != blue.direction:
+        raise ValueError("红字与蓝字发票方向不一致")
+    if red.seller_tax_id and blue.seller_tax_id and red.seller_tax_id != blue.seller_tax_id:
+        raise ValueError("红字与蓝字发票销方税号不一致")
+    if red.buyer_tax_id and blue.buyer_tax_id and red.buyer_tax_id != blue.buyer_tax_id:
+        raise ValueError("红字与蓝字发票购方税号不一致")
+
+    existing = db.query(TaxInvoiceLink).filter(
+        TaxInvoiceLink.invoice_id == red.id,
+        TaxInvoiceLink.target_type == MANUAL_RED_BLUE_TARGET_TYPE,
+    ).all()
+    chosen = None
+    for link in existing:
+        if link.target_id == blue.id:
+            chosen = link
+            link.match_method = "manual"
+            link.confirmed = True
+            link.note = note or "人工确认红蓝发票关系"
+        elif link.match_method != "rejected" or link.confirmed:
+            link.match_method = "rejected"
+            link.confirmed = False
+            link.note = "被新的人工红蓝关联替代"
+    if chosen is None:
+        chosen = TaxInvoiceLink(
+            invoice_id=red.id,
+            target_type=MANUAL_RED_BLUE_TARGET_TYPE,
+            target_id=blue.id,
+            allocated_amount=None,
+            match_method="manual",
+            confirmed=True,
+            note=note or "人工确认红蓝发票关系",
+        )
+        db.add(chosen)
+        db.flush()
+    audit(
+        db, actor, "tax.invoice.red_blue_relation.set", "tax_invoices", red.id,
+        {"blueInvoiceId": blue.id, "note": note}, commit=False,
+    )
+    db.commit()
+    return red_accounting_context(db, [red]).get(red.id, {})
+
+
+def clear_manual_red_blue_relation(
+    db: Session, red_invoice_id: int, actor: str = "system"
+) -> dict:
+    red = db.get(TaxInvoice, red_invoice_id)
+    if red is None:
+        raise LookupError(f"tax_invoices #{red_invoice_id} 不存在")
+    links = db.query(TaxInvoiceLink).filter(
+        TaxInvoiceLink.invoice_id == red.id,
+        TaxInvoiceLink.target_type == MANUAL_RED_BLUE_TARGET_TYPE,
+        TaxInvoiceLink.match_method != "rejected",
+    ).all()
+    for link in links:
+        link.match_method = "rejected"
+        link.confirmed = False
+        link.note = "人工解除红蓝关联"
+    audit(
+        db, actor, "tax.invoice.red_blue_relation.clear", "tax_invoices", red.id,
+        {"count": len(links)}, commit=False,
+    )
+    db.commit()
+    return red_accounting_context(db, [red]).get(red.id, {})
+
+
+def _red_settlement_context(db: Session, rows: list[TaxInvoice]) -> dict[int, dict]:
+    red_rows = [row for row in rows if _invoice_color(row) == "red"]
+    if not red_rows:
+        return {}
+    ids = [row.id for row in red_rows]
+    links = db.query(TaxInvoiceLink).filter(
+        TaxInvoiceLink.invoice_id.in_(ids),
+        TaxInvoiceLink.target_type.in_(RED_SETTLEMENT_TARGET_TYPES),
+        TaxInvoiceLink.match_method != "rejected",
+        TaxInvoiceLink.confirmed.is_(True),
+    ).order_by(TaxInvoiceLink.id).all()
+    bank_ids = {
+        link.target_id for link in links if link.target_type == RED_BANK_REFUND_TARGET_TYPE
+    }
+    banks = {
+        row.id: row
+        for row in db.query(BankTransaction).filter(BankTransaction.id.in_(bank_ids)).all()
+    } if bank_ids else {}
+    invoice_ids = {
+        link.target_id for link in links if link.target_type == RED_FUTURE_OFFSET_TARGET_TYPE
+    }
+    target_invoices = {
+        row.id: row
+        for row in db.query(TaxInvoice).filter(TaxInvoice.id.in_(invoice_ids)).all()
+    } if invoice_ids else {}
+    grouped: dict[int, list[TaxInvoiceLink]] = {}
+    for link in links:
+        grouped.setdefault(link.invoice_id, []).append(link)
+    result = {}
+    for red in red_rows:
+        target = abs(Decimal(str(red.total_amount or 0)))
+        items = []
+        settled = Decimal("0")
+        for link in grouped.get(red.id, []):
+            amount = max(Decimal(str(link.allocated_amount or 0)), Decimal("0"))
+            settled += amount
+            item = {
+                "linkId": link.id,
+                "type": link.target_type,
+                "amount": str(quantize(amount)),
+                "note": link.note or "",
+            }
+            if link.target_type == RED_BANK_REFUND_TARGET_TYPE:
+                txn = banks.get(link.target_id)
+                item.update({
+                    "targetId": link.target_id,
+                    "targetLabel": (
+                        f"{txn.txn_date.isoformat()} 收款 {quantize(to_decimal(txn.amount))} {txn.counterparty_name}"
+                        if txn else f"银行入账 #{link.target_id}"
+                    ),
+                    "txnDate": txn.txn_date.isoformat() if txn else None,
+                    "voucherNo": txn.voucher_no if txn else "",
+                })
+            elif link.target_type == RED_FUTURE_OFFSET_TARGET_TYPE:
+                invoice = target_invoices.get(link.target_id)
+                item.update({
+                    "targetId": link.target_id,
+                    "targetLabel": f"后续发票 {invoice.invoice_number}" if invoice else f"后续发票 #{link.target_id}",
+                })
+            elif link.target_type == RED_PERSONAL_REFUND_TARGET_TYPE:
+                item.update({"targetId": None, "targetLabel": "退回个人垫付款人"})
+            else:
+                item.update({"targetId": None, "targetLabel": "其他人工处理"})
+            items.append(item)
+        remaining = max(target - settled, Decimal("0"))
+        over = max(settled - target, Decimal("0"))
+        if target <= _RED_TOLERANCE:
+            status = "not_applicable"
+        elif over > _RED_TOLERANCE:
+            status = "over_settled"
+        elif remaining <= _RED_TOLERANCE:
+            status = "settled"
+        elif settled > 0:
+            status = "partial"
+        else:
+            status = "unsettled"
+        result[red.id] = {
+            "redSettlementStatus": status,
+            "redSettlementTargetAmount": str(quantize(target)),
+            "redSettledAmount": str(quantize(settled)),
+            "redSettlementRemainingAmount": str(quantize(remaining)),
+            "redSettlementOverAmount": str(quantize(over)),
+            "redSettlements": items,
+        }
+    return result
+
+
+def red_refund_candidates(
+    db: Session, red_invoice_id: int, keyword: str = "", limit: int = 30
+) -> list[dict]:
+    red = db.get(TaxInvoice, red_invoice_id)
+    if red is None:
+        raise LookupError(f"tax_invoices #{red_invoice_id} 不存在")
+    if _invoice_color(red) != "red" or red.direction != "input":
+        raise ValueError("只有进项红字发票需要匹配供应商退款")
+    query = db.query(BankTransaction).filter(BankTransaction.direction == "in")
+    needle = str(keyword or "").strip()
+    if needle:
+        query = query.filter(
+            or_(
+                BankTransaction.counterparty_name.ilike(f"%{needle}%"),
+                BankTransaction.voucher_no.ilike(f"%{needle}%"),
+                BankTransaction.summary.ilike(f"%{needle}%"),
+            )
+        )
+    txns = query.order_by(BankTransaction.txn_date.desc(), BankTransaction.id.desc()).limit(200).all()
+    supplier = re.sub(r"\s+", "", red.seller_name or "").lower()
+    target = abs(Decimal(str(red.total_amount or 0)))
+    rows = []
+    for txn in txns:
+        name = re.sub(r"\s+", "", txn.counterparty_name or "").lower()
+        amount = Decimal(str(txn.amount or 0))
+        rows.append({
+            "txnId": txn.id,
+            "txnDate": txn.txn_date.isoformat(),
+            "amount": str(quantize(amount)),
+            "counterpartyName": txn.counterparty_name or "",
+            "voucherNo": txn.voucher_no or "",
+            "summary": txn.summary or "",
+            "supplierMatched": bool(supplier and name and (supplier in name or name in supplier)),
+            "amountMatched": abs(amount - target) <= _RED_TOLERANCE,
+        })
+    rows.sort(key=lambda row: (not row["supplierMatched"], not row["amountMatched"], row["txnDate"]), reverse=False)
+    return rows[: max(1, min(limit, 100))]
+
+
+def add_red_settlement(
+    db: Session,
+    red_invoice_id: int,
+    settlement_type: str,
+    amount: Decimal | str | int,
+    target_id: int | None = None,
+    note: str = "",
+    actor: str = "system",
+) -> dict:
+    red = db.get(TaxInvoice, red_invoice_id)
+    if red is None:
+        raise LookupError(f"tax_invoices #{red_invoice_id} 不存在")
+    if _invoice_color(red) != "red":
+        raise ValueError("只有红字发票可以登记红冲结算")
+    if settlement_type not in RED_SETTLEMENT_TARGET_TYPES:
+        raise ValueError("无效的红冲结算类型")
+    value = quantize(to_decimal(amount))
+    if value <= 0:
+        raise ValueError("结算金额必须大于 0")
+    if settlement_type == RED_BANK_REFUND_TARGET_TYPE:
+        if target_id is None:
+            raise ValueError("银行退款必须指定入账流水")
+        txn = db.get(BankTransaction, target_id)
+        if txn is None or txn.direction != "in":
+            raise ValueError("只能关联公司银行账户的收入流水")
+        already_used = sum(
+            (
+                Decimal(str(link.allocated_amount or 0))
+                for link in db.query(TaxInvoiceLink).filter(
+                    TaxInvoiceLink.target_type == RED_BANK_REFUND_TARGET_TYPE,
+                    TaxInvoiceLink.target_id == target_id,
+                    TaxInvoiceLink.match_method != "rejected",
+                    TaxInvoiceLink.confirmed.is_(True),
+                ).all()
+            ),
+            Decimal("0"),
+        )
+        txn_amount = max(Decimal(str(txn.amount or 0)), Decimal("0"))
+        if already_used + value - txn_amount > _RED_TOLERANCE:
+            raise ValueError(
+                f"该银行退款流水可用金额不足：流水 {quantize(txn_amount)}，已占用 {quantize(already_used)}"
+            )
+    elif settlement_type == RED_FUTURE_OFFSET_TARGET_TYPE:
+        if target_id is None:
+            raise ValueError("后续货款抵扣必须指定后续蓝字进项发票")
+        future = db.get(TaxInvoice, target_id)
+        if future is None or future.direction != "input" or _invoice_color(future) != "blue":
+            raise ValueError("后续抵扣目标必须是蓝字进项发票")
+        if red.seller_tax_id and future.seller_tax_id and red.seller_tax_id != future.seller_tax_id:
+            raise ValueError("后续抵扣发票与红字发票供应商税号不一致")
+        if red.issue_date and future.issue_date and future.issue_date < red.issue_date:
+            raise ValueError("后续货款抵扣目标的开票日期不能早于红字发票")
+        already_offset = sum(
+            (
+                Decimal(str(link.allocated_amount or 0))
+                for link in db.query(TaxInvoiceLink).filter(
+                    TaxInvoiceLink.target_type == RED_FUTURE_OFFSET_TARGET_TYPE,
+                    TaxInvoiceLink.target_id == target_id,
+                    TaxInvoiceLink.match_method != "rejected",
+                    TaxInvoiceLink.confirmed.is_(True),
+                ).all()
+            ),
+            Decimal("0"),
+        )
+        future_available = max(effective_invoice_amount_after_red(db, future) - already_offset, Decimal("0"))
+        if value - future_available > _RED_TOLERANCE:
+            raise ValueError(
+                f"后续发票可抵扣余额不足：有效金额 {quantize(effective_invoice_amount_after_red(db, future))}，已占用 {quantize(already_offset)}"
+            )
+    else:
+        target_id = red.id
+
+    current = _red_settlement_context(db, [red]).get(red.id, {})
+    remaining = Decimal(str(current.get("redSettlementRemainingAmount") or abs(Decimal(str(red.total_amount or 0)))))
+    if value - remaining > _RED_TOLERANCE:
+        raise ValueError(f"结算金额超过红字发票尚未处理金额 {quantize(remaining)}")
+
+    link = TaxInvoiceLink(
+        invoice_id=red.id,
+        target_type=settlement_type,
+        target_id=int(target_id or red.id),
+        allocated_amount=value,
+        match_method="manual",
+        confirmed=True,
+        note=note,
+    )
+    # 同一银行流水/后续发票只能登记一条；个人退款/其他处理复用唯一行并累加更新。
+    existing = db.query(TaxInvoiceLink).filter(
+        TaxInvoiceLink.invoice_id == red.id,
+        TaxInvoiceLink.target_type == settlement_type,
+        TaxInvoiceLink.target_id == int(target_id or red.id),
+    ).first()
+    if existing is not None:
+        if existing.match_method == "rejected":
+            existing.match_method = "manual"
+            existing.confirmed = True
+            existing.allocated_amount = value
+            existing.note = note
+            link = existing
+        else:
+            raise ValueError("该红冲结算对象已经登记")
+    else:
+        db.add(link)
+        db.flush()
+    audit(
+        db, actor, "tax.invoice.red_settlement.add", "tax_invoices", red.id,
+        {"type": settlement_type, "targetId": target_id, "amount": str(value), "note": note},
+        commit=False,
+    )
+    db.commit()
+    return _red_settlement_context(db, [red]).get(red.id, {})
+
+
+def remove_red_settlement(
+    db: Session, red_invoice_id: int, link_id: int, actor: str = "system"
+) -> dict:
+    red = db.get(TaxInvoice, red_invoice_id)
+    link = db.get(TaxInvoiceLink, link_id)
+    if red is None or link is None or link.invoice_id != red.id or link.target_type not in RED_SETTLEMENT_TARGET_TYPES:
+        raise LookupError("红冲结算记录不存在")
+    link.match_method = "rejected"
+    link.confirmed = False
+    audit(
+        db, actor, "tax.invoice.red_settlement.remove", "tax_invoices", red.id,
+        {"linkId": link.id, "type": link.target_type}, commit=False,
+    )
+    db.commit()
+    return _red_settlement_context(db, [red]).get(red.id, {})
+
+
+def _vat_context(db: Session, rows: list[TaxInvoice], red_context: dict[int, dict]) -> dict[int, dict]:
+    """派生进项抵扣/红冲转出状态；人工财务确认优先于自动推断。
+
+    自动规则只负责提出“待确认”事实，不擅自声称已完成申报。
+    人工覆盖写入 raw[_finance_meta]，原始税务导入字段仍原样保留。
+    """
+    if not rows:
+        return {}
+    row_map = {row.id: row for row in rows}
+    related_ids = {
+        int(ctx["redRelatedInvoiceId"])
+        for ctx in red_context.values()
+        if ctx.get("redRelatedInvoiceId")
+    }
+    for related in db.query(TaxInvoice).filter(TaxInvoice.id.in_(related_ids)).all() if related_ids else []:
+        row_map.setdefault(related.id, related)
+    line_map = invoice_line_summaries(db, list(row_map.values()))
+    result: dict[int, dict] = {}
+    for row in rows:
+        if row.direction != "input":
+            result[row.id] = {
+                "vatDeductibleStatus": "not_applicable",
+                "vatDeductibleAmount": "0.00",
+                "vatDeductibleManual": False,
+                "inputVatTransferStatus": "not_applicable",
+                "inputVatTransferAmount": "0.00",
+                "inputVatTransferManual": False,
+            }
+            continue
+
+        source = row
+        ctx = red_context.get(row.id, {})
+        if ctx.get("invoiceColor") == "red" and ctx.get("redRelatedInvoiceId"):
+            source = row_map.get(int(ctx["redRelatedInvoiceId"]), row)
+
+        line_text = " ".join(
+            str(item.get("goodsName") or "")
+            for item in (line_map.get(source.id, {}).get("lineItems") or [])
+        )
+        text = f"{_raw_invoice_text(source)} {line_text}"
+        source_tax_amount = abs(Decimal(str(source.tax_amount or 0)))
+
+        source_meta = _finance_meta(source)
+        manual_deductible = str(source_meta.get("vatDeductibleStatus") or "")
+        if manual_deductible in _VAT_DEDUCTIBLE_MANUAL_VALUES:
+            deductible_status = manual_deductible
+            deductible_manual = True
+            deductible_amount = (
+                source_tax_amount if manual_deductible == "deductible" else Decimal("0")
+            )
+        elif _NON_DEDUCTIBLE_VAT_RE.search(text):
+            deductible_status = "non_deductible"
+            deductible_manual = False
+            deductible_amount = Decimal("0")
+        elif source.verified:
+            deductible_status = "verified_pending_tax_filing"
+            deductible_manual = False
+            deductible_amount = source_tax_amount
+        else:
+            deductible_status = "pending"
+            deductible_manual = False
+            deductible_amount = Decimal("0")
+
+        transfer_status = "not_applicable"
+        transfer_amount = Decimal("0")
+        transfer_manual = False
+        if ctx.get("invoiceColor") == "red" and ctx.get("redRelatedInvoiceId"):
+            blue = source
+            if blue.verified:
+                transfer_status = "required_confirmation"
+                transfer_amount = abs(Decimal(str(row.tax_amount or blue.tax_amount or 0)))
+            else:
+                transfer_status = "not_required_unverified_blue"
+
+            row_meta = _finance_meta(row)
+            manual_transfer = str(row_meta.get("inputVatTransferStatus") or "")
+            if manual_transfer in _INPUT_VAT_TRANSFER_MANUAL_VALUES:
+                transfer_status = manual_transfer
+                transfer_manual = True
+                manual_amount = row_meta.get("inputVatTransferAmount")
+                if manual_amount not in (None, ""):
+                    transfer_amount = abs(to_decimal(manual_amount))
+
+        result[row.id] = {
+            "vatDeductibleStatus": deductible_status,
+            "vatDeductibleAmount": str(quantize(deductible_amount)),
+            "vatDeductibleManual": deductible_manual,
+            "inputVatTransferStatus": transfer_status,
+            "inputVatTransferAmount": str(quantize(transfer_amount)),
+            "inputVatTransferManual": transfer_manual,
+        }
+    return result
+
+
+def set_vat_review(
+    db: Session,
+    invoice_id: int,
+    *,
+    vat_deductible_status: str | None = None,
+    input_vat_transfer_status: str | None = None,
+    input_vat_transfer_amount: Decimal | str | int | None = None,
+    note: str = "",
+    actor: str = "system",
+) -> dict:
+    """人工确认进项抵扣/红冲进项税转出事实，并保留审计。
+
+    deductible 状态写在蓝字原票；红字转出状态写在红字凭证自身。
+    空值表示不修改该维度。
+    """
+    invoice = db.get(TaxInvoice, invoice_id)
+    if invoice is None:
+        raise LookupError(f"tax_invoices #{invoice_id} 不存在")
+    if invoice.direction != "input":
+        raise ValueError("只有进项发票可以维护进项税状态")
+
+    updates: dict[str, object] = {}
+    if vat_deductible_status is not None:
+        if vat_deductible_status not in _VAT_DEDUCTIBLE_MANUAL_VALUES:
+            raise ValueError("进项抵扣状态仅支持 pending / deductible / non_deductible")
+        if _invoice_color(invoice) == "red":
+            raise ValueError("红字发票的可抵扣属性继承对应蓝字票，请在蓝字原票维护")
+        if vat_deductible_status == "deductible":
+            line_text = " ".join(
+                str(item.get("goodsName") or "")
+                for item in (
+                    invoice_line_summaries(db, [invoice]).get(invoice.id, {}).get("lineItems") or []
+                )
+            )
+            if _NON_DEDUCTIBLE_VAT_RE.search(f"{_raw_invoice_text(invoice)} {line_text}"):
+                raise ValueError("该发票内容属于当前规则明确不可抵扣的进项项目，不能人工改为可抵扣")
+        updates["vatDeductibleStatus"] = vat_deductible_status
+
+    if input_vat_transfer_status is not None:
+        if input_vat_transfer_status not in _INPUT_VAT_TRANSFER_MANUAL_VALUES:
+            raise ValueError("无效的进项税转出状态")
+        if _invoice_color(invoice) != "red":
+            raise ValueError("进项税转出确认只适用于红字进项发票")
+        updates["inputVatTransferStatus"] = input_vat_transfer_status
+        if input_vat_transfer_amount is not None:
+            amount = abs(quantize(to_decimal(input_vat_transfer_amount)))
+            updates["inputVatTransferAmount"] = str(amount)
+
+    if note:
+        updates["vatReviewNote"] = note
+    if not updates:
+        raise ValueError("没有需要更新的进项税状态")
+
+    _write_finance_meta(invoice, updates)
+    audit(
+        db, actor, "tax.invoice.vat_review.set", "tax_invoices", invoice.id,
+        {
+            "vatDeductibleStatus": vat_deductible_status,
+            "inputVatTransferStatus": input_vat_transfer_status,
+            "inputVatTransferAmount": (
+                str(input_vat_transfer_amount) if input_vat_transfer_amount is not None else None
+            ),
+            "note": note,
+        },
+        commit=False,
+    )
+    db.commit()
+    red_ctx = red_accounting_context(db, [invoice])
+    return {
+        **_vat_context(db, [invoice], red_ctx).get(invoice.id, {}),
+        "invoiceId": invoice.id,
+    }
+
+
+def effective_invoice_amount_after_red(db: Session, invoice: TaxInvoice) -> Decimal:
+    """业务匹配/付款核对可继续使用的蓝字净额。
+
+    红字发票本身返回 0；蓝字部分红冲返回未冲余额；全额红冲、待补红字凭证、
+    作废/待确认、红冲超额异常均返回 0，避免继续进入采购/银行自动匹配。
+    """
+    context = red_accounting_context(db, [invoice]).get(invoice.id, {})
+    if context.get("invoiceColor") != "blue":
+        return Decimal("0")
+    if context.get("redStatus") in {
+        "fully_red_offset", "blue_red_pending", "over_red_offset", "void", "unknown"
+    }:
+        return Decimal("0")
+    try:
+        return max(Decimal(str(context.get("remainingAfterRedAmount") or "0")), Decimal("0"))
+    except Exception:
+        return Decimal("0")
+
+
+def is_bank_payment_reconciliation_eligible(
+    invoice: TaxInvoice, db: Session | None = None
+) -> bool:
+    """银行付款核对只允许仍有有效蓝字净额的进项发票。"""
+    total = Decimal(str(invoice.total_amount)) if invoice.total_amount is not None else Decimal("0")
+    if invoice.direction != "input" or invoice.status in {"void", "unknown"}:
+        return False
+    if _invoice_color(invoice) != "blue" or total <= 0:
+        return False
+    if db is None:
+        return True
+    return effective_invoice_amount_after_red(db, invoice) > 0
+
+
+def bank_payment_reconciliation_ineligible_reason(
+    invoice: TaxInvoice, db: Session | None = None
+) -> str:
+    """返回不参与银行付款核对的明确财务原因。"""
+    if invoice.status == "void":
+        return "作废发票不参与银行付款核对"
+    if invoice.status == "unknown":
+        return "待确认发票不参与银行付款核对"
+    if _invoice_color(invoice) == "red":
+        return "红字/红冲相关发票不参与银行付款核对；红字发票用于冲减对应蓝字发票"
+    total = Decimal(str(invoice.total_amount)) if invoice.total_amount is not None else Decimal("0")
+    if total <= 0:
+        return "非正数金额发票不参与银行付款核对"
+    if invoice.direction != "input":
+        return "非进项发票不参与银行付款核对"
+    if db is not None:
+        context = red_accounting_context(db, [invoice]).get(invoice.id, {})
+        red_status = context.get("redStatus")
+        if red_status == "fully_red_offset":
+            return "蓝字发票已全额红冲，不再参与银行付款核对"
+        if red_status == "blue_red_pending":
+            return "蓝字发票已显示红冲但缺少对应红字发票，待补齐后再核对"
+        if red_status == "over_red_offset":
+            return "蓝字发票红冲金额异常，需先完成红蓝发票核对"
+    return "该发票当前不参与银行付款核对"
 
 
 def _normalize_row(
@@ -573,6 +1514,8 @@ def _payment_method_context(row: TaxInvoice, bank_status: str) -> dict[str, str]
         final_method = ""
     elif bank_status == "matched":
         final_method = "corporate"
+    elif bank_status in {"overpaid_after_red", "red_overpayment_settled"}:
+        final_method = "corporate"
     elif bank_status == "partial" and manual_method == "personal":
         final_method = "mixed"
     elif bank_status == "partial":
@@ -620,8 +1563,18 @@ def _serialize_invoice(row: TaxInvoice, context: dict | None = None, db: Session
         payload.update(context)
     # 兼容字段也必须镜像实时业务匹配状态，禁止旧调用读到数据库缓存旧值。
     payload["matchStatus"] = payload.get("businessMatchStatus", row.match_status)
-    # categoryLabel 跟随最终 category（含明细兜底识别），保证前后端文案一致；
-    # 销项走独立 OUTPUT_CATEGORY 文案（空 = 待判断）。
+    # 红字发票的会计分类必须继承对应蓝字原票，避免红字冲减被记到另一个费用科目。
+    payload["categoryInherited"] = False
+    payload["categoryInheritedFromInvoiceId"] = None
+    if db is not None and payload.get("invoiceColor") == "red" and payload.get("redRelatedInvoiceId"):
+        blue = db.get(TaxInvoice, int(payload["redRelatedInvoiceId"]))
+        if blue is not None:
+            payload["category"] = blue.category or ""
+            payload["processingStatus"] = _effective_processing_status(blue)
+            payload["categoryInherited"] = True
+            payload["categoryInheritedFromInvoiceId"] = blue.id
+
+    # categoryLabel 跟随最终 category；销项走独立 OUTPUT_CATEGORY 文案（空 = 待判断）。
     payload["categoryLabel"] = category_label_for_direction(row.direction, payload.get("category") or "")
     # 银行付款核对与发票业务匹配是两个独立域。
     if "bankPaymentStatus" not in payload:
@@ -632,6 +1585,8 @@ def _serialize_invoice(row: TaxInvoice, context: dict | None = None, db: Session
                 "bankPaymentStatus": "not_applicable",
                 "bankPaidAmount": "0.00",
                 "bankRemainingAmount": "0.00",
+                "bankOverpaidAmount": "0.00",
+                "bankEffectiveInvoiceAmount": "0.00",
             })
 
     # 付款方式只由“银行付款事实 + 人工 personal 标记”派生。
@@ -651,6 +1606,7 @@ def serialize_invoice(row: TaxInvoice, db: Session | None = None) -> dict:
     if db is None:
         return _serialize_invoice(row)
 
+    red_ctx = _red_trace_context([row], db=db)
     context = {
         **_invoice_business_context(db, [row]).get(row.id, {
             "links": [],
@@ -659,14 +1615,20 @@ def serialize_invoice(row: TaxInvoice, db: Session | None = None) -> dict:
             "businessMatchStatus": row.match_status,
             "businessMatchedAmount": "0.00",
             "businessRemainingAmount": str(quantize(to_decimal(row.total_amount))),
+            "businessOvermatchedAmount": "0.00",
+            "businessMatchException": "",
         }),
-        **_red_trace_context([row]).get(row.id, {}),
+        **red_ctx.get(row.id, {}),
         **invoice_line_summaries(db, [row]).get(row.id, {"lineItems": [], "lineItemCount": 0}),
         **_invoice_bank_payment_context(db, [row]).get(row.id, {
             "bankPaymentStatus": "not_applicable",
             "bankPaidAmount": "0.00",
             "bankRemainingAmount": "0.00",
+            "bankOverpaidAmount": "0.00",
+            "bankEffectiveInvoiceAmount": "0.00",
         }),
+        **_red_settlement_context(db, [row]).get(row.id, {}),
+        **_vat_context(db, [row], red_ctx).get(row.id, {}),
     }
     if row.direction == "input":
         context["paymentMethod"] = (
@@ -685,7 +1647,11 @@ def serialize_invoice(row: TaxInvoice, db: Session | None = None) -> dict:
 
 
 def _invoice_bank_payment_context(db: Session, rows: list[TaxInvoice]) -> dict[int, dict]:
-    """独立计算进项发票的银行付款核对状态；绝不读取/修改 match_status。"""
+    """独立计算进项发票银行付款状态，并把红冲后的退款/冲抵结算回写到“未解决超额”。
+
+    bankOverpaidAmount 是历史超额付款事实；bankOverpaidUnsettledAmount 才是当前仍需处理金额。
+    已处理完成后保留历史金额，但状态变为 red_overpayment_settled。
+    """
     input_rows = [row for row in rows if row.direction == "input"]
     if not input_rows:
         return {}
@@ -716,29 +1682,60 @@ def _invoice_bank_payment_context(db: Session, rows: list[TaxInvoice]) -> dict[i
             link.invoice_id, Decimal("0")
         ) + amount
 
+    red_context = red_accounting_context(db, input_rows)
+    related_red_ids = sorted({
+        int(red_id)
+        for row in input_rows
+        for red_id in (red_context.get(row.id, {}).get("redRelatedInvoiceIds") or [])
+    })
+    related_red_rows = (
+        db.query(TaxInvoice).filter(TaxInvoice.id.in_(related_red_ids)).all()
+        if related_red_ids else []
+    )
+    settlement_by_red = _red_settlement_context(db, related_red_rows) if related_red_rows else {}
+
     result: dict[int, dict] = {}
     tolerance = Decimal("0.01")
     for row in input_rows:
-        if not is_bank_payment_reconciliation_eligible(row):
-            result[row.id] = {
-                "bankPaymentStatus": "not_applicable",
-                "bankPaidAmount": "0.00",
-                "bankRemainingAmount": "0.00",
-            }
-            continue
-        total = Decimal(str(row.total_amount or 0))
-        paid = min(max(allocated_by_invoice.get(row.id, Decimal("0")), Decimal("0")), total)
-        remaining = max(total - paid, Decimal("0"))
-        if paid <= 0:
+        total = effective_invoice_amount_after_red(db, row)
+        actual_paid = max(allocated_by_invoice.get(row.id, Decimal("0")), Decimal("0"))
+        overpaid = max(actual_paid - total, Decimal("0"))
+        remaining = max(total - actual_paid, Decimal("0"))
+
+        related_ids = red_context.get(row.id, {}).get("redRelatedInvoiceIds") or []
+        red_settled = sum(
+            (
+                Decimal(str(settlement_by_red.get(int(red_id), {}).get("redSettledAmount") or "0"))
+                for red_id in related_ids
+            ),
+            Decimal("0"),
+        )
+        overpaid_settled = min(overpaid, max(red_settled, Decimal("0")))
+        overpaid_unsettled = max(overpaid - overpaid_settled, Decimal("0"))
+
+        if actual_paid > 0 and overpaid > tolerance and _invoice_color(row) == "blue":
+            status = (
+                "red_overpayment_settled"
+                if overpaid_unsettled <= tolerance
+                else "overpaid_after_red"
+            )
+        elif not is_bank_payment_reconciliation_eligible(row, db=db):
+            status = "not_applicable"
+        elif actual_paid <= 0:
             status = "unmatched"
         elif remaining <= tolerance:
             status = "matched"
         else:
             status = "partial"
+
         result[row.id] = {
             "bankPaymentStatus": status,
-            "bankPaidAmount": str(paid.quantize(Decimal("0.01"))),
+            "bankPaidAmount": str(actual_paid.quantize(Decimal("0.01"))),
             "bankRemainingAmount": str(remaining.quantize(Decimal("0.01"))),
+            "bankOverpaidAmount": str(overpaid.quantize(Decimal("0.01"))),
+            "bankOverpaidSettledAmount": str(overpaid_settled.quantize(Decimal("0.01"))),
+            "bankOverpaidUnsettledAmount": str(overpaid_unsettled.quantize(Decimal("0.01"))),
+            "bankEffectiveInvoiceAmount": str(total.quantize(Decimal("0.01"))),
         }
     return result
 
@@ -901,7 +1898,7 @@ def _invoice_business_context(db: Session, rows: list[TaxInvoice]) -> dict[int, 
                 "confirmed": bool(link.confirmed),
                 "note": link.note or "",
             })
-        invoice_total = quantize(to_decimal(invoice.total_amount))
+        invoice_total = quantize(effective_invoice_amount_after_red(db, invoice))
         explicit_allocated = sum(
             (
                 quantize(to_decimal(link.allocated_amount))
@@ -911,10 +1908,13 @@ def _invoice_business_context(db: Session, rows: list[TaxInvoice]) -> dict[int, 
             Decimal("0"),
         )
         has_unknown_allocation = any(link.allocated_amount is None for link in valid_invoice_links)
+        business_overmatched = max(explicit_allocated - max(invoice_total, Decimal("0")), Decimal("0"))
         if invoice_total > 0:
             business_matched = min(max(explicit_allocated, Decimal("0")), invoice_total)
             business_remaining = max(invoice_total - business_matched, Decimal("0"))
-            if invalid_link_count or has_unknown_allocation:
+            if business_overmatched > Decimal("0.01"):
+                business_status = "needs_review"
+            elif invalid_link_count or has_unknown_allocation:
                 business_status = "needs_review"
             elif business_matched <= Decimal("0"):
                 business_status = "needs_review" if invoice.match_status == "needs_review" else "unmatched"
@@ -925,7 +1925,11 @@ def _invoice_business_context(db: Session, rows: list[TaxInvoice]) -> dict[int, 
         else:
             business_matched = Decimal("0")
             business_remaining = Decimal("0")
-            business_status = invoice.match_status
+            business_status = (
+                "needs_review"
+                if business_overmatched > Decimal("0.01") or invalid_link_count
+                else invoice.match_status
+            )
 
         result[invoice_id] = {
             "links": link_rows,
@@ -934,6 +1938,11 @@ def _invoice_business_context(db: Session, rows: list[TaxInvoice]) -> dict[int, 
             "businessMatchStatus": business_status,
             "businessMatchedAmount": str(quantize(business_matched)),
             "businessRemainingAmount": str(quantize(business_remaining)),
+            "businessOvermatchedAmount": str(quantize(business_overmatched)),
+            "businessMatchException": (
+                f"红冲后有效金额 {quantize(max(invoice_total, Decimal('0')))}，历史业务已关联 {quantize(explicit_allocated)}，超额 {quantize(business_overmatched)}"
+                if business_overmatched > Decimal("0.01") else ""
+            ),
             "invalidLinkCount": invalid_link_count,
         }
     return result
@@ -1414,9 +2423,11 @@ def list_invoices(
         query = query.filter(TaxInvoice.verified == verified)
     rows = query.limit(min(max(limit, 1), 500)).offset(max(offset, 0)).all()
     context = _invoice_business_context(db, rows)
-    red_context = _red_trace_context(rows)
+    red_context = _red_trace_context(rows, db=db)
     line_context = invoice_line_summaries(db, rows)
     bank_payment_context = _invoice_bank_payment_context(db, rows)
+    settlement_context = _red_settlement_context(db, rows)
+    vat_context = _vat_context(db, rows, red_context)
     result = []
     for row in rows:
         ctx = {
@@ -1427,7 +2438,11 @@ def list_invoices(
                 "bankPaymentStatus": "not_applicable",
                 "bankPaidAmount": "0.00",
                 "bankRemainingAmount": "0.00",
+                "bankOverpaidAmount": "0.00",
+                "bankEffectiveInvoiceAmount": "0.00",
             }),
+            **settlement_context.get(row.id, {}),
+            **vat_context.get(row.id, {}),
         }
         # 明细兜底识别只面向进项（6+1）；销项分类不按货物名推断，空即待判断。
         if not row.category and row.direction != "output":
@@ -1440,7 +2455,7 @@ def list_invoices(
 
 def summary(db: Session) -> dict:
     rows = filter_visible_invoices(db.query(TaxInvoice)).all()
-    red_context = _red_trace_context(rows)
+    red_context = _red_trace_context(rows, db=db)
     business_context = _invoice_business_context(db, rows)
     active_import_ids = [
         row.id for row in db.query(TaxInvoiceImport.id).filter(TaxInvoiceImport.lifecycle == "active").all()
@@ -1459,20 +2474,24 @@ def summary(db: Session) -> dict:
         (Decimal(str(row.total_amount)) for row in rows if row.direction == "input" and row.total_amount is not None),
         Decimal("0"),
     )
-    effective_input_total = Decimal("0")
-    excluded_red_amount = Decimal("0")
-    for row in rows:
-        if row.direction != "input" or row.total_amount is None:
-            continue
-        amount = Decimal(str(row.total_amount))
-        if row.status == "issued" or amount < 0:
-            effective_input_total += amount
-        elif row.status == "red" and amount > 0:
-            # 已红冲蓝字票只有在对应红字票也存在时才进入净额；否则先排除并提示。
-            if red_context.get(row.id, {}).get("redRelatedInvoiceNo"):
-                effective_input_total += amount
-            else:
-                excluded_red_amount += amount
+    effective_input_total = sum(
+        (
+            Decimal(str(red_context.get(row.id, {}).get("accountingNetAmount") or "0"))
+            for row in rows
+            if row.direction == "input"
+        ),
+        Decimal("0"),
+    )
+    # 保留兼容字段名：这里表示“税务状态已显示红冲，但红字凭证尚未入库/关联”的蓝票原额。
+    excluded_red_amount = sum(
+        (
+            Decimal(str(row.total_amount or 0))
+            for row in rows
+            if row.direction == "input"
+            and red_context.get(row.id, {}).get("redStatus") == "blue_red_pending"
+        ),
+        Decimal("0"),
+    )
     out = {
         "total": len(rows),
         "activeBatchCount": len(active_import_ids),
@@ -1489,19 +2508,39 @@ def summary(db: Session) -> dict:
         "inputTotalAmount": float(effective_input_total),
         "rawInputTotalAmount": float(raw_input_total),
         "excludedRedAmount": float(excluded_red_amount),
+        "byRedStatus": {},
+        "redPairExceptionCount": sum(
+            1 for row in rows
+            if red_context.get(row.id, {}).get("accountingException")
+        ),
+        "redInvoiceCount": sum(
+            1 for row in rows if red_context.get(row.id, {}).get("invoiceColor") == "red"
+        ),
+        "partiallyRedOffsetBlueCount": sum(
+            1 for row in rows if red_context.get(row.id, {}).get("redStatus") == "partially_red_offset"
+        ),
+        "fullyRedOffsetBlueCount": sum(
+            1 for row in rows if red_context.get(row.id, {}).get("redStatus") == "fully_red_offset"
+        ),
     }
     for row in rows:
         out["byDirection"][row.direction] = out["byDirection"].get(row.direction, 0) + 1
         out["byStatus"][row.status] = out["byStatus"].get(row.status, 0) + 1
+        red_status = str(red_context.get(row.id, {}).get("redStatus") or "none")
+        out["byRedStatus"][red_status] = out["byRedStatus"].get(red_status, 0) + 1
         business_status = business_context.get(row.id, {}).get(
             "businessMatchStatus", row.match_status
         )
         out["byMatchStatus"][business_status] = out["byMatchStatus"].get(business_status, 0) + 1
         if row.direction == "input":
-            processing_status = _effective_processing_status(row)
+            category_source = row
+            related_blue_id = red_context.get(row.id, {}).get("redRelatedInvoiceId")
+            if red_context.get(row.id, {}).get("invoiceColor") == "red" and related_blue_id:
+                category_source = db.get(TaxInvoice, int(related_blue_id)) or row
+            processing_status = _effective_processing_status(category_source)
             out["byProcessing"][processing_status] = out["byProcessing"].get(processing_status, 0) + 1
-            # 分类与派生组计数：运营成本 / 报销成本 / 不计入 / 待判断。
-            category = row.category or ""
+            # 红字发票分类继承对应蓝字票，保证冲减和原费用科目一致。
+            category = category_source.category or ""
             out["byCategory"][category] = out["byCategory"].get(category, 0) + 1
             out["byCategoryGroup"][category_group(category)] += 1
         out["byVerification"]["verified" if row.verified else "unverified"] += 1
@@ -1771,7 +2810,12 @@ def set_invoice_categories(
     invoices = db.query(TaxInvoice).filter(TaxInvoice.id.in_(invoice_ids)).all()
     if not invoices:
         return []
+    red_context = red_accounting_context(db, invoices)
     for invoice in invoices:
+        if red_context.get(invoice.id, {}).get("invoiceColor") == "red":
+            raise ValueError(
+                f"红字发票 #{invoice.id} 的财务分类必须继承对应蓝字发票；请先核对红蓝关联，不能单独改红字票类别"
+            )
         validate_category_for_direction(invoice.direction, category)
     # 派生处理结论：进项按 6+1 组；销项 key 与空都落 pending（待判断）。
     derived = _derive_processing_status(category)
@@ -1817,8 +2861,8 @@ def set_invoice_payment_methods(
                 raise ValueError(f"发票 #{invoice.id} 不是进项发票，不适用个人垫付")
             continue
         if payment_method == "personal":
-            if not is_bank_payment_reconciliation_eligible(invoice):
-                raise ValueError(bank_payment_reconciliation_ineligible_reason(invoice))
+            if not is_bank_payment_reconciliation_eligible(invoice, db=db):
+                raise ValueError(bank_payment_reconciliation_ineligible_reason(invoice, db=db))
             bank = _invoice_bank_payment_context(db, [invoice]).get(invoice.id, {})
             if bank.get("bankPaymentStatus") == "matched":
                 raise ValueError(f"发票 #{invoice.id} 已由银行付款全额核对，不能再标记个人垫付")
@@ -1964,7 +3008,11 @@ def _sales_link_candidates(db: Session, invoice: TaxInvoice, keyword: str, limit
     """
     needle = str(keyword or "").strip()
     lowered = needle.lower()
-    invoice_amount = Decimal(str(invoice.total_amount)) if invoice.total_amount is not None else None
+    red_meta = red_accounting_context(db, [invoice]).get(invoice.id, {})
+    if red_meta.get("invoiceColor") == "red":
+        return []
+    effective_amount = effective_invoice_amount_after_red(db, invoice)
+    invoice_amount = effective_amount if effective_amount > 0 else None
     occupancy = _purchase_link_occupancy(db)
 
     query = db.query(SalesOrder).filter(deal_orders_condition())
@@ -2140,8 +3188,8 @@ def sync_business_match_status(
 ) -> str:
     """按采购/销售业务域的真实 confirmed 分摊重算发票业务匹配缓存。
 
-    这是 TaxInvoice.match_status / match_note 的统一写入口。采购、销售等上游域
-    只负责维护 TaxInvoiceLink，不应自行把发票标成 matched。
+    这是 TaxInvoice.match_status / match_note 的统一写入口。红冲后若历史明确分摊
+    超过当前有效金额，必须进入 needs_review，不能继续伪装成 matched。
     """
     domain_types = (
         PURCHASE_LINK_TARGET_TYPES
@@ -2158,7 +3206,7 @@ def sync_business_match_status(
         )
         .all()
     )
-    invoice_total = quantize(to_decimal(invoice.total_amount))
+    invoice_total = quantize(effective_invoice_amount_after_red(db, invoice))
     has_unknown = any(link.allocated_amount is None for link in links)
     allocated = sum(
         (
@@ -2168,7 +3216,10 @@ def sync_business_match_status(
         ),
         Decimal("0"),
     )
-    if invoice_total <= 0:
+    overmatched = max(allocated - max(invoice_total, Decimal("0")), Decimal("0"))
+    if overmatched > Decimal("0.01"):
+        status = "needs_review"
+    elif invoice_total <= 0:
         status = "unmatched"
     elif has_unknown:
         status = "needs_review"
@@ -2182,10 +3233,17 @@ def sync_business_match_status(
     clean_note = (note or "").strip()
     if clean_note and clean_note not in (invoice.match_note or ""):
         invoice.match_note = f"{invoice.match_note}；{clean_note}" if invoice.match_note else clean_note
+    if overmatched > Decimal("0.01"):
+        warning = (
+            f"红冲后业务关联超额：有效金额 {quantize(max(invoice_total, Decimal('0')))}，"
+            f"已关联 {quantize(allocated)}，超额 {quantize(overmatched)}"
+        )
+        if warning not in (invoice.match_note or ""):
+            invoice.match_note = f"{invoice.match_note}；{warning}" if invoice.match_note else warning
     return status
 
 
-# 兼容旧的内部调用名；新代码应使用公开入口 sync_business_match_status。
+# 兼容旧内部调用；新代码统一使用公开入口。
 _sync_business_match_status = sync_business_match_status
 
 
@@ -2211,6 +3269,9 @@ def link_purchase_order(
         raise ValueError("只有销项发票可以人工关联销售订单")
     if target_type in PURCHASE_LINK_TARGET_TYPES and invoice.direction == "output":
         raise ValueError("销项发票不能人工关联采购单，请关联销售订单")
+    red_meta = red_accounting_context(db, [invoice]).get(invoice.id, {})
+    if red_meta.get("invoiceColor") == "red":
+        raise ValueError("红字发票用于冲减对应蓝字发票，业务关联继承蓝字票，不应单独关联订单")
 
     if target_type == SALES_LINK_TARGET_TYPE:
         target = (
@@ -2249,9 +3310,9 @@ def link_purchase_order(
     )
 
     domain_types = PURCHASE_LINK_TARGET_TYPES if target_type in PURCHASE_LINK_TARGET_TYPES else (SALES_LINK_TARGET_TYPE,)
-    invoice_total = quantize(to_decimal(invoice.total_amount))
+    invoice_total = quantize(effective_invoice_amount_after_red(db, invoice))
     if invoice_total <= 0:
-        raise ValueError("发票价税合计必须大于 0")
+        raise ValueError("发票已全额红冲、红冲状态异常或无有效蓝字余额，不能继续关联业务单")
 
     other_invoice_alloc = sum(
         (
