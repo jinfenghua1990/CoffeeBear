@@ -316,9 +316,61 @@ export type SystemUpdateStatus = {
   settings: SystemUpdateSettings;
 };
 
+export type SystemLocalChangeFile = {
+  path: string;
+  status: string;
+  tracked: boolean;
+  eligible: boolean;
+  excludedReason?: string;
+  added?: number | null;
+  deleted?: number | null;
+  size?: number;
+};
+
+export type SystemLocalHandoffRecord = {
+  branch: string;
+  commitSha: string;
+  shortSha: string;
+  baseSha: string;
+  uploadedAt: string;
+  uploadedBy: string;
+  fileCount: number;
+  excludedCount: number;
+  files: string[];
+  worktreePreserved: boolean;
+};
+
+export type SystemLocalChanges = {
+  dirty: boolean;
+  baseSha: string;
+  currentBranch: string;
+  eligibleCount: number;
+  excludedCount: number;
+  totalAdded: number;
+  totalDeleted: number;
+  impactedModules: string[];
+  files: SystemLocalChangeFile[];
+  excludedFiles: SystemLocalChangeFile[];
+  protectedRules: string[];
+  diffPreview?: string;
+  lastUpload?: SystemLocalHandoffRecord | null;
+  worktreePreserved: boolean;
+  checkedAt: string;
+};
+
+export type SystemLocalUploadResult = SystemLocalHandoffRecord & {
+  ok: boolean;
+  message: string;
+  localChanges: SystemLocalChanges;
+};
+
 export const systemUpdateApi = {
   status: () => jsonFetch<SystemUpdateStatus>("/api/v1/system/update/status"),
   readiness: () => jsonFetch<SystemUpdateReadiness>("/api/v1/system/update/readiness"),
+  localChanges: (includeDiff = false) =>
+    jsonFetch<SystemLocalChanges>(`/api/v1/system/update/local-changes?include_diff=${includeDiff ? "true" : "false"}`),
+  uploadLocalChanges: () =>
+    jsonFetch<SystemLocalUploadResult>("/api/v1/system/update/local-changes/upload", { method: "POST" }),
   check: () => jsonFetch<SystemUpdateStatus>("/api/v1/system/update/check", { method: "POST" }),
   saveSettings: (body: Partial<Pick<SystemUpdateSettings, "enabled" | "mode" | "checkIntervalMinutes" | "autoUpdateHour" | "autoUpdateWindowMinutes" | "autoInstallLevel">>) =>
     jsonFetch<{ ok: boolean; settings: SystemUpdateSettings }>("/api/v1/system/update/settings", {

@@ -383,6 +383,394 @@ def _git(*args: str, timeout: int = 60) -> str:
     return result.stdout.strip()
 
 
+
+_LOCAL_HANDOFF_BLOCKED_PREFIXES: tuple[str, ...] = (
+    "data/",
+    "backups/",
+    "logs/",
+    "keys/",
+    ".next/",
+    "node_modules/",
+    "frontend/.next/",
+    "frontend/node_modules/",
+    "frontend/out/",
+)
+_LOCAL_HANDOFF_BLOCKED_SUFFIXES: tuple[str, ...] = (
+    ".xlsx",
+    ".xls",
+    ".csv",
+    ".sqlite",
+    ".sqlite3",
+    ".dump",
+    ".sql.gz",
+    ".pem",
+    ".key",
+    ".p12",
+    ".pfx",
+    ".log",
+)
+_LOCAL_HANDOFF_ALLOWED_NEW_SUFFIXES: tuple[str, ...] = (
+    ".py",
+    ".ts",
+    ".tsx",
+    ".js",
+    ".jsx",
+    ".mjs",
+    ".cjs",
+    ".json",
+    ".md",
+    ".yml",
+    ".yaml",
+    ".toml",
+    ".ini",
+    ".cfg",
+    ".sh",
+    ".css",
+    ".scss",
+    ".html",
+    ".txt",
+)
+_LOCAL_HANDOFF_ALLOWED_NEW_NAMES = {
+    "Dockerfile",
+    "Makefile",
+    "VERSION",
+    ".gitignore",
+    ".dockerignore",
+}
+_LOCAL_HANDOFF_PROTECTED_RULES = [
+    "data/、backups/、logs/、keys/ 等运行时目录不会上传",
+    ".env / runtime.env / 密钥文件不会上传",
+    "Excel、CSV、数据库、dump、日志等业务数据文件不会自动上传",
+    "未跟踪的新文件默认只允许代码、配置、文档类文本文件进入交接分支",
+]
+
+
+def _local_handoff_path() -> Path:
+    return _state_dir() / "local-handoff.json"
+
+
+def _normalize_repo_path(path: str) -> str:
+    normalized = path.replace("\\\\", "/")
+    while normalized.startswith("./"):
+        normalized = normalized[2:]
+    return normalized
+
+
+def _local_handoff_file_policy(path: str, *, tracked: bool) -> tuple[bool, str]:
+    normalized = _normalize_repo_path(path)
+    lower = normalized.lower()
+    name = Path(normalized).name
+    lower_name = name.lower()
+
+    if not normalized or normalized.startswith("../") or normalized.startswith("/"):
+        return False, "路径不在项目目录内"
+    if lower_name == ".env" or lower_name.startswith(".env."):
+        return False, "环境变量文件"
+    if lower_name == "runtime.env" or lower.endswith("/runtime.env"):
+        return False, "运行时凭证"
+    if any(lower.startswith(prefix.lower()) for prefix in _LOCAL_HANDOFF_BLOCKED_PREFIXES):
+        return False, "本地持久化 / 构建目录"
+    if any(lower.endswith(suffix) for suffix in _LOCAL_HANDOFF_BLOCKED_SUFFIXES):
+        return False, "业务数据或敏感文件类型"
+
+    if not tracked:
+        suffix = Path(normalized).suffix.lower()
+        if name not in _LOCAL_HANDOFF_ALLOWED_NEW_NAMES and suffix not in _LOCAL_HANDOFF_ALLOWED_NEW_SUFFIXES:
+            return False, "未跟踪的新文件类型不在自动上传白名单"
+
+    return True, ""
+
+
+def _local_worktree_entries() -> list[dict[str, Any]]:
+    """Return tracked/untracked changes relative to HEAD without touching the index."""
+    root = _repo_root()
+    tracked_status: dict[str, str] = {}
+    status_output = _git("-c", "core.quotepath=false", "diff", "HEAD", "--name-status", "--no-renames", timeout=30)
+    for line in status_output.splitlines():
+        if not line.strip():
+            continue
+        parts = line.split("\t", 1)
+        if len(parts) != 2:
+            continue
+        tracked_status[_normalize_repo_path(parts[1])] = parts[0].strip() or "M"
+
+    numstat: dict[str, tuple[int | None, int | None]] = {}
+    numstat_output = _git("-c", "core.quotepath=false", "diff", "HEAD", "--numstat", "--no-renames", timeout=30)
+    for line in numstat_output.splitlines():
+        parts = line.split("\t", 2)
+        if len(parts) != 3:
+            continue
+        added_raw, deleted_raw, raw_path = parts
+        try:
+            added = int(added_raw)
+        except ValueError:
+            added = None
+        try:
+            deleted = int(deleted_raw)
+        except ValueError:
+            deleted = None
+        numstat[_normalize_repo_path(raw_path)] = (added, deleted)
+
+    untracked_output = _git("-c", "core.quotepath=false", "ls-files", "--others", "--exclude-standard", timeout=30)
+    untracked_paths = [
+        _normalize_repo_path(line.strip())
+        for line in untracked_output.splitlines()
+        if line.strip()
+    ]
+
+    rows: list[dict[str, Any]] = []
+    for path in sorted(tracked_status):
+        eligible, reason = _local_handoff_file_policy(path, tracked=True)
+        added, deleted = numstat.get(path, (None, None))
+        file_path = root / path
+        rows.append({
+            "path": path,
+            "status": tracked_status[path],
+            "tracked": True,
+            "eligible": eligible,
+            "excludedReason": reason,
+            "added": added,
+            "deleted": deleted,
+            "size": file_path.stat().st_size if file_path.is_file() else 0,
+        })
+
+    for path in sorted(set(untracked_paths) - set(tracked_status)):
+        eligible, reason = _local_handoff_file_policy(path, tracked=False)
+        file_path = root / path
+        rows.append({
+            "path": path,
+            "status": "??",
+            "tracked": False,
+            "eligible": eligible,
+            "excludedReason": reason,
+            "added": None,
+            "deleted": None,
+            "size": file_path.stat().st_size if file_path.is_file() else 0,
+        })
+    return rows
+
+
+def local_changes_payload(*, include_diff: bool = False) -> dict[str, Any]:
+    """Inspect local edits for safe GitHub handoff without mutating Git state."""
+    root = _repo_root()
+    if not (root / ".git").exists():
+        raise ValueError(f"{root} 不是可管理的 Git 工作区")
+
+    base_sha = _git("rev-parse", "HEAD", timeout=10)
+    current_branch = _git("branch", "--show-current", timeout=10)
+    entries = _local_worktree_entries()
+    eligible = [item for item in entries if item["eligible"]]
+    excluded = [item for item in entries if not item["eligible"]]
+    eligible_paths = [str(item["path"]) for item in eligible]
+
+    total_added = sum(int(item["added"] or 0) for item in eligible)
+    total_deleted = sum(int(item["deleted"] or 0) for item in eligible)
+    patch = ""
+    if include_diff and eligible_paths:
+        tracked_paths = [str(item["path"]) for item in eligible if item["tracked"]]
+        if tracked_paths:
+            result = _run(
+                ["git", "diff", "HEAD", "--no-ext-diff", "--unified=2", "--", *tracked_paths],
+                timeout=60,
+            )
+            if result.returncode == 0:
+                patch = result.stdout[:120000]
+
+    last_upload = _read_json(_local_handoff_path(), {})
+    return {
+        "dirty": bool(entries),
+        "baseSha": base_sha,
+        "currentBranch": current_branch,
+        "eligibleCount": len(eligible),
+        "excludedCount": len(excluded),
+        "totalAdded": total_added,
+        "totalDeleted": total_deleted,
+        "impactedModules": _modules_for_paths(eligible_paths),
+        "files": eligible,
+        "excludedFiles": excluded,
+        "protectedRules": list(_LOCAL_HANDOFF_PROTECTED_RULES),
+        "diffPreview": patch,
+        "lastUpload": last_upload or None,
+        "worktreePreserved": True,
+        "checkedAt": _now_iso(),
+    }
+
+
+def _run_git_with_index(
+    index_path: Path,
+    args: list[str],
+    *,
+    timeout: int = 60,
+) -> subprocess.CompletedProcess[str]:
+    env = os.environ.copy()
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    env["ECOMMERCE_UPDATE_SERVICE_GIT"] = "1"
+    env["GIT_INDEX_FILE"] = str(index_path)
+    return subprocess.run(
+        ["git", *args],
+        cwd=str(_repo_root()),
+        text=True,
+        capture_output=True,
+        timeout=timeout,
+        check=False,
+        env=env,
+    )
+
+
+def _raise_git_result(result: subprocess.CompletedProcess[str], fallback: str) -> None:
+    if result.returncode == 0:
+        return
+    detail = (result.stderr or result.stdout or fallback).strip()
+    raise RuntimeError(detail[-1600:])
+
+
+def _next_local_handoff_branch(remote: str) -> str:
+    stamp = datetime.now(ZoneInfo(settings.TZ)).strftime("%Y%m%d-%H%M%S")
+    base = f"local/{stamp}"
+    for index in range(20):
+        candidate = base if index == 0 else f"{base}-{index + 1}"
+        probe = _run(
+            ["git", "ls-remote", "--exit-code", "--heads", remote, f"refs/heads/{candidate}"],
+            timeout=30,
+        )
+        if probe.returncode == 2:
+            return candidate
+        if probe.returncode not in {0, 2}:
+            _raise_git_result(probe, "无法检查远端交接分支")
+    raise RuntimeError("无法生成唯一的本地修改交接分支")
+
+
+def upload_local_changes(*, actor: str = "system") -> dict[str, Any]:
+    """Push a safe snapshot of local edits to a new local/* branch.
+
+    A temporary Git index is used so the current branch, real index and working
+    tree remain exactly as they were before the upload.
+    """
+    if settings.DEPLOYMENT_MODE == "container":
+        raise ValueError("容器模式不支持从运行实例上传本地代码修改")
+
+    with _LOCK:
+        runtime = _read_json(_status_path(), {})
+        if runtime.get("phase") in _ACTIVE_PHASES and _pid_running(runtime.get("pid")):
+            raise ValueError("系统更新正在执行，完成后再上传本地修改")
+        lock_owner = _read_update_lock_owner() if _repo_update_lock_dir().exists() else {}
+        if _pid_running(lock_owner.get("pid")):
+            raise ValueError("系统更新全局锁正在占用，完成后再上传本地修改")
+
+        payload = local_changes_payload(include_diff=False)
+        eligible_paths = [str(item["path"]) for item in payload["files"]]
+        if not eligible_paths:
+            if payload["dirty"]:
+                raise ValueError("检测到的修改全部属于受保护或不允许自动上传的文件")
+            raise ValueError("当前没有需要上传的本地修改")
+        if len(eligible_paths) > 500:
+            raise ValueError("本次修改文件超过 500 个，请先拆分后再上传")
+
+        cfg = load_update_settings()
+        remote = str(cfg["remote"])
+        remote_probe = _run(["git", "remote", "get-url", remote], timeout=10)
+        _raise_git_result(remote_probe, "无法读取 Git 远端")
+        remote_url = remote_probe.stdout.strip()
+        if _is_legacy_repo_remote(remote_url):
+            raise ValueError("当前远端仍是旧 ecommerce-dashboard，禁止上传本地修改")
+
+        base_sha = str(payload["baseSha"])
+        branch = _next_local_handoff_branch(remote)
+        index_path = _state_dir() / f".local-handoff-index-{uuid.uuid4().hex}"
+        local_ref_created = False
+        commit_sha = ""
+        try:
+            index_path.unlink(missing_ok=True)
+            read_tree = _run_git_with_index(index_path, ["read-tree", base_sha], timeout=30)
+            _raise_git_result(read_tree, "无法创建临时 Git 索引")
+
+            staged = _run_git_with_index(
+                index_path,
+                ["add", "-A", "--", *eligible_paths],
+                timeout=120,
+            )
+            _raise_git_result(staged, "无法暂存本地修改快照")
+
+            staged_names_result = _run_git_with_index(
+                index_path,
+                ["diff", "--cached", "--name-only", "--no-renames"],
+                timeout=30,
+            )
+            _raise_git_result(staged_names_result, "无法校验本地修改快照")
+            staged_names = [
+                _normalize_repo_path(line.strip())
+                for line in staged_names_result.stdout.splitlines()
+                if line.strip()
+            ]
+            unexpected = [path for path in staged_names if path not in eligible_paths]
+            if unexpected:
+                raise RuntimeError(f"快照出现未授权文件：{', '.join(unexpected[:8])}")
+            for path in staged_names:
+                allowed, reason = _local_handoff_file_policy(path, tracked=True)
+                if not allowed:
+                    raise RuntimeError(f"受保护文件禁止进入交接分支：{path}（{reason}）")
+
+            tree_result = _run_git_with_index(index_path, ["write-tree"], timeout=30)
+            _raise_git_result(tree_result, "无法生成本地修改快照")
+            tree_sha = tree_result.stdout.strip()
+            base_tree = _git("rev-parse", f"{base_sha}^{{tree}}", timeout=10)
+            if tree_sha == base_tree:
+                raise ValueError("允许上传的文件没有形成有效代码变更")
+
+            message = (
+                "local: 本地修改交接 "
+                + datetime.now(ZoneInfo(settings.TZ)).strftime("%Y-%m-%d %H:%M")
+                + f"\n\nUploaded by system update center · actor={actor}"
+            )
+            commit_result = _run(
+                ["git", "commit-tree", tree_sha, "-p", base_sha, "-m", message],
+                timeout=30,
+            )
+            _raise_git_result(commit_result, "无法创建本地修改交接提交")
+            commit_sha = commit_result.stdout.strip()
+            if not _SHA_RE.fullmatch(commit_sha):
+                raise RuntimeError("Git 返回的交接 commit 无效")
+
+            ref_result = _run(
+                ["git", "update-ref", f"refs/heads/{branch}", commit_sha],
+                timeout=20,
+            )
+            _raise_git_result(ref_result, "无法创建本地交接分支")
+            local_ref_created = True
+
+            push_result = _run(
+                ["git", "push", remote, f"refs/heads/{branch}:refs/heads/{branch}"],
+                timeout=180,
+            )
+            _raise_git_result(push_result, "无法把本地修改上传到 GitHub")
+        except Exception:
+            if local_ref_created:
+                _run(["git", "update-ref", "-d", f"refs/heads/{branch}"], timeout=20)
+            raise
+        finally:
+            index_path.unlink(missing_ok=True)
+
+        record = {
+            "branch": branch,
+            "commitSha": commit_sha,
+            "shortSha": commit_sha[:10],
+            "baseSha": base_sha,
+            "uploadedAt": _now_iso(),
+            "uploadedBy": actor,
+            "fileCount": len(eligible_paths),
+            "excludedCount": int(payload["excludedCount"]),
+            "files": eligible_paths[:200],
+            "worktreePreserved": True,
+        }
+        _atomic_json(_local_handoff_path(), record)
+        return {
+            "ok": True,
+            **record,
+            "message": "本地修改已上传到独立 GitHub 分支；当前工作区和分支未被切换。",
+            "localChanges": local_changes_payload(include_diff=False),
+        }
+
+
 def _version_from_time(value: str) -> str:
     """使用项目时区把提交时间转成可读版本号，例如 2026.09.20.1830。"""
     try:
@@ -1319,6 +1707,10 @@ def status_payload(*, include_log: bool = True) -> dict[str, Any]:
         current_branch = str(runtime.get("currentBranch") or "")
     runtime["currentSha"] = current_sha
     runtime["currentBranch"] = current_branch
+    try:
+        runtime["dirty"] = bool(_git("status", "--porcelain", timeout=10))
+    except Exception:
+        runtime["dirty"] = bool(runtime.get("dirty"))
     runtime["currentCommit"] = _commit_info(current_sha) if current_sha else None
     runtime["settings"] = load_update_settings()
     runtime["history"] = read_history(20)

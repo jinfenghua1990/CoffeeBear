@@ -154,7 +154,8 @@ def test_parse_xlsx_preserves_real_account_and_original_row():
     assert row["raw"]["rowNumber"] == 2
 
 
-def test_import_rejects_default_alias_when_file_has_no_real_account(client):
+def test_import_rejects_default_alias_when_file_has_no_real_account(client, tmp_path, monkeypatch):
+    monkeypatch.setattr(settings, "DATA_DIR", str(tmp_path))
     content = _make_xlsx(
         ["交易日期", "摘要", "收入金额"],
         [["2097-06-02", "没有账号", 10]],
@@ -168,7 +169,8 @@ def test_import_rejects_default_alias_when_file_has_no_real_account(client):
     assert "尚未配置真实银行账号" in response.json()["detail"]
 
 
-def test_import_resolves_configured_internal_alias_to_real_account(client, db_session):
+def test_import_resolves_configured_internal_alias_to_real_account(client, db_session, tmp_path, monkeypatch):
+    monkeypatch.setattr(settings, "DATA_DIR", str(tmp_path))
     db_session.add(BankAccount(
         account_no="201000260611394",
         internal_code="ZJRC-001",
@@ -198,7 +200,8 @@ def test_import_resolves_configured_internal_alias_to_real_account(client, db_se
     assert txn.raw["internalAccountCode"] == "ZJRC-001"
 
 
-def test_import_ignores_placeholder_file_account_and_uses_real_mapping(client, db_session):
+def test_import_ignores_placeholder_file_account_and_uses_real_mapping(client, db_session, tmp_path, monkeypatch):
+    monkeypatch.setattr(settings, "DATA_DIR", str(tmp_path))
     db_session.add(BankAccount(
         account_no="201000260611394",
         internal_code="ZJRC-001",

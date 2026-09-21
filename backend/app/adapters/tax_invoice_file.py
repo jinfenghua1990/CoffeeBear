@@ -11,7 +11,7 @@ import io
 import re
 import unicodedata
 import zipfile
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field as dataclass_field
 from datetime import date, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -49,13 +49,13 @@ class ParsedTaxInvoiceExport:
     direction_hint: str
     ignored_row_count: int = 0
     summary_sheet_name: str = ""
-    summary_headers: list[str] = field(default_factory=list)
-    summary_mapping: dict[str, str] = field(default_factory=dict)
-    summary_validation: dict[str, Any] = field(default_factory=dict)
+    summary_headers: list[str] = dataclass_field(default_factory=list)
+    summary_mapping: dict[str, str] = dataclass_field(default_factory=dict)
+    summary_validation: dict[str, Any] = dataclass_field(default_factory=dict)
     detail_sheet_name: str = ""
-    detail_headers: list[str] = field(default_factory=list)
-    detail_mapping: dict[str, str] = field(default_factory=dict)
-    detail_rows: list[dict[str, str]] = field(default_factory=list)
+    detail_headers: list[str] = dataclass_field(default_factory=list)
+    detail_mapping: dict[str, str] = dataclass_field(default_factory=dict)
+    detail_rows: list[dict[str, str]] = dataclass_field(default_factory=list)
 
 
 def normalize_header(value: object) -> str:

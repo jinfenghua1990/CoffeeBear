@@ -3,6 +3,8 @@
 import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   systemUpdateApi,
+  type SystemLocalChanges,
+  type SystemLocalUploadResult,
   type SystemUpdateMode,
   type SystemUpdateLevel,
   type SystemUpdateReadiness,
@@ -119,6 +121,10 @@ export default function SystemUpdatePage() {
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
+  const [localChanges, setLocalChanges] = useState<SystemLocalChanges | null>(null);
+  const [localUpload, setLocalUpload] = useState<SystemLocalUploadResult | null>(null);
+  const [localError, setLocalError] = useState("");
+  const [showLocalFiles, setShowLocalFiles] = useState(false);
   const [showAllChecks, setShowAllChecks] = useState(false);
   const [showChangedFiles, setShowChangedFiles] = useState(false);
   const [updateDialogOpen, setUpdateDialogOpen] = useState(false);
@@ -156,6 +162,18 @@ export default function SystemUpdatePage() {
     } catch (caught) {
       setReadiness(null);
       setError((current) => current || (caught instanceof Error ? caught.message : String(caught)));
+      return null;
+    }
+  }, []);
+
+  const loadLocalChanges = useCallback(async () => {
+    try {
+      const next = await systemUpdateApi.localChanges();
+      setLocalChanges(next);
+      setLocalError("");
+      return next;
+    } catch (caught) {
+      setLocalError(caught instanceof Error ? caught.message : String(caught));
       return null;
     }
   }, []);
@@ -198,6 +216,11 @@ export default function SystemUpdatePage() {
   const isContainer = runtime?.deploymentMode === "container";
 
   useEffect(() => {
+    if (!status || isContainer) return;
+    void loadLocalChanges();
+  }, [isContainer, loadLocalChanges, status?.currentSha]);
+
+  useEffect(() => {
     if (!status || isContainer || firstCheckRef.current) return;
     firstCheckRef.current = true;
     if (status.lastCheckAt && status.moduleVersions?.length) return;
@@ -234,7 +257,7 @@ export default function SystemUpdatePage() {
     setError("");
     setNotice("");
     try {
-      await Promise.all([load(), loadReadiness()]);
+      await Promise.all([load(), loadReadiness(), isContainer ? Promise.resolve(null) : loadLocalChanges()]);
     } finally {
       setBusy("");
     }
@@ -259,6 +282,47 @@ export default function SystemUpdatePage() {
       await loadReadiness();
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : String(caught));
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function scanLocalChanges() {
+    setBusy("local-scan");
+    setLocalError("");
+    setNotice("");
+    try {
+      const next = await loadLocalChanges();
+      if (next) {
+        setNotice(
+          next.dirty
+            ? `检测到 ${next.eligibleCount} 个可上传代码文件，${next.excludedCount} 个受保护文件不会上传。`
+            : "本地工作区干净，没有待上传修改。",
+        );
+      }
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function uploadLocalVersion() {
+    if (!localChanges?.eligibleCount) return;
+    const confirmed = window.confirm(
+      `将 ${localChanges.eligibleCount} 个代码文件上传到新的 local/* GitHub 分支。\n\n本地当前分支、暂存区和工作区不会被切换或清空。\n受保护的 Excel、数据库、备份和凭证不会上传。\n\n确认继续？`,
+    );
+    if (!confirmed) return;
+
+    setBusy("local-upload");
+    setLocalError("");
+    setNotice("");
+    try {
+      const result = await systemUpdateApi.uploadLocalChanges();
+      setLocalUpload(result);
+      setLocalChanges(result.localChanges);
+      setNotice(`本地修改已上传：${result.branch} · ${result.shortSha}。本地代码保持原样，可继续修改。`);
+      await load(true);
+    } catch (caught) {
+      setLocalError(caught instanceof Error ? caught.message : String(caught));
     } finally {
       setBusy("");
     }
@@ -461,6 +525,141 @@ export default function SystemUpdatePage() {
       {activeTab === "overview" && (
         <div className="grid items-start gap-4 xl:grid-cols-2">
           <div className="min-w-0 space-y-4">
+            {!isContainer && (
+              <section className="app-card overflow-hidden rounded-2xl">
+                <div className="p-5">
+                  <div className="flex flex-wrap items-start justify-between gap-3">
+                    <div>
+                      <div className="flex items-center gap-2">
+                        <h2 className="text-[14px] font-semibold tracking-tight text-slate-900 dark:text-slate-100">本地版本管理</h2>
+                        {localChanges ? (
+                          <span className={`inline-flex rounded-full px-2 py-0.5 text-[10px] font-medium ring-1 ring-inset ${
+                            localChanges.dirty
+                              ? "bg-amber-50 text-amber-700 ring-amber-200 dark:bg-amber-500/10 dark:text-amber-200 dark:ring-amber-500/30"
+                              : "bg-emerald-50 text-emerald-700 ring-emerald-200 dark:bg-emerald-500/10 dark:text-emerald-300 dark:ring-emerald-500/30"
+                          }`}>
+                            {localChanges.dirty ? "有本地修改" : "工作区干净"}
+                          </span>
+                        ) : null}
+                      </div>
+                      <p className="mt-1 text-[11px] leading-5 text-slate-400 dark:text-slate-400">
+                        检测你直接在本机修改的代码，并手动上传为独立 local/* 交接分支；不会切换当前分支，也不会清空本地修改。
+                      </p>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => void scanLocalChanges()}
+                        disabled={Boolean(busy || status.running)}
+                        className="app-button-secondary h-8 rounded-lg px-3 text-[10px] font-medium disabled:opacity-40"
+                      >
+                        {busy === "local-scan" ? "检测中…" : "检测本地修改"}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => void uploadLocalVersion()}
+                        disabled={Boolean(busy || status.running || !localChanges?.eligibleCount)}
+                        className="app-button-primary h-8 rounded-lg px-3 text-[10px] font-semibold shadow-none disabled:cursor-not-allowed disabled:opacity-40"
+                      >
+                        {busy === "local-upload" ? "上传中…" : "上传本地修改"}
+                      </button>
+                    </div>
+                  </div>
+
+                  {localChanges ? (
+                    <>
+                      <div className="mt-4 grid gap-2 sm:grid-cols-4">
+                        <div className="rounded-xl border border-slate-100 bg-slate-50/70 px-3 py-2.5 dark:border-slate-700 dark:bg-slate-800/45">
+                          <div className="text-[10px] text-slate-400">当前分支</div>
+                          <div className="mt-1 truncate font-mono text-[11px] font-semibold text-slate-700 dark:text-slate-100" title={localChanges.currentBranch}>
+                            {localChanges.currentBranch || "(detached)"}
+                          </div>
+                        </div>
+                        <div className="rounded-xl border border-slate-100 bg-slate-50/70 px-3 py-2.5 dark:border-slate-700 dark:bg-slate-800/45">
+                          <div className="text-[10px] text-slate-400">基准版本</div>
+                          <div className="mt-1 font-mono text-[11px] font-semibold text-slate-700 dark:text-slate-100">{shortSha(localChanges.baseSha)}</div>
+                        </div>
+                        <div className="rounded-xl border border-blue-100 bg-blue-50/60 px-3 py-2.5 dark:border-blue-500/20 dark:bg-blue-500/10">
+                          <div className="text-[10px] text-blue-500 dark:text-blue-300">可上传代码</div>
+                          <div className="mt-1 text-[14px] font-semibold text-blue-700 dark:text-blue-200">{localChanges.eligibleCount} 个文件</div>
+                        </div>
+                        <div className="rounded-xl border border-amber-100 bg-amber-50/60 px-3 py-2.5 dark:border-amber-500/20 dark:bg-amber-500/10">
+                          <div className="text-[10px] text-amber-600 dark:text-amber-300">受保护 / 排除</div>
+                          <div className="mt-1 text-[14px] font-semibold text-amber-700 dark:text-amber-200">{localChanges.excludedCount} 个文件</div>
+                        </div>
+                      </div>
+
+                      <div className="mt-3 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-slate-100 px-3 py-2.5 dark:border-slate-700">
+                        <div className="text-[11px] text-slate-500 dark:text-slate-300">
+                          {localChanges.eligibleCount
+                            ? <>代码变化 <strong className="font-semibold text-emerald-600">+{localChanges.totalAdded}</strong> / <strong className="font-semibold text-rose-600">-{localChanges.totalDeleted}</strong>
+                                {localChanges.impactedModules?.length ? <> · {localChanges.impactedModules.join("、")}</> : null}
+                              </>
+                            : "没有可上传的代码修改"}
+                        </div>
+                        {(localChanges.files.length || localChanges.excludedFiles.length) ? (
+                          <button
+                            type="button"
+                            onClick={() => setShowLocalFiles((value) => !value)}
+                            className="text-[11px] font-medium text-blue-600 hover:text-blue-700 dark:text-blue-300"
+                          >
+                            {showLocalFiles ? "收起文件明细" : "查看修改文件"}
+                          </button>
+                        ) : null}
+                      </div>
+
+                      {showLocalFiles && (
+                        <div className="mt-3 overflow-hidden rounded-xl border border-slate-100 dark:border-slate-700">
+                          {localChanges.files.slice(0, 80).map((item) => (
+                            <div key={`safe-${item.path}`} className="grid grid-cols-[34px_minmax(0,1fr)_90px] items-center gap-2 border-b border-slate-100 px-3 py-2 text-[10px] last:border-b-0 dark:border-slate-700">
+                              <span className="font-mono font-semibold text-blue-600 dark:text-blue-300">{item.status}</span>
+                              <span className="truncate font-mono text-slate-600 dark:text-slate-200" title={item.path}>{item.path}</span>
+                              <span className="text-right text-slate-400">
+                                {item.added != null || item.deleted != null ? `+${item.added || 0} / -${item.deleted || 0}` : item.tracked ? "已跟踪" : "新文件"}
+                              </span>
+                            </div>
+                          ))}
+                          {localChanges.excludedFiles.slice(0, 40).map((item) => (
+                            <div key={`blocked-${item.path}`} className="grid grid-cols-[34px_minmax(0,1fr)_150px] items-center gap-2 border-b border-amber-100 bg-amber-50/50 px-3 py-2 text-[10px] last:border-b-0 dark:border-amber-500/20 dark:bg-amber-500/5">
+                              <span className="font-mono font-semibold text-amber-600">{item.status}</span>
+                              <span className="truncate font-mono text-slate-600 dark:text-slate-200" title={item.path}>{item.path}</span>
+                              <span className="truncate text-right text-amber-700 dark:text-amber-200" title={item.excludedReason}>{item.excludedReason || "不会上传"}</span>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+
+                      {(localUpload || localChanges.lastUpload) && (
+                        <div className="mt-3 rounded-xl border border-emerald-100 bg-emerald-50/60 px-3 py-2.5 text-[11px] leading-5 text-emerald-700 dark:border-emerald-500/20 dark:bg-emerald-500/10 dark:text-emerald-300">
+                          最近交接：
+                          <span className="ml-1 font-mono font-semibold">{(localUpload || localChanges.lastUpload)?.branch}</span>
+                          {" · "}
+                          <span className="font-mono">{(localUpload || localChanges.lastUpload)?.shortSha}</span>
+                          {" · "}
+                          {fmtDate((localUpload || localChanges.lastUpload)?.uploadedAt)}
+                          <div className="mt-0.5 text-[10px] opacity-80">GitHub 已保存快照，本机当前工作区保持原样。</div>
+                        </div>
+                      )}
+
+                      <div className="mt-3 rounded-lg bg-slate-50 px-3 py-2 text-[10px] leading-5 text-slate-500 dark:bg-slate-800/60 dark:text-slate-300">
+                        {(localChanges.protectedRules || []).join("；")}
+                      </div>
+                    </>
+                  ) : (
+                    <div className="mt-4 rounded-xl border border-slate-100 px-4 py-5 text-[11px] text-slate-400 dark:border-slate-700">
+                      正在读取本地 Git 工作区状态…
+                    </div>
+                  )}
+
+                  {localError && (
+                    <div className="mt-3 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-[11px] leading-5 text-rose-700 dark:border-rose-500/40 dark:bg-rose-500/10 dark:text-rose-200">
+                      本地版本检测失败：{localError}
+                    </div>
+                  )}
+                </div>
+              </section>
+            )}
+
             <section className="app-card overflow-hidden rounded-2xl">
               <div>
                 <div className="min-w-0 p-5">

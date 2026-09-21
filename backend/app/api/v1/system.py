@@ -132,6 +132,32 @@ def system_update_check(request: Request) -> dict[str, Any]:
     return system_update_service.check_for_updates(actor=current_actor(request), automatic=False)
 
 
+@router.get("/update/local-changes", dependencies=[Depends(require_roles("admin"))])
+def system_update_local_changes(include_diff: bool = Query(False)) -> dict[str, Any]:
+    if settings.DEPLOYMENT_MODE == "container":
+        from fastapi import HTTPException
+        raise HTTPException(status_code=409, detail="容器模式没有可上传的本地 Git 工作区修改。")
+    from app.services import system_update_service
+    try:
+        return system_update_service.local_changes_payload(include_diff=include_diff)
+    except (ValueError, RuntimeError) as exc:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.post("/update/local-changes/upload", dependencies=[Depends(require_roles("admin"))])
+def system_update_upload_local_changes(request: Request) -> dict[str, Any]:
+    if settings.DEPLOYMENT_MODE == "container":
+        from fastapi import HTTPException
+        raise HTTPException(status_code=409, detail="容器模式禁止从运行实例上传本地代码修改。")
+    from app.services import system_update_service
+    try:
+        return system_update_service.upload_local_changes(actor=current_actor(request))
+    except (ValueError, RuntimeError) as exc:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
 @router.patch("/update/settings", dependencies=[Depends(require_roles("admin"))])
 def system_update_settings(body: SystemUpdateSettingsBody) -> dict[str, Any]:
     from app.services import system_update_service
