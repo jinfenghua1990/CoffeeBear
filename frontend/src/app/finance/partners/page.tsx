@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useSearchParams } from "next/navigation";
 import Link from "@/components/workspace/workspace-link";
 import {
   authenticatedFetch,
@@ -122,6 +123,28 @@ export default function BusinessPartnersPage() {
   const [rawDetail, setRawDetail] = useState<BankRawDetail | null>(null);
   const [rawLoading, setRawLoading] = useState(false);
   const initialSelection = useRef(false);
+  const searchParams = useSearchParams();
+  const entryApplied = useRef(false);
+
+  // 供应商档案等入口带 role / keyword / partnerId 跳进来时，直接定位到对应档案。
+  useEffect(() => {
+    if (entryApplied.current) return;
+    entryApplied.current = true;
+    const roleParam = searchParams.get("role");
+    if (roleParam === "supplier" || roleParam === "customer" || roleParam === "counterparty") {
+      setRole(roleParam);
+    }
+    const keywordParam = searchParams.get("keyword");
+    if (keywordParam) {
+      setKeywordInput(keywordParam);
+      setKeyword(keywordParam);
+    }
+    const partnerParam = Number(searchParams.get("partnerId") || "");
+    if (Number.isInteger(partnerParam) && partnerParam > 0) {
+      initialSelection.current = true;
+      setSelectedId(partnerParam);
+    }
+  }, [searchParams, setKeyword, setKeywordInput, setRole, setSelectedId]);
 
   const loadList = useCallback(async () => {
     setLoading(true);
@@ -305,7 +328,7 @@ export default function BusinessPartnersPage() {
           {selectedId && detailLoading && <div className="flex min-h-[560px] items-center justify-center text-sm text-slate-400">正在汇总往来数据…</div>}
           {detail && !detailLoading && <>
             <div className="border-b border-slate-100 px-5 py-4">
-              <div className="flex flex-wrap items-start justify-between gap-3"><div className="min-w-0"><div className="flex flex-wrap items-center gap-2"><h2 className="max-w-[650px] truncate text-xl font-semibold text-slate-900">{detail.name}</h2><RoleBadges roles={detail.roles} /></div><div className="mt-1 flex flex-wrap gap-x-4 gap-y-1 text-xs text-slate-500"><span>税号：{detail.taxNo || "待补充"}</span><span>主账号：{detail.bankAccountNo || "待补充"}</span>{detail.legacySupplierId && <span>已承接原供应商档案</span>}</div></div><div className="flex gap-2"><button type="button" onClick={() => { setForm(partnerToForm(detail)); setEditingId(detail.id); }} className="rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50">编辑档案</button><Link href="/finance/bank-transactions?view=transactions" className="rounded-lg border border-blue-200 px-3 py-1.5 text-xs font-medium text-blue-600 hover:bg-blue-50">银行流水</Link></div></div>
+              <div className="flex flex-wrap items-start justify-between gap-3"><div className="min-w-0"><div className="flex flex-wrap items-center gap-2"><h2 className="max-w-[650px] truncate text-xl font-semibold text-slate-900">{detail.name}</h2><RoleBadges roles={detail.roles} /></div><div className="mt-1 flex flex-wrap gap-x-4 gap-y-1 text-xs text-slate-500"><span>税号：{detail.taxNo || "待补充"}</span><span>主账号：{detail.bankAccountNo || "待补充"}</span>{detail.legacySupplierId && <Link href="/suppliers" className="font-medium text-blue-600 hover:text-blue-700">已承接原供应商档案，查看供应商档案 →</Link>}</div></div><div className="flex gap-2"><button type="button" onClick={() => { setForm(partnerToForm(detail)); setEditingId(detail.id); }} className="rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50">编辑档案</button><Link href="/finance/bank-transactions?view=transactions" className="rounded-lg border border-blue-200 px-3 py-1.5 text-xs font-medium text-blue-600 hover:bg-blue-50">银行流水</Link></div></div>
               <div className="mt-4 flex gap-1 overflow-x-auto border-b border-slate-100 -mb-4"><div className="flex min-w-max gap-1">{tabs.map(([key, label, count]) => <button key={key} type="button" onClick={() => setTab(key)} className={`relative px-3 py-2.5 text-xs font-medium ${tab === key ? "text-blue-600" : "text-slate-500 hover:text-slate-700"}`}>{label}{count ? <span className="ml-1 rounded-full bg-amber-100 px-1.5 py-0.5 text-[9px] text-amber-700">{count}</span> : null}{tab === key && <span className="absolute inset-x-2 bottom-0 h-0.5 rounded bg-blue-600" />}</button>)}</div></div>
             </div>
 

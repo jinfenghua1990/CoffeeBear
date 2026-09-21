@@ -159,8 +159,8 @@ const ROUTES: RouteEntry[] = [
   },
   {
     pathname: "/suppliers",
-    title: "往来单位档案",
-    businessType: "master",
+    title: "供应商档案",
+    businessType: "supplier",
     load: () => import("@/app/suppliers/page"),
   },
   {

@@ -98,9 +98,11 @@ export const MODULES: ModuleDef[] = [
       p.startsWith("/supply-chain")
       || p.startsWith("/purchase")
       || p.startsWith("/procurement")
+      || p.startsWith("/suppliers")
       || p.startsWith("/data-center-import"),
     items: [
       { href: "/supply-chain", label: "供应链总览", icon: "home" },
+      { href: "/suppliers", label: "供应商档案", icon: "box" },
       { href: "/data-center-import?tab=alibaba1688", label: "采购接入", icon: "import", activeByPath: true },
       { href: `${WORKBENCH}?view=orders`, label: "采购管理", icon: "cart", activeByPath: true },
       { href: "/supply-chain/production", label: "生产订单", icon: "factory" },
@@ -113,7 +115,7 @@ export const MODULES: ModuleDef[] = [
     label: "财务",
     title: "财务中心",
     href: "/finance",
-    match: (p) => p.startsWith("/finance") || p.startsWith("/payments") || p.startsWith("/profit") || p.startsWith("/suppliers"),
+    match: (p) => p.startsWith("/finance") || p.startsWith("/payments") || p.startsWith("/profit"),
     items: [
       { href: "/finance", label: "财务工作台", icon: "finance" },
       { href: "/finance/monthly-send", label: "月结中心", icon: "mail" },
