@@ -123,7 +123,20 @@ PostgreSQL / Redis 只属于基础设施，不作为公开业务端口。
 
 所有真实库存变化必须留下不可覆盖流水；关键写操作必须幂等。
 
-## 8. 数据完整性与并发
+## 8. 业务事实源边界
+
+跨模块只能引用事实，不得互相覆盖事实字段：
+
+- `TaxInvoiceLink(target_type=bank_transaction)` 是银行对公付款证据；银行匹配服务只能维护该链接及分摊金额，不得直接改写 `TaxInvoice.payment_method`、`match_status` 或认证状态；
+- `TaxInvoice.payment_method=personal` 是人工确认的个人垫付事实；全额银行付款时最终展示可派生为 corporate，但不得删除人工事实。部分银行付款 + personal 必须派生为 mixed；
+- `TaxInvoice.match_status` 是发票↔采购/销售业务链接的缓存状态，只能由发票域按 confirmed `TaxInvoiceLink` + `allocated_amount` 重算；
+- 未确认候选关系不得占用采购单开票额度；缺失 `allocated_amount` 的历史关系只能进入待复核，不能直接算 matched；
+- 红字/已红冲/作废发票属于会计事实，不得重新进入采购自动匹配或银行付款待核对池；
+- 财务报表可以派生“对公/个人/混合”结论，但必须保留结论依据，不能把报表结论反写成源业务事实。
+
+以上边界由 `test_domain_architecture.py` 和对应业务回归测试持续守护。
+
+## 9. 数据完整性与并发
 
 高风险业务写入至少满足：
 
@@ -136,7 +149,7 @@ PostgreSQL / Redis 只属于基础设施，不作为公开业务端口。
 
 老表补 ForeignKey 前必须先做 orphan audit，禁止直接加约束导致真实库迁移失败。
 
-## 9. 认证与安全
+## 10. 认证与安全
 
 ### 数据库最小权限
 
@@ -159,7 +172,7 @@ PostgreSQL / Redis 只属于基础设施，不作为公开业务端口。
 
 `.env`、业务 `data/`、数据库备份不得进入 Docker build context 或 Git。
 
-## 10. 部署与验证
+## 11. 部署与验证
 
 ### macOS 主运行方式
 
@@ -179,7 +192,7 @@ PostgreSQL / Redis 只属于基础设施，不作为公开业务端口。
 
 `docker-compose.yml` 不再运行独立 frontend 容器。
 
-## 11. CI 必须守住的门槛
+## 12. CI 必须守住的门槛
 
 Pull Request 必须验证：
 
@@ -194,7 +207,7 @@ Pull Request 必须验证：
 
 运行级错误和完整测试失败必须阻塞合并；普通未使用 import 等卫生告警可逐步清理后再升级为全阻塞。
 
-## 12. 代码组织原则
+## 13. 代码组织原则
 
 - 新页面不得复制已有 service 形成第二套事实
 - 一个文件明显过大时按业务模块逐步拆分，不做一次性大爆炸重写

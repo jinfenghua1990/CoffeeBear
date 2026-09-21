@@ -74,7 +74,7 @@ def test_input_invoice_cannot_fake_corporate_payment_manually(db_session):
     assert invoice.payment_method == ""
 
 
-def test_confirmed_bank_payment_overrides_and_clears_old_personal_flag(db_session):
+def test_confirmed_bank_payment_overrides_display_but_preserves_manual_personal_fact(db_session):
     invoice = _invoice(db_session, "input")
     service.set_invoice_payment_methods(
         db_session, [invoice.id], "personal", actor="pytest"
@@ -98,17 +98,17 @@ def test_confirmed_bank_payment_overrides_and_clears_old_personal_flag(db_sessio
     )
 
     db_session.refresh(invoice)
-    assert invoice.payment_method == ""
+    assert invoice.payment_method == "personal"
 
     row = _listed(db_session, invoice.id)
-    assert row["manualPaymentMethod"] == ""
+    assert row["manualPaymentMethod"] == "personal"
     assert row["paymentMethod"] == "corporate"
     assert row["bankPaymentStatus"] == "matched"
 
     payment_service.unlink(db_session, linked["id"], actor="pytest")
     row = _listed(db_session, invoice.id)
-    assert row["manualPaymentMethod"] == ""
-    assert row["paymentMethod"] == ""
+    assert row["manualPaymentMethod"] == "personal"
+    assert row["paymentMethod"] == "personal"
     assert row["bankPaymentStatus"] == "unmatched"
 
 
@@ -135,16 +135,8 @@ def test_partial_bank_payment_plus_explicit_personal_remainder_is_mixed(db_sessi
         actor="pytest",
     )
     db_session.refresh(invoice)
-    # 银行事实发生变化后，旧 personal 不自动沿用，必须重新明确。
-    assert invoice.payment_method == ""
+    assert invoice.payment_method == "personal"
 
-    row = _listed(db_session, invoice.id)
-    assert row["paymentMethod"] == "corporate"
-    assert row["bankPaymentStatus"] == "partial"
-
-    service.set_invoice_payment_methods(
-        db_session, [invoice.id], "personal", actor="pytest"
-    )
     row = _listed(db_session, invoice.id)
     assert row["manualPaymentMethod"] == "personal"
     assert row["paymentMethod"] == "mixed"
@@ -196,7 +188,7 @@ def test_invalid_or_red_input_invoice_cannot_be_marked_personal(db_session):
         )
 
 
-def test_auto_bank_match_clears_old_personal_flag(db_session):
+def test_auto_bank_match_preserves_manual_personal_fact(db_session):
     invoice = _invoice(db_session, "input")
     invoice.seller_name = "自动付款匹配供应商"
     invoice.issue_date = datetime(2026, 9, 10)
@@ -218,7 +210,8 @@ def test_auto_bank_match_clears_old_personal_flag(db_session):
     assert result["matched"] >= 1
 
     db_session.refresh(invoice)
-    assert invoice.payment_method == ""
+    assert invoice.payment_method == "personal"
     row = _listed(db_session, invoice.id)
+    assert row["manualPaymentMethod"] == "personal"
     assert row["paymentMethod"] == "corporate"
     assert row["bankPaymentStatus"] == "matched"

@@ -26,3 +26,10 @@ def test_procurement_auto_invoice_links_must_store_allocated_amount():
     source = _text("backend/app/services/procurement_chain_service.py")
     assert "allocated_amount=allocated_amount" in source
     assert "TaxInvoiceLink.confirmed.is_(True)" in source
+
+
+def test_bank_reconciliation_domain_does_not_write_invoice_manual_payment_fact():
+    source = _text("backend/app/services/payment_invoice_match_service.py")
+    assert "invoice.payment_method =" not in source
+    assert "inv.payment_method =" not in source
+    assert "_clear_manual_personal_on_bank_evidence" not in source
