@@ -12,6 +12,7 @@ import pytest
 from sqlalchemy import select
 
 from app.models.bank import BankTransaction
+from app.models.business_partner import BusinessPartner, BusinessPartnerLink
 from app.models.org import AuditLog
 from app.models.purchase import Supplier
 from app.models.tax import TaxInvoice, TaxInvoiceLink
@@ -812,3 +813,82 @@ def test_auto_match_all_periods_reconciles_historical_bank_months(db_session):
         (july_inv.id, july_txn.id),
         (april_inv.id, april_txn.id),
     }
+
+
+
+def test_name_normalization_treats_full_and_half_width_parentheses_as_equal():
+    assert pm._normalize_name("合锦（广州）供应链有限公司") == pm._normalize_name("合锦(广州)供应链有限公司")
+
+
+def test_auto_match_uses_confirmed_business_partner_identity_for_hejin_3080(db_session):
+    """真实故障回归：统一往来单位已经确认同一主体时，不应再次被原始户名差异挡住。"""
+    partner = BusinessPartner(
+        name="合锦（广州）供应链有限公司",
+        normalized_name="合锦(广州)供应链有限公司",
+        tax_no="91440101MA5AQUHB7W",
+        roles=["supplier", "counterparty"],
+        status="active",
+    )
+    db_session.add(partner)
+    db_session.flush()
+
+    invoice = _invoice(
+        db_session,
+        seller="合锦（广州）供应链有限公司",
+        amount="3080.00",
+        year=2026,
+        month=7,
+        day=24,
+    )
+    invoice.seller_tax_id = "91440101MA5AQUHB7W"
+    txn = _txn(
+        db_session,
+        year=2026,
+        month=7,
+        day=22,
+        amount="3080.00",
+        # 模拟银行侧名称与税票名称并非严格全等；括号本身已由 normalize 兼容。
+        name="合锦(广州)供应链结算户",
+        counterparty_account="44090001040020264",
+    )
+    db_session.add_all([
+        BusinessPartnerLink(
+            partner_id=partner.id,
+            source_type="tax_invoice",
+            source_id=invoice.id,
+            relation_role="seller",
+            raw_name=invoice.seller_name,
+            raw_tax_no=invoice.seller_tax_id,
+            status="linked",
+            match_method="tax_no",
+            confidence=1.0,
+            confirmed=True,
+        ),
+        BusinessPartnerLink(
+            partner_id=partner.id,
+            source_type="bank_transaction",
+            source_id=txn.id,
+            relation_role="counterparty",
+            raw_name=txn.counterparty_name,
+            raw_account_no=txn.counterparty_account,
+            status="linked",
+            match_method="bank_account",
+            confidence=0.99,
+            confirmed=True,
+        ),
+    ])
+    db_session.commit()
+
+    result = pm.auto_match(db_session, 2026, 7)
+
+    assert result["matched"] == 1
+    link = db_session.query(TaxInvoiceLink).filter_by(
+        invoice_id=invoice.id,
+        target_type="bank_transaction",
+        target_id=txn.id,
+    ).one()
+    assert link.confirmed is True
+    assert link.match_method == "business_partner_date"
+    assert link.allocated_amount == Decimal("3080.0000")
+    assert result["details"][0]["partnerMatched"] is True
+    assert result["details"][0]["dateDistanceDays"] == 2

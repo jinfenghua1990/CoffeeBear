@@ -19,6 +19,7 @@ from sqlalchemy.orm import Session
 
 from app.core.audit import audit
 from app.models.bank import BankAccount, BankTransaction
+from app.models.business_partner import BusinessPartnerLink
 from app.models.purchase import Supplier
 from app.models.tax import TaxInvoice, TaxInvoiceLink
 from app.services import tax_invoice_service
@@ -32,7 +33,14 @@ MONEY_QUANT = Decimal("0.01")
 MATCH_WINDOW_MONTHS = 3
 AUTO_REPAIR_NEAR_DAYS = 7
 AUTO_REPAIR_STALE_DAYS = 30
-AUTO_REASSIGNABLE_METHODS = {"auto", "supplier_account", "auto_date", "supplier_account_date", "auto_reassigned"}
+AUTO_REASSIGNABLE_METHODS = {
+    "auto",
+    "supplier_account",
+    "auto_date",
+    "supplier_account_date",
+    "business_partner_date",
+    "auto_reassigned",
+}
 
 
 def _normalize_name(name: str | None) -> str:
@@ -67,10 +75,40 @@ def _supplier_accounts_by_name(db: Session) -> dict[str, set[str]]:
     return result
 
 
+def _linked_partner_ids(
+    db: Session,
+    *,
+    source_type: str,
+    source_ids: list[int],
+    relation_role: str,
+) -> dict[int, int]:
+    """返回已确认归档来源 → 统一往来单位。
+
+    needs_review 不参与付款自动匹配；只有已经 linked 且 partner_id 唯一存在的来源
+    才能作为主体身份强证据。
+    """
+    if not source_ids:
+        return {}
+    rows = (
+        db.query(BusinessPartnerLink)
+        .filter(
+            BusinessPartnerLink.source_type == source_type,
+            BusinessPartnerLink.source_id.in_(source_ids),
+            BusinessPartnerLink.relation_role == relation_role,
+            BusinessPartnerLink.status == "linked",
+            BusinessPartnerLink.partner_id.isnot(None),
+        )
+        .all()
+    )
+    return {int(row.source_id): int(row.partner_id) for row in rows if row.partner_id is not None}
+
+
 def _candidate_evidence(
     txn: BankTransaction,
     invoice: TaxInvoice,
     supplier_accounts: dict[str, set[str]],
+    invoice_partner_ids: dict[int, int] | None = None,
+    txn_partner_ids: dict[int, int] | None = None,
 ) -> dict[str, Any]:
     invoice_name = _normalize_name(invoice.seller_name)
     txn_name = _normalize_name(txn.counterparty_name)
@@ -81,14 +119,24 @@ def _candidate_evidence(
         and txn_account in supplier_accounts.get(invoice_name, set())
     )
     name_match = bool(invoice_name and txn_name and invoice_name == txn_name)
+    invoice_partner_id = (invoice_partner_ids or {}).get(invoice.id)
+    txn_partner_id = (txn_partner_ids or {}).get(txn.id)
+    partner_match = bool(
+        invoice_partner_id
+        and txn_partner_id
+        and invoice_partner_id == txn_partner_id
+    )
     issue_date = _invoice_issue_date(invoice)
     distance = abs((issue_date - txn.txn_date).days) if issue_date and txn.txn_date else 10**9
+    identity_rank = 0 if partner_match else 1 if account_match else 2
     return {
         "nameMatch": name_match,
         "accountMatch": account_match,
+        "partnerMatch": partner_match,
+        "partnerId": invoice_partner_id if partner_match else None,
         "dateDistanceDays": distance,
-        # 账号强证据优先；其后才比较日期距离。
-        "score": (0 if account_match else 1, distance),
+        # 已确认统一往来单位是最强身份事实；供应商账号其次；原始名称最后。
+        "score": (identity_rank, distance),
     }
 
 
@@ -96,11 +144,19 @@ def _choose_unique_best_candidate(
     txn: BankTransaction,
     candidates: list[TaxInvoice],
     supplier_accounts: dict[str, set[str]],
+    invoice_partner_ids: dict[int, int] | None = None,
+    txn_partner_ids: dict[int, int] | None = None,
 ) -> tuple[TaxInvoice | None, dict[str, Any]]:
     scored: list[tuple[tuple[int, int], TaxInvoice, dict[str, Any]]] = []
     for invoice in candidates:
-        evidence = _candidate_evidence(txn, invoice, supplier_accounts)
-        if not (evidence["nameMatch"] or evidence["accountMatch"]):
+        evidence = _candidate_evidence(
+            txn,
+            invoice,
+            supplier_accounts,
+            invoice_partner_ids,
+            txn_partner_ids,
+        )
+        if not (evidence["nameMatch"] or evidence["accountMatch"] or evidence["partnerMatch"]):
             continue
         scored.append((evidence["score"], invoice, evidence))
     if not scored:
@@ -130,6 +186,8 @@ def _repair_wrong_auto_links(
     txns: list[BankTransaction],
     invoices: list[TaxInvoice],
     supplier_accounts: dict[str, set[str]],
+    invoice_partner_ids: dict[int, int] | None = None,
+    txn_partner_ids: dict[int, int] | None = None,
 ) -> list[dict[str, Any]]:
     """只纠正“整笔一对一”的系统自动关联；人工/拆分关系绝不自动搬家。"""
     if not txns or not invoices:
@@ -175,8 +233,14 @@ def _repair_wrong_auto_links(
             if pair in occupied_pairs and invoice.id != current_invoice.id:
                 # 包含人工拒绝：任何历史 pair 都不能被自动复活/覆盖。
                 continue
-            evidence = _candidate_evidence(txn, invoice, supplier_accounts)
-            if not (evidence["nameMatch"] or evidence["accountMatch"]):
+            evidence = _candidate_evidence(
+                txn,
+                invoice,
+                supplier_accounts,
+                invoice_partner_ids,
+                txn_partner_ids,
+            )
+            if not (evidence["nameMatch"] or evidence["accountMatch"] or evidence["partnerMatch"]):
                 continue
             used = _invoice_bank_allocated(
                 db,
@@ -187,14 +251,26 @@ def _repair_wrong_auto_links(
             if abs(remaining - txn_total) <= TOLERANCE:
                 candidates.append(invoice)
 
-        best, best_evidence = _choose_unique_best_candidate(txn, candidates, supplier_accounts)
+        best, best_evidence = _choose_unique_best_candidate(
+            txn,
+            candidates,
+            supplier_accounts,
+            invoice_partner_ids,
+            txn_partner_ids,
+        )
         if best is None or best.id == current_invoice.id:
             continue
-        current_evidence = _candidate_evidence(txn, current_invoice, supplier_accounts)
+        current_evidence = _candidate_evidence(
+            txn,
+            current_invoice,
+            supplier_accounts,
+            invoice_partner_ids,
+            txn_partner_ids,
+        )
         if tuple(best_evidence.get("score") or (99, 10**9)) >= tuple(current_evidence["score"]):
             continue
         # 历史账自动搬家只处理“明显错配”：账号必须一致，新票很近，旧票明显跨期过远。
-        if not best_evidence.get("accountMatch"):
+        if not (best_evidence.get("accountMatch") or best_evidence.get("partnerMatch")):
             continue
         if int(best_evidence.get("dateDistanceDays") or 10**9) > AUTO_REPAIR_NEAR_DAYS:
             continue
@@ -209,7 +285,13 @@ def _repair_wrong_auto_links(
             "系统纠偏：原自动关联不是唯一最佳候选；"
             f"由发票#{current_invoice.id}调整至#{best.id}。原备注：{old_note}"
         )
-        method = "supplier_account_date" if best_evidence.get("accountMatch") else "auto_date"
+        method = (
+            "business_partner_date"
+            if best_evidence.get("partnerMatch")
+            else "supplier_account_date"
+            if best_evidence.get("accountMatch")
+            else "auto_date"
+        )
         replacement = TaxInvoiceLink(
             invoice_id=best.id,
             target_type=TARGET_TYPE,
@@ -521,10 +603,22 @@ def overview(db: Session, year: int, month: int) -> dict[str, Any]:
         invoice_pool.append(row)
         pool_by_id[invoice.id] = row
 
-    # 建议与自动匹配共用“账号优先 + 日期最近 + 唯一最佳”口径。
+    # 建议与自动匹配共用“统一往来单位 > 账号 > 原始名称 + 日期最近 + 唯一最佳”口径。
     supplier_accounts = _supplier_accounts_by_name(db)
     txn_by_id = {txn.id: txn for txn in txns}
     pool_invoice_map = {invoice.id: invoice for invoice in pool_rows}
+    invoice_partner_ids = _linked_partner_ids(
+        db,
+        source_type="tax_invoice",
+        source_ids=list(pool_invoice_map),
+        relation_role="seller",
+    )
+    txn_partner_ids = _linked_partner_ids(
+        db,
+        source_type="bank_transaction",
+        source_ids=list(txn_by_id),
+        relation_role="counterparty",
+    )
     for payment in payments:
         remaining = to_decimal(payment["remaining"]) or Decimal("0.0000")
         if remaining <= TOLERANCE:
@@ -538,7 +632,13 @@ def overview(db: Session, year: int, month: int) -> dict[str, Any]:
             if row["id"] in pool_invoice_map
             and abs(_dec(row["remaining"]) - _dec(remaining)) <= TOLERANCE
         ]
-        invoice, evidence = _choose_unique_best_candidate(txn, candidate_invoices, supplier_accounts)
+        invoice, evidence = _choose_unique_best_candidate(
+            txn,
+            candidate_invoices,
+            supplier_accounts,
+            invoice_partner_ids,
+            txn_partner_ids,
+        )
         if invoice is None:
             if evidence.get("ambiguous"):
                 payment["suggestionBlockedReason"] = "存在并列的最佳候选，需人工确认"
@@ -551,6 +651,7 @@ def overview(db: Session, year: int, month: int) -> dict[str, Any]:
         row["suggestedPaymentIds"].append(payment["id"])
         row["suggestionEvidence"] = {
             "accountMatched": bool(evidence.get("accountMatch")),
+            "partnerMatched": bool(evidence.get("partnerMatch")),
             "dateDistanceDays": evidence.get("dateDistanceDays"),
             "candidateCount": evidence.get("candidateCount"),
         }
@@ -942,11 +1043,25 @@ def auto_match(db: Session, year: int, month: int, actor: str = "system") -> dic
         return {"year": year, "month": month, "matched": 0, "skipped": 0, "details": []}
 
     supplier_accounts = _supplier_accounts_by_name(db)
+    invoice_partner_ids = _linked_partner_ids(
+        db,
+        source_type="tax_invoice",
+        source_ids=[invoice.id for invoice in invoices],
+        relation_role="seller",
+    )
+    txn_partner_ids = _linked_partner_ids(
+        db,
+        source_type="bank_transaction",
+        source_ids=[txn.id for txn in txns],
+        relation_role="counterparty",
+    )
     repair_details = _repair_wrong_auto_links(
         db,
         txns=txns,
         invoices=invoices,
         supplier_accounts=supplier_accounts,
+        invoice_partner_ids=invoice_partner_ids,
+        txn_partner_ids=txn_partner_ids,
     )
 
     # 所有历史 pair 都要读取：rejected 不参与金额，但必须阻止自动复活。
@@ -1000,11 +1115,23 @@ def auto_match(db: Session, year: int, month: int, actor: str = "system") -> dic
             invoice_remaining = invoice_total - allocated_by_invoice.get(invoice.id, Decimal("0"))
             if invoice_remaining <= TOLERANCE or abs(invoice_remaining - txn_remaining) > TOLERANCE:
                 continue
-            evidence = _candidate_evidence(txn, invoice, supplier_accounts)
-            if evidence["nameMatch"] or evidence["accountMatch"]:
+            evidence = _candidate_evidence(
+                txn,
+                invoice,
+                supplier_accounts,
+                invoice_partner_ids,
+                txn_partner_ids,
+            )
+            if evidence["nameMatch"] or evidence["accountMatch"] or evidence["partnerMatch"]:
                 candidates.append(invoice)
 
-        invoice, evidence = _choose_unique_best_candidate(txn, candidates, supplier_accounts)
+        invoice, evidence = _choose_unique_best_candidate(
+            txn,
+            candidates,
+            supplier_accounts,
+            invoice_partner_ids,
+            txn_partner_ids,
+        )
         if invoice is None:
             if evidence.get("ambiguous"):
                 skipped += 1
@@ -1022,17 +1149,19 @@ def auto_match(db: Session, year: int, month: int, actor: str = "system") -> dic
         invoice_remaining = invoice_total - allocated_by_invoice.get(invoice.id, Decimal("0"))
         portion = min(invoice_remaining, txn_remaining)
         account_match = bool(evidence.get("accountMatch"))
-        method = "supplier_account_date" if account_match else "auto_date"
+        partner_match = bool(evidence.get("partnerMatch"))
+        method = "business_partner_date" if partner_match else "supplier_account_date" if account_match else "auto_date"
         link_row = TaxInvoiceLink(
             invoice_id=invoice.id,
             target_type=TARGET_TYPE,
             target_id=txn.id,
             allocated_amount=portion,
             match_method=method,
-            confidence=Decimal("0.99") if account_match else Decimal("0.95"),
+            confidence=Decimal("1.00") if partner_match else Decimal("0.99") if account_match else Decimal("0.95"),
             confirmed=True,
             note=(
                 f"系统唯一最佳候选自动匹配：候选{evidence.get('candidateCount', 0)}张；"
+                f"统一往来单位={'是' if partner_match else '否'}；"
                 f"账号证据={'是' if account_match else '否'}；"
                 f"付款/开票日期差{evidence.get('dateDistanceDays')}天"
             ),
@@ -1054,6 +1183,8 @@ def auto_match(db: Session, year: int, month: int, actor: str = "system") -> dic
             "amount": str(portion),
             "matchMethod": method,
             "accountMatched": account_match,
+            "partnerMatched": partner_match,
+            "partnerId": evidence.get("partnerId"),
             "dateDistanceDays": evidence.get("dateDistanceDays"),
             "candidateCount": evidence.get("candidateCount"),
         })
@@ -1187,13 +1318,25 @@ def auto_match(db: Session, year: int, month: int, actor: str = "system") -> dic
         for inv in leftover_invoices:
             if (inv.id, txn.id) in existing_invoice_txn:
                 continue
-            evidence = _candidate_evidence(txn, inv, supplier_accounts)
+            evidence = _candidate_evidence(
+                txn,
+                inv,
+                supplier_accounts,
+                invoice_partner_ids,
+                txn_partner_ids,
+            )
             if not evidence["accountMatch"]:
                 continue
             inv_remaining = _invoice_target_amount(db, inv) - allocated_by_invoice.get(inv.id, Decimal("0"))
             if inv_remaining > TOLERANCE and abs(inv_remaining - txn_remaining) <= TOLERANCE:
                 candidates.append(inv)
-        inv, evidence = _choose_unique_best_candidate(txn, candidates, supplier_accounts)
+        inv, evidence = _choose_unique_best_candidate(
+            txn,
+            candidates,
+            supplier_accounts,
+            invoice_partner_ids,
+            txn_partner_ids,
+        )
         if inv is None or not evidence.get("accountMatch"):
             if evidence.get("ambiguous"):
                 ambiguous_details.append({
