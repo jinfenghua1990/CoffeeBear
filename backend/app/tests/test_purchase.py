@@ -3,11 +3,17 @@ from decimal import Decimal
 import pytest
 
 from app.models.catalog import Warehouse
-from app.models.purchase import ExternalPurchaseOrder, InboundLink
+from app.models.purchase import (
+    ExternalPurchaseOrder,
+    InboundLink,
+    JackyunPurchaseOrder,
+    JackyunPurchaseOrderLink,
+)
 from app.services.purchase_service import (
     _has_actual_inbound,
     create_external_po,
     derive_invoice_status,
+    unlink_jackyun_po_link,
     update_external_po,
     validate_transition,
 )
@@ -139,3 +145,87 @@ def test_formal_purchase_creation_promotes_reference_only_order(db_session):
     assert promoted.raw["referenceOnly"] is False
     assert promoted.supplier_name == "正式采购供应商"
     assert promoted.order_amount == Decimal("1800")
+
+
+
+def test_unlinking_one_of_multiple_jackyun_links_keeps_linked_status(db_session):
+    po = ExternalPurchaseOrder(
+        external_order_id="PYTEST-JY-SPLIT-PO",
+        platform="1688",
+        purchase_status="jackyun_linked",
+    )
+    first = JackyunPurchaseOrder(
+        jackyun_purch_id="PYTEST-JY-SPLIT-1",
+        purch_no="PYTEST-JY-SPLIT-1",
+    )
+    second = JackyunPurchaseOrder(
+        jackyun_purch_id="PYTEST-JY-SPLIT-2",
+        purch_no="PYTEST-JY-SPLIT-2",
+    )
+    db_session.add_all([po, first, second])
+    db_session.flush()
+    first_link = JackyunPurchaseOrderLink(
+        po_id=po.id, jackyun_po_id=first.id,
+        relation_kind="split", alloc_amount=Decimal("60"),
+    )
+    second_link = JackyunPurchaseOrderLink(
+        po_id=po.id, jackyun_po_id=second.id,
+        relation_kind="split", alloc_amount=Decimal("40"),
+    )
+    db_session.add_all([first_link, second_link])
+    db_session.commit()
+
+    result = unlink_jackyun_po_link(db_session, po, first_link, actor="pytest")
+    db_session.refresh(po)
+
+    assert result["remainingLinks"] == 1
+    assert result["statusReverted"] is False
+    assert po.purchase_status == "jackyun_linked"
+    assert db_session.query(JackyunPurchaseOrderLink).filter_by(po_id=po.id).count() == 1
+
+
+def test_unlinking_last_jackyun_link_reverts_to_confirmed(db_session):
+    po = ExternalPurchaseOrder(
+        external_order_id="PYTEST-JY-LAST-PO",
+        platform="1688",
+        purchase_status="jackyun_linked",
+    )
+    jpo = JackyunPurchaseOrder(
+        jackyun_purch_id="PYTEST-JY-LAST",
+        purch_no="PYTEST-JY-LAST",
+    )
+    db_session.add_all([po, jpo])
+    db_session.flush()
+    link = JackyunPurchaseOrderLink(po_id=po.id, jackyun_po_id=jpo.id)
+    db_session.add(link)
+    db_session.commit()
+
+    result = unlink_jackyun_po_link(db_session, po, link, actor="pytest")
+    db_session.refresh(po)
+
+    assert result["remainingLinks"] == 0
+    assert result["statusReverted"] is True
+    assert po.purchase_status == "confirmed"
+
+
+def test_late_purchase_state_cannot_drop_jackyun_link_directly(db_session):
+    po = ExternalPurchaseOrder(
+        external_order_id="PYTEST-JY-LATE-PO",
+        platform="1688",
+        purchase_status="inbound",
+    )
+    jpo = JackyunPurchaseOrder(
+        jackyun_purch_id="PYTEST-JY-LATE",
+        purch_no="PYTEST-JY-LATE",
+    )
+    db_session.add_all([po, jpo])
+    db_session.flush()
+    link = JackyunPurchaseOrderLink(po_id=po.id, jackyun_po_id=jpo.id)
+    db_session.add(link)
+    db_session.commit()
+
+    with pytest.raises(ValueError, match="不允许直接解除"):
+        unlink_jackyun_po_link(db_session, po, link, actor="pytest")
+
+    assert db_session.get(JackyunPurchaseOrderLink, link.id) is not None
+    assert po.purchase_status == "inbound"

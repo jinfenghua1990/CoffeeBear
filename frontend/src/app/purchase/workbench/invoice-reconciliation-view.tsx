@@ -5,7 +5,8 @@ import { procurementWorkbenchApi } from "@/lib/api";
 
 type CoveredOrder = {
   orderId: number; orderNo: string; platform: string; date: string | null;
-  orderAmount: number; consumed: number; partial: boolean;
+  orderAmount: number; allocatedAmount?: number; consumed: number; partial: boolean;
+  allocationIssue?: boolean; source?: "manual" | "source_ref" | "auto";
 };
 type PendingOrder = {
   orderId: number; orderNo: string; platform: string; date: string | null;
@@ -15,6 +16,8 @@ type ReconInvoice = {
   invoiceId: number; invoiceNo: string; issueDate: string | null; seller: string;
   amount: number; covered: CoveredOrder[]; coveredTotal: number; diff: number;
   status: "matched" | "short";
+  shortReason?: "date_cutoff" | "insufficient_orders" | "explicit_link_issue" | null;
+  explicitLinked?: boolean;
 };
 type ReconSupplier = {
   supplier: string; supplierNorm: string; hasOrders: boolean;
@@ -153,7 +156,7 @@ export default function InvoiceReconciliationView() {
                       <span className="flex min-w-0 items-center gap-2">
                         <span className="font-mono text-slate-700">{inv.invoiceNo}</span>
                         <span className="text-slate-400">{inv.issueDate ?? "无日期"}</span>
-                        <span className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${badge.cls}`}>{badge.text}</span>
+                        <span className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${inv.shortReason === "explicit_link_issue" ? "bg-rose-50 text-rose-600" : badge.cls}`}>{inv.shortReason === "explicit_link_issue" ? "明确关联待核对" : badge.text}</span>
                       </span>
                       <span className="flex items-center gap-3">
                         <span className="font-medium text-slate-700">{money(inv.amount)}</span>
@@ -161,23 +164,25 @@ export default function InvoiceReconciliationView() {
                       </span>
                     </button>
                     {open && <div className="space-y-1 border-t border-slate-100 p-2">
-                      {inv.covered.length === 0 && <p className="text-[11px] text-slate-400">没有可配平的订单（该供应商订单可能未导入或金额未同步）</p>}
+                      {inv.covered.length === 0 && <p className={`text-[11px] ${inv.shortReason === "explicit_link_issue" ? "text-rose-600" : "text-slate-400"}`}>{inv.shortReason === "explicit_link_issue" ? "已有明确关联，但订单映射或分摊金额不完整；系统未使用 FIFO 猜单。" : "没有可配平的订单（该供应商订单可能未导入或金额未同步）"}</p>}
                       {inv.covered.map(o => (
                         <div key={`${o.orderId}-${o.consumed}`} className="flex flex-wrap items-center justify-between gap-2 rounded bg-white px-2 py-1 text-[11px]">
                           <span className="flex min-w-0 items-center gap-2">
                             <span className="font-mono text-slate-600">{o.orderNo}</span>
                             <span className="text-slate-400">{o.date ?? "无日期"}</span>
+                            {o.source === "manual" && <span className="rounded bg-indigo-50 px-1 py-px text-[10px] text-indigo-600">手动</span>}
+                            {o.source === "source_ref" && <span className="rounded bg-sky-50 px-1 py-px text-[10px] text-sky-600">清单</span>}
                             {o.partial && <span className="rounded bg-violet-50 px-1 py-px text-[10px] text-violet-600">部分消耗</span>}
                           </span>
                           <span className="text-slate-500">
-                            本次 {money(o.consumed)}{o.partial && <span className="text-slate-400"> / 订单 {money(o.orderAmount)}</span>}
+                            本次 {money(o.consumed)}{o.allocatedAmount != null && o.allocatedAmount !== o.consumed ? <span className="text-rose-500"> / 关联 {money(o.allocatedAmount)}</span> : null}{o.partial && <span className="text-slate-400"> / 订单 {money(o.orderAmount)}</span>}
                           </span>
                         </div>
                       ))}
                       <div className="flex justify-between px-2 pt-1 text-[11px]">
                         <span className="text-slate-400">合计消耗</span>
                         <span className={inv.status === "matched" ? "font-medium text-emerald-600" : "font-medium text-amber-600"}>
-                          {money(inv.coveredTotal)}{inv.status === "short" && <span className="text-slate-400">（距票面还差 {money(inv.amount - inv.coveredTotal)}，可能仍有订单未导入）</span>}
+                          {money(inv.coveredTotal)}{inv.status === "short" && <span className="text-slate-400">（距票面还差 {money(inv.amount - inv.coveredTotal)}{inv.shortReason === "explicit_link_issue" ? "，请核对明确关联" : "，可能仍有订单未导入"}）</span>}
                         </span>
                       </div>
                     </div>}

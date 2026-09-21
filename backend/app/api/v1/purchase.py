@@ -15,7 +15,6 @@ from app.models.alibaba1688_import import Alibaba1688Order
 from app.models.catalog import ProductSku
 from app.models.purchase import (
     ExternalPurchaseOrder,
-    JackyunPurchaseOrder,
     JackyunPurchaseOrderLink,
     PurchaseAllocationItem,
     PurchaseExtraExpense,
@@ -438,13 +437,10 @@ def unlink_jackyun_order(po_id: int, link_id: int, request: Request, db: Session
     link = db.get(JackyunPurchaseOrderLink, link_id)
     if link is None or link.po_id != po.id:
         raise HTTPException(404, "当前订单的采购单关联不存在")
-    db.delete(link)
-    db.flush()
-    if po.purchase_status == "jackyun_linked" and not db.query(JackyunPurchaseOrderLink).filter_by(po_id=po.id).first():
-        po.purchase_status = "confirmed"
-    db.commit()
-    audit(db, current_actor(request), "purchase.po.jackyun_unlink", "jackyun_purchase_order_links", link_id, {"poId": po.id})
-    return {"ok": True}
+    try:
+        return svc.unlink_jackyun_po_link(db, po, link, actor=current_actor(request))
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
 
 
 @router.post("/orders/auto-link-purchase-orders")
@@ -928,7 +924,7 @@ def inbound_batch_accept_cost(body: BatchAcceptCostBody, request: Request,
 @router.delete("/orders/{po_id}/jackyun-link/{jackyun_po_id}")
 def jackyun_unlink(po_id: int, jackyun_po_id: int, request: Request,
                    db: Session = Depends(get_db)) -> dict[str, Any]:
-    """解除 1688 订单与吉客云采购单的关联（原始采购单保留，可重新匹配）。"""
+    """按吉客云采购单 ID 解除关联；状态回退规则与 link_id 入口完全一致。"""
     po = _po_or_404(db, po_id)
     link = (
         db.query(JackyunPurchaseOrderLink)
@@ -937,20 +933,7 @@ def jackyun_unlink(po_id: int, jackyun_po_id: int, request: Request,
     )
     if not link:
         raise HTTPException(404, "该订单未关联此采购单")
-    jpo = db.get(JackyunPurchaseOrder, jackyun_po_id)
-    db.delete(link)
-    reverted = False
-    if po.purchase_status == "jackyun_linked":
-        po.purchase_status = "confirmed"
-        reverted = True
-    audit(
-        db,
-        current_actor(request),
-        "purchase.po.jackyun_unlink",
-        "jackyun_purchase_order_links",
-        link.id,
-        {"poId": po.id, "jackyunPoId": jackyun_po_id,
-         "purchNo": jpo.purch_no if jpo else None},
-    )
-    db.commit()
-    return {"ok": True, "purchaseStatus": po.purchase_status, "statusReverted": reverted}
+    try:
+        return svc.unlink_jackyun_po_link(db, po, link, actor=current_actor(request))
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))

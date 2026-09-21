@@ -569,6 +569,60 @@ def link_jackyun_po(db: Session, po: ExternalPurchaseOrder, purch_no: str,
     return link
 
 
+
+
+def unlink_jackyun_po_link(
+    db: Session,
+    po: ExternalPurchaseOrder,
+    link: JackyunPurchaseOrderLink,
+    actor: str = "system",
+) -> dict:
+    """解除采购工作流订单 ↔ 吉客云采购单关联。
+
+    - 只允许在 confirmed / jackyun_linked 阶段调整基础关联；
+    - split 场景删除其中一条后，只要仍有其他吉客云关联，状态继续保持 jackyun_linked；
+    - 只有最后一条真实关联删除，且不存在 bypass 标记时，才回退到 confirmed。
+    """
+    if link.po_id != po.id:
+        raise ValueError("采购单关联不属于当前订单")
+    if po.purchase_status not in {"confirmed", "jackyun_linked"}:
+        raise ValueError("当前采购状态不允许直接解除吉客云采购单关联，请先回退/重新编辑采购链路")
+
+    jpo = db.get(JackyunPurchaseOrder, link.jackyun_po_id)
+    link_id = link.id
+    jackyun_po_id = link.jackyun_po_id
+    purch_no = jpo.purch_no if jpo else ""
+    db.delete(link)
+    db.flush()
+
+    remaining = db.query(JackyunPurchaseOrderLink).filter_by(po_id=po.id).count()
+    reverted = False
+    if po.purchase_status == "jackyun_linked" and remaining == 0 and not _jackyun_po_bypassed(po):
+        po.purchase_status = "confirmed"
+        reverted = True
+
+    db.commit()
+    audit(
+        db,
+        actor,
+        "purchase.po.jackyun_unlink",
+        "jackyun_purchase_order_links",
+        link_id,
+        {
+            "poId": po.id,
+            "jackyunPoId": jackyun_po_id,
+            "purchNo": purch_no,
+            "remainingLinks": remaining,
+            "statusReverted": reverted,
+        },
+    )
+    return {
+        "ok": True,
+        "purchaseStatus": po.purchase_status,
+        "remainingLinks": remaining,
+        "statusReverted": reverted,
+    }
+
 # ---------- 吉客云采购单自动关联（文件导入后 Phase-1 自动匹配） ----------
 
 def _jackyun_po_date(jpo: JackyunPurchaseOrder):
