@@ -35,6 +35,7 @@ from app.models.tax import TaxInvoice, TaxInvoiceLink
 from app.services.allocation import balance_check
 from app.services.import_lifecycle import filter_active_import, filter_active_rows
 from app.services.inbound_allocation_seed import seed_allocations_for_link
+from app.services.supplier_sync_service import normalize_supplier_name
 from app.services import purchase_invoice_truth_service as invoice_truth
 from app.services.tax_invoice_service import (
     PURCHASE_LINK_TARGET_TYPES,
@@ -1819,7 +1820,7 @@ def _pair_supplier_key(
     order: Alibaba1688Order | None,
     external: ExternalPurchaseOrder | None,
 ) -> str:
-    """订单对的「供应商/买家」关键字，与 _order_row 行内取值完全同口径。
+    """订单对的「供应商」关键字，与 _order_row 行内取值完全同口径。
 
     供供应商维度按名字预筛：供应商历史/画像只需命中该供应商的少数订单，
     没有必要把全部订单都做一遍完整行聚合（实测全量聚合 49 单 ≈ 100ms）。
@@ -1830,10 +1831,7 @@ def _pair_supplier_key(
         (order.seller_company_name if order is not None else "")
         or (external.supplier_name if external is not None else "")
     )
-    buyer = order.buyer_company_name if order is not None else (
-        external.buyer_account if external is not None else ""
-    )
-    return (supplier or buyer or "").strip()
+    return normalize_supplier_name(supplier)
 
 
 def _pair_order_id(
@@ -3025,9 +3023,9 @@ def supplier_summaries(db: Session, limit: int = 200, offset: int = 0) -> dict:
     sku_counter: dict[str, dict[str, dict]] = {}
 
     for row in rows:
-        supplier = (row.get("supplier") or row.get("buyer") or "未命名供应商").strip()
+        supplier = normalize_supplier_name(row.get("supplier"))
         if not supplier:
-            supplier = "未命名供应商"
+            continue
         if supplier not in by_supplier:
             by_supplier[supplier] = {
                 "supplierName": supplier,
@@ -3079,15 +3077,18 @@ def supplier_summaries(db: Session, limit: int = 200, offset: int = 0) -> dict:
 
 def supplier_detail(db: Session, supplier_name: str) -> dict | None:
     """单个供应商详情：历史合作 + 最近订单 + 常购 SKU。"""
+    supplier_key = normalize_supplier_name(supplier_name)
+    if not supplier_key:
+        return None
     pairs, pf = chain_snapshot(db)
     # 先按供应商关键字筛订单对，再对命中订单做完整行聚合：结果与全量聚合后再筛完全一致，
     # 但省掉了为无关订单解析明细的成本。
     rows = [
         _order_row(db, order, external, pf=pf)
         for order, external in pairs
-        if _pair_supplier_key(db, pf, order, external) == supplier_name
+        if _pair_supplier_key(db, pf, order, external) == supplier_key
     ]
-    matched = [r for r in rows if (r.get("supplier") or r.get("buyer") or "").strip() == supplier_name]
+    matched = [r for r in rows if normalize_supplier_name(r.get("supplier")) == supplier_key]
     if not matched:
         return None
 
@@ -3114,7 +3115,7 @@ def supplier_detail(db: Session, supplier_name: str) -> dict | None:
     often = sorted(sku_counter.values(), key=lambda x: x["count"], reverse=True)[:8]
 
     return {
-        "supplierName": supplier_name,
+        "supplierName": supplier_key,
         "orderCount": len(matched),
         "totalPurchase": round(total, 2),
         "uninvoiced": round(uninvoiced, 2),
@@ -3127,17 +3128,18 @@ def supplier_detail(db: Session, supplier_name: str) -> dict | None:
 
 def order_supplier_history(db: Session, supplier_name: str, exclude_order_id: int | None = None) -> dict:
     """某个订单的供应商历史：合作次数、累计金额、未开发票、最近采购、常购 SKU。"""
+    supplier_key = normalize_supplier_name(supplier_name)
     pairs, pf = chain_snapshot(db)
     # 同上：先按供应商 + 排除单号筛订单对，再只对命中订单做完整行聚合。
     rows = [
         _order_row(db, order, external, pf=pf)
         for order, external in pairs
-        if _pair_supplier_key(db, pf, order, external) == supplier_name
+        if _pair_supplier_key(db, pf, order, external) == supplier_key
         and (exclude_order_id is None or _pair_order_id(order, external) != exclude_order_id)
     ]
     matched = [
         r for r in rows
-        if (r.get("supplier") or r.get("buyer") or "").strip() == supplier_name
+        if normalize_supplier_name(r.get("supplier")) == supplier_key
         and (exclude_order_id is None or r.get("orderId") != exclude_order_id)
     ]
     matched.sort(key=lambda r: r.get("orderDate") or "", reverse=True)

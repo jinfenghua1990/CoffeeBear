@@ -9,8 +9,9 @@ from sqlalchemy.orm import Session
 from app.api.deps import current_actor
 from app.core.audit import audit
 from app.db import get_db
-from app.models.purchase import ExternalPurchaseOrder, Supplier
-from app.services.supplier_sync_service import sync_suppliers_from_business_data
+from app.models.purchase import Supplier
+from app.services.procurement_chain_service import supplier_summaries
+from app.services.supplier_sync_service import normalize_supplier_name, sync_suppliers_from_business_data
 
 router = APIRouter(prefix="/suppliers", tags=["suppliers"])
 
@@ -43,6 +44,7 @@ def _serialize(row: Supplier, order_count: int | None = None) -> dict[str, Any]:
         "address": row.address or "",
         "notes": row.notes or "",
         "isTemp": bool(row.is_temp),
+        "purchaseType": "regular" if (order_count or 0) >= 2 else "temporary",
         "createdAt": row.created_at.isoformat() if row.created_at else None,
     }
     if order_count is not None:
@@ -64,7 +66,7 @@ def _ensure_tax_no_unique(db: Session, tax_no: str, exclude_id: int | None = Non
 @router.get("")
 def list_suppliers(
     keyword: str = "",
-    status: str = Query("all", pattern="^(all|normal|temp)$"),
+    status: str = Query("all", pattern="^(all|regular|temporary|normal|temp)$"),
     db: Session = Depends(get_db),
 ) -> list[dict[str, Any]]:
     sync = sync_suppliers_from_business_data(db)
@@ -78,7 +80,22 @@ def list_suppliers(
             "",
             sync,
         )
-    q = db.query(Supplier)
+    # 供应商档案的展示范围必须和采购工作台使用同一套“逻辑采购单”事实。
+    # 这样 1688 原始单 + 工作流副本不会重复计数，也不会让只有报销/结算/入库
+    # 记录、却没有真实采购订单的对象进入本页面。
+    purchase_counts: dict[str, int] = {}
+    summary = supplier_summaries(db, limit=100_000, offset=0)
+    for item in summary["items"]:
+        name = normalize_supplier_name(item.get("supplierName"))
+        count = int(item.get("orderCount") or 0)
+        if not name or count <= 0:
+            continue
+        purchase_counts[name] = purchase_counts.get(name, 0) + count
+
+    if not purchase_counts:
+        return []
+
+    q = db.query(Supplier).filter(Supplier.name.in_(list(purchase_counts)))
     keyword = keyword.strip()
     if keyword:
         like = f"%{keyword}%"
@@ -90,18 +107,14 @@ def list_suppliers(
                 Supplier.phone.ilike(like),
             )
         )
-    if status == "normal":
-        q = q.filter(Supplier.is_temp.is_(False))
-    elif status == "temp":
-        q = q.filter(Supplier.is_temp.is_(True))
-    rows = q.order_by(Supplier.is_temp.asc(), Supplier.name.asc()).all()
 
-    counts: dict[str, int] = {}
-    for po in db.query(ExternalPurchaseOrder).all():
-        if (po.raw or {}).get("referenceOnly") is True or not po.supplier_name:
-            continue
-        counts[po.supplier_name] = counts.get(po.supplier_name, 0) + 1
-    return [_serialize(row, counts.get(row.name, 0)) for row in rows]
+    rows = q.order_by(Supplier.name.asc(), Supplier.id.asc()).all()
+    if status in {"regular", "normal"}:
+        rows = [row for row in rows if purchase_counts.get(row.name, 0) >= 2]
+    elif status in {"temporary", "temp"}:
+        rows = [row for row in rows if purchase_counts.get(row.name, 0) == 1]
+
+    return [_serialize(row, purchase_counts.get(row.name, 0)) for row in rows]
 
 
 @router.post("")

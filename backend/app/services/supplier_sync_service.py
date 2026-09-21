@@ -8,14 +8,7 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from app.models.alibaba1688_import import Alibaba1688FileImport, Alibaba1688Order
-from app.models.consumable_purchase import ConsumablePurchase
-from app.models.jackyun import (
-    JackyunGoodsDocument,
-    JackyunPurchaseReturn,
-    JackyunPurchaseSettlement,
-)
-from app.models.purchase import ExternalPurchaseOrder, JackyunPurchaseOrder, Supplier
-from app.models.production import ProductionOrder
+from app.models.purchase import ExternalPurchaseOrder, Supplier
 
 
 _PLATFORM_PRIORITY = {
@@ -85,18 +78,16 @@ def ensure_supplier(
 
 
 def sync_suppliers_from_business_data(db: Session) -> dict[str, Any]:
-    """从现有采购、入库、耗材采购和生产数据幂等回补供应商主档。"""
+    """只从真实采购订单事实幂等回补供应商主档。
+
+    入库、结算、退货、报销/费用以及生产执行单都属于采购后的下游事实，
+    不能反向创建供应商；否则会把非采购付款对象带进供应商档案。
+    """
     created = 0
     updated = 0
     sources = {
         "purchaseOrders": 0,
         "1688Orders": 0,
-        "inboundDocuments": 0,
-        "jackyunPurchaseOrders": 0,
-        "purchaseSettlements": 0,
-        "purchaseReturns": 0,
-        "consumablePurchases": 0,
-        "productionOrders": 0,
     }
 
     def add(name: Any, platform: Any, source: str) -> None:
@@ -124,22 +115,6 @@ def sync_suppliers_from_business_data(db: Session) -> dict[str, Any]:
         .all()
     ):
         add(row.seller_company_name or row.seller_member_name, "1688", "1688Orders")
-
-    for row in db.query(JackyunGoodsDocument).filter(JackyunGoodsDocument.document_type == "inbound").all():
-        add(row.supplier_name, "其他", "inboundDocuments")
-
-    for row in db.query(JackyunPurchaseOrder).all():
-        add(row.supplier_name, "其他", "jackyunPurchaseOrders")
-    for row in db.query(JackyunPurchaseSettlement).all():
-        add(row.supplier_name, "其他", "purchaseSettlements")
-    for row in db.query(JackyunPurchaseReturn).all():
-        add(row.supplier_name, "其他", "purchaseReturns")
-
-    for row in db.query(ConsumablePurchase).all():
-        add(row.supplier_name, "1688" if row.source_order_id else "线下", "consumablePurchases")
-
-    for row in db.query(ProductionOrder).all():
-        add(row.factory_name, "线下", "productionOrders")
 
     return {
         "created": created,

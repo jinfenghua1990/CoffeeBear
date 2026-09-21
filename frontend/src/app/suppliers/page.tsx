@@ -15,7 +15,7 @@ import {
 } from "@/lib/api";
 import { useTabScopedState, useTabTitle } from "@/lib/workspace/tab-store";
 
-type StatusFilter = "all" | "normal" | "temp";
+type StatusFilter = "all" | "regular" | "temporary";
 type SortKey = "totalPurchase" | "invoiced" | "uninvoiced" | "pendingCount" | "lastOrderDate";
 type SortDir = "desc" | "asc";
 type DetailTab = "orders" | "uninvoiced" | "profile";
@@ -30,20 +30,6 @@ type FormState = {
   phone: string;
   address: string;
   notes: string;
-  isTemp: boolean;
-};
-
-const EMPTY_FORM: FormState = {
-  id: null,
-  name: "",
-  platform: "1688",
-  externalShopId: "",
-  contact: "",
-  taxNo: "",
-  phone: "",
-  address: "",
-  notes: "",
-  isTemp: false,
 };
 
 const PLATFORM_OPTIONS = ["1688", "拼多多", "淘宝", "线下", "其他"];
@@ -105,10 +91,15 @@ type DisplayRow = {
   pendingCount: number | null;
 };
 
-function TempBadge() {
+function purchaseTypeLabel(type: SupplierRecord["purchaseType"]): string {
+  return type === "regular" ? "常购供应商" : "临时供应商";
+}
+
+function PurchaseTypeBadge({ type }: { type: SupplierRecord["purchaseType"] }) {
+  const regular = type === "regular";
   return (
-    <span className="ml-1.5 inline-block shrink-0 rounded bg-amber-100 px-1 py-px align-[1px] text-[10px] font-semibold leading-4 text-amber-700">
-      临时
+    <span className={`inline-flex rounded-full px-2 py-0.5 text-[10px] font-medium ${regular ? "bg-emerald-100 text-emerald-700" : "bg-amber-100 text-amber-700"}`}>
+      {purchaseTypeLabel(type)}
     </span>
   );
 }
@@ -375,11 +366,6 @@ export default function SuppliersPage() {
     URL.revokeObjectURL(url);
   }
 
-  function openCreate() {
-    setForm({ ...EMPTY_FORM });
-    setNotice(null);
-  }
-
   function openEdit(row: SupplierRecord) {
     setForm({
       id: row.id,
@@ -391,7 +377,6 @@ export default function SuppliersPage() {
       phone: row.phone,
       address: row.address,
       notes: row.notes,
-      isTemp: row.isTemp,
     });
     setNotice(null);
   }
@@ -413,7 +398,6 @@ export default function SuppliersPage() {
         phone: form.phone.trim(),
         address: form.address.trim(),
         notes: form.notes.trim(),
-        isTemp: form.isTemp,
       };
       if (form.id == null) {
         await supplierApi.create(payload);
@@ -528,7 +512,7 @@ export default function SuppliersPage() {
           <span className="text-slate-600">供应商档案</span>
         </nav>
         <h1 className="mt-1 text-xl font-semibold tracking-tight text-slate-900">供应商档案</h1>
-        <p className="mt-0.5 text-xs text-slate-500">用于查看供应商采购、开票、未开票与订单明细</p>
+        <p className="mt-0.5 text-xs text-slate-500">管理生产及商品采购供应商，查看采购、入库、开票及订单往来</p>
       </header>
 
       {notice && (
@@ -567,7 +551,7 @@ export default function SuppliersPage() {
               className="h-9 w-64 rounded-lg border border-slate-300 px-3 text-sm outline-none placeholder:text-slate-400 focus:border-violet-400"
             />
             <div className="flex overflow-hidden rounded-lg border border-slate-300 text-sm">
-              {([["all", "全部"], ["normal", "正常"], ["temp", "临时"]] as [StatusFilter, string][]).map(([key, label]) => (
+              {([["all", "全部供应商"], ["regular", "常购供应商"], ["temporary", "临时供应商"]] as [StatusFilter, string][]).map(([key, label]) => (
                 <button
                   key={key}
                   type="button"
@@ -578,13 +562,7 @@ export default function SuppliersPage() {
                 </button>
               ))}
             </div>
-            <button
-              type="button"
-              onClick={openCreate}
-              className="ml-auto rounded-lg bg-violet-600 px-3.5 py-1.5 text-sm font-medium text-white hover:bg-violet-700"
-            >
-              + 新增供应商
-            </button>
+            <span className="ml-auto text-xs text-slate-400">类型按有效采购次数自动判定：1 次为临时，2 次及以上为常购</span>
           </div>
 
           <div className="overflow-x-auto">
@@ -598,7 +576,7 @@ export default function SuppliersPage() {
                   <SortTh label="未开票" colKey="uninvoiced" sortKey={sortKey} sortDir={sortDir} onSort={onSort} right />
                   <SortTh label="未开票订单" colKey="pendingCount" sortKey={sortKey} sortDir={sortDir} onSort={onSort} right />
                   <SortTh label="最近采购时间" colKey="lastOrderDate" sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
-                  <th className="px-3 py-2 text-left font-medium text-slate-500">状态</th>
+                  <th className="px-3 py-2 text-left font-medium text-slate-500">供应商类型</th>
                   <th className="px-3 py-2 text-right font-medium text-slate-500">操作</th>
                 </tr>
               </thead>
@@ -606,7 +584,7 @@ export default function SuppliersPage() {
                 {loading ? (
                   <tr><td colSpan={9} className="px-3 py-8 text-center text-slate-400">加载中…</td></tr>
                 ) : pageRows.length === 0 ? (
-                  <tr><td colSpan={9} className="px-3 py-8 text-center text-slate-400">暂无供应商；有采购、入库或生产数据后会自动生成，也可以手动新增</td></tr>
+                  <tr><td colSpan={9} className="px-3 py-8 text-center text-slate-400">暂无采购供应商；产生有效采购订单后会自动进入供应商档案</td></tr>
                 ) : (
                   pageRows.map((row) => (
                     <tr
@@ -616,7 +594,6 @@ export default function SuppliersPage() {
                     >
                       <td className="max-w-[180px] truncate px-3 py-2 font-medium text-slate-800">
                         {row.record.name}
-                        {row.record.isTemp && <TempBadge />}
                       </td>
                       <td className="px-3 py-2 font-mono text-xs text-slate-600">{row.record.taxNo || "—"}</td>
                       <td className="px-3 py-2 text-right tabular-nums text-slate-700">{fmtMoney(row.totalPurchase)}</td>
@@ -629,12 +606,7 @@ export default function SuppliersPage() {
                       </td>
                       <td className="whitespace-nowrap px-3 py-2 text-slate-600">{fmtDate(row.lastOrderDate)}</td>
                       <td className="whitespace-nowrap px-3 py-2">
-                        <span className="inline-flex items-center gap-1.5">
-                          <span className={`h-1.5 w-1.5 rounded-full ${row.record.isTemp ? "bg-amber-500" : "bg-emerald-500"}`} />
-                          <span className={`text-xs ${row.record.isTemp ? "text-amber-600" : "text-emerald-600"}`}>
-                            {row.record.isTemp ? "临时" : "正常"}
-                          </span>
-                        </span>
+                        <PurchaseTypeBadge type={row.record.purchaseType} />
                       </td>
                       <td className="whitespace-nowrap px-3 py-2 text-right">
                         <button
@@ -722,9 +694,7 @@ export default function SuppliersPage() {
                 <div className="flex items-start justify-between gap-2">
                   <div className="flex min-w-0 items-center gap-2">
                     <h3 className="truncate text-sm font-semibold text-slate-900">{selected.record.name}</h3>
-                    <span className={`shrink-0 rounded-full px-2 py-0.5 text-[10px] font-medium ${selected.record.isTemp ? "bg-amber-100 text-amber-700" : "bg-emerald-100 text-emerald-700"}`}>
-                      {selected.record.isTemp ? "临时" : "正常"}
-                    </span>
+                    <PurchaseTypeBadge type={selected.record.purchaseType} />
                   </div>
                   <button
                     type="button"
@@ -870,6 +840,7 @@ export default function SuppliersPage() {
                       <dl className="grid grid-cols-2 gap-x-4 gap-y-3 text-xs">
                         {(
                           [
+                            ["供应商类型", purchaseTypeLabel(selected.record.purchaseType)],
                             ["平台", selected.record.platform],
                             ["店铺 / 编码", selected.record.externalShopId],
                             ["联系人", selected.record.contact],
@@ -988,15 +959,9 @@ export default function SuppliersPage() {
                   className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-1.5 text-sm outline-none focus:border-violet-400"
                 />
               </label>
-              <label className="col-span-2 flex items-center gap-2 rounded-lg bg-amber-50 px-3 py-2">
-                <input
-                  type="checkbox"
-                  checked={form.isTemp}
-                  onChange={(e) => setForm({ ...form, isTemp: e.target.checked })}
-                  className="h-4 w-4 accent-amber-600"
-                />
-                <span className="text-xs text-amber-700">标记为临时供应商（一次性采购，不作为长期合作主档识别）</span>
-              </label>
+              <div className="col-span-2 rounded-lg bg-slate-50 px-3 py-2 text-xs text-slate-500">
+                供应商类型由有效采购次数自动计算，不在档案中手工维护。
+              </div>
             </div>
             <div className="mt-5 flex justify-end gap-2">
               <button type="button" onClick={() => setForm(null)} disabled={saving} className="rounded-lg border border-slate-300 px-4 py-1.5 text-sm text-slate-600 hover:bg-slate-50 disabled:opacity-50">取消</button>

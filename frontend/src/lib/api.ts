@@ -1158,6 +1158,7 @@ export type SupplierRecord = {
   address: string;
   notes: string;
   isTemp: boolean;
+  purchaseType: "regular" | "temporary";
   orderCount?: number;
   createdAt: string | null;
 };
