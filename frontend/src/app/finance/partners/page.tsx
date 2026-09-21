@@ -7,6 +7,7 @@ import {
   authenticatedFetch,
   businessPartnerApi,
   type BusinessPartnerDetail,
+  type BusinessPartnerBankAccount,
   type BusinessPartnerInput,
   type BusinessPartnerListItem,
   type BusinessPartnerRole,
@@ -45,6 +46,8 @@ const emptyForm: BusinessPartnerInput = {
   bankName: "",
   bankAccountNo: "",
   bankAccountName: "",
+  formerNames: [],
+  bankAccounts: [{ bankName: "", accountNo: "", accountName: "", isPrimary: true }],
   notes: "",
 };
 
@@ -99,6 +102,10 @@ function partnerToForm(detail: BusinessPartnerDetail): BusinessPartnerInput {
     bankName: detail.bankName,
     bankAccountNo: detail.bankAccountNo,
     bankAccountName: detail.bankAccountName,
+    formerNames: [...detail.formerNames],
+    bankAccounts: detail.bankAccounts.length
+      ? detail.bankAccounts.map((row) => ({ ...row }))
+      : [{ bankName: detail.bankName, accountNo: detail.bankAccountNo, accountName: detail.bankAccountName, isPrimary: true }],
     notes: detail.notes,
   };
 }
@@ -562,17 +569,67 @@ function Review({ rows, saving, onClaim }: { rows: BusinessPartnerDetail["review
 
 function Profile({ detail, alias, setAlias, saving, onAddAlias }: { detail: BusinessPartnerDetail; alias: string; setAlias: (value: string) => void; saving: boolean; onAddAlias: () => void }) {
   const grouped = detail.identifiers.reduce<Record<string, string[]>>((result, row) => { (result[row.kind] ||= []).push(row.value); return result; }, {});
-  const labels: Record<string, string> = { name: "主名称", alias: "已确认别名", tax_no: "税号", bank_account: "银行账号", customer_code: "客户编码" };
-  return <div className="space-y-5"><div className="grid gap-3 md:grid-cols-2"><Info label="联系人" value={detail.contact} /><Info label="电话" value={detail.phone} /><Info label="地址" value={detail.address} /><Info label="开户行" value={detail.bankName} /><Info label="主银行账号" value={detail.bankAccountNo} /><Info label="开户名称" value={detail.bankAccountName} /></div><div className="rounded-xl border border-slate-200 p-4"><div className="text-sm font-semibold text-slate-800">名称、税号和账号证据</div><div className="mt-3 space-y-3">{Object.entries(grouped).map(([kind, values]) => <div key={kind}><div className="text-[11px] text-slate-500">{labels[kind] || kind}</div><div className="mt-1 flex flex-wrap gap-1.5">{values.map((value) => <span key={`${kind}-${value}`} className="rounded-md bg-slate-100 px-2 py-1 text-xs text-slate-700">{value}</span>)}</div></div>)}</div><div className="mt-4 border-t border-slate-100 pt-4"><div className="text-xs font-medium text-slate-700">补充已确认名称别名</div><p className="mt-1 text-[11px] leading-4 text-slate-500">例如银行户名、发票卖方名称或带“个体工商户”的完整名称。保存后系统会重新核对待确认来源。</p><div className="mt-2 flex gap-2"><input value={alias} onChange={(event) => setAlias(event.target.value)} placeholder="输入已确认的完整名称" className="min-w-0 flex-1 rounded-lg border border-slate-200 px-3 py-2 text-sm outline-none focus:border-blue-400" /><button type="button" disabled={saving || !alias.trim()} onClick={onAddAlias} className="rounded-lg border border-blue-200 px-3 py-2 text-xs font-medium text-blue-600 hover:bg-blue-50 disabled:opacity-50">保存别名</button></div></div></div><div className="rounded-xl border border-slate-200 p-4"><div className="text-sm font-semibold text-slate-800">备注</div><div className="mt-2 whitespace-pre-wrap text-sm leading-6 text-slate-600">{detail.notes || "暂无备注"}</div></div></div>;
+  const labels: Record<string, string> = { name: "主名称", alias: "已确认别名", former_name: "曾用名", tax_no: "税号", bank_account: "银行账号", customer_code: "客户编码" };
+  return <div className="space-y-5">
+    <div className="grid gap-3 md:grid-cols-2"><Info label="联系人" value={detail.contact} /><Info label="电话" value={detail.phone} /><Info label="地址" value={detail.address} /><Info label="税号" value={detail.taxNo} /></div>
+    <div className="rounded-xl border border-slate-200 p-4">
+      <div className="flex items-center justify-between"><div className="text-sm font-semibold text-slate-800">银行账户</div><span className="text-[11px] text-slate-400">{detail.bankAccounts.length} 个账号</span></div>
+      <div className="mt-3 space-y-2">{detail.bankAccounts.length ? detail.bankAccounts.map((row) => <div key={row.accountNo} className="grid gap-2 rounded-lg bg-slate-50 px-3 py-2.5 sm:grid-cols-[1fr_1.35fr_1fr_auto]"><div><div className="text-[10px] text-slate-400">开户行</div><div className="mt-0.5 text-xs text-slate-700">{row.bankName || "—"}</div></div><div><div className="text-[10px] text-slate-400">银行账号</div><div className="mt-0.5 font-mono text-xs text-slate-800">{row.accountNo}</div></div><div><div className="text-[10px] text-slate-400">开户名称</div><div className="mt-0.5 text-xs text-slate-700">{row.accountName || "—"}</div></div><div className="flex items-center">{row.isPrimary && <span className="rounded bg-blue-50 px-2 py-1 text-[10px] font-medium text-blue-600">主账户</span>}</div></div>) : <div className="text-xs text-slate-400">暂无银行账户</div>}</div>
+    </div>
+    <div className="rounded-xl border border-slate-200 p-4"><div className="text-sm font-semibold text-slate-800">名称、税号和账号证据</div><div className="mt-3 space-y-3">{Object.entries(grouped).map(([kind, values]) => <div key={kind}><div className="text-[11px] text-slate-500">{labels[kind] || kind}</div><div className="mt-1 flex flex-wrap gap-1.5">{values.map((value) => <span key={`${kind}-${value}`} className="rounded-md bg-slate-100 px-2 py-1 text-xs text-slate-700">{value}</span>)}</div></div>)}</div><div className="mt-4 border-t border-slate-100 pt-4"><div className="text-xs font-medium text-slate-700">快速补充别名</div><p className="mt-1 text-[11px] leading-4 text-slate-500">完整维护曾用名和多个银行账户请使用“编辑档案”。这里保留快速补充入口。</p><div className="mt-2 flex gap-2"><input value={alias} onChange={(event) => setAlias(event.target.value)} placeholder="输入已确认的完整名称" className="min-w-0 flex-1 rounded-lg border border-slate-200 px-3 py-2 text-sm outline-none focus:border-blue-400" /><button type="button" disabled={saving || !alias.trim()} onClick={onAddAlias} className="rounded-lg border border-blue-200 px-3 py-2 text-xs font-medium text-blue-600 hover:bg-blue-50 disabled:opacity-50">保存别名</button></div></div></div>
+    <div className="rounded-xl border border-slate-200 p-4"><div className="text-sm font-semibold text-slate-800">备注</div><div className="mt-2 whitespace-pre-wrap text-sm leading-6 text-slate-600">{detail.notes || "暂无备注"}</div></div>
+  </div>;
 }
 
 function Info({ label, value }: { label: string; value: string }) { return <div className="rounded-lg bg-slate-50 px-3 py-2.5"><div className="text-[11px] text-slate-400">{label}</div><div className="mt-1 break-all text-sm text-slate-700">{value || "—"}</div></div>; }
 
 function PartnerForm({ form, setForm, editing, saving, onClose, onSave }: { form: BusinessPartnerInput; setForm: (next: BusinessPartnerInput) => void; editing: boolean; saving: boolean; onClose: () => void; onSave: () => void }) {
   const formInput = "w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 outline-none focus:border-blue-400";
+  const bankAccounts = form.bankAccounts?.length ? form.bankAccounts : [{ bankName: "", accountNo: "", accountName: "", isPrimary: true }];
+  const formerNames = form.formerNames || [];
+
   function set<K extends keyof BusinessPartnerInput>(key: K, value: BusinessPartnerInput[K]) { setForm({ ...form, [key]: value }); }
   function toggleRole(role: BusinessPartnerRole) { const roles = form.roles.includes(role) ? form.roles.filter((item) => item !== role) : [...form.roles, role]; set("roles", roles.length ? roles : ["counterparty"]); }
-  return <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/35 p-4"><div className="max-h-[calc(100vh-40px)] w-full max-w-2xl overflow-y-auto rounded-2xl bg-white shadow-2xl"><div className="sticky top-0 flex items-center justify-between border-b border-slate-100 bg-white px-5 py-4"><div><h3 className="text-base font-semibold text-slate-900">{editing ? "编辑往来单位" : "新增往来单位"}</h3><p className="mt-1 text-xs text-slate-500">主档资料只维护一次，采购、发票和银行流水共同使用。</p></div><button type="button" onClick={onClose} className="text-xl text-slate-400 hover:text-slate-700">×</button></div><div className="grid gap-3 p-5 sm:grid-cols-2"><Field label="单位名称 *"><input value={form.name} onChange={(event) => set("name", event.target.value)} className={formInput} /></Field><Field label="税号"><input value={form.taxNo || ""} onChange={(event) => set("taxNo", event.target.value)} className={formInput} /></Field><div className="sm:col-span-2"><div className="mb-1 text-xs font-medium text-slate-600">角色</div><div className="flex flex-wrap gap-2">{(["supplier", "customer", "counterparty"] as BusinessPartnerRole[]).map((role) => <label key={role} className="flex cursor-pointer items-center gap-1.5 rounded-lg border border-slate-200 px-3 py-2 text-xs text-slate-700"><input type="checkbox" checked={form.roles.includes(role)} onChange={() => toggleRole(role)} />{roleLabels[role]}</label>)}</div></div><Field label="联系人"><input value={form.contact || ""} onChange={(event) => set("contact", event.target.value)} className={formInput} /></Field><Field label="电话"><input value={form.phone || ""} onChange={(event) => set("phone", event.target.value)} className={formInput} /></Field><Field label="开户行"><input value={form.bankName || ""} onChange={(event) => set("bankName", event.target.value)} className={formInput} /></Field><Field label="银行账号"><input value={form.bankAccountNo || ""} onChange={(event) => set("bankAccountNo", event.target.value)} className={formInput} /></Field><Field label="开户名称" wide><input value={form.bankAccountName || ""} onChange={(event) => set("bankAccountName", event.target.value)} className={formInput} /></Field><Field label="地址" wide><input value={form.address || ""} onChange={(event) => set("address", event.target.value)} className={formInput} /></Field><Field label="备注" wide><textarea value={form.notes || ""} onChange={(event) => set("notes", event.target.value)} rows={3} className={`${formInput} resize-y`} /></Field></div><div className="flex justify-end gap-2 border-t border-slate-100 px-5 py-4"><button type="button" onClick={onClose} className="rounded-lg px-3 py-2 text-sm text-slate-600 hover:bg-slate-100">取消</button><button type="button" disabled={saving || !form.name.trim()} onClick={onSave} className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-50">{saving ? "保存中…" : "保存并核对来源"}</button></div></div></div>;
+  function setFormerName(index: number, value: string) { set("formerNames", formerNames.map((item, i) => i === index ? value : item)); }
+  function addFormerName() { set("formerNames", [...formerNames, ""]); }
+  function removeFormerName(index: number) { set("formerNames", formerNames.filter((_, i) => i !== index)); }
+  function setBank(index: number, patch: Partial<BusinessPartnerBankAccount>) {
+    set("bankAccounts", bankAccounts.map((item, i) => i === index ? { ...item, ...patch } : item));
+  }
+  function addBank() { set("bankAccounts", [...bankAccounts, { bankName: "", accountNo: "", accountName: "", isPrimary: false }]); }
+  function removeBank(index: number) {
+    const next = bankAccounts.filter((_, i) => i !== index);
+    if (next.length && !next.some((row) => row.isPrimary)) next[0] = { ...next[0], isPrimary: true };
+    set("bankAccounts", next.length ? next : [{ bankName: "", accountNo: "", accountName: "", isPrimary: true }]);
+  }
+  function makePrimary(index: number) { set("bankAccounts", bankAccounts.map((item, i) => ({ ...item, isPrimary: i === index }))); }
+
+  return <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/35 p-4"><div className="max-h-[calc(100vh-40px)] w-full max-w-4xl overflow-y-auto rounded-2xl bg-white shadow-2xl">
+    <div className="sticky top-0 z-10 flex items-center justify-between border-b border-slate-100 bg-white px-5 py-4"><div><h3 className="text-base font-semibold text-slate-900">{editing ? "编辑往来单位" : "新增往来单位"}</h3><p className="mt-1 text-xs text-slate-500">主档资料只维护一次；曾用名和全部银行账户都会参与采购、发票与银行流水识别。</p></div><button type="button" onClick={onClose} className="text-xl text-slate-400 hover:text-slate-700">×</button></div>
+    <div className="space-y-5 p-5">
+      <section className="grid gap-3 sm:grid-cols-2">
+        <Field label="单位名称 *"><input value={form.name} onChange={(event) => set("name", event.target.value)} className={formInput} /></Field>
+        <Field label="税号"><input value={form.taxNo || ""} onChange={(event) => set("taxNo", event.target.value)} className={formInput} /></Field>
+        <div className="sm:col-span-2"><div className="mb-1 text-xs font-medium text-slate-600">角色</div><div className="flex flex-wrap gap-2">{(["supplier", "customer", "counterparty"] as BusinessPartnerRole[]).map((role) => <label key={role} className="flex cursor-pointer items-center gap-1.5 rounded-lg border border-slate-200 px-3 py-2 text-xs text-slate-700"><input type="checkbox" checked={form.roles.includes(role)} onChange={() => toggleRole(role)} />{roleLabels[role]}</label>)}</div></div>
+      </section>
+
+      <section className="rounded-xl border border-slate-200 p-4">
+        <div className="flex items-start justify-between gap-3"><div><div className="text-sm font-semibold text-slate-800">曾用名 / 历史名称</div><div className="mt-1 text-[11px] text-slate-500">例如旧营业执照名称、银行户名、带“个体工商户”的完整名称。系统按完整值识别，不做危险的模糊合并。</div></div><button type="button" onClick={addFormerName} className="shrink-0 rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50">+ 添加曾用名</button></div>
+        <div className="mt-3 space-y-2">{formerNames.length ? formerNames.map((value, index) => <div key={index} className="flex gap-2"><input value={value} onChange={(event) => setFormerName(index, event.target.value)} placeholder="输入完整曾用名" className={formInput} /><button type="button" onClick={() => removeFormerName(index)} className="shrink-0 rounded-lg px-3 text-xs text-slate-400 hover:bg-rose-50 hover:text-rose-600">删除</button></div>) : <div className="rounded-lg bg-slate-50 px-3 py-3 text-xs text-slate-400">暂无曾用名，需要时点击右上角添加。</div>}</div>
+      </section>
+
+      <section className="rounded-xl border border-slate-200 p-4">
+        <div className="flex items-start justify-between gap-3"><div><div className="text-sm font-semibold text-slate-800">银行账户</div><div className="mt-1 text-[11px] text-slate-500">支持多个结算账号。主账户用于页面摘要；所有账号都会参与银行流水身份识别。</div></div><button type="button" onClick={addBank} className="shrink-0 rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50">+ 添加账户</button></div>
+        <div className="mt-3 space-y-3">{bankAccounts.map((row, index) => <div key={index} className={`rounded-xl border p-3 ${row.isPrimary ? "border-blue-200 bg-blue-50/30" : "border-slate-200 bg-slate-50/40"}`}>
+          <div className="mb-2 flex items-center justify-between"><div className="flex items-center gap-2"><span className="text-xs font-medium text-slate-700">账户 {index + 1}</span>{row.isPrimary && <span className="rounded bg-blue-100 px-1.5 py-0.5 text-[10px] font-medium text-blue-700">主账户</span>}</div><div className="flex gap-1">{!row.isPrimary && <button type="button" onClick={() => makePrimary(index)} className="rounded px-2 py-1 text-[10px] font-medium text-blue-600 hover:bg-blue-50">设为主账户</button>}{bankAccounts.length > 1 && <button type="button" onClick={() => removeBank(index)} className="rounded px-2 py-1 text-[10px] text-slate-400 hover:bg-rose-50 hover:text-rose-600">删除</button>}</div></div>
+          <div className="grid gap-2 sm:grid-cols-3"><Field label="开户行"><input value={row.bankName} onChange={(event) => setBank(index, { bankName: event.target.value })} className={formInput} /></Field><Field label="银行账号"><input value={row.accountNo} onChange={(event) => setBank(index, { accountNo: event.target.value })} className={formInput} /></Field><Field label="开户名称"><input value={row.accountName} onChange={(event) => setBank(index, { accountName: event.target.value })} className={formInput} /></Field></div>
+        </div>)}</div>
+      </section>
+
+      <section className="grid gap-3 sm:grid-cols-2"><Field label="联系人"><input value={form.contact || ""} onChange={(event) => set("contact", event.target.value)} className={formInput} /></Field><Field label="电话"><input value={form.phone || ""} onChange={(event) => set("phone", event.target.value)} className={formInput} /></Field><Field label="地址" wide><input value={form.address || ""} onChange={(event) => set("address", event.target.value)} className={formInput} /></Field><Field label="备注" wide><textarea value={form.notes || ""} onChange={(event) => set("notes", event.target.value)} rows={3} className={`${formInput} resize-y`} /></Field></section>
+    </div>
+    <div className="sticky bottom-0 flex justify-end gap-2 border-t border-slate-100 bg-white px-5 py-4"><button type="button" onClick={onClose} className="rounded-lg px-3 py-2 text-sm text-slate-600 hover:bg-slate-100">取消</button><button type="button" disabled={saving || !form.name.trim()} onClick={onSave} className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-50">{saving ? "保存中…" : "保存并重新核对"}</button></div>
+  </div></div>;
 }
 
 function Field({ label, children, wide = false }: { label: string; children: ReactNode; wide?: boolean }) { return <label className={wide ? "sm:col-span-2" : ""}><span className="mb-1 block text-xs font-medium text-slate-600">{label}</span>{children}</label>; }

@@ -326,3 +326,107 @@ def test_partner_sync_endpoint_also_runs_bank_invoice_reconciliation(client, db_
     invoice_row = next(row for row in detail["invoices"] if row["id"] == invoice.id)
     assert invoice_row["bankPaidAmount"] == 3080.0
     assert invoice_row["bankRemainingAmount"] == 0.0
+
+
+
+def test_partner_master_supports_former_names_and_multiple_bank_accounts(db_session):
+    partner = service.create_partner(
+        db_session,
+        {
+            "name": "多账户测试供应商",
+            "tax_no": "91330000MULTIBANK01",
+            "roles": ["supplier"],
+            "former_names": ["多账户测试供应商（旧）", "多账户供应商老名称"],
+            "bank_accounts": [
+                {
+                    "bank_name": "中国银行杭州支行",
+                    "account_no": "6222 0000 0001",
+                    "account_name": "多账户测试供应商",
+                    "is_primary": True,
+                },
+                {
+                    "bank_name": "招商银行杭州分行",
+                    "account_no": "7559-0000-0002",
+                    "account_name": "多账户测试供应商结算户",
+                    "is_primary": False,
+                },
+            ],
+        },
+    )
+    db_session.flush()
+
+    detail = service.partner_detail(db_session, partner.id)
+    assert detail is not None
+    assert detail["formerNames"] == ["多账户测试供应商（旧）", "多账户供应商老名称"]
+    assert detail["bankAccountNo"] == "622200000001"
+    assert detail["bankName"] == "中国银行杭州支行"
+    assert detail["bankAccounts"] == [
+        {
+            "bankName": "中国银行杭州支行",
+            "accountNo": "622200000001",
+            "accountName": "多账户测试供应商",
+            "isPrimary": True,
+        },
+        {
+            "bankName": "招商银行杭州分行",
+            "accountNo": "755900000002",
+            "accountName": "多账户测试供应商结算户",
+            "isPrimary": False,
+        },
+    ]
+
+    identifiers = {(row["kind"], row["value"]) for row in detail["identifiers"]}
+    assert ("former_name", "多账户测试供应商（旧）") in identifiers
+    assert ("former_name", "多账户供应商老名称") in identifiers
+    assert ("bank_account", "622200000001") in identifiers
+    assert ("bank_account", "755900000002") in identifiers
+
+    # 任一维护过的账号都必须能反查回同一个往来单位，用于银行流水归档。
+    ctx = service.SyncContext(db_session)
+    assert ctx.index.resolve(account_no="622200000001").partner.id == partner.id
+    assert ctx.index.resolve(account_no="755900000002").partner.id == partner.id
+
+
+def test_update_partner_can_change_primary_account_and_former_names(db_session):
+    partner = service.create_partner(
+        db_session,
+        {
+            "name": "主账户切换供应商",
+            "roles": ["supplier"],
+            "bank_accounts": [
+                {"bank_name": "银行A", "account_no": "10001", "account_name": "A户", "is_primary": True},
+                {"bank_name": "银行B", "account_no": "10002", "account_name": "B户", "is_primary": False},
+            ],
+            "former_names": ["旧名称A"],
+        },
+    )
+    db_session.flush()
+
+    service.update_partner(
+        db_session,
+        partner.id,
+        {
+            "name": "主账户切换供应商",
+            "roles": ["supplier"],
+            "tax_no": "",
+            "contact": "",
+            "phone": "",
+            "address": "",
+            "notes": "",
+            "bank_accounts": [
+                {"bank_name": "银行A", "account_no": "10001", "account_name": "A户", "is_primary": False},
+                {"bank_name": "银行B", "account_no": "10002", "account_name": "B户", "is_primary": True},
+            ],
+            "former_names": ["旧名称B"],
+        },
+    )
+    db_session.flush()
+
+    detail = service.partner_detail(db_session, partner.id)
+    assert detail is not None
+    assert detail["bankAccountNo"] == "10002"
+    assert detail["bankName"] == "银行B"
+    assert detail["bankAccountName"] == "B户"
+    assert detail["formerNames"] == ["旧名称B"]
+    assert [row["accountNo"] for row in detail["bankAccounts"]] == ["10001", "10002"]
+    assert [row["isPrimary"] for row in detail["bankAccounts"]] == [False, True]

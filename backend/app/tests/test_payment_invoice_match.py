@@ -12,7 +12,7 @@ import pytest
 from sqlalchemy import select
 
 from app.models.bank import BankTransaction
-from app.models.business_partner import BusinessPartner, BusinessPartnerLink
+from app.models.business_partner import BusinessPartner, BusinessPartnerIdentifier, BusinessPartnerLink
 from app.models.org import AuditLog
 from app.models.purchase import Supplier
 from app.models.tax import TaxInvoice, TaxInvoiceLink
@@ -892,3 +892,167 @@ def test_auto_match_uses_confirmed_business_partner_identity_for_hejin_3080(db_s
     assert link.allocated_amount == Decimal("3080.0000")
     assert result["details"][0]["partnerMatched"] is True
     assert result["details"][0]["dateDistanceDays"] == 2
+
+
+
+def test_multiple_partner_bank_accounts_are_trusted_for_same_tax_number(db_session):
+    partner = BusinessPartner(
+        name="多银行账号供应商",
+        normalized_name="多银行账号供应商",
+        tax_no="91330000MULTI001",
+        bank_account_no="10000001",
+        bank_accounts=[
+            {"bank_name": "银行A", "account_no": "10000001", "account_name": "主体", "is_primary": True},
+            {"bank_name": "银行B", "account_no": "10000002", "account_name": "主体结算户", "is_primary": False},
+        ],
+        roles=["supplier"],
+        status="active",
+    )
+    db_session.add(partner)
+    db_session.flush()
+    db_session.add(
+        BusinessPartnerIdentifier(
+            partner_id=partner.id,
+            kind="bank_account",
+            value="10000002",
+            normalized_value="10000002",
+            source="manual",
+        )
+    )
+    invoice = _invoice(db_session, seller="多银行账号供应商", amount="1888.00", year=2026, month=9, day=12)
+    invoice.seller_tax_id = "91330000MULTI001"
+    txn = _txn(
+        db_session,
+        year=2026,
+        month=9,
+        day=10,
+        amount="1888.00",
+        name="完全不同的银行户名",
+        counterparty_account="10000002",
+    )
+    db_session.commit()
+
+    result = pm.auto_match(db_session, 2026, 9)
+
+    link = db_session.query(TaxInvoiceLink).filter_by(
+        invoice_id=invoice.id,
+        target_type="bank_transaction",
+        target_id=txn.id,
+    ).one()
+    assert link.confirmed is True
+    assert link.match_method == "supplier_account_date"
+    assert result["details"][0]["accountMatched"] is True
+
+
+def test_repeated_confirmed_tax_account_history_becomes_trusted_identity(db_session):
+    tax_no = "91330000LEARN001"
+    account = "622299990001"
+    for month, amount in [(5, "501.00"), (6, "502.00")]:
+        invoice = _invoice(
+            db_session,
+            seller=f"历史发票名称{month}",
+            amount=amount,
+            year=2026,
+            month=month,
+            day=11,
+        )
+        invoice.seller_tax_id = tax_no
+        txn = _txn(
+            db_session,
+            year=2026,
+            month=month,
+            day=10,
+            amount=amount,
+            name=f"历史银行名称{month}",
+            counterparty_account=account,
+        )
+        db_session.add(
+            TaxInvoiceLink(
+                invoice_id=invoice.id,
+                target_type="bank_transaction",
+                target_id=txn.id,
+                allocated_amount=Decimal(amount),
+                match_method="manual",
+                confidence=Decimal("1.00"),
+                confirmed=True,
+            )
+        )
+
+    new_invoice = _invoice(
+        db_session,
+        seller="以后新开的名称",
+        amount="3080.00",
+        year=2026,
+        month=7,
+        day=24,
+    )
+    new_invoice.seller_tax_id = tax_no
+    new_txn = _txn(
+        db_session,
+        year=2026,
+        month=7,
+        day=22,
+        amount="3080.00",
+        name="以后新的银行户名",
+        counterparty_account=account,
+    )
+    db_session.commit()
+
+    result = pm.auto_match(db_session, 2026, 7)
+
+    link = db_session.query(TaxInvoiceLink).filter_by(
+        invoice_id=new_invoice.id,
+        target_type="bank_transaction",
+        target_id=new_txn.id,
+    ).one()
+    assert link.confirmed is True
+    assert link.match_method == "supplier_account_date"
+    assert result["details"][0]["accountMatched"] is True
+
+
+def test_single_tax_account_history_is_not_enough_to_learn(db_session):
+    tax_no = "91330000ONCE001"
+    account = "622299990099"
+    old_invoice = _invoice(db_session, seller="旧名称", amount="801.00", year=2026, month=5, day=11)
+    old_invoice.seller_tax_id = tax_no
+    old_txn = _txn(
+        db_session,
+        year=2026,
+        month=5,
+        day=10,
+        amount="801.00",
+        name="旧银行名",
+        counterparty_account=account,
+    )
+    db_session.add(
+        TaxInvoiceLink(
+            invoice_id=old_invoice.id,
+            target_type="bank_transaction",
+            target_id=old_txn.id,
+            allocated_amount=Decimal("801.00"),
+            match_method="manual",
+            confidence=Decimal("1.00"),
+            confirmed=True,
+        )
+    )
+    new_invoice = _invoice(db_session, seller="完全新名称", amount="802.00", year=2026, month=7, day=20)
+    new_invoice.seller_tax_id = tax_no
+    new_txn = _txn(
+        db_session,
+        year=2026,
+        month=7,
+        day=19,
+        amount="802.00",
+        name="完全新银行名",
+        counterparty_account=account,
+    )
+    db_session.commit()
+
+    result = pm.auto_match(db_session, 2026, 7)
+
+    assert result["matched"] == 0
+    assert db_session.query(TaxInvoiceLink).filter_by(
+        invoice_id=new_invoice.id,
+        target_type="bank_transaction",
+        target_id=new_txn.id,
+    ).count() == 0

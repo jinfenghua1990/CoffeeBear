@@ -80,7 +80,7 @@ def normalize_identifier(kind: str, value: Any) -> str:
         return normalize_tax_no(value)
     if kind == "bank_account":
         return normalize_account(value)
-    if kind in {"name", "alias"}:
+    if kind in {"name", "alias", "former_name"}:
         return normalize_name(value)
     return re.sub(r"\s+", "", unicodedata.normalize("NFKC", str(value or ""))).casefold()
 
@@ -113,6 +113,129 @@ def _iso(value: date | datetime | None) -> str | None:
 
 def _roles(value: Iterable[str] | None) -> list[str]:
     return sorted({role for role in (value or []) if role in PARTNER_ROLES})
+
+
+def _normalized_bank_accounts(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    """把编辑表单里的多银行账户收敛成稳定结构；账号是唯一键。"""
+    raw_accounts = payload.get("bank_accounts")
+    if raw_accounts is None:
+        # 兼容旧客户端：仍只提交 bank_name / bank_account_no / bank_account_name。
+        legacy_no = normalize_account(payload.get("bank_account_no"))
+        if not legacy_no:
+            return []
+        raw_accounts = [{
+            "bank_name": payload.get("bank_name") or "",
+            "account_no": legacy_no,
+            "account_name": payload.get("bank_account_name") or "",
+            "is_primary": True,
+        }]
+
+    rows: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for raw in raw_accounts or []:
+        if not isinstance(raw, dict):
+            continue
+        bank_name = str(raw.get("bank_name") or raw.get("bankName") or "").strip()
+        account_no = normalize_account(raw.get("account_no") or raw.get("accountNo"))
+        account_name = str(raw.get("account_name") or raw.get("accountName") or "").strip()
+        is_primary = bool(raw.get("is_primary") if "is_primary" in raw else raw.get("isPrimary"))
+        if not bank_name and not account_no and not account_name:
+            continue
+        if not account_no:
+            raise ValueError("银行账户必须填写银行账号")
+        if account_no in seen:
+            raise ValueError(f"银行账号重复：{account_no}")
+        seen.add(account_no)
+        rows.append({
+            "bank_name": bank_name,
+            "account_no": account_no,
+            "account_name": account_name,
+            "is_primary": is_primary,
+        })
+
+    if rows:
+        primary_index = next((index for index, row in enumerate(rows) if row["is_primary"]), 0)
+        for index, row in enumerate(rows):
+            row["is_primary"] = index == primary_index
+    return rows
+
+
+def _primary_bank_account(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    return next((row for row in rows if row.get("is_primary")), rows[0] if rows else {})
+
+
+def _bank_accounts_payload(partner: BusinessPartner) -> list[dict[str, Any]]:
+    raw_rows = partner.bank_accounts if isinstance(partner.bank_accounts, list) else []
+    rows: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for raw in raw_rows:
+        if not isinstance(raw, dict):
+            continue
+        account_no = normalize_account(raw.get("account_no") or raw.get("accountNo"))
+        if not account_no or account_no in seen:
+            continue
+        seen.add(account_no)
+        rows.append({
+            "bankName": str(raw.get("bank_name") or raw.get("bankName") or "").strip(),
+            "accountNo": account_no,
+            "accountName": str(raw.get("account_name") or raw.get("accountName") or "").strip(),
+            "isPrimary": bool(raw.get("is_primary") if "is_primary" in raw else raw.get("isPrimary")),
+        })
+    if not rows and normalize_account(partner.bank_account_no):
+        rows.append({
+            "bankName": partner.bank_name or "",
+            "accountNo": normalize_account(partner.bank_account_no),
+            "accountName": partner.bank_account_name or "",
+            "isPrimary": True,
+        })
+    if rows and not any(row["isPrimary"] for row in rows):
+        rows[0]["isPrimary"] = True
+    return rows
+
+
+def _replace_manual_identifiers(
+    db: Session,
+    partner: BusinessPartner,
+    *,
+    kind: str,
+    values: list[str],
+    primary_value: str = "",
+) -> None:
+    """编辑主档时替换该类人工维护识别值；来源事实自动生成的 identifier 不删除。"""
+    desired: dict[str, str] = {}
+    for value in values:
+        clean = str(value or "").strip()
+        normalized = normalize_identifier(kind, clean)
+        if clean and normalized:
+            desired.setdefault(normalized, clean)
+
+    existing = (
+        db.query(BusinessPartnerIdentifier)
+        .filter(
+            BusinessPartnerIdentifier.partner_id == partner.id,
+            BusinessPartnerIdentifier.kind == kind,
+        )
+        .all()
+    )
+    for row in existing:
+        normalized = normalize_identifier(kind, row.normalized_value or row.value)
+        if row.source == "manual" and normalized not in desired:
+            db.delete(row)
+        if kind == "bank_account":
+            row.is_primary = bool(primary_value and normalized == normalize_identifier(kind, primary_value))
+    db.flush()
+
+    ctx = SyncContext(db)
+    primary_normalized = normalize_identifier(kind, primary_value)
+    for normalized, clean in desired.items():
+        _add_identifier(
+            ctx,
+            partner,
+            kind=kind,
+            value=clean,
+            source="manual",
+            is_primary=bool(primary_normalized and normalized == primary_normalized),
+        )
 
 
 def _source_key(source_type: str, source_id: int, relation_role: str) -> tuple[str, int, str]:
@@ -801,6 +924,7 @@ def _partner_core(db: Session, partner: BusinessPartner) -> dict[str, Any]:
         "bankName": partner.bank_name or "",
         "bankAccountNo": partner.bank_account_no or "",
         "bankAccountName": partner.bank_account_name or "",
+        "bankAccounts": _bank_accounts_payload(partner),
         "roles": _roles(partner.roles),
         "status": partner.status,
         "notes": partner.notes or "",
@@ -1264,22 +1388,24 @@ def create_partner(db: Session, payload: dict[str, Any]) -> BusinessPartner:
     name = str(payload.get("name") or "").strip()
     if not name:
         raise ValueError("往来单位名称不能为空")
+    bank_accounts = _normalized_bank_accounts(payload)
+    primary = _primary_bank_account(bank_accounts)
     resolution = ctx.index.resolve(
         name=name,
         tax_no=str(payload.get("tax_no") or ""),
-        account_no=str(payload.get("bank_account_no") or ""),
+        account_no=str(primary.get("account_no") or ""),
     )
     if resolution.partner is not None:
         raise ValueError(f"已存在往来单位「{resolution.partner.name}」，请在原档案补充资料")
     if resolution.candidates:
         raise ValueError("存在相似或冲突的往来单位，请先在待确认记录中处理")
-    return _create_partner(
+    partner = _create_partner(
         ctx,
         name=name,
         tax_no=str(payload.get("tax_no") or ""),
-        account_no=str(payload.get("bank_account_no") or ""),
-        account_name=str(payload.get("bank_account_name") or ""),
-        bank_name=str(payload.get("bank_name") or ""),
+        account_no=str(primary.get("account_no") or ""),
+        account_name=str(primary.get("account_name") or ""),
+        bank_name=str(primary.get("bank_name") or ""),
         roles=_roles(payload.get("roles") or ["counterparty"]),
         source="manual",
         contact=str(payload.get("contact") or ""),
@@ -1287,6 +1413,19 @@ def create_partner(db: Session, payload: dict[str, Any]) -> BusinessPartner:
         address=str(payload.get("address") or ""),
         notes=str(payload.get("notes") or ""),
     )
+    partner.bank_accounts = bank_accounts
+    for account in bank_accounts:
+        _add_identifier(
+            ctx,
+            partner,
+            kind="bank_account",
+            value=account["account_no"],
+            source="manual",
+            is_primary=bool(account["is_primary"]),
+        )
+    for former_name in payload.get("former_names") or []:
+        _add_identifier(ctx, partner, kind="former_name", value=str(former_name), source="manual")
+    return partner
 
 
 def update_partner(db: Session, partner_id: int, payload: dict[str, Any]) -> BusinessPartner:
@@ -1303,19 +1442,50 @@ def update_partner(db: Session, partner_id: int, payload: dict[str, Any]) -> Bus
         partner.normalized_name = normalize_name(new_name)
         _add_identifier(ctx, partner, kind="name", value=new_name, source="manual", is_primary=True)
         ctx.index.add_identifier(partner.id, "name", partner.normalized_name)
+
     partner.contact = str(payload.get("contact") or "").strip()
     partner.phone = str(payload.get("phone") or "").strip()
     partner.address = str(payload.get("address") or "").strip()
-    partner.bank_name = str(payload.get("bank_name") or "").strip()
-    partner.bank_account_name = str(payload.get("bank_account_name") or "").strip()
     partner.notes = str(payload.get("notes") or "").strip()
     partner.roles = _roles(payload.get("roles") or ["counterparty"])
+
     tax_no = normalize_tax_no(payload.get("tax_no"))
-    account_no = normalize_account(payload.get("bank_account_no"))
     partner.tax_no = tax_no
-    partner.bank_account_no = account_no
     _add_identifier(ctx, partner, kind="tax_no", value=tax_no, source="manual", is_primary=True)
-    _add_identifier(ctx, partner, kind="bank_account", value=account_no, source="manual", is_primary=True)
+
+    if payload.get("bank_accounts") is not None:
+        bank_accounts = _normalized_bank_accounts(payload)
+    else:
+        # 旧客户端仍可用单一银行字段更新主账户。
+        bank_accounts = _normalized_bank_accounts(payload)
+        if not bank_accounts and isinstance(partner.bank_accounts, list):
+            bank_accounts = list(partner.bank_accounts)
+
+    primary = _primary_bank_account(bank_accounts)
+    partner.bank_accounts = bank_accounts
+    partner.bank_name = str(primary.get("bank_name") or "")
+    partner.bank_account_no = normalize_account(primary.get("account_no"))
+    partner.bank_account_name = str(primary.get("account_name") or "")
+    _replace_manual_identifiers(
+        db,
+        partner,
+        kind="bank_account",
+        values=[str(row["account_no"]) for row in bank_accounts],
+        primary_value=partner.bank_account_no,
+    )
+
+    if payload.get("former_names") is not None:
+        former_names = [
+            str(value).strip()
+            for value in (payload.get("former_names") or [])
+            if normalize_name(value) and normalize_name(value) != partner.normalized_name
+        ]
+        _replace_manual_identifiers(
+            db,
+            partner,
+            kind="former_name",
+            values=former_names,
+        )
     return partner
 
 

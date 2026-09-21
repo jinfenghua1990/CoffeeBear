@@ -18,6 +18,15 @@ from app.services import payment_invoice_match_service as payment_match_service
 router = APIRouter(prefix="/finance/partners", tags=["finance-partners"])
 
 
+class PartnerBankAccountInput(BaseModel):
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
+
+    bank_name: str = Field(default="", max_length=128)
+    account_no: str = Field(default="", max_length=128)
+    account_name: str = Field(default="", max_length=256)
+    is_primary: bool = False
+
+
 class PartnerInput(BaseModel):
     model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
 
@@ -30,6 +39,8 @@ class PartnerInput(BaseModel):
     bank_name: str = Field(default="", max_length=128)
     bank_account_no: str = Field(default="", max_length=128)
     bank_account_name: str = Field(default="", max_length=256)
+    former_names: list[str] | None = None
+    bank_accounts: list[PartnerBankAccountInput] | None = None
     notes: str = Field(default="", max_length=2000)
 
 
@@ -166,6 +177,9 @@ def create_partner(
 ) -> dict[str, Any]:
     try:
         row = partner_service.create_partner(db, payload.model_dump())
+        first = partner_service.sync_business_partners(db)
+        payment = payment_match_service.auto_match_all_periods(db, actor=current_actor(request))
+        second = partner_service.sync_business_partners(db)
         db.commit()
         audit(
             db,
@@ -173,7 +187,15 @@ def create_partner(
             "business_partner.created",
             "business_partner",
             str(row.id),
-            {"name": row.name, "roles": row.roles},
+            {
+                "name": row.name,
+                "roles": row.roles,
+                "sync": {
+                    "createdLinks": int(first.get("createdLinks", 0)) + int(second.get("createdLinks", 0)),
+                    "updatedLinks": int(first.get("updatedLinks", 0)) + int(second.get("updatedLinks", 0)),
+                    "bankInvoiceMatchesCreated": int(payment.get("matchedLinks", 0)),
+                },
+            },
         )
         return partner_service.partner_detail(db, row.id) or {}
     except ValueError as exc:
@@ -199,8 +221,16 @@ def update_partner(
 ) -> dict[str, Any]:
     try:
         row = partner_service.update_partner(db, partner_id, payload.model_dump())
-        # 手工资料更新后立刻再跑一次，让已存在的待确认来源按新别名/税号/账号回填。
-        sync = partner_service.sync_business_partners(db)
+        # 主档变化（尤其是曾用名 / 新银行账号）先回填来源，再立即重跑票款匹配。
+        first = partner_service.sync_business_partners(db)
+        payment = payment_match_service.auto_match_all_periods(db, actor=current_actor(request))
+        second = partner_service.sync_business_partners(db)
+        sync = {
+            "createdLinks": int(first.get("createdLinks", 0)) + int(second.get("createdLinks", 0)),
+            "updatedLinks": int(first.get("updatedLinks", 0)) + int(second.get("updatedLinks", 0)),
+            "bankInvoiceMatchesCreated": int(payment.get("matchedLinks", 0)),
+            "bankInvoiceRepaired": int(payment.get("repaired", 0)),
+        }
         db.commit()
         audit(
             db,

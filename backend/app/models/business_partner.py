@@ -34,6 +34,9 @@ class BusinessPartner(Base, PkMixin, TimestampMixin):
     bank_name: Mapped[str] = mapped_column(String(128), default="")
     bank_account_no: Mapped[str] = mapped_column(String(128), default="", index=True)
     bank_account_name: Mapped[str] = mapped_column(String(256), default="")
+    # 结构化银行账户主档。bank_* 三个旧字段继续镜像“主账户”，保证旧接口/报表兼容。
+    # [{bank_name, account_no, account_name, is_primary}]
+    bank_accounts: Mapped[list] = mapped_column(JSONB, default=list)
     # supplier / customer / counterparty；角色可以并存，不以菜单位置决定身份。
     roles: Mapped[list] = mapped_column(JSONB, default=list)
     status: Mapped[str] = mapped_column(String(16), default="active", index=True)

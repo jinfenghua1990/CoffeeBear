@@ -1410,6 +1410,13 @@ export const supplierApi = {
 
 export type BusinessPartnerRole = "supplier" | "customer" | "counterparty";
 
+export type BusinessPartnerBankAccount = {
+  bankName: string;
+  accountNo: string;
+  accountName: string;
+  isPrimary: boolean;
+};
+
 export type BusinessPartnerIdentifier = {
   id: number;
   kind: "name" | "alias" | "tax_no" | "bank_account" | "customer_code" | string;
@@ -1462,6 +1469,7 @@ export type BusinessPartnerDetail = BusinessPartnerListItem & {
   bankName: string;
   bankAccountNo: string;
   bankAccountName: string;
+  bankAccounts: BusinessPartnerBankAccount[];
   notes: string;
   createdAt: string | null;
   updatedAt: string | null;
@@ -1505,6 +1513,8 @@ export type BusinessPartnerInput = {
   bankName?: string;
   bankAccountNo?: string;
   bankAccountName?: string;
+  formerNames?: string[];
+  bankAccounts?: BusinessPartnerBankAccount[];
   notes?: string;
 };
 

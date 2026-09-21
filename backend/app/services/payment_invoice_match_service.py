@@ -19,7 +19,7 @@ from sqlalchemy.orm import Session
 
 from app.core.audit import audit
 from app.models.bank import BankAccount, BankTransaction
-from app.models.business_partner import BusinessPartnerLink
+from app.models.business_partner import BusinessPartner, BusinessPartnerIdentifier, BusinessPartnerLink
 from app.models.purchase import Supplier
 from app.models.tax import TaxInvoice, TaxInvoiceLink
 from app.services import tax_invoice_service
@@ -58,6 +58,10 @@ def _normalize_account(value: str | None) -> str:
     return re.sub(r"[\s-]+", "", str(value or "").strip()).upper()
 
 
+def _normalize_tax_no(value: str | None) -> str:
+    return re.sub(r"\s+", "", str(value or "").strip()).upper()
+
+
 def _invoice_issue_date(invoice: TaxInvoice) -> date | None:
     value = invoice.issue_date
     if value is None:
@@ -66,12 +70,111 @@ def _invoice_issue_date(invoice: TaxInvoice) -> date | None:
 
 
 def _supplier_accounts_by_name(db: Session) -> dict[str, set[str]]:
+    """构建可信“发票销方名称 → 银行账号”证据池。
+
+    除旧 Supplier 主档外，还会使用统一往来单位里维护的多个银行账号，并从
+    已确认历史票款中学习稳定的“税号 + 银行账号”关系。历史学习至少要求同一
+    税号/账号出现 2 次，且该账号没有对应过其他税号，避免一次误配被放大。
+    """
     result: dict[str, set[str]] = {}
+
+    # 旧 Supplier 主档继续兼容。
     for supplier in db.query(Supplier).all():
         name = _normalize_name(supplier.name)
         account = _normalize_account(supplier.bank_account_no)
         if name and account:
             result.setdefault(name, set()).add(account)
+
+    active_partners = {
+        int(row.id): row
+        for row in db.query(BusinessPartner).filter(BusinessPartner.status == "active").all()
+    }
+    partner_taxes: dict[int, set[str]] = {}
+    partner_accounts: dict[int, set[str]] = {}
+    for partner_id, partner in active_partners.items():
+        tax_no = _normalize_tax_no(partner.tax_no)
+        account = _normalize_account(partner.bank_account_no)
+        if tax_no:
+            partner_taxes.setdefault(partner_id, set()).add(tax_no)
+        if account:
+            partner_accounts.setdefault(partner_id, set()).add(account)
+
+    for identifier in db.query(BusinessPartnerIdentifier).all():
+        partner_id = int(identifier.partner_id)
+        if partner_id not in active_partners:
+            continue
+        if identifier.kind == "tax_no":
+            value = _normalize_tax_no(identifier.normalized_value or identifier.value)
+            if value:
+                partner_taxes.setdefault(partner_id, set()).add(value)
+        elif identifier.kind == "bank_account":
+            value = _normalize_account(identifier.normalized_value or identifier.value)
+            if value:
+                partner_accounts.setdefault(partner_id, set()).add(value)
+
+    tax_to_partner_ids: dict[str, set[int]] = {}
+    for partner_id, taxes in partner_taxes.items():
+        for tax_no in taxes:
+            tax_to_partner_ids.setdefault(tax_no, set()).add(partner_id)
+
+    # 只从强确认关系学习，纯名称自动匹配不参与“训练”。
+    strong_methods = {"manual", "business_partner_date", "supplier_account_date", "supplier_account"}
+    confirmed_links = (
+        db.query(TaxInvoiceLink)
+        .filter(
+            TaxInvoiceLink.target_type == TARGET_TYPE,
+            TaxInvoiceLink.confirmed.is_(True),
+            TaxInvoiceLink.match_method.in_(strong_methods),
+        )
+        .all()
+    )
+    invoice_ids = {int(row.invoice_id) for row in confirmed_links}
+    txn_ids = {int(row.target_id) for row in confirmed_links}
+    invoices = {
+        int(row.id): row
+        for row in db.query(TaxInvoice).filter(TaxInvoice.id.in_(invoice_ids)).all()
+    } if invoice_ids else {}
+    txns = {
+        int(row.id): row
+        for row in db.query(BankTransaction).filter(BankTransaction.id.in_(txn_ids)).all()
+    } if txn_ids else {}
+
+    pair_hits: dict[tuple[str, str], set[tuple[int, int]]] = {}
+    account_taxes: dict[str, set[str]] = {}
+    for link in confirmed_links:
+        invoice = invoices.get(int(link.invoice_id))
+        txn = txns.get(int(link.target_id))
+        if invoice is None or txn is None:
+            continue
+        tax_no = _normalize_tax_no(invoice.seller_tax_id)
+        account = _normalize_account(txn.counterparty_account)
+        if not tax_no or not account:
+            continue
+        pair_hits.setdefault((tax_no, account), set()).add((invoice.id, txn.id))
+        account_taxes.setdefault(account, set()).add(tax_no)
+
+    learned_by_tax: dict[str, set[str]] = {}
+    for (tax_no, account), observations in pair_hits.items():
+        if len(observations) >= 2 and len(account_taxes.get(account, set())) == 1:
+            learned_by_tax.setdefault(tax_no, set()).add(account)
+
+    # 将“税号 → 账号”画像映射回当前发票销方名称，继续复用既有安全匹配流程：
+    # 金额一致 + 唯一最佳日期仍然必须满足。
+    for invoice in db.query(TaxInvoice).filter(TaxInvoice.direction == "input").all():
+        name = _normalize_name(invoice.seller_name)
+        tax_no = _normalize_tax_no(invoice.seller_tax_id)
+        if not name or not tax_no:
+            continue
+
+        partner_ids = tax_to_partner_ids.get(tax_no, set())
+        if len(partner_ids) == 1:
+            partner_id = next(iter(partner_ids))
+            for account in partner_accounts.get(partner_id, set()):
+                result.setdefault(name, set()).add(account)
+
+        for account in learned_by_tax.get(tax_no, set()):
+            result.setdefault(name, set()).add(account)
+
     return result
 
 
