@@ -13,6 +13,8 @@ from app.db import get_db
 from app.models.business_partner import BusinessPartner
 from app.services import business_partner_service as partner_service
 from app.services import payment_invoice_match_service as payment_match_service
+from app.services import partner_master_service
+from app.services.partner_reference_service import partner_reference_coverage
 
 
 router = APIRouter(prefix="/finance/partners", tags=["finance-partners"])
@@ -83,40 +85,28 @@ def list_partners(
 
 @router.post("/sync")
 def sync_partners(request: Request, db: Session = Depends(get_db)) -> dict[str, Any]:
+    """全量重建统一主体关系。
+
+    V2 不再只生成关联表：采购、发票、银行、入库等业务事实会同时写入直接
+    partner FK；原始名称/税号/账号保持不变用于审计。
+    """
     actor = current_actor(request)
-
-    # 第一阶段先把采购、发票、银行流水归入统一往来单位。
-    first = _sync_and_commit(db)
-
-    # 第二阶段才做“银行付款 ↔ 进项发票”核对。以前这个按钮只做第一阶段，
-    # 导致同一档案里明明同时存在发票和银行流水，银行已关联仍长期为 0。
-    payment = payment_match_service.auto_match_all_periods(db, actor=actor)
-
-    # 新生成的发票付款链接本身也是强关联证据；再同步一次，让代付/户名不同等场景
-    # 能立即回到正确往来单位，而不是等下次打开页面。
-    second = partner_service.sync_business_partners(db)
+    result = partner_master_service.rebuild_partner_master(db, actor=actor, run_payment_match=True)
     db.commit()
-
-    result = {
-        "createdPartners": int(first.get("createdPartners", 0)) + int(second.get("createdPartners", 0)),
-        "updatedPartners": int(first.get("updatedPartners", 0)) + int(second.get("updatedPartners", 0)),
-        "createdLinks": int(first.get("createdLinks", 0)) + int(second.get("createdLinks", 0)),
-        "updatedLinks": int(first.get("updatedLinks", 0)) + int(second.get("updatedLinks", 0)),
-        "needsReview": int(second.get("needsReview", first.get("needsReview", 0))),
-        "bankInvoicePeriods": int(payment.get("periodCount", 0)),
-        "bankInvoiceMatchesCreated": int(payment.get("matchedLinks", 0)),
-        "bankInvoiceRepaired": int(payment.get("repaired", 0)),
-        "bankInvoiceAmbiguous": int(payment.get("ambiguous", 0)),
-    }
     audit(
         db,
         actor,
-        "business_partner.synced",
+        "business_partner.master_rebuilt",
         "business_partner",
         "",
-        {**result, "paymentPeriods": payment.get("periods", [])},
+        {key: value for key, value in result.items() if key not in {"coverage"}},
     )
     return {"ok": True, **result}
+
+
+@router.get("/coverage")
+def partner_master_coverage(db: Session = Depends(get_db)) -> dict[str, Any]:
+    return partner_reference_coverage(db)
 
 
 @router.post("/{partner_id}/recheck")
@@ -135,9 +125,11 @@ def recheck_partner_matches(
         raise HTTPException(404, "往来单位不存在")
 
     before = partner_service.partner_detail(db, partner_id) or {}
-    first = _sync_and_commit(db)
-    payment = payment_match_service.auto_match_all_periods(db, actor=current_actor(request))
-    second = partner_service.sync_business_partners(db)
+    rebuild = partner_master_service.rebuild_partner_master(
+        db,
+        actor=current_actor(request),
+        run_payment_match=True,
+    )
     db.commit()
     after = partner_service.partner_detail(db, partner_id) or {}
 
@@ -149,15 +141,16 @@ def recheck_partner_matches(
     result = {
         "ok": True,
         "partnerId": partner_id,
-        "createdLinks": int(first.get("createdLinks", 0)) + int(second.get("createdLinks", 0)),
-        "updatedLinks": int(first.get("updatedLinks", 0)) + int(second.get("updatedLinks", 0)),
+        "createdLinks": int(rebuild.get("createdLinks", 0)),
+        "updatedLinks": int(rebuild.get("updatedLinks", 0)),
+        "materializedRefs": int(rebuild.get("materializedRefs", 0)),
         "needsReview": int(after_summary.get("needsReviewCount", 0)),
         "partnerMatchesAdded": max(0, after_match_count - before_match_count),
         "partnerInvoicePaidBefore": before_invoice_paid,
         "partnerInvoicePaidAfter": after_invoice_paid,
-        "bankInvoiceMatchesCreated": int(payment.get("matchedLinks", 0)),
-        "bankInvoiceRepaired": int(payment.get("repaired", 0)),
-        "bankInvoiceAmbiguous": int(payment.get("ambiguous", 0)),
+        "bankInvoiceMatchesCreated": int(rebuild.get("bankInvoiceMatchesCreated", 0)),
+        "bankInvoiceRepaired": int(rebuild.get("bankInvoiceRepaired", 0)),
+        "bankInvoiceAmbiguous": int(rebuild.get("bankInvoiceAmbiguous", 0)),
         "detail": after,
     }
     audit(
