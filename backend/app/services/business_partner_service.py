@@ -670,10 +670,13 @@ def _sync_procurement_sources(ctx: SyncContext) -> None:
         rows: Iterable[Any],
         *,
         name_getter,
+        partner_id_getter=None,
     ) -> None:
         for row in rows:
             raw_name = str(name_getter(row) or "").strip()
-            if not raw_name:
+            partner_id = int(partner_id_getter(row) or 0) if partner_id_getter else 0
+            force_partner = ctx.index.partners.get(partner_id) if partner_id else None
+            if not raw_name and force_partner is None:
                 continue
             _write_link(
                 ctx,
@@ -682,38 +685,46 @@ def _sync_procurement_sources(ctx: SyncContext) -> None:
                 relation_role="supplier",
                 raw_name=raw_name,
                 roles=["supplier"],
-                resolution=ctx.index.resolve(name=raw_name),
+                force_partner=force_partner,
+                force_method="direct_partner_fk" if force_partner else None,
+                resolution=None if force_partner else ctx.index.resolve(name=raw_name),
             )
 
     source(
         "external_purchase_order",
         ctx.db.query(ExternalPurchaseOrder).all(),
         name_getter=lambda row: row.supplier_name,
+        partner_id_getter=lambda row: row.supplier_partner_id,
     )
     source(
         "alibaba1688_order",
         ctx.db.query(Alibaba1688Order).filter(Alibaba1688Order.row_status != "deleted").all(),
         name_getter=lambda row: row.seller_company_name or row.seller_member_name,
+        partner_id_getter=lambda row: row.supplier_partner_id,
     )
     source(
         "jackyun_purchase_order",
         ctx.db.query(JackyunPurchaseOrder).all(),
         name_getter=lambda row: row.supplier_name,
+        partner_id_getter=lambda row: row.supplier_partner_id,
     )
     source(
         "jackyun_purchase_settlement",
         ctx.db.query(JackyunPurchaseSettlement).all(),
         name_getter=lambda row: row.supplier_name,
+        partner_id_getter=lambda row: row.supplier_partner_id,
     )
     source(
         "jackyun_purchase_return",
         ctx.db.query(JackyunPurchaseReturn).all(),
         name_getter=lambda row: row.supplier_name,
+        partner_id_getter=lambda row: row.supplier_partner_id,
     )
     source(
         "consumable_purchase",
         ctx.db.query(ConsumablePurchase).filter(ConsumablePurchase.status != "cancelled").all(),
         name_getter=lambda row: row.supplier_name,
+        partner_id_getter=lambda row: row.supplier_partner_id,
     )
     source(
         "inbound_document",
@@ -721,11 +732,13 @@ def _sync_procurement_sources(ctx: SyncContext) -> None:
             JackyunGoodsDocument.document_type == "inbound"
         ).all(),
         name_getter=lambda row: row.supplier_name,
+        partner_id_getter=lambda row: row.supplier_partner_id,
     )
     source(
         "jky_web_stockin_order",
         ctx.db.query(JkyWebStockinOrder).all(),
         name_getter=lambda row: row.supplier_name,
+        partner_id_getter=lambda row: row.supplier_partner_id,
     )
 
 
@@ -754,6 +767,7 @@ def _sync_invoice_sources(ctx: SyncContext) -> None:
 
         if not seller_own and (invoice.seller_name or invoice.seller_tax_id):
             role = "supplier" if buyer_own or direction == "input" else "counterparty"
+            force_partner = ctx.index.partners.get(int(invoice.seller_partner_id or 0))
             _write_link(
                 ctx,
                 source_type="tax_invoice",
@@ -762,11 +776,17 @@ def _sync_invoice_sources(ctx: SyncContext) -> None:
                 raw_name=invoice.seller_name,
                 raw_tax_no=invoice.seller_tax_id,
                 roles=[role],
-                resolution=ctx.index.resolve(name=invoice.seller_name, tax_no=invoice.seller_tax_id),
+                force_partner=force_partner,
+                force_method="direct_partner_fk" if force_partner else None,
+                resolution=None if force_partner else ctx.index.resolve(
+                    name=invoice.seller_name,
+                    tax_no=invoice.seller_tax_id,
+                ),
             )
 
         if not buyer_own and (invoice.buyer_name or invoice.buyer_tax_id):
             role = "customer" if seller_own or direction == "output" else "counterparty"
+            force_partner = ctx.index.partners.get(int(invoice.buyer_partner_id or 0))
             _write_link(
                 ctx,
                 source_type="tax_invoice",
@@ -775,7 +795,12 @@ def _sync_invoice_sources(ctx: SyncContext) -> None:
                 raw_name=invoice.buyer_name,
                 raw_tax_no=invoice.buyer_tax_id,
                 roles=[role],
-                resolution=ctx.index.resolve(name=invoice.buyer_name, tax_no=invoice.buyer_tax_id),
+                force_partner=force_partner,
+                force_method="direct_partner_fk" if force_partner else None,
+                resolution=None if force_partner else ctx.index.resolve(
+                    name=invoice.buyer_name,
+                    tax_no=invoice.buyer_tax_id,
+                ),
             )
 
 
@@ -790,9 +815,27 @@ def _active_invoice_partner_ids(ctx: SyncContext, txn_id: int) -> list[int]:
         )
         .all()
     )
-    invoice_ids = {row.invoice_id for row in invoice_links}
+    invoice_ids = {int(row.invoice_id) for row in invoice_links}
     if not invoice_ids:
         return []
+
+    # V2 first uses the direct seller_partner_id on the invoice.
+    direct_ids = {
+        int(partner_id)
+        for (partner_id,) in (
+            ctx.db.query(TaxInvoice.seller_partner_id)
+            .filter(
+                TaxInvoice.id.in_(invoice_ids),
+                TaxInvoice.seller_partner_id.isnot(None),
+            )
+            .all()
+        )
+        if partner_id is not None
+    }
+    if direct_ids:
+        return sorted(direct_ids)
+
+    # Compatibility fallback for pre-materialization data.
     partner_ids = {
         row.partner_id
         for row in ctx.link_by_key.values()
@@ -802,19 +845,36 @@ def _active_invoice_partner_ids(ctx: SyncContext, txn_id: int) -> list[int]:
         and row.status == "linked"
         and row.partner_id is not None
     }
-    return sorted(partner_ids)
+    return sorted(int(value) for value in partner_ids)
 
 
 def _sync_bank_sources(ctx: SyncContext) -> None:
     for txn in ctx.db.query(BankTransaction).all():
+        direct_partner = ctx.index.partners.get(int(txn.counterparty_partner_id or 0))
         invoice_partner_ids = _active_invoice_partner_ids(ctx, txn.id)
         evidence: dict[str, Any] = {"direction": txn.direction or ""}
+        if direct_partner is not None:
+            evidence["directPartnerId"] = direct_partner.id
         if invoice_partner_ids:
             evidence["invoicePartnerIds"] = invoice_partner_ids
         raw_name = str(txn.counterparty_name or "").strip()
         raw_account_no = str(txn.counterparty_account or "").strip()
         # 利息、手续费等没有对方户名和账号的流水不属于任何往来单位，既不建档也不进待确认。
-        if not raw_name and not raw_account_no and not invoice_partner_ids:
+        if not raw_name and not raw_account_no and not invoice_partner_ids and direct_partner is None:
+            continue
+        if direct_partner is not None:
+            _write_link(
+                ctx,
+                source_type="bank_transaction",
+                source_id=txn.id,
+                relation_role="counterparty",
+                raw_name=raw_name,
+                raw_account_no=raw_account_no,
+                roles=["counterparty"],
+                force_partner=direct_partner,
+                force_method="direct_partner_fk",
+                force_evidence=evidence,
+            )
             continue
         if len(invoice_partner_ids) == 1:
             _write_link(
@@ -860,6 +920,7 @@ def _sync_sales_sources(ctx: SyncContext) -> None:
         customer_name = _customer_name(row)
         if not customer_name and not row.customer_code:
             continue
+        force_partner = ctx.index.partners.get(int(row.customer_partner_id or 0))
         link = _write_link(
             ctx,
             source_type="jky_web_sales_order",
@@ -867,7 +928,9 @@ def _sync_sales_sources(ctx: SyncContext) -> None:
             relation_role="customer",
             raw_name=customer_name,
             roles=["customer"],
-            resolution=ctx.index.resolve(name=customer_name),
+            force_partner=force_partner,
+            force_method="direct_partner_fk" if force_partner else None,
+            resolution=None if force_partner else ctx.index.resolve(name=customer_name),
         )
         if link.partner_id and row.customer_code:
             partner = ctx.index.partners[link.partner_id]
