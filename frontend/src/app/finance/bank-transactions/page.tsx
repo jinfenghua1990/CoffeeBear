@@ -8,6 +8,7 @@ import { useTabRuntime, useTabScopedState, useTabTitle, useWorkspace } from "@/l
 
 type DirectionFilter = "all" | "in" | "out";
 type MatchFilter = "all" | "matched" | "unmatched";
+type TimeScope = "all" | "period";
 
 type BankRawDetail = {
   id: number;
@@ -67,11 +68,11 @@ function expenseMatchStatus(row: ReconTxn) {
 }
 
 function matchText(row: ReconTxn) {
-  if (row.direction === "in") return settlementMatchStatus(row) === "matched" ? "已回款对账" : "待回款对账";
+  if (row.direction === "in") return settlementMatchStatus(row) === "matched" ? "已匹配回款" : "待匹配回款";
   const status = expenseMatchStatus(row);
-  if (status === "matched") return "银行付款已核对";
-  if (status === "partial") return "银行付款部分核对";
-  return "待核对银行付款";
+  if (status === "matched") return "已匹配发票";
+  if (status === "partial") return "部分匹配发票";
+  return "待匹配发票";
 }
 
 function matchClass(row: ReconTxn) {
@@ -100,6 +101,7 @@ export default function BankTransactionsPage() {
   const [rows, setRows] = useState<ReconTxn[]>([]);
   const [direction, setDirection] = useTabScopedState<DirectionFilter>("bank.direction", "all");
   const [matchFilter, setMatchFilter] = useTabScopedState<MatchFilter>("bank.match", "all");
+  const [timeScope, setTimeScope] = useTabScopedState<TimeScope>("bank.timeScope", "all");
   const [query, setQuery] = useTabScopedState("bank.search", "");
   const [period, setPeriod] = useTabScopedState("bank.period", previousMonth);
   const [accountFilter, setAccountFilter] = useTabScopedState("bank.account", "");
@@ -127,23 +129,30 @@ export default function BankTransactionsPage() {
       const lastDay = year && month ? new Date(year, month, 0).getDate() : 31;
       const startDate = year && month ? `${year}-${String(month).padStart(2, "0")}-01` : "";
       const endDate = year && month ? `${year}-${String(month).padStart(2, "0")}-${String(lastDay).padStart(2, "0")}` : "";
-      const params = new URLSearchParams({ limit: "500" });
-      if (startDate && endDate) {
-        params.set("start_date", startDate);
-        params.set("end_date", endDate);
+      const pageSize = 500;
+      const allRows: ReconTxn[] = [];
+      for (let offset = 0; ; offset += pageSize) {
+        const params = new URLSearchParams({ limit: String(pageSize), offset: String(offset) });
+        if (timeScope === "period" && startDate && endDate) {
+          params.set("start_date", startDate);
+          params.set("end_date", endDate);
+        }
+        const response = await authenticatedFetch(`/api/v1/reconciliation/transactions?${params.toString()}`, { cache: "no-store" });
+        const payload = (await response.json().catch(() => [])) as ReconTxn[] | { detail?: string };
+        if (!response.ok) {
+          throw new Error(!Array.isArray(payload) && payload.detail ? payload.detail : `加载失败（${response.status}）`);
+        }
+        const batch = Array.isArray(payload) ? payload : [];
+        allRows.push(...batch);
+        if (batch.length < pageSize) break;
       }
-      const response = await authenticatedFetch(`/api/v1/reconciliation/transactions?${params.toString()}`, { cache: "no-store" });
-      const payload = (await response.json().catch(() => [])) as ReconTxn[] | { detail?: string };
-      if (!response.ok) {
-        throw new Error(!Array.isArray(payload) && payload.detail ? payload.detail : `加载失败（${response.status}）`);
-      }
-      setRows(Array.isArray(payload) ? payload : []);
+      setRows(allRows);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : String(caught));
     } finally {
       setLoading(false);
     }
-  }, [period]);
+  }, [period, timeScope]);
 
   useEffect(() => {
     if (bankView === "transactions") void load();
@@ -156,24 +165,26 @@ export default function BankTransactionsPage() {
     if (params.get("view") !== "summary") setAccountFilter(params.get("account") || "");
   }, [ownSearch, setAccountFilter, setPeriod]);
 
-  const periodRows = useMemo(
-    () => rows.filter((row) => !period || row.txnDate.slice(0, 7) === period),
-    [period, rows],
+  const scopeRows = useMemo(
+    () => timeScope === "period"
+      ? rows.filter((row) => !period || row.txnDate.slice(0, 7) === period)
+      : rows,
+    [period, rows, timeScope],
   );
 
   const accountOptions = useMemo(() => {
     const map = new Map<string, string>();
-    for (const row of periodRows) {
+    for (const row of scopeRows) {
       const key = row.accountNo || "";
       if (!key) continue;
       map.set(key, row.accountName || row.bankName || key);
     }
     return Array.from(map.entries());
-  }, [periodRows]);
+  }, [scopeRows]);
 
   const visibleRows = useMemo(() => {
     const needle = query.trim().toLowerCase();
-    return periodRows.filter((row) => {
+    return scopeRows.filter((row) => {
       if (accountFilter && row.accountNo !== accountFilter) return false;
       if (direction !== "all" && row.direction !== direction) return false;
       const matched = row.direction === "in" ? settlementMatchStatus(row) === "matched" : expenseMatchStatus(row) === "matched";
@@ -185,10 +196,10 @@ export default function BankTransactionsPage() {
         .toLowerCase()
         .includes(needle);
     });
-  }, [accountFilter, direction, matchFilter, periodRows, query]);
+  }, [accountFilter, direction, matchFilter, scopeRows, query]);
 
   const summary = useMemo(() => {
-    return periodRows.reduce(
+    return scopeRows.reduce(
       (result, row) => {
         const amount = Number(row.amount) || 0;
         result.count += 1;
@@ -200,15 +211,15 @@ export default function BankTransactionsPage() {
       },
       { count: 0, income: 0, expense: 0, pending: 0 },
     );
-  }, [periodRows]);
+  }, [scopeRows]);
 
   const directionCounts = useMemo(
     () => ({
-      all: periodRows.length,
-      in: periodRows.filter((row) => row.direction === "in").length,
-      out: periodRows.filter((row) => row.direction === "out").length,
+      all: scopeRows.length,
+      in: scopeRows.filter((row) => row.direction === "in").length,
+      out: scopeRows.filter((row) => row.direction === "out").length,
     }),
-    [periodRows],
+    [scopeRows],
   );
 
   async function uploadBank(file: File) {
@@ -302,11 +313,11 @@ export default function BankTransactionsPage() {
           <div>
             <div className="mb-1 text-[11px] font-medium tracking-wide text-blue-600">财务中心 / 银行</div>
             <h1 className="text-xl font-semibold tracking-tight text-slate-900">银行流水</h1>
-            <p className="mt-1 text-xs text-slate-500">查看账户收入与支出流水；收入核对平台结算，支出核对进项发票。两套状态独立计算，不互相改写。</p>
+            <p className="mt-1 text-xs text-slate-500">这里只展示银行真实流水；收入可关联回款/平台结算，支出可关联进项发票。银行流水本身不叫“付款核对”。</p>
           </div>
           <div className="flex flex-wrap items-center gap-2">
             <input ref={fileRef} type="file" accept=".xlsx" className="hidden" onChange={(event) => { const file = event.target.files?.[0]; if (file) void uploadBank(file); }} />
-            <input type="month" value={period} onChange={(event) => setPeriod(event.target.value)} aria-label="银行流水账期" className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs text-slate-600 outline-none focus:border-blue-400" />
+            <input type="month" value={period} onChange={(event) => setPeriod(event.target.value)} aria-label="银行流水账期" title="用于当前账期筛选和上传流水归档账期" className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs text-slate-600 outline-none focus:border-blue-400" />
             <input value={manualAccountNo} onChange={(event) => setManualAccountNo(event.target.value)} aria-label="无账号文件时填写内部编号或真实银行账号" placeholder="内部编号或真实银行账号" className="w-44 rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs text-slate-600 outline-none placeholder:text-slate-400 focus:border-blue-400" />
             <button type="button" onClick={() => fileRef.current?.click()} disabled={uploading} className="rounded-lg bg-blue-600 px-3.5 py-2 text-xs font-medium text-white shadow-sm hover:bg-blue-700 disabled:cursor-wait disabled:opacity-50">{uploading ? "导入中…" : "上传银行流水"}</button>
             <button type="button" onClick={() => void load()} disabled={loading} className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs text-slate-600 hover:bg-slate-50 disabled:opacity-50">刷新</button>
@@ -335,7 +346,14 @@ export default function BankTransactionsPage() {
       <section className={`${CARD} overflow-hidden`}>
         <div className="sticky top-0 z-20 flex flex-wrap items-center gap-2 border-b border-slate-200 bg-white/95 px-4 py-3 backdrop-blur">
           <div className="flex items-center rounded-lg border border-slate-200 bg-white p-0.5">
-            {([ ["all", "全部流水"], ["in", "收入"], ["out", "支出"] ] as const).map(([value, label]) => (
+            {([ ["all", "全部时间"], ["period", "当前账期"] ] as const).map(([value, label]) => (
+              <button key={value} type="button" onClick={() => setTimeScope(value)} className={`rounded-md px-3 py-1.5 text-xs transition ${timeScope === value ? "bg-slate-900 font-medium text-white" : "text-slate-500 hover:bg-slate-50"}`}>
+                {label}
+              </button>
+            ))}
+          </div>
+          <div className="flex items-center rounded-lg border border-slate-200 bg-white p-0.5">
+            {([ ["all", "全部收支"], ["in", "收入"], ["out", "支出"] ] as const).map(([value, label]) => (
               <button key={value} type="button" onClick={() => setDirection(value)} className={`rounded-md px-3 py-1.5 text-xs transition ${direction === value ? "bg-blue-600 font-medium text-white" : "text-slate-500 hover:bg-slate-50"}`}>
                 {label} <span className={direction === value ? "text-blue-100" : "text-slate-400"}>{directionCounts[value]}</span>
               </button>
@@ -343,22 +361,22 @@ export default function BankTransactionsPage() {
           </div>
           <div className="relative min-w-[220px] flex-1">
             <span className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate-400">⌕</span>
-            <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索对方户名 / 摘要 / 流水号 / 账户" className="w-full rounded-lg border border-slate-200 bg-white py-1.5 pl-8 pr-3 text-xs outline-none focus:border-blue-400" />
+            <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder={timeScope === "all" ? "搜索对方户名 / 摘要 / 流水号 / 账户（全部时间）" : "搜索当前账期的对方户名 / 摘要 / 流水号 / 账户"} className="w-full rounded-lg border border-slate-200 bg-white py-1.5 pl-8 pr-3 text-xs outline-none focus:border-blue-400" />
           </div>
           <select value={accountFilter} onChange={(event) => setAccountFilter(event.target.value)} className="rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs text-slate-600 outline-none">
             <option value="">全部账户</option>
             {accountOptions.map(([accountNo, label]) => <option key={accountNo} value={accountNo}>{label} · {accountNo}</option>)}
           </select>
           <select value={matchFilter} onChange={(event) => setMatchFilter(event.target.value as MatchFilter)} className="rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs text-slate-600 outline-none">
-            <option value="all">全部处理状态</option>
-            <option value="matched">已完成</option>
-            <option value="unmatched">待处理（含部分核对）</option>
+            <option value="all">全部关联状态</option>
+            <option value="matched">已匹配</option>
+            <option value="unmatched">待匹配（含部分匹配）</option>
           </select>
           <Link href={`/finance/monthly-send?tab=match&month=${encodeURIComponent(period)}`} className="ml-auto rounded-lg border border-blue-200 px-3 py-1.5 text-xs font-medium text-blue-600 hover:bg-blue-50">发起对账</Link>
         </div>
 
         <div className="flex items-center justify-between border-b border-slate-100 bg-slate-50/50 px-4 py-2 text-[11px] text-slate-400">
-          <span>{loading ? "正在读取银行流水…" : `当前显示 ${visibleRows.length} / ${periodRows.length} 笔 · ${period}`}</span>
+          <span>{loading ? "正在读取银行流水…" : `当前显示 ${visibleRows.length} / ${scopeRows.length} 笔 · ${timeScope === "all" ? "全部时间" : period}`}</span>
           <span>原始文件与每笔原始行均保留；重复导入只补齐来源，不覆盖原记录</span>
         </div>
 
@@ -381,7 +399,7 @@ export default function BankTransactionsPage() {
                   <th className="px-4 py-3 font-medium">银行流水号</th>
                   <th className="px-4 py-3 font-medium">凭证号码</th>
                   <th className="px-4 py-3 font-medium">账户</th>
-                  <th className="px-4 py-3 font-medium">银行核对状态</th>
+                  <th className="px-4 py-3 font-medium">业务关联状态</th>
                   <th className="px-4 py-3 font-medium">原始记录</th>
                 </tr>
               </thead>
