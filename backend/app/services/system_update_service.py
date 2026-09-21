@@ -434,13 +434,51 @@ def _changes(current_sha: str, latest_sha: str) -> list[dict[str, Any]]:
 
 
 def _changed_files(current_sha: str, latest_sha: str) -> list[str]:
+    """Return the complete changed-file set between two releases.
+
+    git diff is the primary source. Some long-lived/native worktrees have
+    occasionally returned an empty stdout even though the two commits differ;
+    in that case fall back to the commit range and de-duplicate file names so
+    the update UI never silently reports zero files for a real update.
+    """
+    if current_sha == latest_sha:
+        return []
+
     try:
-        result = _run(["git", "diff", "--name-only", current_sha, latest_sha], timeout=30)
+        result = _run(
+            ["git", "diff", "--name-only", "--no-renames", current_sha, latest_sha],
+            timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError):
+        result = None
+
+    if result is not None and result.returncode == 0:
+        rows = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+        if rows:
+            return list(dict.fromkeys(rows))
+
+    try:
+        fallback = _run(
+            [
+                "git",
+                "log",
+                "--format=",
+                "--name-only",
+                "--no-renames",
+                f"{current_sha}..{latest_sha}",
+            ],
+            timeout=60,
+        )
     except (OSError, subprocess.SubprocessError):
         return []
-    if result.returncode != 0:
+
+    if fallback.returncode != 0:
         return []
-    return [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    return list(dict.fromkeys(
+        line.strip()
+        for line in fallback.stdout.splitlines()
+        if line.strip()
+    ))
 
 
 _MODULE_VERSION_RULES: list[tuple[str, str, tuple[str, ...]]] = [
@@ -808,26 +846,20 @@ def check_for_updates(*, actor: str = "system", automatic: bool = False) -> dict
             diverged = current_sha != latest_sha and ancestor.returncode == 1
             available = current_sha != latest_sha and not diverged
             change_rows = _changes(current_sha, latest_sha) if available else []
-
-            # 模块归属/模块版本/变更文件属于更新中心的增强展示信息。
-            # 它们读取额外 Git 历史失败时不能把核心“是否有新版本”检查一起判失败。
             for row in change_rows:
                 try:
-                    row["modules"] = _modules_for_paths(
-                        _commit_changed_files(str(row.get("sha") or ""))
-                    )
+                    row["modules"] = _modules_for_paths(_commit_changed_files(str(row.get("sha") or "")))
                 except Exception:
+                    # 模块归属是版本概览的附加信息，读取失败不能阻塞主更新检查。
                     row["modules"] = []
-            try:
-                changed_files = _changed_files(current_sha, latest_sha) if available else []
-            except Exception:
-                changed_files = []
+            changed_files = _changed_files(current_sha, latest_sha) if available else []
             try:
                 module_versions = _module_versions(
                     current_sha,
                     latest_sha if not diverged else current_sha,
                 )
             except Exception:
+                # Git 对象暂时不可读时仍要返回可执行的更新结果；模块明细下一次检查再补齐。
                 module_versions = []
             classification = _classify_update(change_rows, changed_files) if available else {
                 "updateLevel": "patch",
