@@ -1238,7 +1238,10 @@ def list_partners(
         if needle and needle not in normalize_name(searchable) and needle not in normalize_tax_no(searchable):
             continue
         items.append({
-            **{key: detail[key] for key in ("id", "name", "taxNo", "roles", "status", "identifiers", "legacySupplierId")},
+            **{
+                key: detail[key]
+                for key in ("id", "name", "taxNo", "roles", "status", "identifiers", "formerNames", "legacySupplierId")
+            },
             "summary": detail["summary"],
             "possibleDuplicateCount": len(detail["possibleDuplicates"]),
         })
