@@ -522,7 +522,7 @@ def test_cancelled_file_fact_preserves_synced_order_and_invoice_link(client, db_
         db_session.get(TaxInvoice, invoice.id), db=db_session
     )
     assert serialized["businessMatchStatus"] == "needs_review"
-    assert serialized["businessMatchedAmount"] == "0.00"
+    assert serialized["businessMatchedAmount"] == "0.0000"
     assert serialized["invalidLinkCount"] == 1
 
     db_session.query(TaxInvoiceLink).filter_by(invoice_id=invoice.id).delete(synchronize_session=False)

@@ -10,9 +10,11 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from sqlalchemy.orm import Session
 
+from app.config import settings
 from app.core.audit import audit
 from app.models.catalog import ProductSku, Warehouse
 from app.models.ops import ExceptionRecord
@@ -580,10 +582,15 @@ def _jackyun_po_date(jpo: JackyunPurchaseOrder):
         for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d",
                     "%Y/%m/%d %H:%M:%S", "%Y/%m/%d", "%Y.%m.%d", "%Y%m%d"):
             try:
-                return datetime.strptime(cleaned, fmt)
+                return datetime.strptime(cleaned, fmt).replace(
+                    tzinfo=ZoneInfo(settings.TZ)
+                )
             except ValueError:
                 continue
-    return jpo.created_at
+    fallback = jpo.created_at
+    if fallback is not None and fallback.tzinfo is None:
+        return fallback.replace(tzinfo=ZoneInfo(settings.TZ))
+    return fallback
 
 
 def auto_link_purchase_orders(db: Session, actor: str = "system", dry_run: bool = False) -> dict:

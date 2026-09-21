@@ -2,14 +2,16 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime, time, timedelta, timezone
+from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import and_ as sa_and
 from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
+from app.config import settings
 from app.models.alibaba1688_import import Alibaba1688Order
 from app.models.catalog import ProductSku, Warehouse
 from app.models.consumable import Consumable, ConsumableTransaction
@@ -26,12 +28,15 @@ def _number(value: Decimal | None) -> float:
     return float(value or 0)
 
 
-def _naive(value: datetime | None) -> datetime | None:
+def _business_time(value: datetime | None) -> datetime | None:
     if value is None:
         return None
-    if value.tzinfo is not None:
-        return value.astimezone(timezone.utc).replace(tzinfo=None)
-    return value
+    tz = ZoneInfo(settings.TZ)
+    return value.astimezone(tz) if value.tzinfo is not None else value.replace(tzinfo=tz)
+
+
+def _day_start(value: date) -> datetime:
+    return datetime.combine(value, time.min).replace(tzinfo=ZoneInfo(settings.TZ))
 
 
 def _source(document: JackyunGoodsDocument) -> str:
@@ -498,9 +503,9 @@ def _consumable_inbound_rows(db: Session) -> list[dict[str, Any]]:
                 "note": f"耗材采购单 {purchase.number}",
             })
 
-        occurred = [_naive(tx.occurred_at) for tx in group if tx.occurred_at]
+        occurred = [_business_time(tx.occurred_at) for tx in group if tx.occurred_at]
         inbound_dt = min(occurred) if occurred else None
-        created = [_naive(tx.created_at) for tx in group if tx.created_at]
+        created = [_business_time(tx.created_at) for tx in group if tx.created_at]
         warehouse = warehouses.get(head.warehouse_id)
         total_quantity = _number(sum((tx.quantity or Decimal("0")) for tx in group))
         operation_note = (
@@ -614,9 +619,9 @@ def list_inbound_documents(
             )
         )
     if start_date:
-        query = query.filter(JackyunGoodsDocument.document_at >= datetime.combine(start_date, time.min))
+        query = query.filter(JackyunGoodsDocument.document_at >= _day_start(start_date))
     if end_date:
-        query = query.filter(JackyunGoodsDocument.document_at < datetime.combine(end_date + timedelta(days=1), time.min))
+        query = query.filter(JackyunGoodsDocument.document_at < _day_start(end_date + timedelta(days=1)))
 
     documents = query.order_by(JackyunGoodsDocument.document_at.desc().nullslast(), JackyunGoodsDocument.id.desc()).all()
     prefetch = _InboundPrefetch(db)
@@ -633,8 +638,8 @@ def list_inbound_documents(
             db, code=warehouse, name=warehouse,
         )
         warehouse_values = {value for value in (warehouse.strip(), normalized_code, normalized_name) if value}
-    lower_bound = datetime.combine(start_date, time.min) if start_date else None
-    upper_bound = datetime.combine(end_date + timedelta(days=1), time.min) if end_date else None
+    lower_bound = _day_start(start_date) if start_date else None
+    upper_bound = _day_start(end_date + timedelta(days=1)) if end_date else None
     filtered: list[dict[str, Any]] = []
     for row in consumable_rows:
         if warehouse_values is not None and row["warehouse"] not in warehouse_values and row["warehouseCode"] not in warehouse_values:

@@ -7,7 +7,7 @@
 import json
 import re
 import unicodedata
-from datetime import datetime
+from datetime import datetime, timezone
 from decimal import Decimal
 
 from sqlalchemy import event, or_
@@ -861,7 +861,7 @@ class ProcurementChainMatcher:
             raise ValueError("请填写实际认证所属月份，格式 YYYY-MM")
         invoice.verified = verified
         invoice.verified_month = verified_month if verified else ""
-        invoice.verified_at = datetime.now() if verified else None
+        invoice.verified_at = datetime.now(timezone.utc) if verified else None
         self.db.commit()
         return invoice
 
@@ -1826,16 +1826,13 @@ def _extract_1688_items(order: Alibaba1688Order | None) -> list[dict]:
         return []
 
     def _yuan(value):
-        try:
-            return round(float(value) / 100.0, 2)
-        except Exception:
+        parsed = parse_decimal(value)
+        if parsed is None:
             return None
+        return (parsed / Decimal("100")).quantize(Decimal("0.01"))
 
-    def _float(value):
-        try:
-            return float(value) if value not in (None, "") else None
-        except Exception:
-            return None
+    def _quantity(value):
+        return parse_decimal(value)
 
     items: list[dict] = []
     for entry in entries:
@@ -1843,11 +1840,11 @@ def _extract_1688_items(order: Alibaba1688Order | None) -> list[dict]:
             continue
         qty_raw = entry.get("quantity")
         qty = qty_raw.get("realAmount") or qty_raw.get("calAmount") if isinstance(qty_raw, dict) else qty_raw
-        qty = _float(qty)
+        qty = _quantity(qty)
         unit_price = _yuan(entry.get("actualUnitPrice") or entry.get("price"))
         amount = _yuan(entry.get("amount"))
         if unit_price is not None and qty:
-            amount = round(unit_price * qty, 2)
+            amount = (unit_price * qty).quantize(Decimal("0.01"))
         spec = ""
         for spec_item in ((entry.get("specInfo") or {}).get("specItems") or []):
             if isinstance(spec_item, dict) and spec_item.get("specValue"):
@@ -1859,11 +1856,15 @@ def _extract_1688_items(order: Alibaba1688Order | None) -> list[dict]:
             "productName": str(entry.get("productName") or "").strip(),
             "skuId": str(entry.get("skuId") or "").strip(),
             "spec": spec,
-            "quantity": qty,
-            "unitPrice": unit_price,
-            "amount": amount,
+            "quantity": float(qty) if qty is not None else None,
+            "unitPrice": float(unit_price) if unit_price is not None else None,
+            "amount": float(amount) if amount is not None else None,
             "statusLabel": str(entry.get("entryStatusLabel") or "").strip(),
-            "receivedQuantity": _float(extension.get("receivedQuantity")),
+            "receivedQuantity": (
+                float(received_qty)
+                if (received_qty := _quantity(extension.get("receivedQuantity"))) is not None
+                else None
+            ),
         })
     return items
 
@@ -2328,18 +2329,33 @@ def _po_amount_closure(purchase_orders: list[dict], order_amount) -> dict:
     """
     if not purchase_orders:
         return {"relevant": False, "allocTotal": None, "gap": None, "closed": True}
-    total = 0.0
+    total = Decimal("0")
+    has_explicit_allocation = False
     for po in purchase_orders:
-        alloc = po.get("allocAmount")
+        alloc = parse_decimal(po.get("allocAmount"))
         if alloc is not None and alloc > 0:
-            total += float(alloc)
-        elif po.get("amount") is not None:
-            total += float(po["amount"])
+            total += alloc
+            has_explicit_allocation = True
+        else:
+            po_amount = parse_decimal(po.get("amount"))
+            if po_amount is not None:
+                total += po_amount
+    total = total.quantize(Decimal("0.01"))
     if order_amount is None:
-        return {"relevant": True, "allocTotal": round(total, 2), "gap": None, "closed": True}
-    gap = round(float(order_amount) - total, 2)
-    closed = abs(gap) <= max(float(order_amount) * 0.02, 0.05)
-    return {"relevant": True, "allocTotal": round(total, 2), "gap": gap, "closed": closed}
+        return {"relevant": True, "allocTotal": float(total), "gap": None, "closed": True}
+    target = parse_decimal(order_amount) or Decimal("0")
+    gap = (target - total).quantize(Decimal("0.01"))
+    # 单张历史关联且没有显式分摊时只展示差额，不把运费/抵扣差异误报为合并拆分异常。
+    if len(purchase_orders) == 1 and not has_explicit_allocation:
+        closed = True
+    else:
+        closed = abs(gap) <= max(abs(target) * Decimal("0.02"), Decimal("0.05"))
+    return {
+        "relevant": True,
+        "allocTotal": float(total),
+        "gap": float(gap),
+        "closed": closed,
+    }
 
 
 def _order_date_str(order: Alibaba1688Order) -> str | None:
