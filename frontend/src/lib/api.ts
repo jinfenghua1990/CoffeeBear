@@ -2845,6 +2845,7 @@ export type WorkbenchOrderItem = {
   /** 人工覆盖的类型（goods/consumable/空=自动判定） */
   orderKindOverride?: string;
   supplier: string;
+  supplierPartnerId?: number | null;
   amount: number | null;
   paidAmount?: number | null;
   freight: number | null;
