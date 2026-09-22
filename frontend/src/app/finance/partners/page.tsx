@@ -64,6 +64,52 @@ function dateText(value: string | null | undefined) {
   return value ? value.slice(0, 10) : "—";
 }
 
+function invoicePaymentStatus(row: BusinessPartnerDetail["invoices"][number]) {
+  const effectiveAmount = Math.max(0, Number(row.effectiveAmount ?? row.amount ?? 0));
+  const paidAmount = Math.max(0, Number(row.bankPaidAmount ?? 0));
+  const remainingAmount = Math.max(0, Number(row.bankRemainingAmount ?? 0));
+
+  if (row.invoiceColor === "red") {
+    return paidAmount > 0.005
+      ? {
+          label: "红冲资金已关联",
+          className: "bg-emerald-50 px-2 py-1 font-medium text-emerald-700",
+          title: `红字发票不参与原蓝字付款核对，已关联资金 ${money(paidAmount)}`,
+        }
+      : {
+          label: "不适用",
+          className: "bg-slate-100 px-2 py-1 font-medium text-slate-500",
+          title: "红字发票通过红蓝关系冲销，不作为原蓝字付款金额单独核对",
+        };
+  }
+
+  if (row.redStatus === "fully_red_offset" && effectiveAmount <= 0.005) {
+    return paidAmount > 0.005
+      ? {
+          label: "红冲后超额待处理",
+          className: "bg-rose-50 px-2 py-1 font-medium text-rose-700",
+          title: `原蓝字发票已全额红冲，但历史已关联付款 ${money(paidAmount)}，需处理退款或后续抵扣`,
+        }
+      : {
+          label: "不适用",
+          className: "bg-slate-100 px-2 py-1 font-medium text-slate-500",
+          title: "蓝字发票已全额红冲，红冲后没有待核对的有效应付金额",
+        };
+  }
+
+  const settled = remainingAmount <= 0.005 && effectiveAmount > 0.005;
+  const partial = paidAmount > 0.005 && !settled;
+  return {
+    label: settled ? "已匹配" : partial ? "部分匹配" : "待匹配",
+    className: settled
+      ? "bg-emerald-50 px-2 py-1 font-medium text-emerald-700"
+      : partial
+        ? "bg-blue-50 px-2 py-1 font-medium text-blue-700"
+        : "bg-amber-50 px-2 py-1 font-medium text-amber-700",
+    title: settled || partial ? `已关联 ${money(paidAmount)} / 有效金额 ${money(effectiveAmount)}` : undefined,
+  };
+}
+
 function rawValue(value: unknown) {
   if (value === null || value === undefined || value === "") return "—";
   if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") return String(value);
@@ -549,12 +595,7 @@ function Invoices({ rows }: { rows: BusinessPartnerDetail["invoices"] }) {
       <tbody className="divide-y divide-slate-100">
         {rows.map((row) => {
           const remaining = Math.max(0, Number(row.bankRemainingAmount || 0));
-          const paid = Number(row.bankPaidAmount || 0);
-          const effectiveAmount = Number(row.effectiveAmount ?? row.amount ?? 0);
-          // 红字票和已全额红冲蓝字票不进入银行付款核对；不能因有效金额为 0 被误判为“已匹配”。
-          const redOffset = row.redStatus === "fully_red_offset" || row.redStatus === "red_invoice";
-          const settled = !redOffset && remaining <= 0.005 && effectiveAmount > 0.005;
-          const partial = !redOffset && paid > 0.005 && !settled;
+          const paymentStatus = invoicePaymentStatus(row);
           return <tr key={row.id} className="hover:bg-slate-50/60">
             <td className="px-3 py-2.5">
               <div className="text-slate-600">{dateText(row.date)}</div>
@@ -576,8 +617,8 @@ function Invoices({ rows }: { rows: BusinessPartnerDetail["invoices"] }) {
             <td className="px-3 py-2.5 text-right tabular-nums text-emerald-700">{money(row.bankPaidAmount)}</td>
             <td className={`px-3 py-2.5 text-right tabular-nums ${remaining > 0.005 ? "font-medium text-amber-700" : "text-slate-400"}`}>{money(remaining)}</td>
             <td className="px-3 py-2.5">
-              <span className={redOffset ? "rounded-md bg-orange-100 px-2 py-1 font-medium text-orange-800" : settled ? "rounded-md bg-emerald-50 px-2 py-1 font-medium text-emerald-700" : partial ? "rounded-md bg-blue-50 px-2 py-1 font-medium text-blue-700" : "rounded-md bg-amber-50 px-2 py-1 font-medium text-amber-700"}>
-                {redOffset ? "已全额红冲/资金核对不适用" : settled ? "已匹配" : partial ? "部分匹配" : "待匹配"}
+              <span className={`rounded-md ${paymentStatus.className}`} title={paymentStatus.title}>
+                {paymentStatus.label}
               </span>
               {row.verified && <span className="ml-1.5 text-[10px] text-slate-400">已认证</span>}
             </td>
