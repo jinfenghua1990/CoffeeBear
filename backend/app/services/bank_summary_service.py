@@ -17,6 +17,7 @@ from datetime import date
 from decimal import Decimal
 from typing import Any
 
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.models.bank import BankAccount, BankTransaction
@@ -41,9 +42,40 @@ def _month_range(year: int, month: int) -> tuple[date, date]:
 def build_summary(db: Session, *, year: int, month: int) -> dict[str, Any]:
     start, end = _month_range(year, month)
     accounts = db.query(BankAccount).order_by(BankAccount.id).all()
-    transactions = db.query(BankTransaction).order_by(BankTransaction.txn_date, BankTransaction.id).all()
-    month_txns = [row for row in transactions if start <= row.txn_date <= end]
-    month_ids = [row.id for row in month_txns]
+
+    # 只把当月流水载入内存；全历史收支与最后交易日期用 SQL 聚合，避免整表读入。
+    month_txns = (
+        db.query(BankTransaction)
+        .filter(BankTransaction.txn_date >= start, BankTransaction.txn_date <= end)
+        .order_by(BankTransaction.txn_date, BankTransaction.id)
+        .all()
+    )
+    income_by_account = dict(
+        db.query(
+            BankTransaction.account_id,
+            func.coalesce(func.sum(BankTransaction.amount), 0),
+        )
+        .filter(BankTransaction.direction == "in")
+        .group_by(BankTransaction.account_id)
+        .all()
+    )
+    expense_by_account = dict(
+        db.query(
+            BankTransaction.account_id,
+            func.coalesce(func.sum(BankTransaction.amount), 0),
+        )
+        .filter(BankTransaction.direction == "out")
+        .group_by(BankTransaction.account_id)
+        .all()
+    )
+    last_date_by_account = dict(
+        db.query(
+            BankTransaction.account_id,
+            func.max(BankTransaction.txn_date),
+        )
+        .group_by(BankTransaction.account_id)
+        .all()
+    )
 
     confirmed_income_ids = reconciliation.confirmed_settlement_txn_ids(
         db, [row.id for row in month_txns if row.direction == "in"]
@@ -52,19 +84,35 @@ def build_summary(db: Session, *, year: int, month: int) -> dict[str, Any]:
     confirmed_expense_ids = payment_invoice_match_service.fully_reconciled_txn_ids(db, expense_ids)
 
     account_ids = {row.id for row in accounts}
-    all_by_account: dict[int | None, list[BankTransaction]] = defaultdict(list)
     month_by_account: dict[int | None, list[BankTransaction]] = defaultdict(list)
-    for row in transactions:
-        key = row.account_id if row.account_id in account_ids else None
-        all_by_account[key].append(row)
     for row in month_txns:
         key = row.account_id if row.account_id in account_ids else None
         month_by_account[key].append(row)
 
+    def _bucket_total(
+        agg: dict[int | None, Decimal], account_id: int | None
+    ) -> Decimal:
+        """取某账户的全历史聚合；None/孤儿 account_id 归入“未归属账户”桶。"""
+        if account_id is not None:
+            return _dec(agg.get(account_id))
+        return _dec(
+            sum(
+                (amount for key, amount in agg.items() if key is None or key not in account_ids),
+                Decimal("0"),
+            )
+        )
+
     rows: list[dict[str, Any]] = []
-    # 历史脏数据可能没有 account_id；保留一个“未归属账户”行，避免汇总静默丢金额。
+    # 历史脏数据可能没有 account_id 或指向已删除账户；保留一个“未归属账户”行，
+    # 避免汇总静默丢金额。判定与旧的“按行归类”一致：任何未归属行都存在即显示该行。
     account_keys: list[int | None] = [row.id for row in accounts]
-    if None in all_by_account:
+    has_unassigned = (
+        None in month_by_account
+        or any(key is None or key not in account_ids for key in income_by_account)
+        or any(key is None or key not in account_ids for key in expense_by_account)
+        or any(key is None or key not in account_ids for key in last_date_by_account)
+    )
+    if has_unassigned:
         account_keys.append(None)
 
     total_balance = Decimal("0")
@@ -76,12 +124,11 @@ def build_summary(db: Session, *, year: int, month: int) -> dict[str, Any]:
     account_map = {row.id: row for row in accounts}
     for account_id in account_keys:
         account = account_map.get(account_id) if account_id is not None else None
-        all_rows = all_by_account.get(account_id, [])
         selected_rows = month_by_account.get(account_id, [])
 
         opening = _dec(account.opening_balance if account else None)
-        all_income = sum((_dec(row.amount) for row in all_rows if row.direction == "in"), Decimal("0"))
-        all_expense = sum((_dec(row.amount) for row in all_rows if row.direction == "out"), Decimal("0"))
+        all_income = _bucket_total(income_by_account, account_id)
+        all_expense = _bucket_total(expense_by_account, account_id)
         system_balance = opening + all_income - all_expense
 
         income = sum((_dec(row.amount) for row in selected_rows if row.direction == "in"), Decimal("0"))
@@ -92,7 +139,7 @@ def build_summary(db: Session, *, year: int, month: int) -> dict[str, Any]:
         account_pending_expense = sum(
             1 for row in selected_rows if row.direction == "out" and row.id not in confirmed_expense_ids
         )
-        last_txn_date = max((row.txn_date for row in all_rows), default=None)
+        last_txn_date = last_date_by_account.get(account_id)
 
         total_balance += system_balance
         monthly_income += income

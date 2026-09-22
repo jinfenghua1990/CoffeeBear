@@ -11,7 +11,9 @@ from sqlalchemy import select
 from app.config import settings
 from app.core.auth import hash_password
 from app.db import SessionLocal
+from app.models.finance import FinanceLegalEntity
 from app.models.org import Role, User, UserRole
+from app.services.finance_center_service import DEFAULT_ENTITY_CODE, DEFAULT_ENTITY_NAME
 
 BUILTIN_ROLES = [
     ("admin", "管理员"),
@@ -62,6 +64,26 @@ def ensure_seed(db) -> dict:
             result["passwordSet"] = True
 
     db.commit()
+    # 默认财务主体：启动时幂等创建，避免 GET 财务中心在只读路径上写库。
+    if (
+        db.scalar(
+            select(FinanceLegalEntity).where(FinanceLegalEntity.code == DEFAULT_ENTITY_CODE)
+        )
+        is None
+    ):
+        db.add(
+            FinanceLegalEntity(
+                code=DEFAULT_ENTITY_CODE,
+                name=DEFAULT_ENTITY_NAME,
+                country_code="CN",
+                base_currency="CNY",
+                status="active",
+                is_default=True,
+                business_scopes=["domestic", "foreign_trade"],
+                note="系统初始化默认主体",
+            )
+        )
+        db.commit()
     # 默认对方户名规则是系统初始数据，不能在 GET /rules、GET /suggestions 中懒写入。
     from app.services.reconciliation import seed_rules_if_empty
 

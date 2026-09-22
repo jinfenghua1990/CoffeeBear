@@ -15,7 +15,6 @@ from app.core.audit import audit
 from app.models.finance import ClosingVersion
 from app.services import monthly_core
 from app.services import profit as profit_service
-from app.utils.money import to_decimal
 
 
 def snapshot_of(db: Session, year: int, month: int, formula_version: str = "v1") -> dict[str, Any]:
@@ -25,11 +24,11 @@ def snapshot_of(db: Session, year: int, month: int, formula_version: str = "v1")
     profit = profit_service.compute(db, year, month)
 
     metrics["grossProfit"] = profit.get("grossProfit")
-    receivable = to_decimal(recon.get("receivable"))
-    received = to_decimal(recon.get("received"))
-    metrics["receivable"] = recon.get("receivable") if receivable else None
-    metrics["received"] = recon.get("received") if received else None
-    metrics["pendingReceive"] = recon.get("pending") if receivable else None
+    # 无回款结算记录才算“无数据”→ None；有记录时合法 0 也要如实展示。
+    has_settlement = bool(recon.get("byPlatform"))
+    metrics["receivable"] = recon.get("receivable") if has_settlement else None
+    metrics["received"] = recon.get("received") if has_settlement else None
+    metrics["pendingReceive"] = recon.get("pending") if has_settlement else None
 
     return {
         "period": f"{year}-{month:02d}",

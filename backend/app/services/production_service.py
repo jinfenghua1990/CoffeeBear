@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import defaultdict
 from datetime import date
 from decimal import Decimal
 from uuid import uuid4
@@ -10,6 +11,7 @@ from sqlalchemy.orm import Session
 from app.models.catalog import ProductSku
 from app.models.consumable import Consumable, ConsumableSkuMapping
 from app.models.production import ProductionMaterialReservation, ProductionOrder, ProductionOrderItem
+from app.services.supplier_sync_service import ensure_supplier
 from app.utils.money import to_decimal
 
 
@@ -102,14 +104,11 @@ def _serialize_item(row: ProductionOrderItem) -> dict:
     }
 
 
-def production_order_detail(db: Session, order: ProductionOrder) -> dict:
-    items = db.query(ProductionOrderItem).filter_by(production_order_id=order.id).order_by(ProductionOrderItem.id).all()
-    materials = (
-        db.query(ProductionMaterialReservation)
-        .filter_by(production_order_id=order.id)
-        .order_by(ProductionMaterialReservation.code, ProductionMaterialReservation.id)
-        .all()
-    )
+def _order_payload(
+    order: ProductionOrder,
+    items: list[ProductionOrderItem],
+    materials: list[ProductionMaterialReservation],
+) -> dict:
     shortage_count = sum(1 for row in materials if _material_state(row) == "shortage")
     return {
         "id": order.id,
@@ -131,12 +130,56 @@ def production_order_detail(db: Session, order: ProductionOrder) -> dict:
     }
 
 
+def production_order_detail(db: Session, order: ProductionOrder) -> dict:
+    items = db.query(ProductionOrderItem).filter_by(production_order_id=order.id).order_by(ProductionOrderItem.id).all()
+    materials = (
+        db.query(ProductionMaterialReservation)
+        .filter_by(production_order_id=order.id)
+        .order_by(ProductionMaterialReservation.code, ProductionMaterialReservation.id)
+        .all()
+    )
+    return _order_payload(order, items, materials)
+
+
+def production_order_details(db: Session, orders: list[ProductionOrder]) -> list[dict]:
+    """批量组装多个生产单详情，避免逐单查询造成 N+1。"""
+    if not orders:
+        return []
+    order_ids = [order.id for order in orders]
+    items = (
+        db.query(ProductionOrderItem)
+        .filter(ProductionOrderItem.production_order_id.in_(order_ids))
+        .order_by(ProductionOrderItem.id)
+        .all()
+    )
+    materials = (
+        db.query(ProductionMaterialReservation)
+        .filter(ProductionMaterialReservation.production_order_id.in_(order_ids))
+        .order_by(ProductionMaterialReservation.code, ProductionMaterialReservation.id)
+        .all()
+    )
+    items_by_order: dict[int, list[ProductionOrderItem]] = defaultdict(list)
+    materials_by_order: dict[int, list[ProductionMaterialReservation]] = defaultdict(list)
+    for item in items:
+        items_by_order[item.production_order_id].append(item)
+    for row in materials:
+        materials_by_order[row.production_order_id].append(row)
+    return [
+        _order_payload(
+            order,
+            items_by_order.get(order.id, []),
+            materials_by_order.get(order.id, []),
+        )
+        for order in orders
+    ]
+
+
 def list_production_orders(db: Session, *, status: str = "", limit: int = 200) -> list[dict]:
     query = db.query(ProductionOrder)
     if status:
         query = query.filter(ProductionOrder.status == status)
     orders = query.order_by(ProductionOrder.created_at.desc(), ProductionOrder.id.desc()).limit(limit).all()
-    return [production_order_detail(db, order) for order in orders]
+    return production_order_details(db, orders)
 
 
 def _recalculate_materials(db: Session, order: ProductionOrder) -> list[ProductionMaterialReservation]:
@@ -292,7 +335,6 @@ def create_production_order(
         )
     db.flush()
     _recalculate_materials(db, order)
-    from app.services.supplier_sync_service import ensure_supplier
     ensure_supplier(db, order.factory_name, platform="线下")
     db.commit()
     db.refresh(order)

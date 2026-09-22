@@ -2423,6 +2423,8 @@ def _order_row(
         else None
     )
     paid_on_1688 = platform == "1688" and (platform_paid_amount or Decimal("0")) > 0
+    # 与其它列表/详情行共用统一“往来单位 → partner_id”口径（见 _pair_supplier_partner_id）。
+    supplier_partner_id = _pair_supplier_partner_id(order, external)
     row = {
         # 兼容旧前端：orderId 优先使用文件副本 id；工作流独有订单使用采购单 id。
         "orderId": file_order_id if file_order_id is not None else external.id,

@@ -28,7 +28,11 @@ def test_procurement_auto_invoice_links_must_store_allocated_amount():
 
 
 def test_bank_reconciliation_domain_does_not_write_invoice_manual_payment_fact():
-    source = _text("backend/app/services/payment_invoice_match_service.py")
-    assert "invoice.payment_method =" not in source
-    assert "inv.payment_method =" not in source
-    assert "_clear_manual_personal_on_bank_evidence" not in source
+    for relative in (
+        "backend/app/services/payment_invoice_match_service.py",
+        "backend/app/services/payment_invoice_match_helpers.py",
+    ):
+        source = _text(relative)
+        assert "invoice.payment_method =" not in source
+        assert "inv.payment_method =" not in source
+        assert "_clear_manual_personal_on_bank_evidence" not in source

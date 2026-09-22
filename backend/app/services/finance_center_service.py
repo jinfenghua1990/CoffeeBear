@@ -46,6 +46,11 @@ def _decimal(value: Any) -> Decimal:
 
 
 def ensure_default_entity(db: Session) -> FinanceLegalEntity:
+    """只读路径兜底：返回默认主体；缺失时仅加入当前事务（不提交）。
+
+    持久化由启动 seed（app.seed.ensure_seed）保证，避免 GET 请求在
+    读路径上执行 commit 造成副作用。
+    """
     row = db.scalar(select(FinanceLegalEntity).where(FinanceLegalEntity.code == DEFAULT_ENTITY_CODE))
     if row is not None:
         return row
@@ -60,7 +65,7 @@ def ensure_default_entity(db: Session) -> FinanceLegalEntity:
         note="系统初始化默认主体",
     )
     db.add(row)
-    db.commit()
+    db.flush()
     db.refresh(row)
     return row
 
