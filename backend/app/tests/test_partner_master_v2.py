@@ -383,3 +383,61 @@ def test_partner_reference_coverage_reports_direct_linkage(db_session):
 
     assert coverage["sources"]["externalPurchases"]["total"] >= 1
     assert coverage["sources"]["externalPurchases"]["linked"] >= 1
+
+def test_supplier_profile_update_cannot_overwrite_canonical_identity(client, db_session):
+    partner = _partner(db_session, "统一主体不可被画像覆盖", "91330000CANON001")
+    partner.contact = "主体联系人"
+    partner.phone = "13800000001"
+    partner.address = "主体地址"
+    partner.notes = "主体通用备注"
+    profile = Supplier(
+        partner_id=partner.id,
+        name="1688渠道旧名称",
+        platform="1688",
+        external_shop_id="SHOP-OLD",
+        tax_no=partner.tax_no,
+        contact=partner.contact,
+        phone=partner.phone,
+        address=partner.address,
+        notes="旧采购备注",
+    )
+    db_session.add(profile)
+    db_session.flush()
+
+    response = client.put(
+        f"/api/v1/suppliers/{profile.id}",
+        json={
+            "name": "错误尝试覆盖主体名称",
+            "platform": "线下",
+            "externalShopId": "SHOP-NEW",
+            "contact": "错误联系人",
+            "taxNo": "91330000WRONG999",
+            "phone": "19999999999",
+            "address": "错误地址",
+            "notes": "新的采购画像备注",
+            "isTemp": False,
+        },
+    )
+
+    assert response.status_code == 200
+    db_session.expire_all()
+    partner_after = db_session.get(BusinessPartner, partner.id)
+    profile_after = db_session.get(Supplier, profile.id)
+    assert partner_after is not None
+    assert profile_after is not None
+    assert partner_after.name == "统一主体不可被画像覆盖"
+    assert partner_after.tax_no == "91330000CANON001"
+    assert partner_after.contact == "主体联系人"
+    assert partner_after.phone == "13800000001"
+    assert partner_after.address == "主体地址"
+    assert partner_after.notes == "主体通用备注"
+    assert profile_after.platform == "线下"
+    assert profile_after.external_shop_id == "SHOP-NEW"
+    assert profile_after.notes == "新的采购画像备注"
+    assert profile_after.tax_no == "91330000CANON001"
+
+    payload = response.json()
+    assert payload["name"] == "统一主体不可被画像覆盖"
+    assert payload["taxNo"] == "91330000CANON001"
+    assert payload["notes"] == "新的采购画像备注"
+
