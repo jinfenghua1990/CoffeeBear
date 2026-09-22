@@ -21,9 +21,11 @@ from app.models.alibaba1688_import import Alibaba1688Order
 from app.models.bank import BankTransaction
 from app.models.business_partner import (
     BusinessPartner,
+    BusinessPartnerBankAccount,
     BusinessPartnerDuplicateReview,
     BusinessPartnerIdentifier,
     BusinessPartnerLink,
+    BusinessPartnerRole,
 )
 from app.models.consumable_purchase import ConsumablePurchase
 from app.models.finance import FinanceLegalEntity
@@ -164,7 +166,31 @@ def _primary_bank_account(rows: list[dict[str, Any]]) -> dict[str, Any]:
     return next((row for row in rows if row.get("is_primary")), rows[0] if rows else {})
 
 
-def _bank_accounts_payload(partner: BusinessPartner) -> list[dict[str, Any]]:
+def _bank_accounts_payload(db: Session, partner: BusinessPartner) -> list[dict[str, Any]]:
+    """Read the relational bank-account master first; JSON is compatibility fallback only."""
+    relation_rows = (
+        db.query(BusinessPartnerBankAccount)
+        .filter(
+            BusinessPartnerBankAccount.partner_id == partner.id,
+            BusinessPartnerBankAccount.status == "active",
+        )
+        .order_by(
+            BusinessPartnerBankAccount.is_primary.desc(),
+            BusinessPartnerBankAccount.id.asc(),
+        )
+        .all()
+    )
+    if relation_rows:
+        return [
+            {
+                "bankName": row.bank_name or "",
+                "accountNo": row.normalized_account_no or normalize_account(row.account_no),
+                "accountName": row.account_name or "",
+                "isPrimary": bool(row.is_primary),
+            }
+            for row in relation_rows
+        ]
+
     raw_rows = partner.bank_accounts if isinstance(partner.bank_accounts, list) else []
     rows: list[dict[str, Any]] = []
     seen: set[str] = set()
@@ -999,7 +1025,7 @@ def _partner_core(db: Session, partner: BusinessPartner) -> dict[str, Any]:
         "bankName": partner.bank_name or "",
         "bankAccountNo": partner.bank_account_no or "",
         "bankAccountName": partner.bank_account_name or "",
-        "bankAccounts": _bank_accounts_payload(partner),
+        "bankAccounts": _bank_accounts_payload(db, partner),
         "roles": _roles(partner.roles),
         "status": partner.status,
         "notes": partner.notes or "",
