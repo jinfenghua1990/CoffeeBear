@@ -533,7 +533,6 @@ def sync_orders(db: Session, actor: str = "system") -> dict[str, Any]:
         {"code": "invalid_priority", "message": item, "blocksCursor": False}
         for item in priority_warnings
     ]
-    selected: str | None = None
     result_stats: dict[str, Any] = {
         "window": {"start": start.isoformat(), "end": end.isoformat()},
         "priority": provider_names,

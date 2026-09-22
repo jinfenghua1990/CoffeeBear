@@ -5,7 +5,6 @@
 - 税务走完整 CSV 导入链路（auto_confirm / draft → confirm → delete → restore），并验证业务查询按 lifecycle 过滤。
 """
 import pytest
-from sqlalchemy.exc import IntegrityError
 
 from app.models.alibaba1688_import import Alibaba1688FileImport, Alibaba1688Order
 from app.models.jackyun_import import JackyunFileImport, JackyunFileImportRecord
@@ -160,7 +159,7 @@ def test_tax_auto_confirm_and_draft_business_filtering(db_session, monkeypatch, 
         actor="pytest", auto_confirm=False,
     )
     assert draft_batch.lifecycle == "draft"
-    draft_inv = db_session.query(TaxInvoice).filter_by(invoice_number="INV-LC-BBB").one()
+    db_session.query(TaxInvoice).filter_by(invoice_number="INV-LC-BBB").one()  # 确认 draft 导入后发票已入库
 
     listed = tax_invoice_service.list_invoices(db_session)
     listed_nos = {i["invoiceNumber"] for i in listed}
@@ -222,9 +221,6 @@ INV-ROW-BBB, CODE-R2,2026-09-02,供应商乙,91330000000000004D,本公司,913300
         actor="pytest", auto_confirm=True,
     )
     try:
-        inv_a = db_session.query(TaxInvoice).filter_by(invoice_number="INV-ROW-AAA").one()
-        inv_b = db_session.query(TaxInvoice).filter_by(invoice_number="INV-ROW-BBB").one()
-
         def visible_nos():
             return {i["invoiceNumber"] for i in tax_invoice_service.list_invoices(db_session)}
 
@@ -357,7 +353,6 @@ def test_inbound_file_preserves_rows_and_registers_non_1688_order(db_session):
     from app.models.procurement_chain import ProcurementChainLink
     from app.models.purchase import ExternalPurchaseOrder
 
-    import_no = "IMPORT-OTHER-ORDER-001"
     rk_no = "RK-OTHER-ORDER-001"
     order_no = "OTHER-ORDER-20260501002"
     imp = JackyunFileImport(
@@ -427,7 +422,6 @@ def test_inbound_file_does_not_auto_link_mismatched_sku_to_existing_order(db_ses
     from app.models.procurement_chain import ProcurementChainLink
     from app.models.purchase import ExternalPurchaseOrder, PurchaseAllocationItem
 
-    import_no = "IMPORT-MISMATCH-SKU-001"
     rk_no = "RK-MISMATCH-SKU-001"
     order_no = "ORDER-MISMATCH-SKU-001"
     imp = JackyunFileImport(
@@ -495,7 +489,6 @@ def test_inbound_file_does_not_auto_link_shared_document_without_allocations(db_
     from app.models.procurement_chain import ProcurementChainLink
     from app.models.purchase import ExternalPurchaseOrder
 
-    import_no = "IMPORT-SHARED-DOC-001"
     rk_no = "RK-SHARED-DOC-001"
     order_a = "ORDER-SHARED-A-001"
     order_b = "ORDER-SHARED-B-001"
@@ -564,7 +557,6 @@ def test_inbound_file_keeps_local_reference_as_staging_only(db_session):
     from app.models.procurement_chain import ProcurementChainLink
     from app.models.purchase import ExternalPurchaseOrder
 
-    import_no = "IMPORT-LOCAL-REFERENCE-001"
     rk_no = "RK-LOCAL-REFERENCE-001"
     order_no = "20260501001"
     imp = JackyunFileImport(

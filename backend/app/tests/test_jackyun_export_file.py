@@ -348,7 +348,6 @@ def test_inbound_import_creates_missing_document_and_items(db_session):
     from app.models.procurement_chain import ProcurementChainLink
     from app.models.purchase import ExternalPurchaseOrder
 
-    import_no = "IMPORT-MISSING-DOCUMENT-001"
     rk_no = "RK-MISSING-DOCUMENT-001"
     order_no = "PO-MISSING-DOCUMENT-001"
     imp = JackyunFileImport(

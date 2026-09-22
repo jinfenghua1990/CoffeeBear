@@ -10,7 +10,6 @@
 from __future__ import annotations
 
 import argparse
-import base64
 import datetime as dt
 import fcntl
 import hashlib

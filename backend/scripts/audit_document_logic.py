@@ -167,7 +167,6 @@ def main():
     M = "E. 发票"
     invoices = db.query(TaxInvoice).all()
     input_inv = [i for i in invoices if i.direction == "input"]
-    red_neg = [i for i in invoices if d(i.total_amount) <= 0]
     red_status = [i for i in invoices if i.status == "red"]
     for i in red_status:
         if d(i.total_amount) > 0:

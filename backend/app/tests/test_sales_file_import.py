@@ -207,7 +207,7 @@ def test_detail_cost_uses_inbound_weighted_cost_and_paid_amount(client, db_sessi
 
     monkeypatch.setattr(service.settings, "DATA_DIR", str(tmp_path))
     costed = _make_sku(db_session, "JYTEST-SKU-COST", "JYTEST-SKU-COST")
-    uncosted = _make_sku(db_session, "JYTEST-SKU-NOCOST", "JYTEST-SKU-NOCOST")
+    _make_sku(db_session, "JYTEST-SKU-NOCOST", "JYTEST-SKU-NOCOST")  # 无入库成本 SKU（匹配 Excel 行）
     inbound = JackyunGoodsDocument(
         document_type="inbound", goodsdoc_no="JYTEST-INBOUND-COST",
         document_at=datetime(2026, 1, 5, tzinfo=timezone.utc),

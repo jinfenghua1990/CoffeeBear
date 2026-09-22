@@ -179,7 +179,6 @@ def main() -> None:
             (i.line_no or 0) for i in
             db.query(JackyunGoodsDocumentItem).filter_by(document_id=doc.id).all()
         )
-        line_no = item.line_no
         for r in rows[1:]:
             unit = q4(r["amount"] / r["qty"])
             max_line += 1

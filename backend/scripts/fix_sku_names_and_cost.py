@@ -9,7 +9,6 @@ default_cost 始终用最新入库价覆盖（跟随最新采购成本）。
 from __future__ import annotations
 
 import sys
-from collections import defaultdict
 from decimal import Decimal
 from pathlib import Path
 

@@ -41,7 +41,7 @@ def main() -> None:
 
     ready, skipped = [], []
     for r in rows:
-        po_id, order_no, status, paid, adj, alloc, cnt = (
+        po_id, order_no, _, paid, adj, alloc, cnt = (
             r[0], r[1], r[2], Decimal(str(r[3] or 0)), Decimal(str(r[4] or 0)),
             Decimal(str(r[5])), r[6])
         target = paid + adj

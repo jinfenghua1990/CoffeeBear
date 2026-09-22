@@ -8,9 +8,8 @@ from zoneinfo import ZoneInfo
 
 from app.models.catalog import ProductSku, Warehouse
 from app.models.consumable import Consumable
-from app.models.consumable_purchase import ConsumablePurchase, ConsumablePurchaseItem
-from app.models.jackyun import JackyunGoodsDocument, JackyunGoodsDocumentItem
-from app.models.procurement_chain import ProcurementChainLink
+from app.models.consumable_purchase import ConsumablePurchaseItem
+from app.models.jackyun import JackyunGoodsDocumentItem
 from app.models.purchase import ExternalPurchaseOrder, PurchaseAllocationItem
 from app.config import settings
 from app.services import consumable_purchase_service, purchase_service

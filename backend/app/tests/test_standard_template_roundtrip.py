@@ -4,13 +4,10 @@
 生产/物料无对应识别类型；库存是运算结果不回导。
 """
 import io
-from datetime import date
 from decimal import Decimal
 
-import pytest
-
 from app.adapters.alibaba1688_export_file import parse_alibaba1688_export
-from app.adapters.jackyun_export_file import detect_report_type, parse_jackyun_export
+from app.adapters.jackyun_export_file import detect_report_type
 from app.services import data_export_service as export_service
 from app.services import jackyun_file_import_service as import_service
 
