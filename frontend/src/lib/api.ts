@@ -467,7 +467,7 @@ export function runR2Backup(mode: "auto" | "daily" | "full" = "auto"): Promise<{
 export type BackupRecord = {
   timestamp: string;
   time: string | null;
-  type: "local" | "r2_daily" | "r2_full" | "kodo_full" | string;
+  type: "local" | "r2_daily" | "r2_full" | "kodo_full" | "webdav_full" | string;
   target: string;
   status: string;
   detail: string;
@@ -485,17 +485,20 @@ export type BackupStatus = {
   lastR2: BackupRecord | null;
   lastR2Full: BackupRecord | null;
   lastKodo: BackupRecord | null;
+  lastWebdav: BackupRecord | null;
   lastAttemptR2: BackupJobAttempt | null;
   lastAttemptKodo: BackupJobAttempt | null;
+  lastAttemptWebdav: BackupJobAttempt | null;
   health: {
     local: BackupHealth;
     r2: BackupHealth;
     kodo: BackupHealth;
+    webdav: BackupHealth;
   };
 };
 
 export type BackupJobAttempt = {
-  target: "r2" | "kodo" | string;
+  target: "r2" | "kodo" | "webdav" | string;
   status: "running" | "success" | "failed" | "skipped" | string;
   startedAt: string | null;
   finishedAt: string | null;
@@ -576,6 +579,60 @@ export function runKodoColdBackup(): Promise<{
   log: string;
 }> {
   return jsonFetch("/api/v1/integrations/kodo-cold/run", { method: "POST" });
+}
+
+export type WebdavBackupConfig = {
+  configured: boolean;
+  enabled: boolean;
+  baseUrl: string;
+  remotePath: string;
+  username: string;
+  usernameHint: string;
+  connectionStatus: "configured" | "connected" | "error" | string;
+  lastTestedAt: string | null;
+  lastSuccessAt: string | null;
+  errorSummary: string | null;
+  mode: "backup" | string;
+  readEnabled: true;
+  scheduler: { mode: string; managed: boolean; label: string; message: string };
+};
+
+export type WebdavBackupConfigInput = {
+  baseUrl: string;
+  remotePath: string;
+  username: string;
+  appPassword?: string;
+  enabled: boolean;
+};
+
+export function getWebdavBackupConfig(): Promise<WebdavBackupConfig> {
+  return jsonFetch<WebdavBackupConfig>("/api/v1/integrations/webdav-backup");
+}
+
+export function saveWebdavBackupConfig(body: WebdavBackupConfigInput): Promise<WebdavBackupConfig> {
+  return jsonFetch<WebdavBackupConfig>("/api/v1/integrations/webdav-backup", {
+    method: "PUT",
+    body: JSON.stringify(body),
+  });
+}
+
+export function testWebdavBackupConnection(): Promise<{
+  ok: boolean;
+  status: number;
+  baseUrl: string;
+  remotePath: string;
+  message: string;
+}> {
+  return jsonFetch("/api/v1/integrations/webdav-backup/test", { method: "POST" });
+}
+
+export function runWebdavBackup(): Promise<{
+  started: boolean;
+  target: "webdav";
+  mode: "full";
+  log: string;
+}> {
+  return jsonFetch("/api/v1/integrations/webdav-backup/run", { method: "POST" });
 }
 
 export type ExceptionRow = {

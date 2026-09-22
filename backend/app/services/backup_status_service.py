@@ -112,6 +112,31 @@ def _kodo_records(directory: Path) -> list[dict[str, Any]]:
     return records
 
 
+def _webdav_records(directory: Path) -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+    receipt_dir = directory / ".webdav-uploaded"
+    if not receipt_dir.is_dir():
+        return records
+    for receipt in receipt_dir.glob("*.json"):
+        payload = _read_json(receipt)
+        timestamp = str(payload.get("timestamp") or receipt.stem)
+        records.append(
+            {
+                "timestamp": timestamp,
+                "time": _iso_from_timestamp(timestamp),
+                "type": "webdav_full",
+                "target": "坚果云 WebDAV",
+                "status": "success",
+                "detail": "完整容灾 · WebDAV 上传回执已确认 · 系统恢复执行器待接入",
+                "snapshotObjectKey": str(payload.get("snapshotObjectKey") or ""),
+                "recoverable": False,
+                "verificationLevel": "uploaded",
+                "uploadedCount": len(payload.get("objects") or []),
+            }
+        )
+    return records
+
+
 def _job_attempt(directory: Path, target: str) -> dict[str, Any] | None:
     payload = _read_json(directory / ".job-status" / f"{target}.json")
     if not payload:
@@ -194,12 +219,14 @@ def get_status(limit: int = 50) -> dict[str, Any]:
             "lastR2": None,
             "lastR2Full": None,
             "lastKodo": None,
+            "lastWebdav": None,
             "lastAttemptR2": None,
             "lastAttemptKodo": None,
-            "health": {"local": empty, "r2": empty, "kodo": empty},
+            "lastAttemptWebdav": None,
+            "health": {"local": empty, "r2": empty, "kodo": empty, "webdav": empty},
         }
 
-    success_records = _local_records(directory) + _r2_records(directory) + _kodo_records(directory)
+    success_records = _local_records(directory) + _r2_records(directory) + _kodo_records(directory) + _webdav_records(directory)
     success_records.sort(key=lambda row: str(row.get("timestamp") or ""), reverse=True)
 
     def first(types: set[str]) -> dict[str, Any] | None:
@@ -209,13 +236,16 @@ def get_status(limit: int = 50) -> dict[str, Any]:
     last_r2 = first({"r2_daily", "r2_full"})
     last_r2_full = first({"r2_full"})
     last_kodo = first({"kodo_full"})
+    last_webdav = first({"webdav_full"})
     last_attempt_r2 = _job_attempt(directory, "r2")
     last_attempt_kodo = _job_attempt(directory, "kodo")
+    last_attempt_webdav = _job_attempt(directory, "webdav")
 
     records = list(success_records)
     for attempt_record in (
         _attempt_record(last_attempt_r2, target_label="Cloudflare R2", type_name="r2_attempt"),
         _attempt_record(last_attempt_kodo, target_label="七牛云 Kodo", type_name="kodo_attempt"),
+        _attempt_record(last_attempt_webdav, target_label="坚果云 WebDAV", type_name="webdav_attempt"),
     ):
         if attempt_record:
             records.append(attempt_record)
@@ -228,11 +258,14 @@ def get_status(limit: int = 50) -> dict[str, Any]:
         "lastR2": last_r2,
         "lastR2Full": last_r2_full,
         "lastKodo": last_kodo,
+        "lastWebdav": last_webdav,
         "lastAttemptR2": last_attempt_r2,
         "lastAttemptKodo": last_attempt_kodo,
+        "lastAttemptWebdav": last_attempt_webdav,
         "health": {
             "local": _health(last_local, None, stale_hours=36),
             "r2": _health(last_r2, last_attempt_r2, stale_hours=36),
             "kodo": _health(last_kodo, last_attempt_kodo, stale_hours=36),
+            "webdav": _health(last_webdav, last_attempt_webdav, stale_hours=36),
         },
     }

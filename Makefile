@@ -6,10 +6,12 @@ BACKEND := $(ROOT)/backend
 VENV := $(BACKEND)/.venv
 SYSTEM_UPDATE_LAUNCH_LABEL ?= com.gino.ecommerce-dashboard
 LAUNCH_LABEL := gui/$(shell id -u)/$(SYSTEM_UPDATE_LAUNCH_LABEL)
-NATIVE_ENV = set -a; . "$(ROOT)/.env"; set +a; export DATABASE_URL="$${DATABASE_URL:-postgresql+psycopg://$${POSTGRES_USER}:$${POSTGRES_PASSWORD}@localhost:5432/$${POSTGRES_DB}}"; export REDIS_URL="$${REDIS_URL:-redis://localhost:6379/0}"; export DATA_DIR="$${DATA_DIR:-$(ROOT)/data}";
+# Native targets must not inherit the container-only `postgres` hostname. Set
+# NATIVE_DATABASE_URL explicitly when a non-local native database is intended.
+NATIVE_ENV = set -a; . "$(ROOT)/.env"; set +a; export DATABASE_URL="$${NATIVE_DATABASE_URL:-postgresql+psycopg://$${POSTGRES_USER}:$${POSTGRES_PASSWORD}@localhost:5432/$${POSTGRES_DB}}"; export REDIS_URL="$${REDIS_URL:-redis://localhost:6379/0}"; export DATA_DIR="$${DATA_DIR:-$(ROOT)/data}";
 MIGRATION_ENV = $(NATIVE_ENV) if [ -n "$$MIGRATION_DATABASE_URL" ]; then export DATABASE_URL="$$MIGRATION_DATABASE_URL"; fi;
 
-.PHONY: help update-guard-check update-guard-install up restart status logs logs-api rebuild rebuild-fe test test-db lint tsc verify release-check secret-scan repo-hygiene smoke migrate migration-check exec-api persistence-migrate backup backup-full backup-r2 backup-r2-daily backup-r2-full cold-backup-kodo restore-check orphan-audit backup-schedule-install backup-schedule-status backup-schedule-uninstall fresh
+.PHONY: help update-guard-check update-guard-install up restart status logs logs-api rebuild rebuild-fe test test-db lint tsc verify release-check secret-scan repo-hygiene smoke migrate migration-check exec-api persistence-migrate backup backup-full backup-r2 backup-r2-daily backup-r2-full cold-backup-kodo backup-webdav restore-check orphan-audit backup-schedule-install backup-schedule-status backup-schedule-uninstall fresh
 
 help: ## 列出所有 target
 	@awk 'BEGIN {FS = ":.*##"} /^[a-zA-Z_-]+:.*?##/ {printf "  \033[36m%-16s\033[0m %s\n", $1, $2}' $(MAKEFILE_LIST)
@@ -95,16 +97,19 @@ backup-full: update-guard-check ## 生成完整容灾恢复点：应用 + 配置
 	bash ./scripts/full-backup.sh
 
 backup-r2: update-guard-check ## R2 自动策略：每日模块化；到期自动执行全量容灾（默认每 10 天）
-	@set -a; . "$(ROOT)/.env"; set +a; "$(VENV)/bin/python" "$(ROOT)/scripts/r2-backup.py" --mode auto
+	@$(NATIVE_ENV) "$(VENV)/bin/python" "$(ROOT)/scripts/r2-backup.py" --mode auto
 
 backup-r2-daily: update-guard-check ## 立即执行一次 R2 模块化备份
-	@set -a; . "$(ROOT)/.env"; set +a; "$(VENV)/bin/python" "$(ROOT)/scripts/r2-backup.py" --mode daily
+	@$(NATIVE_ENV) "$(VENV)/bin/python" "$(ROOT)/scripts/r2-backup.py" --mode daily
 
 backup-r2-full: update-guard-check ## 立即执行一次 R2 完整容灾备份
-	@set -a; . "$(ROOT)/.env"; set +a; "$(VENV)/bin/python" "$(ROOT)/scripts/r2-backup.py" --mode full
+	@$(NATIVE_ENV) "$(VENV)/bin/python" "$(ROOT)/scripts/r2-backup.py" --mode full
 
 cold-backup-kodo: update-guard-check ## 生成并上传每日完整容灾恢复点到 Kodo；严格只写入，不下载/取回/远端校验
-	@set -a; . "$(ROOT)/.env"; set +a; "$(VENV)/bin/python" "$(ROOT)/scripts/kodo-cold-upload.py"
+	@$(NATIVE_ENV) "$(VENV)/bin/python" "$(ROOT)/scripts/kodo-cold-upload.py"
+
+backup-webdav: update-guard-check ## 生成并上传每日完整容灾恢复点到坚果云 WebDAV
+	@$(NATIVE_ENV) "$(VENV)/bin/python" "$(ROOT)/scripts/webdav-backup.py"
 
 restore-check: ## 将最新备份恢复到临时库验证，生产库不做任何修改
 	bash ./scripts/restore-check.sh

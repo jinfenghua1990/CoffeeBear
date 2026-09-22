@@ -33,6 +33,7 @@ def test_backup_shell_scripts_parse(script):
     [
         "scripts/backup-config-crypto.py",
         "scripts/kodo-cold-upload.py",
+        "scripts/webdav-backup.py",
         "scripts/r2-backup.py",
         "scripts/r2-restore.py",
     ],

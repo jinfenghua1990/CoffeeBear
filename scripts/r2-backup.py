@@ -227,6 +227,8 @@ def prepare_full_snapshot(*, include_docker: bool) -> tuple[Path, dict[str, str]
         check=True,
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
     )
     sys.stdout.write(result.stdout)
     manifest_path = ""

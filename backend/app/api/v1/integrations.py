@@ -6,7 +6,13 @@ from sqlalchemy.orm import Session
 
 from app.db import get_db
 from app.api.deps import current_actor, require_roles
-from app.services import backup_status_service, integration_service, kodo_backup_service, r2_backup_service
+from app.services import (
+    backup_status_service,
+    integration_service,
+    kodo_backup_service,
+    r2_backup_service,
+    webdav_backup_service,
+)
 
 router = APIRouter(prefix="/integrations", tags=["integrations"])
 
@@ -73,6 +79,61 @@ def run_kodo_cold_backup(db: Session = Depends(get_db)) -> dict[str, Any]:
     try:
         return kodo_backup_service.start_backup()
     except RuntimeError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+class WebdavBackupConfigIn(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    base_url: str = Field(default=webdav_backup_service.DEFAULT_BASE_URL, alias="baseUrl")
+    remote_path: str = Field(default=webdav_backup_service.DEFAULT_PREFIX, alias="remotePath")
+    username: str
+    app_password: str = Field(default="", alias="appPassword")
+    enabled: bool = True
+
+
+@router.get("/webdav-backup", dependencies=[Depends(require_roles("admin"))])
+def get_webdav_backup_config(db: Session = Depends(get_db)) -> dict[str, Any]:
+    """返回脱敏后的坚果云 WebDAV 配置；应用密码永不回传前端。"""
+    return webdav_backup_service.get_config(db)
+
+
+@router.put("/webdav-backup", dependencies=[Depends(require_roles("admin"))])
+def save_webdav_backup_config(
+    body: WebdavBackupConfigIn,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    """保存坚果云 WebDAV 备份配置，凭据加密落库。"""
+    try:
+        return webdav_backup_service.save_config(
+            db,
+            base_url=body.base_url,
+            remote_path=body.remote_path,
+            username=body.username,
+            app_password=body.app_password,
+            enabled=body.enabled,
+            actor=current_actor(request),
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@router.post("/webdav-backup/test", dependencies=[Depends(require_roles("admin"))])
+def test_webdav_backup_connection(db: Session = Depends(get_db)) -> dict[str, Any]:
+    """验证 WebDAV 登录、写入、读取和清理探针，不触碰业务备份文件。"""
+    try:
+        return webdav_backup_service.test_connection(db)
+    except (ValueError, RuntimeError) as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@router.post("/webdav-backup/run", dependencies=[Depends(require_roles("admin"))])
+def run_webdav_backup(db: Session = Depends(get_db)) -> dict[str, Any]:
+    """手动启动一次 WebDAV 完整容灾备份。"""
+    try:
+        return webdav_backup_service.start_backup(db)
+    except (ValueError, RuntimeError) as exc:
         raise HTTPException(400, str(exc)) from exc
 
 

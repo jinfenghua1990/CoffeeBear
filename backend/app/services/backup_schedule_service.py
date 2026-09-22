@@ -11,6 +11,7 @@ _LABELS = {
     "restore": "com.gino.ecommerce-dashboard.restore-check",
     "r2": "com.gino.ecommerce-dashboard.backup-r2",
     "kodo": "com.gino.ecommerce-dashboard.cold-backup-kodo",
+    "webdav": "com.gino.ecommerce-dashboard.backup-webdav",
 }
 
 

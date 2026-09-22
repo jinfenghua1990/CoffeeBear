@@ -249,5 +249,5 @@ done < <(ls -1t "$BACKUP_DIR"/full_*.manifest 2>/dev/null || true)
 
 FULL_ABS="$(cd "$BACKUP_DIR" && pwd)/$(basename "$FULL_FINAL")"
 echo "==> 完成。完整容灾恢复点：$FULL_ABS"
-echo "==> 配置包已客户端加密；恢复时需要独立密钥（指纹 $KEY_FINGERPRINT）。"
+echo "==> 配置包已客户端加密；恢复时需要独立密钥（指纹 ${KEY_FINGERPRINT}）。"
 echo "FULL_BACKUP_MANIFEST=$FULL_ABS"

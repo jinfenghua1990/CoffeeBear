@@ -20,8 +20,11 @@ import hashlib
 import hmac
 import json
 import os
+import re
+import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 from typing import Any
@@ -191,11 +194,60 @@ def upload_one(
     source: Path,
 ) -> dict[str, Any]:
     token = upload_token(access_key, secret_key, bucket, object_key)
+    # macOS/Python 3.14 在七牛简单表单上传较大文件时可能卡在 TLS 写入；
+    # curl 使用系统网络栈稳定流式上传，Token 通过临时文件传入，不出现在命令行和日志中。
+    if source.stat().st_size >= 4 * 1024 * 1024 and shutil.which("curl"):
+        with tempfile.TemporaryDirectory(prefix="kodo-upload-") as temp_dir:
+            token_path = Path(temp_dir) / "token"
+            token_path.write_text(token, encoding="utf-8")
+            token_path.chmod(0o600)
+            result = subprocess.run(
+                [
+                    shutil.which("curl") or "curl",
+                    "--silent",
+                    "--show-error",
+                    "--connect-timeout",
+                    "15",
+                    "--max-time",
+                    "7200",
+                    "--write-out",
+                    "\nKODO_HTTP_STATUS=%{http_code}\n",
+                    "-F",
+                    f"token=<{token_path}",
+                    "-F",
+                    f"key={object_key}",
+                    "-F",
+                    f"file=@{source};type=application/octet-stream",
+                    upload_url,
+                ],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                check=False,
+            )
+        match = re.search(r"\nKODO_HTTP_STATUS=(\d{3})\s*$", result.stdout or "")
+        if not match:
+            detail = (result.stderr or result.stdout or "无响应").strip()[:800]
+            raise RuntimeError(f"上传失败：curl 未返回 HTTP 状态（{detail}）")
+        status_code = int(match.group(1))
+        response_body = (result.stdout or "")[: -len(match.group(0))]
+        if status_code in {409, 614}:
+            return {"already_exists": True, "status": status_code}
+        if status_code < 200 or status_code >= 300:
+            body = response_body[:800].replace("\n", " ")
+            raise RuntimeError(f"上传失败 HTTP {status_code}：{body}")
+        try:
+            return json.loads(response_body or "{}")
+        except ValueError:
+            return {"response": response_body[:800]}
+
     with source.open("rb") as stream:
         response = requests.post(
             upload_url,
             data={"token": token, "key": object_key},
             files={"file": (source.name, stream, "application/octet-stream")},
+            headers={"Expect": "", "Connection": "close"},
             timeout=(15, 3600),
         )
     # insertOnly + 内容寻址键：如果本地回执丢失，重传同 SHA 对象可能收到“已存在”。
@@ -259,6 +311,8 @@ def _run_main() -> int:
             check=True,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
         )
     except subprocess.CalledProcessError as exc:
         sys.stderr.write(exc.stdout or "")

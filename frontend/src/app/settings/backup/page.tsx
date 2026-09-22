@@ -5,20 +5,24 @@ import {
   getBackupStatus,
   getKodoColdBackupConfig,
   getR2BackupConfig,
+  getWebdavBackupConfig,
   prepareR2Restore,
   runR2Backup,
   saveKodoColdBackupConfig,
   saveR2BackupConfig,
+  saveWebdavBackupConfig,
   testKodoColdBackupWrite,
   testR2BackupConnection,
+  testWebdavBackupConnection,
   type BackupStatus,
   type KodoColdBackupConfig,
   type R2BackupConfig,
+  type WebdavBackupConfig,
 } from "@/lib/api";
 
 type TabKey = "overview" | "restore" | "records";
 type Tone = "green" | "blue" | "amber" | "slate";
-type StorageKey = "r2" | "kodo" | "nas";
+type StorageKey = "r2" | "kodo" | "webdav" | "nas";
 
 function Pill({
   children,
@@ -184,6 +188,11 @@ const STORAGE_DETAILS: Record<StorageKey, { title: string; role: string; desc: s
     role: "国内冷备 · 只写入",
     desc: "标准配置只保留 Access Key 与 Secret Key；技术参数统一放到高级配置。",
   },
+  webdav: {
+    title: "坚果云 WebDAV",
+    role: "异地备份 · 可读写",
+    desc: "使用坚果云第三方应用密码；备份写入独立远程目录，不影响其他存储目标。",
+  },
   nas: {
     title: "本地 NAS",
     role: "可选冷备",
@@ -236,6 +245,17 @@ export default function BackupSettingsPage() {
     enabled: true,
   });
 
+  const [webdavConfig, setWebdavConfig] = useState<WebdavBackupConfig | null>(null);
+  const [webdavLoading, setWebdavLoading] = useState(true);
+  const [webdavSaving, setWebdavSaving] = useState(false);
+  const [webdavForm, setWebdavForm] = useState({
+    baseUrl: "https://dav.jianguoyun.com/dav/",
+    remotePath: "ecommerce-workspace/webdav",
+    username: "",
+    appPassword: "",
+    enabled: true,
+  });
+
   const tabs = useMemo(
     () =>
       [
@@ -281,6 +301,32 @@ export default function BackupSettingsPage() {
     return () => {
       cancelled = true;
       window.clearInterval(timer);
+    };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    getWebdavBackupConfig()
+      .then((config) => {
+        if (cancelled) return;
+        setWebdavConfig(config);
+        setWebdavForm((current) => ({
+          ...current,
+          baseUrl: config.baseUrl || "https://dav.jianguoyun.com/dav/",
+          remotePath: config.remotePath || "ecommerce-workspace/webdav",
+          username: config.username || "",
+          enabled: config.configured ? config.enabled : true,
+          appPassword: "",
+        }));
+      })
+      .catch(() => {
+        if (!cancelled) setWebdavConfig(null);
+      })
+      .finally(() => {
+        if (!cancelled) setWebdavLoading(false);
+      });
+    return () => {
+      cancelled = true;
     };
   }, []);
 
@@ -450,6 +496,50 @@ export default function BackupSettingsPage() {
     }
   }
 
+  async function saveWebdavConfig() {
+    if (!webdavForm.baseUrl.trim() || !webdavForm.remotePath.trim() || !webdavForm.username.trim()) {
+      showNotice("请填写 WebDAV 服务器地址、远程目录和账号。");
+      return;
+    }
+    if (!webdavConfig?.configured && !webdavForm.appPassword.trim()) {
+      showNotice("首次配置需要填写坚果云应用密码。");
+      return;
+    }
+
+    setWebdavSaving(true);
+    try {
+      const saved = await saveWebdavBackupConfig({
+        baseUrl: webdavForm.baseUrl.trim(),
+        remotePath: webdavForm.remotePath.trim(),
+        username: webdavForm.username.trim(),
+        appPassword: webdavForm.appPassword.trim(),
+        enabled: webdavForm.enabled,
+      });
+      setWebdavConfig(saved);
+      setWebdavForm((current) => ({
+        ...current,
+        baseUrl: saved.baseUrl,
+        remotePath: saved.remotePath,
+        username: saved.username,
+        appPassword: "",
+        enabled: saved.enabled,
+      }));
+
+      try {
+        await testWebdavBackupConnection();
+        closeStorageModal();
+        showNotice("坚果云 WebDAV 已保存，连接、写入、读取和清理测试通过。");
+      } catch (error) {
+        setAdvancedConfigOpen(true);
+        showNotice("凭据已保存，但 WebDAV 测试未通过，请检查服务器地址、远程目录和应用密码：" + (error instanceof Error ? error.message : String(error)));
+      }
+    } catch (error) {
+      showNotice("保存失败：" + (error instanceof Error ? error.message : String(error)));
+    } finally {
+      setWebdavSaving(false);
+    }
+  }
+
   async function runR2() {
     if (!r2Config?.configured || !r2Config.enabled) {
       openStorage("r2");
@@ -594,6 +684,15 @@ export default function BackupSettingsPage() {
                     onConfigure={() => openStorage("kodo")}
                   />
                   <ArchitectureItem
+                    icon="cloud"
+                    title="坚果云 WebDAV（异地备份）"
+                    desc="每日完整恢复点 · 可读写 · 独立目录"
+                    tone={webdavConfig?.connectionStatus === "connected" && webdavConfig.enabled ? "green" : "amber"}
+                    status={webdavLoading ? "读取中" : webdavConfig?.connectionStatus === "error" ? "检测失败" : webdavConfig?.configured ? (webdavConfig.enabled ? "已配置" : "已停用") : "待配置"}
+                    statusTone={webdavConfig?.connectionStatus === "connected" && webdavConfig.enabled ? "green" : "amber"}
+                    onConfigure={() => openStorage("webdav")}
+                  />
+                  <ArchitectureItem
                     icon="nas"
                     title="本地 NAS（可选）"
                     desc="本地冷备 / 第三副本"
@@ -663,7 +762,7 @@ export default function BackupSettingsPage() {
           <section className="app-card overflow-hidden rounded-xl">
             <div className="border-b border-slate-100 px-4 py-3">
               <div className="text-[13px] font-semibold text-slate-900">备份记录</div>
-              <div className="mt-1 text-[10px] text-slate-400">来自本地 manifest、R2 成功回执和 Kodo 本地上传回执。</div>
+              <div className="mt-1 text-[10px] text-slate-400">来自本地 manifest、R2、Kodo 和坚果云 WebDAV 本地上传回执。</div>
             </div>
             <div className="grid grid-cols-[1.1fr_.9fr_.8fr_1.2fr_.7fr] border-b border-slate-100 bg-slate-50 px-4 py-2 text-[10px] font-medium text-slate-500">
               <span>时间</span><span>类型</span><span>目标</span><span>说明</span><span>状态</span>
@@ -673,7 +772,7 @@ export default function BackupSettingsPage() {
                 <div key={`${row.type}-${row.timestamp}-${row.target}`} className="grid grid-cols-[1.1fr_.9fr_.8fr_1.2fr_.7fr] items-center px-4 py-3 text-[10px]">
                   <span className="text-slate-600">{backupTime(row.time)}</span>
                   <span className="font-medium text-slate-700">
-                    {row.type === "r2_full" ? "全量容灾" : row.type === "r2_daily" ? "日常模块化" : row.type === "kodo_full" ? "冷备恢复点" : row.type === "r2_attempt" || row.type === "kodo_attempt" ? "任务状态" : "本地基础"}
+                    {row.type === "r2_full" ? "全量容灾" : row.type === "r2_daily" ? "日常模块化" : row.type === "kodo_full" ? "冷备恢复点" : row.type === "webdav_full" ? "WebDAV 恢复点" : row.type === "r2_attempt" || row.type === "kodo_attempt" || row.type === "webdav_attempt" ? "任务状态" : "本地基础"}
                   </span>
                   <span className="text-slate-600">{row.target}</span>
                   <span className="text-slate-500">{row.detail}</span>
@@ -868,6 +967,82 @@ export default function BackupSettingsPage() {
                   <button type="button" onClick={closeStorageModal} className="app-button-secondary rounded-lg px-4 py-2 text-[10px] font-medium">取消</button>
                   <button type="button" disabled={kodoSaving || kodoLoading} onClick={() => void saveKodoConfig()} className="app-button-primary rounded-lg px-4 py-2 text-[10px] font-medium disabled:opacity-50">
                     {kodoSaving ? "保存并检测…" : "保存并完成"}
+                  </button>
+                </div>
+              </>
+            ) : selectedStorage === "webdav" ? (
+              <>
+                <div className="space-y-3 px-5 py-4">
+                  <div className="rounded-lg bg-blue-50 px-3 py-2 text-[9px] leading-5 text-blue-700">
+                    使用坚果云“第三方应用管理”生成的应用密码。系统会先做登录、写入、读取和清理探针，再启用每日完整容灾上传。
+                  </div>
+
+                  <label className="block space-y-1.5">
+                    <span className="text-[10px] font-medium text-slate-600">WebDAV 服务器地址</span>
+                    <input
+                      value={webdavForm.baseUrl}
+                      onChange={(event) => setWebdavForm((current) => ({ ...current, baseUrl: event.target.value }))}
+                      placeholder="https://dav.jianguoyun.com/dav/"
+                      className="h-9 w-full rounded-lg border border-slate-200 bg-white px-3 text-[10px] text-slate-700 outline-none focus:border-blue-400"
+                    />
+                  </label>
+
+                  <div className="grid gap-3 sm:grid-cols-2">
+                    <label className="block space-y-1.5">
+                      <span className="text-[10px] font-medium text-slate-600">账号</span>
+                      <input
+                        type="email"
+                        autoComplete="username"
+                        value={webdavForm.username}
+                        onChange={(event) => setWebdavForm((current) => ({ ...current, username: event.target.value }))}
+                        placeholder={webdavConfig?.configured ? "留空保持原账号" : "坚果云账号"}
+                        className="h-9 w-full rounded-lg border border-slate-200 bg-white px-3 text-[10px] text-slate-700 outline-none focus:border-blue-400"
+                      />
+                    </label>
+                    <label className="block space-y-1.5">
+                      <span className="text-[10px] font-medium text-slate-600">
+                        应用密码 {webdavConfig?.usernameHint ? <span className="font-normal text-slate-400">（已保存 {webdavConfig.usernameHint}）</span> : null}
+                      </span>
+                      <input
+                        type="password"
+                        autoComplete="new-password"
+                        value={webdavForm.appPassword}
+                        onChange={(event) => setWebdavForm((current) => ({ ...current, appPassword: event.target.value }))}
+                        placeholder={webdavConfig?.configured ? "留空保持原应用密码" : "坚果云应用密码"}
+                        className="h-9 w-full rounded-lg border border-slate-200 bg-white px-3 text-[10px] text-slate-700 outline-none focus:border-blue-400"
+                      />
+                    </label>
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={() => setAdvancedConfigOpen((value) => !value)}
+                    className="text-[10px] font-medium text-slate-500 hover:text-slate-800"
+                  >
+                    {advancedConfigOpen ? "收起高级配置 ↑" : "高级配置 / 人工调整 ↓"}
+                  </button>
+
+                  {advancedConfigOpen ? (
+                    <div className="grid gap-3 rounded-xl border border-slate-100 bg-slate-50/60 p-3 sm:grid-cols-2">
+                      <label className="block space-y-1.5 sm:col-span-2">
+                        <span className="text-[9px] font-medium text-slate-500">远程备份目录</span>
+                        <input
+                          value={webdavForm.remotePath}
+                          onChange={(event) => setWebdavForm((current) => ({ ...current, remotePath: event.target.value }))}
+                          className="h-9 w-full rounded-lg border border-slate-200 bg-white px-3 text-[10px] text-slate-700 outline-none focus:border-blue-400"
+                        />
+                      </label>
+                      <label className="flex items-center gap-2 text-[9px] text-slate-600">
+                        <input type="checkbox" checked={webdavForm.enabled} onChange={(event) => setWebdavForm((current) => ({ ...current, enabled: event.target.checked }))} />
+                        启用 WebDAV 每日备份
+                      </label>
+                    </div>
+                  ) : null}
+                </div>
+                <div className="flex justify-end gap-2 border-t border-slate-100 px-5 py-3">
+                  <button type="button" onClick={closeStorageModal} className="app-button-secondary rounded-lg px-4 py-2 text-[10px] font-medium">取消</button>
+                  <button type="button" disabled={webdavSaving || webdavLoading} onClick={() => void saveWebdavConfig()} className="app-button-primary rounded-lg px-4 py-2 text-[10px] font-medium disabled:opacity-50">
+                    {webdavSaving ? "保存并检测…" : "保存并完成"}
                   </button>
                 </div>
               </>
