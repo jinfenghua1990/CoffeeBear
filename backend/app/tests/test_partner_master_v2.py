@@ -11,7 +11,9 @@ from app.models.business_partner import (
     BusinessPartnerIdentifier,
     BusinessPartnerLink,
 )
+from app.models.jky_web import JkyWebSalesOrder
 from app.models.purchase import ExternalPurchaseOrder, Supplier
+from app.models.sales import SalesOrder
 from app.models.tax import TaxInvoice
 from app.services import business_partner_service
 from app.services.partner_reference_service import (
@@ -440,4 +442,81 @@ def test_supplier_profile_update_cannot_overwrite_canonical_identity(client, db_
     assert payload["name"] == "统一主体不可被画像覆盖"
     assert payload["taxNo"] == "91330000CANON001"
     assert payload["notes"] == "新的采购画像备注"
+
+def test_generic_sales_order_inherits_customer_partner_from_stable_jky_identity(db_session):
+    partner = BusinessPartner(
+        name="销售客户甲",
+        normalized_name="销售客户甲",
+        roles=["customer"],
+        status="active",
+    )
+    db_session.add(partner)
+    db_session.flush()
+
+    jky = JkyWebSalesOrder(
+        trade_no="TRADE-CANON-001",
+        source_trade_no="PLATFORM-CANON-001",
+        customer_code="CUST-001",
+        customer_account="customer-a",
+        customer_partner_id=partner.id,
+        raw={"客户名称": "销售客户甲"},
+    )
+    sales = SalesOrder(
+        order_no="LOCAL-SALES-001",
+        source_provider="jky_file",
+        source_order_id="TRADE-CANON-001",
+        identity_keys=["PLATFORM-CANON-001"],
+        raw={},
+    )
+    db_session.add_all([jky, sales])
+    db_session.flush()
+
+    result = materialize_partner_references(db_session)
+
+    assert result["bySource"]["sales_order"] == 1
+    assert sales.customer_partner_id == partner.id
+
+
+def test_generic_sales_order_does_not_inherit_conflicting_customer_identity(db_session):
+    first = BusinessPartner(
+        name="销售客户冲突甲",
+        normalized_name="销售客户冲突甲",
+        roles=["customer"],
+        status="active",
+    )
+    second = BusinessPartner(
+        name="销售客户冲突乙",
+        normalized_name="销售客户冲突乙",
+        roles=["customer"],
+        status="active",
+    )
+    db_session.add_all([first, second])
+    db_session.flush()
+    db_session.add_all([
+        JkyWebSalesOrder(
+            trade_no="TRADE-CONFLICT-A",
+            source_trade_no="SHARED-SOURCE-ORDER",
+            customer_partner_id=first.id,
+            raw={"客户名称": "销售客户冲突甲"},
+        ),
+        JkyWebSalesOrder(
+            trade_no="TRADE-CONFLICT-B",
+            source_trade_no="SHARED-SOURCE-ORDER",
+            customer_partner_id=second.id,
+            raw={"客户名称": "销售客户冲突乙"},
+        ),
+    ])
+    sales = SalesOrder(
+        order_no="SHARED-SOURCE-ORDER",
+        source_provider="legacy",
+        source_order_id="",
+        raw={},
+    )
+    db_session.add(sales)
+    db_session.flush()
+
+    result = materialize_partner_references(db_session)
+
+    assert result["bySource"].get("sales_order", 0) == 0
+    assert sales.customer_partner_id is None
 
