@@ -33,6 +33,7 @@ from app.models.finance import ArchiveFile, FinanceSalesReportTemplate, FinanceU
 from app.models.sales import SalesOrder, SalesOrderItem
 from app.services import finance_service
 from app.services.finance_sales_report_format import (
+    DEFAULT_FIELD_KEYS,
     FIELD_REGISTRY,
     DEFAULT_RULES,
     _money,
