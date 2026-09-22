@@ -1665,6 +1665,174 @@ def add_identifier(db: Session, partner_id: int, *, kind: str, value: str) -> Bu
     return row
 
 
+def _merge_partner_into(
+    db: Session,
+    *,
+    target: BusinessPartner,
+    source: BusinessPartner,
+    actor: str = "",
+    note: str = "",
+) -> dict[str, Any]:
+    """把重复主档并入唯一主体；原始业务字段不改写，被并档主体仅归档。"""
+    target_tax = normalize_tax_no(target.tax_no)
+    source_tax = normalize_tax_no(source.tax_no)
+    if target_tax and source_tax and target_tax != source_tax:
+        raise ValueError(
+            f"两个档案税号冲突（{target_tax} / {source_tax}），不能直接合并"
+        )
+
+    ctx = SyncContext(db)
+    _add_identifier(ctx, target, kind="former_name", value=source.name, source="master_merge")
+
+    source_identifiers = (
+        db.query(BusinessPartnerIdentifier)
+        .filter(BusinessPartnerIdentifier.partner_id == source.id)
+        .all()
+    )
+    for item in source_identifiers:
+        kind = "former_name" if item.kind == "name" else item.kind
+        if kind not in IDENTIFIER_KINDS:
+            continue
+        _add_identifier(
+            ctx,
+            target,
+            kind=kind,
+            value=item.value,
+            source="master_merge",
+            is_primary=False,
+        )
+
+    target.roles = _roles([*(target.roles or []), *(source.roles or [])])
+    if not target.tax_no and source.tax_no:
+        target.tax_no = source.tax_no
+    if not target.contact and source.contact:
+        target.contact = source.contact
+    if not target.phone and source.phone:
+        target.phone = source.phone
+    if not target.address and source.address:
+        target.address = source.address
+    if not target.notes and source.notes:
+        target.notes = source.notes
+
+    target_accounts = _bank_accounts_payload(db, target)
+    source_accounts = _bank_accounts_payload(db, source)
+    combined: dict[str, dict[str, Any]] = {}
+    for item in [*target_accounts, *source_accounts]:
+        normalized = normalize_account(item.get("accountNo"))
+        if not normalized:
+            continue
+        current = combined.get(normalized)
+        if current is None:
+            combined[normalized] = {
+                "bank_name": item.get("bankName") or "",
+                "account_no": normalized,
+                "account_name": item.get("accountName") or "",
+                "is_primary": bool(item.get("isPrimary")),
+            }
+        else:
+            current["bank_name"] = current["bank_name"] or item.get("bankName") or ""
+            current["account_name"] = current["account_name"] or item.get("accountName") or ""
+            current["is_primary"] = bool(current["is_primary"] or item.get("isPrimary"))
+
+    merged_accounts = list(combined.values())
+    if merged_accounts:
+        current_primary = normalize_account(target.bank_account_no)
+        primary_index = next(
+            (
+                index for index, item in enumerate(merged_accounts)
+                if current_primary and normalize_account(item["account_no"]) == current_primary
+            ),
+            next((index for index, item in enumerate(merged_accounts) if item["is_primary"]), 0),
+        )
+        for index, item in enumerate(merged_accounts):
+            item["is_primary"] = index == primary_index
+        primary = merged_accounts[primary_index]
+        target.bank_accounts = merged_accounts
+        target.bank_name = str(primary.get("bank_name") or "")
+        target.bank_account_no = normalize_account(primary.get("account_no"))
+        target.bank_account_name = str(primary.get("account_name") or "")
+        _replace_manual_identifiers(
+            db,
+            target,
+            kind="bank_account",
+            values=[str(item["account_no"]) for item in merged_accounts],
+            primary_value=target.bank_account_no,
+        )
+
+    for supplier in db.query(Supplier).filter(Supplier.partner_id == source.id).all():
+        supplier.partner_id = target.id
+    if target.legacy_supplier_id is None and source.legacy_supplier_id is not None:
+        target.legacy_supplier_id = source.legacy_supplier_id
+    source.legacy_supplier_id = None
+
+    target_roles = {
+        row.role: row
+        for row in db.query(BusinessPartnerRole)
+        .filter(BusinessPartnerRole.partner_id == target.id)
+        .all()
+    }
+    for row in (
+        db.query(BusinessPartnerRole)
+        .filter(BusinessPartnerRole.partner_id == source.id)
+        .all()
+    ):
+        if row.role in target_roles:
+            db.delete(row)
+        else:
+            row.partner_id = target.id
+            target_roles[row.role] = row
+
+    target_banks = {
+        row.normalized_account_no: row
+        for row in db.query(BusinessPartnerBankAccount)
+        .filter(BusinessPartnerBankAccount.partner_id == target.id)
+        .all()
+    }
+    for row in (
+        db.query(BusinessPartnerBankAccount)
+        .filter(BusinessPartnerBankAccount.partner_id == source.id)
+        .all()
+    ):
+        existing = target_banks.get(row.normalized_account_no)
+        if existing is None:
+            row.partner_id = target.id
+            target_banks[row.normalized_account_no] = row
+            continue
+        existing.bank_name = existing.bank_name or row.bank_name
+        existing.account_name = existing.account_name or row.account_name
+        existing.verified = bool(existing.verified or row.verified)
+        existing.status = "active" if "active" in {existing.status, row.status} else existing.status
+        db.delete(row)
+
+    from app.services.partner_reference_service import (
+        materialize_partner_references,
+        repoint_partner_references,
+    )
+
+    moved = repoint_partner_references(
+        db,
+        from_partner_id=source.id,
+        to_partner_id=target.id,
+    )
+
+    source.status = "archived"
+    merge_note = f"已合并至往来主体 #{target.id} {target.name}"
+    if note:
+        merge_note += f"；{note}"
+    source.notes = (source.notes + "\n" + merge_note).strip() if source.notes else merge_note
+
+    db.flush()
+    materialized = materialize_partner_references(db)
+    return {
+        "targetPartnerId": target.id,
+        "archivedPartnerId": source.id,
+        "movedFacts": int(moved.get("moved", 0)),
+        "movedBySource": moved.get("bySource", {}),
+        "materializedRefs": int(materialized.get("materialized", 0)),
+        "actor": str(actor or ""),
+    }
+
+
 def decide_duplicate(
     db: Session,
     partner_id: int,
