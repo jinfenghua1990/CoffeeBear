@@ -1903,7 +1903,6 @@ def _pair_supplier_key(
         (order.seller_company_name if order is not None else "")
         or (external.supplier_name if external is not None else "")
     )
-    supplier_partner_id = _pair_supplier_partner_id(order, external)
     return normalize_supplier_name(supplier)
 
 
@@ -2405,6 +2404,7 @@ def _order_row(
         (order.seller_company_name if order is not None else "")
         or (external.supplier_name if external is not None else "")
     )
+    supplier_partner_id = _pair_supplier_partner_id(order, external)
     buyer = order.buyer_company_name if order is not None else (
         external.buyer_account if external is not None else ""
     )
@@ -2562,7 +2562,6 @@ def _stage_states(row: dict) -> list[dict]:
     每项返回：{key, no, label, short, dimension, done, detail, amount}
     """
     allocations = row.get("allocations") or []
-    purchase_orders = row.get("purchaseOrders") or []
     inbound = row.get("inbound") or []
     invoice = row.get("invoice") or []
     settlement = row.get("settlement") or []

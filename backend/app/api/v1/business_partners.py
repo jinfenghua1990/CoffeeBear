@@ -12,7 +12,6 @@ from app.core.audit import audit
 from app.db import get_db
 from app.models.business_partner import BusinessPartner
 from app.services import business_partner_service as partner_service
-from app.services import payment_invoice_match_service as payment_match_service
 from app.services import partner_master_service
 from app.services.partner_reference_service import partner_reference_coverage
 
