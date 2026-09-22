@@ -267,6 +267,7 @@ def reconcile(
         for value in [
             *(r.supplier_partner_id for r in po_rows),
             *(v.seller_partner_id for v in inv_rows),
+            target_partner_id,
         ]
         if value is not None
     }
