@@ -418,3 +418,43 @@ def test_unbilled_income_xlsx_matches_delivery_tabs():
     assert detail.cell(row=12, column=4).value == "商品B"
     assert detail.cell(row=13, column=4).value == "合计"
     assert detail.cell(row=13, column=8).value == 95.0
+
+
+def test_unlinked_output_service_invoice_is_excluded_from_unbilled_income(db_session):
+    from app.models.tax import TaxInvoice
+
+    tz = ZoneInfo(settings.TZ)
+    token = uuid4().hex[:10]
+    sku = ProductSku(
+        jackyun_sku_id=f"sku-{token}", sku_code=f"SALES-{token}",
+        sku_name="销售商品", tax_code="3010101000000000000",
+    )
+    order = SalesOrder(
+        order_no=_order_no("SALES"), platform="淘宝", order_status="已完成",
+        pay_status="已支付", paid_amount=Decimal("100.00"),
+        ordered_at=datetime(2026, 8, 10, 12, 0, tzinfo=tz),
+        raw={"warehouseName": "示范仓"},
+    )
+    db_session.add_all([sku, order])
+    db_session.flush()
+    db_session.add(SalesOrderItem(
+        order_id=order.id, sku_code=sku.sku_code, goods_name=sku.sku_name,
+        quantity=Decimal("1"), amount=Decimal("100.00"), discount_amount=Decimal("0"),
+        sku_id=sku.id,
+    ))
+    db_session.add(TaxInvoice(
+        invoice_key=f"service-fee-{token}", invoice_number=f"SERVICE-{token}",
+        direction="output", status="issued", issue_date=datetime(2026, 8, 20, tzinfo=tz),
+        seller_name="本公司", buyer_name="平台服务方", total_amount=Decimal("15.53"),
+        source_system="tax_export", raw={"发票内容": "服务费"},
+    ))
+    db_session.commit()
+
+    report = svc.build_unbilled_income_report(
+        db_session, 2026, 8, company=f"service-fee-{token}",
+    )
+
+    assert report["salesAmount"] == "100.00"
+    assert report["redSalesAdjustmentAmount"] == "0.00"
+    assert report["invoicedAmount"] == "0.00"
+    assert report["unbilledAmount"] == "100.00"

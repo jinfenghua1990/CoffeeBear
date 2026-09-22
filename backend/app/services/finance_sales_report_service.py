@@ -682,59 +682,42 @@ def build_unbilled_income_report(
     month: int,
     company: str = finance_service.DEFAULT_COMPANY,
 ) -> dict[str, Any]:
-    """无票收入 = 销售总金额 − 已开票金额（销项价税合计，含红字冲减）。
+    """销售出库无票收入 = 当前销售出库口径 − 销售出库关联的已开票净额。
 
     - 销售总金额复用 build_report 的 summary.salesAmount（与发给财务的销售汇总同口径）。
-    - 已开票金额直接汇总官方销项发票（tax_export，direction=output，issued/red）的
-      价税合计，不依赖发票分类规则（分类缺失不应影响无票收入）。
-    - 缺失发票导入时已开票金额为 0，无票收入等于销售总金额，不臆造。
+    - 已开票金额只取已确认关联到销售订单的销项发票；未关联的服务费等销项发票
+      不属于销售出库无票收入表。
+    - 人工调整版本按当前勾选的明细计算调整后销售金额、已开票净额和无票收入。
     """
-    from app.models.tax import TaxInvoice
     from app.services.monthly_core import month_bounds
 
     sales = build_report(db, year, month, get_or_create_template(db, company))
     start, nxt = month_bounds(year, month)
-    invoice_rows = (
-        db.query(TaxInvoice)
-        .filter(
-            TaxInvoice.source_system == "tax_export",
-            TaxInvoice.direction == "output",
-            TaxInvoice.status.in_(("issued", "red")),
-            TaxInvoice.issue_date >= start,
-            TaxInvoice.issue_date < nxt,
-        )
-        .all()
-    )
-    from app.services import tax_invoice_service
-    red_context = tax_invoice_service.red_accounting_context(db, invoice_rows)
-    invoiced_total = sum(
-        (
-            Decimal(str(red_context.get(row.id, {}).get("accountingNetAmount") or "0"))
-            for row in invoice_rows
-            if red_context.get(row.id, {}).get("accountingNetIncluded", False)
-        ),
-        Decimal("0"),
-    )
-    red_sales_adjustment = sum(
-        (
-            Decimal(str(red_context.get(row.id, {}).get("accountingNetAmount") or "0"))
-            for row in invoice_rows
-            if red_context.get(row.id, {}).get("invoiceColor") == "red"
-            and red_context.get(row.id, {}).get("accountingNetIncluded", False)
-        ),
-        Decimal("0"),
-    )
+    invoiced_by_group, red_adjustment_by_group = _output_invoiced_by_group(db, start, nxt)
+    linked_invoiced_total = sum(invoiced_by_group.values(), Decimal("0"))
+    linked_red_adjustment = sum(red_adjustment_by_group.values(), Decimal("0"))
     sales_total = Decimal(sales["summary"]["salesAmount"] or "0")
-    adjusted_sales_total = sales_total + red_sales_adjustment
-    # 红字发票同时冲减销售基数和已开票净额，因此不会制造虚假的“无票收入”。
-    unbilled = adjusted_sales_total - invoiced_total
     source_details, details, selected_keys, adjustment = _unbilled_details_for_period(
         db, company=company, year=year, month=month,
     )
+    row_invoiced_total = sum((Decimal(d.get("invoiced") or "0") for d in details), Decimal("0"))
+    if adjustment is None:
+        red_sales_adjustment = linked_red_adjustment
+        adjusted_sales_total = sales_total + red_sales_adjustment
+        invoiced_total = linked_invoiced_total
+    else:
+        # 当前版本只交付勾选的销售出库明细，汇总也必须跟随该版本，不能把取消的行算回去。
+        red_sales_adjustment = sum((Decimal(d.get("redSalesAdjustment") or "0") for d in details), Decimal("0"))
+        adjusted_sales_total = sum(
+            (Decimal(d.get("adjustedSales") or d.get("sales") or "0") for d in details),
+            Decimal("0"),
+        )
+        invoiced_total = row_invoiced_total
+    # 红字发票同时冲减销售基数与已开票净额；未关联的服务费发票不参与本表。
+    unbilled = adjusted_sales_total - invoiced_total
     version = adjustment.version if adjustment is not None else _latest_sales_summary_version(
         db, company=company, year=year, month=month,
     )
-    row_invoiced_total = sum((Decimal(d.get("invoiced") or "0") for d in details), Decimal("0"))
     unattributed = invoiced_total - row_invoiced_total
     if unattributed < 0:
         unattributed = Decimal("0")

@@ -414,7 +414,7 @@ function invoicedValue(detail: { invoiced?: string }): number | null {
   return Number(detail.invoiced);
 }
 
-/** 行无票收入：后端缺省但有已开票时，前端按 sales − invoiced 兜底（不为负）。 */
+/** 行无票收入：后端缺省但有已开票时，前端按调整后销售金额 − 已开票净额兜底。 */
 function unbilledValue(detail: { sales: string; adjustedSales?: string; invoiced?: string; unbilled?: string }): number | null {
   const invoiced = invoicedValue(detail);
   if (invoiced === null) return null;
@@ -1571,19 +1571,27 @@ export default function MonthlySendPage() {
                 </label>
                 <div className="mt-4 rounded-lg border border-blue-100 bg-blue-50/60 p-3 text-[11px] leading-4 text-blue-800">
                   {unbilledDetailMode === "adjust"
-                    ? "无票收入 = 销售总金额 − 已开票金额。当前明细按税务编号 + 产品聚合；取消勾选的明细不会进入本次版本。"
+                    ? "无票收入 = 调整后销售金额 − 已开票净额；销项红字调整同时冲减销售基数和已开票净额。当前明细按税务编号 + 产品聚合；取消勾选的明细不会进入本次版本。"
                     : "当前为只读发送预览，只展示这个版本实际会进入附件的明细。"} 
                 </div>
               </div>
 
               <div className="min-w-0 overflow-auto p-4">
-                <div className="mb-3 grid grid-cols-2 gap-2 sm:grid-cols-4">
+                <div className="mb-3 grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-6">
                   <div className="rounded-lg bg-slate-50 p-2.5">
                     <div className="text-[10px] text-slate-400">销售总金额</div>
                     <div className="mt-1 text-sm font-semibold">{money(unbilled?.salesAmount)}</div>
                   </div>
                   <div className="rounded-lg bg-slate-50 p-2.5">
-                    <div className="text-[10px] text-slate-400">已开票</div>
+                    <div className="text-[10px] text-slate-400">销项红字调整</div>
+                    <div className="mt-1 text-sm font-semibold text-rose-700">{money(unbilled?.redSalesAdjustmentAmount || 0)}</div>
+                  </div>
+                  <div className="rounded-lg bg-slate-50 p-2.5">
+                    <div className="text-[10px] text-slate-400">调整后销售金额</div>
+                    <div className="mt-1 text-sm font-semibold">{money(unbilled?.adjustedSalesAmount || unbilled?.salesAmount)}</div>
+                  </div>
+                  <div className="rounded-lg bg-slate-50 p-2.5">
+                    <div className="text-[10px] text-slate-400">已开票净额</div>
                     <div className="mt-1 text-sm font-semibold">{money(unbilled?.invoicedAmount)}</div>
                   </div>
                   <div className="rounded-lg bg-amber-50 p-2.5">
@@ -1617,6 +1625,8 @@ export default function MonthlySendPage() {
                         <th className="border-b border-slate-200 px-3 py-2 font-medium">产品</th>
                         <th className="border-b border-slate-200 px-3 py-2 text-right font-medium">发货数量</th>
                         <th className="border-b border-slate-200 px-3 py-2 text-right font-medium">销售金额</th>
+                        <th className="border-b border-slate-200 px-3 py-2 text-right font-medium">销项红字调整</th>
+                        <th className="border-b border-slate-200 px-3 py-2 text-right font-medium">调整后销售金额</th>
                         <th className="border-b border-slate-200 px-3 py-2 text-right font-medium">已开票金额</th>
                         <th className="border-b border-slate-200 px-3 py-2 text-right font-medium">无票收入</th>
                         <th className="border-b border-slate-200 px-3 py-2 text-right font-medium">销售成本</th>
@@ -1644,6 +1654,8 @@ export default function MonthlySendPage() {
                             <td className="max-w-[260px] truncate px-3 py-2">{detail.product}</td>
                             <td className="px-3 py-2 text-right tabular-nums">{Number(detail.quantity).toLocaleString("zh-CN")}</td>
                             <td className="px-3 py-2 text-right tabular-nums">{num(detail.sales)}</td>
+                            <td className="px-3 py-2 text-right tabular-nums text-rose-700">{num(detail.redSalesAdjustment || 0)}</td>
+                            <td className="px-3 py-2 text-right tabular-nums">{num(detail.adjustedSales ?? detail.sales)}</td>
                             <td className="px-3 py-2 text-right tabular-nums">{rowInvoiced === null ? "—" : num(rowInvoiced)}</td>
                             <td className="px-3 py-2 text-right tabular-nums text-amber-700">{rowUnbilled === null ? "—" : num(rowUnbilled)}</td>
                             <td className="px-3 py-2 text-right tabular-nums text-amber-700">{num(detail.cost)}</td>
@@ -1659,6 +1671,12 @@ export default function MonthlySendPage() {
                         </td>
                         <td className="px-3 py-2 text-right tabular-nums">
                           {num(filteredUnbilledDetails.reduce((sum, detail) => sum + Number(detail.sales || 0), 0))}
+                        </td>
+                        <td className="px-3 py-2 text-right tabular-nums text-rose-700">
+                          {num(filteredUnbilledDetails.reduce((sum, detail) => sum + Number(detail.redSalesAdjustment || 0), 0))}
+                        </td>
+                        <td className="px-3 py-2 text-right tabular-nums">
+                          {num(filteredUnbilledDetails.reduce((sum, detail) => sum + Number(detail.adjustedSales ?? detail.sales ?? 0), 0))}
                         </td>
                         <td className="px-3 py-2 text-right tabular-nums">
                           {num(filteredUnbilledDetails.reduce((sum, detail) => {
@@ -1691,7 +1709,7 @@ export default function MonthlySendPage() {
                     {money(filteredUnbilledDetails.reduce((sum, detail) => sum + Number(detail.sales || 0), 0))}</>}
                 {Number(unbilled?.unattributedInvoiced || 0) > 0 ? (
                   <span className="ml-2 text-amber-700">
-                    已开票 {money(unbilled?.invoicedAmount)} 中有 {money(unbilled?.unattributedInvoiced)} 未关联到具体销售订单，仅计入总额、不摊入明细行
+                    已开票净额 {money(unbilled?.invoicedAmount)} 中有 {money(unbilled?.unattributedInvoiced)} 未关联到具体销售订单，仅计入总额、不摊入明细行
                   </span>
                 ) : null}
               </div>
