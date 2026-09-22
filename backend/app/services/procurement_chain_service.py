@@ -1339,6 +1339,21 @@ def run_full_procurement_automation(db: Session, actor: str = "system") -> dict:
         db.rollback()
         result["ok"] = False
         result["errors"].append(f"采购单自动关联：{exc}")
+    try:
+        # V2 主数据必须成为所有导入/自动化的最后一道收口：
+        # 新采购、入库、发票等一旦落库，立即解析并物化 canonical partner FK。
+        from app.services.partner_master_service import rebuild_partner_master
+
+        result["partnerMaster"] = rebuild_partner_master(
+            db,
+            actor=actor,
+            run_payment_match=True,
+        )
+        db.commit()
+    except Exception as exc:
+        db.rollback()
+        result["ok"] = False
+        result["errors"].append(f"统一往来主体重建：{exc}")
     return result
 
 
