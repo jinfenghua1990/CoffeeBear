@@ -576,8 +576,8 @@ function Invoices({ rows }: { rows: BusinessPartnerDetail["invoices"] }) {
             <td className="px-3 py-2.5 text-right tabular-nums text-emerald-700">{money(row.bankPaidAmount)}</td>
             <td className={`px-3 py-2.5 text-right tabular-nums ${remaining > 0.005 ? "font-medium text-amber-700" : "text-slate-400"}`}>{money(remaining)}</td>
             <td className="px-3 py-2.5">
-              <span className={settled ? "rounded-md bg-emerald-50 px-2 py-1 font-medium text-emerald-700" : partial ? "rounded-md bg-blue-50 px-2 py-1 font-medium text-blue-700" : "rounded-md bg-amber-50 px-2 py-1 font-medium text-amber-700"}>
-                {settled ? "已匹配" : partial ? "部分匹配" : "待匹配"}
+              <span className={redOffset ? "rounded-md bg-orange-100 px-2 py-1 font-medium text-orange-800" : settled ? "rounded-md bg-emerald-50 px-2 py-1 font-medium text-emerald-700" : partial ? "rounded-md bg-blue-50 px-2 py-1 font-medium text-blue-700" : "rounded-md bg-amber-50 px-2 py-1 font-medium text-amber-700"}>
+                {redOffset ? "已全额红冲/资金核对不适用" : settled ? "已匹配" : partial ? "部分匹配" : "待匹配"}
               </span>
               {row.verified && <span className="ml-1.5 text-[10px] text-slate-400">已认证</span>}
             </td>
