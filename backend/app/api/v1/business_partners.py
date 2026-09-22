@@ -170,9 +170,11 @@ def create_partner(
 ) -> dict[str, Any]:
     try:
         row = partner_service.create_partner(db, payload.model_dump())
-        first = partner_service.sync_business_partners(db)
-        payment = payment_match_service.auto_match_all_periods(db, actor=current_actor(request))
-        second = partner_service.sync_business_partners(db)
+        rebuild = partner_master_service.rebuild_partner_master(
+            db,
+            actor=current_actor(request),
+            run_payment_match=True,
+        )
         db.commit()
         audit(
             db,
@@ -184,9 +186,11 @@ def create_partner(
                 "name": row.name,
                 "roles": row.roles,
                 "sync": {
-                    "createdLinks": int(first.get("createdLinks", 0)) + int(second.get("createdLinks", 0)),
-                    "updatedLinks": int(first.get("updatedLinks", 0)) + int(second.get("updatedLinks", 0)),
-                    "bankInvoiceMatchesCreated": int(payment.get("matchedLinks", 0)),
+                    "createdLinks": int(rebuild.get("createdLinks", 0)),
+                    "updatedLinks": int(rebuild.get("updatedLinks", 0)),
+                    "materializedRefs": int(rebuild.get("materializedRefs", 0)),
+                    "bankInvoiceMatchesCreated": int(rebuild.get("bankInvoiceMatchesCreated", 0)),
+                    "bankInvoiceRepaired": int(rebuild.get("bankInvoiceRepaired", 0)),
                 },
             },
         )
@@ -214,15 +218,17 @@ def update_partner(
 ) -> dict[str, Any]:
     try:
         row = partner_service.update_partner(db, partner_id, payload.model_dump())
-        # 主档变化（尤其是曾用名 / 新银行账号）先回填来源，再立即重跑票款匹配。
-        first = partner_service.sync_business_partners(db)
-        payment = payment_match_service.auto_match_all_periods(db, actor=current_actor(request))
-        second = partner_service.sync_business_partners(db)
+        rebuild = partner_master_service.rebuild_partner_master(
+            db,
+            actor=current_actor(request),
+            run_payment_match=True,
+        )
         sync = {
-            "createdLinks": int(first.get("createdLinks", 0)) + int(second.get("createdLinks", 0)),
-            "updatedLinks": int(first.get("updatedLinks", 0)) + int(second.get("updatedLinks", 0)),
-            "bankInvoiceMatchesCreated": int(payment.get("matchedLinks", 0)),
-            "bankInvoiceRepaired": int(payment.get("repaired", 0)),
+            "createdLinks": int(rebuild.get("createdLinks", 0)),
+            "updatedLinks": int(rebuild.get("updatedLinks", 0)),
+            "materializedRefs": int(rebuild.get("materializedRefs", 0)),
+            "bankInvoiceMatchesCreated": int(rebuild.get("bankInvoiceMatchesCreated", 0)),
+            "bankInvoiceRepaired": int(rebuild.get("bankInvoiceRepaired", 0)),
         }
         db.commit()
         audit(
@@ -250,7 +256,11 @@ def add_partner_identifier(
         row = partner_service.add_identifier(
             db, partner_id, kind=payload.kind, value=payload.value
         )
-        sync = partner_service.sync_business_partners(db)
+        sync = partner_master_service.rebuild_partner_master(
+            db,
+            actor=current_actor(request),
+            run_payment_match=True,
+        )
         db.commit()
         audit(
             db,
@@ -310,6 +320,11 @@ def claim_partner_review_link(
         row = partner_service.claim_review_link(
             db, partner_id=partner_id, link_id=link_id, note=payload.note
         )
+        rebuild = partner_master_service.rebuild_partner_master(
+            db,
+            actor=current_actor(request),
+            run_payment_match=True,
+        )
         db.commit()
         audit(
             db,
@@ -317,7 +332,13 @@ def claim_partner_review_link(
             "business_partner.review_claimed",
             "business_partner_link",
             str(row.id),
-            {"partnerId": partner_id, "sourceType": row.source_type, "sourceId": row.source_id},
+            {
+                "partnerId": partner_id,
+                "sourceType": row.source_type,
+                "sourceId": row.source_id,
+                "materializedRefs": int(rebuild.get("materializedRefs", 0)),
+                "bankInvoiceMatchesCreated": int(rebuild.get("bankInvoiceMatchesCreated", 0)),
+            },
         )
         return partner_service.partner_detail(db, partner_id) or {}
     except ValueError as exc:
