@@ -49,13 +49,31 @@ def build_fingerprint(account_no: str, txn_date: str, amount, voucher_no: str,
 
 
 def match_platform(counterparty_name: str, rules: list[tuple[str, str, str]]) -> str | None:
-    """rules: [(pattern, match_type, platform)]，contains 优先级按规则顺序。"""
+    """按规则把对方户名映射到平台，对规则顺序不敏感。
+
+    - 精确相等(equals)优先且唯一确定；
+    - contains 模式按 pattern 长度降序取最具体的命中，避免宽泛规则遮蔽具体规则
+      （如「科技」不应遮蔽「某科技有限公司」），从而影响 score_match 的平台评分。
+    """
     name = counterparty_name or ""
+    if not name:
+        return None
+
+    # 1) 精确相等优先
     for pattern, match_type, platform in rules:
         if match_type == "equals" and name == pattern:
             return platform
-        if match_type != "equals" and pattern in name:
-            return platform
+
+    # 2) 子串匹配按具体度（pattern 越长越具体）降序，最具体的优先
+    contains_hits = [
+        (len(pattern), platform)
+        for pattern, match_type, platform in rules
+        if match_type != "equals" and pattern and pattern in name
+    ]
+    if contains_hits:
+        contains_hits.sort(key=lambda x: x[0], reverse=True)
+        return contains_hits[0][1]
+
     return None
 
 
