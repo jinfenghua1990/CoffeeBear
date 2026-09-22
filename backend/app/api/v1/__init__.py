@@ -36,6 +36,7 @@ from app.api.v1 import (
     supply_chain_material_flow,
     system,
     tax_accounting,
+    finance_vouchers,
     tax_invoices,
     warehouses,
 )
@@ -80,3 +81,4 @@ api_router.include_router(data_export.router)
 api_router.include_router(automation.router)
 api_router.include_router(tax_invoices.router)
 api_router.include_router(tax_accounting.router)
+api_router.include_router(finance_vouchers.router)

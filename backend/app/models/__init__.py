@@ -22,6 +22,7 @@ from app.models import (
     purchase,
     sales,
     tax,
+    finance_voucher,
 )
 from app.models.base import Base
 
@@ -50,4 +51,5 @@ __all__ = [
     "finance",
     "foreign_trade",
     "ops",
+    "finance_voucher",
 ]
