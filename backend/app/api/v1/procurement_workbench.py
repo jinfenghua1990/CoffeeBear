@@ -323,6 +323,15 @@ def supplier_list(
     return service.suppliers(db, limit=limit, offset=offset)
 
 
+@router.get("/suppliers/by-partner/{partner_id}")
+def supplier_workbench_by_partner(partner_id: int, db: Session = Depends(get_db)) -> dict:
+    """V2：按唯一往来主体 ID 查看供应商历史，名称只用于展示。"""
+    data = service.supplier_workbench_by_partner(db, partner_id)
+    if data is None:
+        raise HTTPException(status_code=404, detail="供应商不存在或暂无采购事实")
+    return data
+
+
 @router.get("/suppliers/{supplier_name}")
 def supplier_workbench(supplier_name: str, db: Session = Depends(get_db)) -> dict:
     """单个供应商详情：历史合作 + 常购 SKU + 最近订单。"""
