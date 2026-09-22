@@ -67,7 +67,7 @@ def upgrade() -> None:
         sa.UniqueConstraint("partner_id", "normalized_account_no", name="uq_business_partner_bank_account"),
     )
     op.create_index("ix_business_partner_bank_accounts_partner_id", "business_partner_bank_accounts", ["partner_id"])
-    op.create_index("ix_business_partner_bank_accounts_normalized", "business_partner_bank_accounts", ["normalized_account_no"])
+    op.create_index("ix_business_partner_bank_accounts_normalized_account_no", "business_partner_bank_accounts", ["normalized_account_no"])
     op.create_index("ix_business_partner_bank_accounts_status", "business_partner_bank_accounts", ["status"])
 
     _partner_fk("suppliers", "partner_id", "fk_suppliers_partner")
@@ -151,6 +151,14 @@ def upgrade() -> None:
         """
     )
 
+    # V2 只保留 legacy_supplier_id 的历史值，不再让 canonical 主档反向依赖
+    # Supplier 兼容表。否则 business_partners <-> suppliers 会形成外键环。
+    op.drop_constraint(
+        "fk_business_partners_legacy_supplier",
+        "business_partners",
+        type_="foreignkey",
+    )
+
     # Materialize all existing confirmed/linked source relationships into direct FKs.
     mappings = [
         ("external_purchase_orders", "supplier_partner_id", "external_purchase_order", "supplier"),
@@ -208,6 +216,16 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    # 恢复到 V1 时重新建立 legacy Supplier 反向外键。
+    op.create_foreign_key(
+        "fk_business_partners_legacy_supplier",
+        "business_partners",
+        "suppliers",
+        ["legacy_supplier_id"],
+        ["id"],
+        ondelete="SET NULL",
+    )
+
     for table, column, fk_name in [
         ("sales_orders", "customer_partner_id", "fk_sales_orders_customer_partner"),
         ("jky_web_sales_orders", "customer_partner_id", "fk_jky_web_sales_orders_customer_partner"),
@@ -229,7 +247,7 @@ def downgrade() -> None:
         op.drop_column(table, column)
 
     op.drop_index("ix_business_partner_bank_accounts_status", table_name="business_partner_bank_accounts")
-    op.drop_index("ix_business_partner_bank_accounts_normalized", table_name="business_partner_bank_accounts")
+    op.drop_index("ix_business_partner_bank_accounts_normalized_account_no", table_name="business_partner_bank_accounts")
     op.drop_index("ix_business_partner_bank_accounts_partner_id", table_name="business_partner_bank_accounts")
     op.drop_table("business_partner_bank_accounts")
     op.drop_index("ix_business_partner_roles_role", table_name="business_partner_roles")
