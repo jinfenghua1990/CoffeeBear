@@ -78,13 +78,18 @@ def orders(
 
 @router.get("/invoice-reconciliation")
 def invoice_reconciliation(
-    supplier: str = Query("", description="只看该供应商（宽松匹配，供供应商画像用）"),
+    partner_id: int | None = Query(None, ge=1, description="V2 统一往来主体 ID（优先）"),
+    supplier: str = Query("", description="兼容旧数据：按供应商名称过滤"),
     db: Session = Depends(get_db),
 ) -> dict:
-    """发票维度对账：按开票日期限制可用订单，再按订单日期 FIFO 多单配平（纯推导，不落库）。"""
+    """发票维度对账：canonical partner 优先，再按开票日期/FIFO 多单配平（纯推导）。"""
     from app.services import invoice_reconciliation
 
-    return invoice_reconciliation.reconcile(db, supplier=supplier or None)
+    return invoice_reconciliation.reconcile(
+        db,
+        supplier=supplier or None,
+        partner_id=partner_id,
+    )
 
 
 @router.post("/invoice-match")
