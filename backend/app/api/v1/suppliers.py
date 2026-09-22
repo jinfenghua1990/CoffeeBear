@@ -70,7 +70,8 @@ def _serialize(
         "taxNo": canonical.tax_no if canonical is not None else (profile.tax_no or ""),
         "phone": canonical.phone if canonical is not None else (profile.phone or ""),
         "address": canonical.address if canonical is not None else (profile.address or ""),
-        "notes": canonical.notes if canonical is not None else (profile.notes or ""),
+        # Supplier.notes 是采购画像备注；主体通用备注只在 BusinessPartner 主档维护。
+        "notes": profile.notes or "",
         "isTemp": bool(profile.is_temp),
         "purchaseType": "regular" if (order_count or 0) >= 2 else "temporary",
         "createdAt": (
