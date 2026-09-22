@@ -35,6 +35,18 @@ def test_platform_no_match():
     assert match_platform("张三", RULES) is None
 
 
+def test_platform_most_specific_contains_wins():
+    """宽泛规则不应遮蔽更具体的规则，且结果与规则顺序无关。"""
+    broad_first = [
+        ("科技", "contains", "宽泛平台"),
+        ("某科技有限公司", "contains", "具体平台"),
+    ]
+    specific_first = list(reversed(broad_first))
+    name = "上海某科技有限公司收款"
+    assert match_platform(name, broad_first) == "具体平台"
+    assert match_platform(name, specific_first) == "具体平台"
+
+
 def test_fingerprint_stable_and_voucher_based():
     a = build_fingerprint("ZJRC-001", "2026-09-01", "12000.00", "V123")
     b = build_fingerprint("ZJRC-001", "2026-09-01", "12000", "V123")
