@@ -564,6 +564,21 @@ def _status(remaining: Decimal, amount: Decimal) -> str:
     return "partial"
 
 
+def _clear_manual_personal_on_bank_evidence(
+    db: Session,
+    invoice: TaxInvoice,
+    actor: str,
+) -> None:
+    """银行付款事实变化后请求发票域清除旧 personal 人工标记。"""
+    tax_invoice_service.clear_manual_personal_payment_method(
+        db,
+        invoice,
+        actor=actor,
+        reason="银行付款事实新增或分摊发生变化",
+        commit=False,
+    )
+
+
 def overview(db: Session, year: int, month: int) -> dict[str, Any]:
     """当月银行付款清单 + 已挂发票 + 当月进项发票池 + 汇总（推导，不落库）。"""
     start, end = _month_range(year, month)
@@ -1020,6 +1035,7 @@ def _split_match_invoice_to_txns(
         )
         db.add(link_row)
         db.flush()
+        _clear_manual_personal_on_bank_evidence(db, invoice, actor)
         allocated += portion
         if allocated_by_invoice is not None:
             allocated_by_invoice[invoice.id] = allocated
@@ -1083,6 +1099,7 @@ def _split_match_txn_to_invoices(
         )
         db.add(link_row)
         db.flush()
+        _clear_manual_personal_on_bank_evidence(db, invoice, actor)
         allocated += portion
         if allocated_by_txn is not None:
             allocated_by_txn[txn.id] = allocated
@@ -1306,6 +1323,7 @@ def auto_match(db: Session, year: int, month: int, actor: str = "system") -> dic
         )
         db.add(link_row)
         db.flush()
+        _clear_manual_personal_on_bank_evidence(db, invoice, actor)
         allocated_by_txn[txn.id] = allocated_by_txn.get(txn.id, Decimal("0")) + portion
         allocated_by_invoice[invoice.id] = allocated_by_invoice.get(invoice.id, Decimal("0")) + portion
         matched += 1
@@ -1502,6 +1520,7 @@ def auto_match(db: Session, year: int, month: int, actor: str = "system") -> dic
         )
         db.add(link_row)
         db.flush()
+        _clear_manual_personal_on_bank_evidence(db, inv, actor)
         allocated_by_invoice[inv.id] = allocated_by_invoice.get(inv.id, Decimal("0")) + portion
         allocated_by_txn[txn.id] = allocated_by_txn.get(txn.id, Decimal("0")) + portion
         existing_invoice_txn.add((inv.id, txn.id))
@@ -1592,6 +1611,7 @@ def link(
     link.confidence = Decimal("1")
     link.confirmed = True
     link.note = note or "付款发票匹配清单手工标记"
+    _clear_manual_personal_on_bank_evidence(db, invoice, actor)
 
     db.commit()
     audit(

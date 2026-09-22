@@ -104,6 +104,8 @@ def test_build_report_links_bank_invoice_purchase(db_session):
     assert report["invoiceRows"][0]["payments"][0]["voucherNo"] == txn.voucher_no
     assert report["invoiceRows"][0]["paymentSource"] == "corporate"
     assert report["invoiceRows"][0]["paymentSourceLabel"] == "对公支付"
+    assert report["invoiceRows"][0]["paymentMethod"] == "corporate"
+    assert report["invoiceRows"][0]["paymentMethodLabel"] == "对公账户支出"
     assert report["invoiceRows"][0]["expenseNatureLabel"] == "货款"
     assert po.external_order_id in report["invoiceRows"][0]["purchaseOrderNos"]
 
@@ -158,6 +160,9 @@ def test_report_keeps_received_invoice_even_when_bank_link_is_unconfirmed(db_ses
     assert report["invoiceRows"][0]["invoiceStatus"] == "unpaid"
     assert report["invoiceRows"][0]["paymentSource"] == "personal"
     assert report["invoiceRows"][0]["paymentSourceLabel"] == "个人支付（系统推定）"
+    assert report["invoiceRows"][0]["manualPaymentMethod"] == ""
+    assert report["invoiceRows"][0]["paymentMethod"] == "personal"
+    assert report["invoiceRows"][0]["paymentMethodLabel"] == "个人垫付"
     assert report["invoiceRows"][0]["payments"] == []
     assert Decimal(report["summary"]["invoiceTotal"]) == Decimal("300.00")
     assert Decimal(report["summary"]["outstandingTotal"]) == Decimal("300.00")
@@ -583,3 +588,55 @@ def test_corporate_report_uses_shanghai_invoice_month_boundaries(db_session):
     assert august.id in august_ids
     assert september.id not in august_ids
     assert september.id in september_ids
+
+
+def test_report_exposes_manual_and_derived_payment_method_for_mixed_invoice(db_session):
+    token = uuid4().hex[:10]
+    account = BankAccount(
+        account_no=f"ACCT-MIXED-{token}",
+        account_name=f"混合付款账户-{token}",
+        bank_name="测试银行",
+        currency="CNY",
+    )
+    db_session.add(account)
+    db_session.flush()
+    txn = BankTransaction(
+        account_id=account.id,
+        txn_date=date(2026, 8, 18),
+        direction="out",
+        amount=Decimal("400.00"),
+        counterparty_name=f"混合付款供应商-{token}",
+        fingerprint=f"pytest-mixed-report-{token}",
+        raw={},
+    )
+    invoice = TaxInvoice(
+        invoice_key=f"pytest-mixed-report-{token}",
+        invoice_number=f"INV-MIXED-{token}",
+        direction="input",
+        status="issued",
+        issue_date=datetime(2026, 8, 15, tzinfo=timezone.utc),
+        seller_name=f"混合付款供应商-{token}",
+        total_amount=Decimal("1000.00"),
+        payment_method="personal",
+        source_system="tax_export",
+        raw={},
+    )
+    db_session.add_all([txn, invoice])
+    db_session.flush()
+    db_session.add(TaxInvoiceLink(
+        invoice_id=invoice.id,
+        target_type="bank_transaction",
+        target_id=txn.id,
+        allocated_amount=Decimal("400.00"),
+        match_method="manual",
+        confirmed=True,
+    ))
+    db_session.commit()
+
+    report = service.build_report(db_session, 2026, 8)
+    row = next(item for item in report["invoiceRows"] if item["invoiceId"] == invoice.id)
+
+    assert row["bankReconciliationStatus"] == "partial"
+    assert row["manualPaymentMethod"] == "personal"
+    assert row["paymentMethod"] == "mixed"
+    assert row["paymentMethodLabel"] == "对公 + 个人垫付"

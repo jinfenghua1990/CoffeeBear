@@ -413,6 +413,17 @@ def build_report(
         order_nos = [str(x.get("orderNo") or "") for x in covered if x.get("orderNo")]
         line_items = list((line_summary_map.get(source_invoice.id) or {}).get("lineItems") or [])
         payment_source, payment_source_label, payment_source_basis = _payment_source(db, inv, status)
+        canonical_bank_status = {
+            "paid": "matched",
+            "unpaid": "unmatched",
+            "partial": "partial",
+            "overpaid_after_red": "overpaid_after_red",
+            "red_overpayment_settled": "red_overpayment_settled",
+            "not_applicable": "not_applicable",
+        }.get(status, "not_applicable")
+        payment_context = tax_invoice_service.payment_method_context(inv, canonical_bank_status)
+        payment_method = str(payment_context.get("paymentMethod") or "")
+        payment_method_label = tax_invoice_service.PAYMENT_METHOD_LABELS.get(payment_method, "未设置")
         expense_nature, expense_nature_label, expense_nature_basis = _expense_nature(
             source_invoice, covered, line_items
         )
@@ -486,7 +497,13 @@ def build_report(
                 "redPairMethod": red_meta.get("redPairMethod", ""),
                 **settlement_meta,
                 **vat_meta,
-                "paymentSource": payment_source,
+                "manualPaymentMethod": payment_context["manualPaymentMethod"],
+                "paymentMethod": payment_method,
+                "paymentMethodLabel": payment_method_label,
+                "manualPaymentMethod": payment_context["manualPaymentMethod"],
+            "paymentMethod": payment_method,
+            "paymentMethodLabel": payment_method_label,
+            "paymentSource": payment_source,
                 "paymentSourceLabel": payment_source_label,
                 "paymentSourceBasis": payment_source_basis,
                 "expenseNature": expense_nature,
