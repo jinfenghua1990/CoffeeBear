@@ -13,6 +13,8 @@ from app.models.foreign_trade import (
     ForeignTradeDealer,
     ForeignTradeInventoryReservation,
     ForeignTradeOrder,
+    ForeignTradeProduct,
+    ForeignTradeProductPlatform,
     ForeignTradeShipment,
     ForeignTradeSkuMapping,
 )
@@ -33,6 +35,48 @@ def order_profit(order: ForeignTradeOrder) -> Decimal:
         - _decimal(order.purchase_cost)
         - _decimal(order.logistics_cost)
     )
+
+
+
+
+def product_platform_dict(row: ForeignTradeProductPlatform) -> dict:
+    return {
+        "id": row.id,
+        "brand": row.brand,
+        "code": row.code,
+        "name": row.name,
+        "nameEn": row.name_en,
+        "description": row.description,
+        "displayOrder": row.display_order,
+        "enabled": bool(row.enabled),
+    }
+
+
+def foreign_product_dict(
+    row: ForeignTradeProduct,
+    platform: ForeignTradeProductPlatform | None = None,
+    sku: ProductSku | None = None,
+) -> dict:
+    return {
+        "id": row.id,
+        "brand": row.brand,
+        "platformCode": row.platform_code,
+        "platformName": platform.name if platform else row.platform_code,
+        "platformNameEn": platform.name_en if platform else "",
+        "modelCode": row.model_code,
+        "name": row.name,
+        "nameEn": row.name_en,
+        "skuId": row.sku_id,
+        "skuCode": sku.sku_code if sku else "",
+        "skuName": sku.sku_name if sku else "",
+        "externalSku": row.external_sku,
+        "status": row.status,
+        "countries": row.countries or [],
+        "currency": row.currency,
+        "note": row.note,
+        "createdAt": row.created_at.isoformat() if row.created_at else None,
+        "updatedAt": row.updated_at.isoformat() if row.updated_at else None,
+    }
 
 
 def order_dict(order: ForeignTradeOrder, dealer: ForeignTradeDealer | None = None) -> dict:
@@ -120,7 +164,7 @@ def list_orders(
     if channel_code:
         stmt = stmt.where(ForeignTradeOrder.channel_code == channel_code)
     if brand:
-        stmt = stmt.where(ForeignTradeOrder.brand == brand)
+        stmt = stmt.where(func.lower(ForeignTradeOrder.brand) == brand.strip().lower())
     if business_mode:
         stmt = stmt.where(ForeignTradeOrder.business_mode == business_mode)
     if q.strip():
@@ -138,6 +182,58 @@ def list_orders(
         for row in db.scalars(select(ForeignTradeDealer).where(ForeignTradeDealer.id.in_(dealer_ids))).all()
     } if dealer_ids else {}
     return [order_dict(row, dealers.get(row.dealer_id)) for row in orders]
+
+
+
+def list_product_platforms(db: Session, brand: str = "ALSVID") -> list[dict]:
+    normalized_brand = brand.strip().upper() or "ALSVID"
+    rows = db.scalars(
+        select(ForeignTradeProductPlatform)
+        .where(func.upper(ForeignTradeProductPlatform.brand) == normalized_brand)
+        .order_by(ForeignTradeProductPlatform.display_order, ForeignTradeProductPlatform.code)
+    ).all()
+    return [product_platform_dict(row) for row in rows]
+
+
+def list_foreign_products(
+    db: Session,
+    brand: str = "ALSVID",
+    platform_code: str = "",
+    q: str = "",
+) -> list[dict]:
+    normalized_brand = brand.strip().upper() or "ALSVID"
+    stmt = select(ForeignTradeProduct).where(
+        func.upper(ForeignTradeProduct.brand) == normalized_brand
+    )
+    if platform_code.strip():
+        stmt = stmt.where(ForeignTradeProduct.platform_code == platform_code.strip().upper())
+    if q.strip():
+        needle = f"%{q.strip()}%"
+        stmt = stmt.where(or_(
+            ForeignTradeProduct.model_code.ilike(needle),
+            ForeignTradeProduct.name.ilike(needle),
+            ForeignTradeProduct.name_en.ilike(needle),
+            ForeignTradeProduct.external_sku.ilike(needle),
+        ))
+    rows = db.scalars(
+        stmt.order_by(ForeignTradeProduct.platform_code, ForeignTradeProduct.model_code)
+    ).all()
+    platform_codes = {row.platform_code for row in rows}
+    platforms = {
+        row.code: row
+        for row in db.scalars(
+            select(ForeignTradeProductPlatform).where(
+                func.upper(ForeignTradeProductPlatform.brand) == normalized_brand,
+                ForeignTradeProductPlatform.code.in_(platform_codes),
+            )
+        ).all()
+    } if platform_codes else {}
+    sku_ids = {row.sku_id for row in rows if row.sku_id is not None}
+    skus = {
+        row.id: row
+        for row in db.scalars(select(ProductSku).where(ProductSku.id.in_(sku_ids))).all()
+    } if sku_ids else {}
+    return [foreign_product_dict(row, platforms.get(row.platform_code), skus.get(row.sku_id)) for row in rows]
 
 
 def overview(db: Session) -> dict:

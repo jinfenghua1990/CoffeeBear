@@ -133,7 +133,7 @@ export default function ForeignTradeWorkbenchPage() {
           />
           <ChannelCard
             eyebrow="BRAND"
-            title="Alsvid"
+            title="ALSVID"
             description="德国 / 奥地利自行车业务作为独立品牌线管理，同时复用中台商品、采购、物流与财务能力。"
             details={["Germany + Austria", "German + English / EUR", "B2C 消费者 + Dealers/B2B 经销商"]}
             status={<Status tone="ready">首期规划明确</Status>}

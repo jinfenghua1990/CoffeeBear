@@ -1,2 +1,5 @@
-import ForeignTradeWorkbench from "../workbench";
-export default function Page(){return <ForeignTradeWorkbench mode="alsvid" />;}
+import AlsvidProductsWorkbench from "../alsvid-products";
+
+export default function Page() {
+  return <AlsvidProductsWorkbench />;
+}

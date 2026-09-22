@@ -4,7 +4,7 @@ from __future__ import annotations
 from datetime import datetime
 from decimal import Decimal
 
-from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, Index, Numeric, String, Text, UniqueConstraint
+from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, Index, Integer, Numeric, String, Text, UniqueConstraint
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -44,6 +44,53 @@ class ForeignTradeSkuMapping(Base, PkMixin, TimestampMixin):
     product_name: Mapped[str] = mapped_column(String(512), default="")
     status: Mapped[str] = mapped_column(String(16), default="pending")
     note: Mapped[str] = mapped_column(Text, default="")
+
+
+class ForeignTradeProductPlatform(Base, PkMixin, TimestampMixin):
+    """外贸品牌技术平台主档，例如 ALSVID 的 FC1/FT1/CT1/GT1。"""
+
+    __tablename__ = "foreign_trade_product_platforms"
+    __table_args__ = (
+        UniqueConstraint("brand", "code", name="uq_foreign_trade_product_platform_brand_code"),
+        Index("ix_foreign_trade_product_platform_brand", "brand"),
+        Index("ix_foreign_trade_product_platform_order", "display_order"),
+    )
+
+    brand: Mapped[str] = mapped_column(String(128), nullable=False, default="ALSVID")
+    code: Mapped[str] = mapped_column(String(32), nullable=False)
+    name: Mapped[str] = mapped_column(String(128), nullable=False)
+    name_en: Mapped[str] = mapped_column(String(128), default="")
+    description: Mapped[str] = mapped_column(Text, default="")
+    display_order: Mapped[int] = mapped_column(Integer, default=0)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    raw: Mapped[dict] = mapped_column(JSONB, default=dict)
+
+
+class ForeignTradeProduct(Base, PkMixin, TimestampMixin):
+    """外贸产品主档；可先建产品，后续再绑定共用的中台 ProductSku。"""
+
+    __tablename__ = "foreign_trade_products"
+    __table_args__ = (
+        UniqueConstraint("brand", "model_code", name="uq_foreign_trade_products_brand_model"),
+        Index("ix_foreign_trade_products_brand_platform", "brand", "platform_code"),
+        Index("ix_foreign_trade_products_status", "status"),
+        Index("ix_foreign_trade_products_sku_id", "sku_id"),
+    )
+
+    brand: Mapped[str] = mapped_column(String(128), nullable=False, default="ALSVID")
+    platform_code: Mapped[str] = mapped_column(String(32), nullable=False)
+    model_code: Mapped[str] = mapped_column(String(64), nullable=False)
+    name: Mapped[str] = mapped_column(String(256), nullable=False)
+    name_en: Mapped[str] = mapped_column(String(256), default="")
+    sku_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("product_skus.id", ondelete="SET NULL"), nullable=True
+    )
+    external_sku: Mapped[str] = mapped_column(String(128), default="")
+    status: Mapped[str] = mapped_column(String(24), default="draft")
+    countries: Mapped[list] = mapped_column(JSONB, default=list)
+    currency: Mapped[str] = mapped_column(String(8), default="EUR")
+    note: Mapped[str] = mapped_column(Text, default="")
+    raw: Mapped[dict] = mapped_column(JSONB, default=dict)
 
 
 class ForeignTradeOrder(Base, PkMixin, TimestampMixin):

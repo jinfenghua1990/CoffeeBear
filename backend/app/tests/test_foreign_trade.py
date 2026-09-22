@@ -258,3 +258,56 @@ def test_b2b_order_requires_active_dealer_and_b2c_clears_binding(client, db_sess
     assert changed.json()["businessMode"] == "b2c"
     assert changed.json()["dealerId"] is None
     assert changed.json()["dealerName"] == ""
+
+
+def test_alsvid_platform_product_crud(client):
+    platforms = client.get("/api/v1/foreign-trade/products/platforms", params={"brand": "ALSVID"})
+    assert platforms.status_code == 200
+    platform_codes = {row["code"] for row in platforms.json()["items"]}
+    assert {"FC1", "FT1", "CT1", "GT1"} <= platform_codes
+
+    created = client.post(
+        "/api/v1/foreign-trade/products",
+        json={
+            "brand": "alsvid",
+            "platform_code": "fc1",
+            "model_code": "FC1-TEST",
+            "name": "折叠旗舰测试",
+            "name_en": "Folding Flagship Test",
+            "status": "draft",
+            "countries": ["de", "AT", "de"],
+            "currency": "eur",
+        },
+    )
+    assert created.status_code == 201
+    product = created.json()
+    assert product["brand"] == "ALSVID"
+    assert product["platformCode"] == "FC1"
+    assert product["platformName"] == "折叠旗舰"
+    assert product["countries"] == ["DE", "AT"]
+
+    listed = client.get(
+        "/api/v1/foreign-trade/products",
+        params={"brand": "ALSVID", "platform_code": "FC1", "q": "FC1-TEST"},
+    )
+    assert listed.status_code == 200
+    assert any(row["modelCode"] == "FC1-TEST" for row in listed.json()["items"])
+
+    updated = client.put(
+        f"/api/v1/foreign-trade/products/{product['id']}",
+        json={
+            "brand": "ALSVID",
+            "platform_code": "FC1",
+            "model_code": "FC1-TEST",
+            "name": "折叠旗舰测试版",
+            "name_en": "Folding Flagship Test",
+            "status": "active",
+            "countries": ["DE", "AT"],
+            "currency": "EUR",
+        },
+    )
+    assert updated.status_code == 200
+    assert updated.json()["status"] == "active"
+
+    deleted = client.delete(f"/api/v1/foreign-trade/products/{product['id']}")
+    assert deleted.status_code == 200

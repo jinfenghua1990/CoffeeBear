@@ -212,7 +212,7 @@ export default function ForeignTradeWorkbench({ mode }: { mode: ForeignTradeMode
     channels: "渠道管理",
     sku: "海外 SKU 映射",
     fulfillment: "履约中心",
-    alsvid: "Alsvid",
+    alsvid: "ALSVID",
   }[mode];
 
   const subtitle = {
@@ -220,7 +220,7 @@ export default function ForeignTradeWorkbench({ mode }: { mode: ForeignTradeMode
     channels: "管理 Shopify、B2B、代发和手工渠道；后续 API 接入也挂在渠道上。",
     sku: "把海外渠道 SKU 映射到中台 SKU，避免采购和成本核算认错货。",
     fulfillment: "处理待采购、待发货、物流单号与完成状态。",
-    alsvid: "Alsvid 德国 / 奥地利业务视图，订单仍使用同一外贸订单底座。",
+    alsvid: "ALSVID 德国 / 奥地利业务视图，订单仍使用同一外贸订单底座。",
   }[mode];
 
   const load = useCallback(async () => {
@@ -234,7 +234,7 @@ export default function ForeignTradeWorkbench({ mode }: { mode: ForeignTradeMode
         const data = await api<{ items: SkuMapping[] }>(`/api/v1/foreign-trade/sku-mappings?q=${encodeURIComponent(q)}`);
         setMappings(data.items);
       } else {
-        const brand = mode === "alsvid" ? "&brand=Alsvid" : "";
+        const brand = mode === "alsvid" ? "&brand=ALSVID" : "";
         const business = businessFilter === "all" ? "" : "&business_mode=" + businessFilter;
         const [orderData, dealerData] = await Promise.all([
           api<{ items: Order[] }>(`/api/v1/foreign-trade/orders?q=${encodeURIComponent(q)}${brand}${business}`),
@@ -311,7 +311,7 @@ export default function ForeignTradeWorkbench({ mode }: { mode: ForeignTradeMode
       setOrderDraft(orderToDraft(row));
     } else {
       setEditingOrder(null);
-      setOrderDraft({ ...EMPTY_ORDER, brand: mode === "alsvid" ? "Alsvid" : "" });
+      setOrderDraft({ ...EMPTY_ORDER, brand: mode === "alsvid" ? "ALSVID" : "" });
     }
     setOrderFormOpen(true);
   }

@@ -7,15 +7,18 @@ from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.db import get_db
+from app.models.catalog import ProductSku
 from app.models.foreign_trade import (
     ForeignTradeChannel,
     ForeignTradeDealer,
     ForeignTradeOrder,
+    ForeignTradeProduct,
+    ForeignTradeProductPlatform,
     ForeignTradeShipment,
     ForeignTradeSkuMapping,
 )
@@ -147,6 +150,126 @@ def delete_sku_mapping(mapping_id: int, db: Session = Depends(get_db)) -> dict:
     row = db.get(ForeignTradeSkuMapping, mapping_id)
     if not row:
         raise HTTPException(status_code=404, detail="SKU 映射不存在")
+    db.delete(row)
+    db.commit()
+    return {"ok": True}
+
+
+@router.get("/products/platforms")
+def product_platforms(
+    brand: str = Query("ALSVID", max_length=128),
+    db: Session = Depends(get_db),
+) -> dict:
+    return {"items": service.list_product_platforms(db, brand=brand)}
+
+
+class ProductBody(BaseModel):
+    brand: str = Field(default="ALSVID", min_length=1, max_length=128)
+    platform_code: str = Field(min_length=1, max_length=32)
+    model_code: str = Field(min_length=1, max_length=64)
+    name: str = Field(min_length=1, max_length=256)
+    name_en: str = Field(default="", max_length=256)
+    sku_id: int | None = None
+    external_sku: str = Field(default="", max_length=128)
+    status: Literal["draft", "planned", "active", "archived"] = "draft"
+    countries: list[str] = Field(default_factory=list)
+    currency: str = Field(default="EUR", max_length=8)
+    note: str = ""
+
+
+def _product_values(db: Session, body: ProductBody) -> dict:
+    brand = body.brand.strip().upper() or "ALSVID"
+    platform_code = body.platform_code.strip().upper()
+    model_code = body.model_code.strip().upper()
+    platform = db.scalar(select(ForeignTradeProductPlatform).where(
+        func.upper(ForeignTradeProductPlatform.brand) == brand,
+        ForeignTradeProductPlatform.code == platform_code,
+    ))
+    if platform is None:
+        raise HTTPException(status_code=404, detail="技术平台不存在，请先维护平台主档")
+    if body.sku_id is not None and db.get(ProductSku, body.sku_id) is None:
+        raise HTTPException(status_code=404, detail="绑定的中台 SKU 不存在")
+    countries = list(dict.fromkeys(
+        value.strip().upper() for value in body.countries if value.strip()
+    ))
+    return {
+        "brand": brand,
+        "platform_code": platform_code,
+        "model_code": model_code,
+        "name": body.name.strip(),
+        "name_en": body.name_en.strip(),
+        "sku_id": body.sku_id,
+        "external_sku": body.external_sku.strip(),
+        "status": body.status,
+        "countries": countries,
+        "currency": body.currency.strip().upper() or "EUR",
+        "note": body.note.strip(),
+    }
+
+
+@router.get("/products")
+def products(
+    brand: str = Query("ALSVID", max_length=128),
+    platform_code: str = Query("", max_length=32),
+    q: str = Query("", max_length=200),
+    db: Session = Depends(get_db),
+) -> dict:
+    return {
+        "items": service.list_foreign_products(
+            db, brand=brand, platform_code=platform_code, q=q
+        )
+    }
+
+
+@router.post("/products", status_code=201)
+def create_product(body: ProductBody, db: Session = Depends(get_db)) -> dict:
+    values = _product_values(db, body)
+    existing = db.scalar(select(ForeignTradeProduct).where(
+        ForeignTradeProduct.brand == values["brand"],
+        ForeignTradeProduct.model_code == values["model_code"],
+    ))
+    if existing is not None:
+        raise HTTPException(status_code=409, detail="该品牌的产品型号已存在")
+    row = ForeignTradeProduct(**values)
+    db.add(row)
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="该品牌的产品型号已存在") from exc
+    db.refresh(row)
+    return service.list_foreign_products(db, brand=row.brand, q=row.model_code)[0]
+
+
+@router.put("/products/{product_id}")
+def update_product(product_id: int, body: ProductBody, db: Session = Depends(get_db)) -> dict:
+    row = db.get(ForeignTradeProduct, product_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="外贸产品不存在")
+    values = _product_values(db, body)
+    existing = db.scalar(select(ForeignTradeProduct).where(
+        ForeignTradeProduct.brand == values["brand"],
+        ForeignTradeProduct.model_code == values["model_code"],
+        ForeignTradeProduct.id != row.id,
+    ))
+    if existing is not None:
+        raise HTTPException(status_code=409, detail="该品牌的产品型号已存在")
+    for key, value in values.items():
+        setattr(row, key, value)
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="该品牌的产品型号已存在") from exc
+    db.refresh(row)
+    return service.list_foreign_products(db, brand=row.brand, q=row.model_code)[0]
+
+
+@router.delete("/products/{product_id}")
+def delete_product(product_id: int, db: Session = Depends(get_db)) -> dict:
+    row = db.get(ForeignTradeProduct, product_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="外贸产品不存在")
     db.delete(row)
     db.commit()
     return {"ok": True}
