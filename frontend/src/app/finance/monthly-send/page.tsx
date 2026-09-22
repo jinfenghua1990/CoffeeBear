@@ -569,7 +569,7 @@ export default function MonthlySendPage() {
     authenticatedFetch(`/api/v1/finance/${sel.year}/${sel.month}/files?company=${encodeURIComponent(companyName)}`, { cache: "no-store" })
       .then((r) => r.json())
       .then((rows) => { if (seq === filesRequestSeq.current) setFiles(rows); })
-      .catch(() => {});
+      .catch(() => { if (seq === filesRequestSeq.current) setMsg("报告档案加载失败，请刷新重试"); });
   }, [companyName, sel]);
 
   const loadBusiness = useCallback(() => {
@@ -597,7 +597,7 @@ export default function MonthlySendPage() {
     authenticatedFetch(`/api/v1/finance/unbilled/preview?year=${sel.year}&month=${sel.month}&company=${encodeURIComponent(companyName)}`, { cache: "no-store" })
       .then((r) => (r.ok ? r.json() : null))
       .then((data) => { if (seq === unbilledRequestSeq.current) setUnbilled(data); })
-      .catch(() => {});
+      .catch(() => { if (seq === unbilledRequestSeq.current) setMsg("未结算调整预览加载失败，请刷新重试"); });
   }, [companyName, domesticSupportedByEntity, sel]);
 
   const loadCorporatePayment = useCallback(() => {

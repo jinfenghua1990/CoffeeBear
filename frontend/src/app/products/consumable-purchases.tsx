@@ -12,7 +12,8 @@ const money = (value: string | number) => `¥${Number(value).toLocaleString("zh-
 const qty = (value: string | number) => Number(value).toLocaleString("zh-CN", { maximumFractionDigits: 4 });
 const inputClass = "h-10 w-full min-w-0 rounded-lg border border-slate-200 bg-white px-3 text-sm outline-none focus:border-indigo-400 focus:ring-2 focus:ring-indigo-50";
 const today = () => { const now = new Date(); return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`; };
-const blankLine = () => ({ consumable_id: "", quantity: "", unit_cost: "" });
+let lineSeq = 0;
+const blankLine = () => { lineSeq += 1; return { _key: `line-${lineSeq}`, consumable_id: "", quantity: "", unit_cost: "" }; };
 
 async function fetchWarehouses(): Promise<WarehouseOption[]> {
   const res = await authenticatedFetch("/api/v1/warehouses?include_inactive=false", { cache: "no-store" });
@@ -101,7 +102,7 @@ export default function ConsumablePurchases({ materials, reload, initialPurchase
     event.preventDefault(); if (busy) return; setBusy(true); setError("");
     try {
       const result = await consumablesApi.createPurchase({ ...draft, source_order_id: draft.source_order_id ? Number(draft.source_order_id) : null,
-        items: lines.map((line) => ({ ...line, consumable_id: Number(line.consumable_id) })) });
+        items: lines.map((line) => ({ consumable_id: Number(line.consumable_id), quantity: line.quantity, unit_cost: line.unit_cost })) });
       setCreating(false); setDetail(result); setReceiving(false);
       setNotice("采购单已建立，确认实收数量后才增加库存。"); await load();
     } catch (e) { setError(String(e)); }
@@ -200,7 +201,7 @@ export default function ConsumablePurchases({ materials, reload, initialPurchase
           <label className="text-xs text-slate-600">备注<input value={draft.note} onChange={(e) => setDraft({ ...draft, note: e.target.value })} className={`mt-1 ${inputClass}`} /></label>
         </div>
         <div className="mt-6 flex justify-between"><h4 className="text-sm font-semibold">采购明细</h4><button type="button" onClick={() => setLines([...lines, blankLine()])} className="text-sm text-indigo-600">+ 添加耗材</button></div>
-        <div className="mt-3 space-y-3">{lines.map((line, index) => <div key={index} className="grid grid-cols-[minmax(0,1fr)_110px_120px_32px] items-end gap-2">
+        <div className="mt-3 space-y-3">{lines.map((line, index) => <div key={line._key} className="grid grid-cols-[minmax(0,1fr)_110px_120px_32px] items-end gap-2">
           <label className="text-xs text-slate-500">耗材<select required aria-label={`第${index + 1}行耗材`} value={line.consumable_id} onChange={(e) => { const material = materials.find((row) => row.id === Number(e.target.value)); setLines(lines.map((item, i) => i === index ? { ...item, consumable_id: e.target.value, unit_cost: material?.purchaseUnitCost ?? "" } : item)); }} className={`mt-1 ${inputClass}`}><option value="">选择耗材</option>{materials.filter((row) => row.status === "active").map((row) => <option key={row.id} value={row.id}>{row.code} · {row.name}（{row.unit}）</option>)}</select></label>
           <label className="text-xs text-slate-500">采购数量<input required type="number" min="0.0001" step="0.0001" value={line.quantity} onChange={(e) => setLines(lines.map((item, i) => i === index ? { ...item, quantity: e.target.value } : item))} className={`mt-1 ${inputClass}`} /></label>
           <label className="text-xs text-slate-500">采购单价<input required type="number" min="0" step="0.0001" value={line.unit_cost} onChange={(e) => setLines(lines.map((item, i) => i === index ? { ...item, unit_cost: e.target.value } : item))} className={`mt-1 ${inputClass}`} /></label>

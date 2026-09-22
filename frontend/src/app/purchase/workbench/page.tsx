@@ -2760,9 +2760,9 @@ function OrderConsumableSection({ order, materials }: { order: WorkbenchOrderRow
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
-  const [form, setForm] = useState<{ orderedOn: string; lines: Array<{ consumable_id: string; quantity: string; unit_cost: string; total_amount: string }> }>({
+  const [form, setForm] = useState<{ orderedOn: string; lines: Array<{ _key: string; consumable_id: string; quantity: string; unit_cost: string; total_amount: string }> }>({
     orderedOn: inputDate(new Date()),
-    lines: [{ consumable_id: "", quantity: "", unit_cost: "", total_amount: "" }],
+    lines: [{ _key: newRequestKey(), consumable_id: "", quantity: "", unit_cost: "", total_amount: "" }],
   });
   const [receivingId, setReceivingId] = useState<number | null>(null);
   const [receiveDate, setReceiveDate] = useState(inputDate(new Date()));
@@ -2820,7 +2820,7 @@ function OrderConsumableSection({ order, materials }: { order: WorkbenchOrderRow
   const orderTotal = Number(order.paidAmount ?? order.amount ?? 0);
   const formTotalQty = form.lines.reduce((sum, line) => sum + Number(line.quantity || 0), 0);
   const autoUnit = formTotalQty > 0 && orderTotal > 0 ? Number((orderTotal / formTotalQty).toFixed(10)) : 0;
-  function applyAutoUnitCost(lines: Array<{ consumable_id: string; quantity: string; unit_cost: string; total_amount: string }>) {
+  function applyAutoUnitCost(lines: Array<{ _key: string; consumable_id: string; quantity: string; unit_cost: string; total_amount: string }>) {
     const totalQty = lines.reduce((sum, line) => sum + Number(line.quantity || 0), 0);
     if (!autoUnitCost || totalQty <= 0 || orderTotal <= 0) return lines;
     const unit = String(Number((orderTotal / totalQty).toFixed(10)));
@@ -3234,7 +3234,7 @@ function OrderConsumableSection({ order, materials }: { order: WorkbenchOrderRow
               </div>
               <div className="mt-2 space-y-2">
                 {form.lines.map((line, index) => (
-                  <div key={index} className="grid grid-cols-[minmax(0,1fr)_84px_92px_84px_24px] items-center gap-2">
+                  <div key={line._key} className="grid grid-cols-[minmax(0,1fr)_84px_92px_84px_24px] items-center gap-2">
                     <SearchableSelect
                       ariaLabel={`第${index + 1}行耗材`}
                       placeholder="选择耗材"
@@ -3261,7 +3261,7 @@ function OrderConsumableSection({ order, materials }: { order: WorkbenchOrderRow
                 ))}
               </div>
               <div className="mt-2 flex items-center justify-between">
-                <button type="button" onClick={() => setForm({ ...form, lines: applyAutoUnitCost([...form.lines, { consumable_id: "", quantity: "", unit_cost: "", total_amount: "" }]) })} className="text-[11px] font-medium text-indigo-600">+ 添加耗材</button>
+                <button type="button" onClick={() => setForm({ ...form, lines: applyAutoUnitCost([...form.lines, { _key: newRequestKey(), consumable_id: "", quantity: "", unit_cost: "", total_amount: "" }]) })} className="text-[11px] font-medium text-indigo-600">+ 添加耗材</button>
                 <div className="flex items-center gap-2">
                   <span className="text-[11px] text-slate-500">合计 <strong className="text-slate-700">¥{form.lines.reduce((sum, line) => sum + Number(line.quantity || 0) * Number(line.unit_cost || 0), 0).toLocaleString("zh-CN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</strong></span>
                   <button disabled={busy} className="rounded-md bg-indigo-600 px-3 py-1 text-[11px] font-medium text-white disabled:opacity-50">{busy ? "保存中…" : "建立采购单"}</button>

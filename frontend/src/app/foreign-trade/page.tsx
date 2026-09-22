@@ -77,11 +77,12 @@ function SharedLink({ href, title, description }: { href: string; title: string;
 
 export default function ForeignTradeWorkbenchPage() {
   const [summary, setSummary] = useState({ orders: 0, pendingProcurement: 0, pendingFulfillment: 0, channels: 0, skuMappings: 0, pendingSkuMappings: 0, salesAmount: "0", profitCny: "0" });
+  const [overviewFailed, setOverviewFailed] = useState(false);
   useEffect(() => {
     authenticatedFetch("/api/v1/foreign-trade/overview", { cache: "no-store" })
       .then((res) => res.ok ? res.json() : null)
-      .then((data) => data && setSummary(data))
-      .catch(() => {});
+      .then((data) => { setOverviewFailed(false); if (data) setSummary(data); })
+      .catch(() => setOverviewFailed(true));
   }, []);
   const metrics = [
     { label: "外贸订单", value: String(summary.orders), hint: "全部渠道订单" },
@@ -94,6 +95,7 @@ export default function ForeignTradeWorkbenchPage() {
   return (
     <div className="min-h-full bg-slate-50/70 px-5 py-5">
       <div className="mx-auto max-w-[1500px]">
+        {overviewFailed && <div role="alert" className="mb-4 rounded-lg border border-amber-200 bg-amber-50 px-4 py-2 text-xs text-amber-800">外贸概览加载失败，以下指标为默认值；请刷新重试。</div>}
         <section className="flex flex-wrap items-start justify-between gap-4">
           <div>
             <div className="text-[11px] font-medium uppercase tracking-[0.14em] text-blue-500">FOREIGN TRADE WORKBENCH</div>
