@@ -1,7 +1,7 @@
 from decimal import Decimal
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -15,8 +15,8 @@ router = APIRouter(prefix="/finance/vouchers", tags=["finance-vouchers"])
 
 class GenerateRequest(BaseModel):
     legal_entity_id: int
-    year: int
-    month: int
+    year: int = Field(ge=1900, le=2999)
+    month: int = Field(ge=1, le=12)
 
 
 def _serialize_voucher(v: FinanceVoucher, db: Session) -> dict:
@@ -31,6 +31,7 @@ def _serialize_voucher(v: FinanceVoucher, db: Session) -> dict:
         "year": v.accounting_year,
         "month": v.accounting_month,
         "voucherDate": v.voucher_date.isoformat() if v.voucher_date else None,
+        "currency": v.currency,
         "source": v.source,
         "status": v.status,
         "note": v.note,
@@ -57,11 +58,17 @@ def _serialize_voucher(v: FinanceVoucher, db: Session) -> dict:
 def generate(req: GenerateRequest, db: Session = Depends(get_db),
              actor: str = Depends(current_actor)) -> dict:
     try:
-        return finance_voucher_service.generate_vouchers_for_period(
+        result = finance_voucher_service.generate_vouchers_for_period(
             db, legal_entity_id=req.legal_entity_id, year=req.year, month=req.month, actor=actor
         )
+        db.commit()
+        return result
     except ValueError as e:
+        db.rollback()
         raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail="自动凭证保存失败") from e
 
 
 @router.get("")

@@ -1055,6 +1055,75 @@ export const taxAccountingApi = {
   categoryRules: () => jsonFetch<{ items: TaxCategoryRule[] }>("/api/v1/tax-accounting/category-rules?include_disabled=true"),
 };
 
+export type FinanceLegalEntity = {
+  id: number;
+  code: string;
+  name: string;
+  countryCode: string;
+  baseCurrency: string;
+  taxId: string;
+  status: string;
+  isDefault: boolean;
+  businessScopes: string[];
+  note: string;
+};
+
+export type FinanceVoucherLine = {
+  seq: number;
+  accountCode: string;
+  accountName: string;
+  direction: "debit" | "credit" | string;
+  amount: number;
+  taxAmount: number;
+  summary: string;
+  entryId: number | null;
+};
+
+export type FinanceVoucher = {
+  id: number;
+  voucherNo: string;
+  year: number;
+  month: number;
+  voucherDate: string | null;
+  currency: string;
+  source: string;
+  status: "draft" | "posted" | string;
+  note: string;
+  debitTotal: number;
+  creditTotal: number;
+  balanced: boolean;
+  lines: FinanceVoucherLine[];
+};
+
+export const financeEntityApi = {
+  list: () => jsonFetch<{ items: FinanceLegalEntity[] }>("/api/v1/finance/entities"),
+};
+
+export const financeVoucherApi = {
+  list: (params: { legalEntityId: number; year: number; month: number }) => {
+    const query = new URLSearchParams({
+      legal_entity_id: String(params.legalEntityId),
+      year: String(params.year),
+      month: String(params.month),
+    });
+    return jsonFetch<FinanceVoucher[]>(`/api/v1/finance/vouchers?${query.toString()}`);
+  },
+  generate: (params: { legalEntityId: number; year: number; month: number }) =>
+    jsonFetch<{ legalEntityId: number; year: number; month: number; generated: number; skipped: number; source: string }>(
+      "/api/v1/finance/vouchers",
+      {
+        method: "POST",
+        body: JSON.stringify({
+          legal_entity_id: params.legalEntityId,
+          year: params.year,
+          month: params.month,
+        }),
+      },
+    ),
+  post: (voucherId: number) =>
+    jsonFetch<{ id: number; status: string }>(`/api/v1/finance/vouchers/${voucherId}/post`, { method: "POST" }),
+};
+
 export const consumablesApi = {
   list: (search = "") => jsonFetch<ConsumableRow[]>(`/api/v1/consumables?search=${encodeURIComponent(search)}`),
   save: (body: Record<string, unknown>) => jsonFetch<ConsumableRow>("/api/v1/consumables", { method: "POST", body: JSON.stringify(body) }),

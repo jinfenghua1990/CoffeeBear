@@ -29,6 +29,7 @@ class FinanceVoucher(Base, PkMixin, TimestampMixin):
     accounting_year: Mapped[int] = mapped_column(Integer, nullable=False)
     accounting_month: Mapped[int] = mapped_column(Integer, nullable=False)
     voucher_date: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    currency: Mapped[str] = mapped_column(String(8), server_default="CNY", nullable=False)
     source: Mapped[str] = mapped_column(String(16), server_default="auto", nullable=False)
     status: Mapped[str] = mapped_column(String(16), server_default="draft", nullable=False)
     note: Mapped[str] = mapped_column(Text, server_default="", nullable=False)

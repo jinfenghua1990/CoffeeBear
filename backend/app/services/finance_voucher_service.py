@@ -3,9 +3,11 @@
 入口：generate_vouchers_for_period(db, legal_entity_id, year, month)
 
 - 取该账期 finance_entries（已入账业务事项）
+- 只把 actual 事项转成正式凭证，estimated 事项只用于预测
 - 按 (category, direction) 匹配借贷模板，生成 FinanceVoucher + 多行 FinanceVoucherLine
+- 每张凭证保留来源事项币种，避免把 EUR 等外币金额直接混入 CNY
 - 每张凭证做借贷平衡断言（差额 > 0.01 报错并整段回滚），这是自动做账的正确性底线
-- 幂等：重新生成时先清掉本账期 source=auto 的草稿凭证（已过账的保护不动）
+- 幂等：重新生成时先清掉本账期 source=auto 的草稿凭证，已过账事项不重复入账
 """
 from __future__ import annotations
 
@@ -15,7 +17,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.models.finance import FinanceEntry
+from app.models.finance import FinanceEntry, FinanceLegalEntity
 from app.models.finance_voucher import FinanceVoucher, FinanceVoucherLine
 
 ZERO = Decimal("0")
@@ -110,6 +112,39 @@ def _assert_balanced(lines: list[FinanceVoucherLine], voucher_no: str) -> None:
 def generate_vouchers_for_period(
     db: Session, *, legal_entity_id: int, year: int, month: int, actor: str = "system"
 ) -> dict[str, Any]:
+    entity = db.get(FinanceLegalEntity, legal_entity_id)
+    if entity is None or entity.status == "archived":
+        raise ValueError("公司主体不存在")
+
+    posted_entry_ids = {
+        entry_id
+        for entry_id in db.scalars(
+            select(FinanceVoucherLine.entry_id)
+            .join(FinanceVoucher, FinanceVoucher.id == FinanceVoucherLine.voucher_id)
+            .where(
+                FinanceVoucher.legal_entity_id == legal_entity_id,
+                FinanceVoucher.accounting_year == year,
+                FinanceVoucher.accounting_month == month,
+                FinanceVoucher.status == "posted",
+                FinanceVoucherLine.entry_id.is_not(None),
+            )
+        ).all()
+        if entry_id is not None
+    }
+
+    existing_numbers = db.scalars(
+        select(FinanceVoucher.voucher_no).where(
+            FinanceVoucher.legal_entity_id == legal_entity_id,
+            FinanceVoucher.accounting_year == year,
+            FinanceVoucher.accounting_month == month,
+        )
+    ).all()
+    prefix = "记-" + str(year) + str(month).zfill(2) + "-"
+    next_sequence = max(
+        [int(number[len(prefix):]) for number in existing_numbers
+         if number.startswith(prefix) and number[len(prefix):].isdigit()] or [0]
+    )
+
     existing = db.scalars(
         select(FinanceVoucher).where(
             FinanceVoucher.legal_entity_id == legal_entity_id,
@@ -137,6 +172,14 @@ def generate_vouchers_for_period(
     skipped = 0
     errors: list[str] = []
     for entry in entries:
+        # 预计事项只参与经营预测，不应进入正式记账凭证。
+        if (entry.value_type or "actual") != "actual":
+            skipped += 1
+            continue
+        # 已过账事项属于不可重复记账的历史事实，重新生成时保留原凭证。
+        if entry.id in posted_entry_ids:
+            skipped += 1
+            continue
         amount = _norm(entry.amount)
         if amount == 0:
             skipped += 1
@@ -146,13 +189,16 @@ def generate_vouchers_for_period(
             skipped += 1
             continue
         seq_counter["n"] += 1
-        voucher_no = "记-" + str(year) + str(month).zfill(2) + "-" + str(seq_counter["n"]).zfill(4)
+        sequence = next_sequence + seq_counter["n"]
+        voucher_no = prefix + str(sequence).zfill(4)
+        currency = (entry.currency or "CNY").strip().upper() or "CNY"
         voucher = FinanceVoucher(
             legal_entity_id=legal_entity_id,
             voucher_no=voucher_no,
             accounting_year=year,
             accounting_month=month,
             voucher_date=entry.occurred_at,
+            currency=currency,
             source="auto",
             status="draft",
             note="auto from entry #" + str(entry.id) + " (" + entry.category + "/" + entry.direction + ")",

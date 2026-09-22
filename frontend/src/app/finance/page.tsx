@@ -634,6 +634,7 @@ export default function FinanceCenterPage() {
             <div className="mt-2 grid gap-1.5">
               <QuickLink href="/finance/bank-transactions" title="收支 / 银行流水" desc="实际资金进出与匹配" />
               <QuickLink href="/finance/invoices" title="发票管理" desc="进销项票据与匹配" />
+              <QuickLink href="/finance/vouchers" title="自动记账凭证" desc="按实际财务事项生成借贷凭证" />
               <QuickLink href="/finance/tax-accounting" title="发票税务" desc="国内税务归集与分类" />
               <QuickLink href="/finance/monthly-send" title="月结中心" desc="整理、打包并发送财务资料" />
             </div>

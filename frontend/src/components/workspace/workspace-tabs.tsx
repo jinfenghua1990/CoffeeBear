@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useWorkspace, type WorkspaceTab } from "@/lib/workspace/tab-store";
 import { syncWorkspaceUrl } from "@/lib/workspace/url-sync";
 
@@ -202,6 +202,7 @@ export default function WorkspaceTabBar() {
           tab={menuTab}
           x={menu.x}
           y={menu.y}
+          canCloseOthers={ordered.some((tab) => tab.id !== menuTab.id && tab.closable && !tab.pinned)}
           canCloseRight={ordered.indexOf(menuTab) < ordered.length - 1}
           onClose={() => requestClose(menuTab)}
           onCloseOthers={() => closeOthers(menuTab.id)}
@@ -267,6 +268,7 @@ function TabContextMenu({
   tab,
   x,
   y,
+  canCloseOthers,
   canCloseRight,
   onClose,
   onCloseOthers,
@@ -277,6 +279,7 @@ function TabContextMenu({
   tab: WorkspaceTab;
   x: number;
   y: number;
+  canCloseOthers: boolean;
   canCloseRight: boolean;
   onClose: () => void;
   onCloseOthers: () => void;
@@ -285,32 +288,50 @@ function TabContextMenu({
   onDuplicate: () => void;
 }) {
   const href = hrefOf(tab);
-  const items: { label: string; onSelect: () => void; disabled?: boolean }[] = [
+  const menuRef = useRef<HTMLDivElement>(null);
+  const [position, setPosition] = useState({ left: x, top: y });
+  const items: { label: string; onSelect: () => void; disabled?: boolean; separatorBefore?: boolean }[] = [
     { label: "关闭当前", onSelect: onClose, disabled: !tab.closable || tab.pinned },
-    { label: "关闭其他", onSelect: onCloseOthers },
+    { label: "关闭其他", onSelect: onCloseOthers, disabled: !canCloseOthers },
     { label: "关闭右侧", onSelect: onCloseRight, disabled: !canCloseRight },
-    { label: tab.pinned ? "取消固定" : "固定标签", onSelect: onTogglePin, disabled: !tab.closable },
+    { label: tab.pinned ? "取消固定" : "固定标签", onSelect: onTogglePin, disabled: !tab.closable, separatorBefore: true },
     { label: "复制标签页", onSelect: onDuplicate },
     { label: "在新窗口打开", onSelect: () => window.open(href, "_blank", "noopener") },
   ];
+  const visibleItems = items.filter((item) => !item.disabled);
+
+  useLayoutEffect(() => {
+    const node = menuRef.current;
+    if (!node) return;
+    const gutter = 8;
+    const rect = node.getBoundingClientRect();
+    setPosition({
+      left: Math.max(gutter, Math.min(x, window.innerWidth - rect.width - gutter)),
+      top: Math.max(gutter, Math.min(y, window.innerHeight - rect.height - gutter)),
+    });
+  }, [x, y]);
 
   return (
     <div
-      className="fixed z-dropdown w-[168px] rounded-xl border border-slate-200 bg-white p-1.5 shadow-lg"
-      style={{ left: Math.min(x, window.innerWidth - 180), top: Math.min(y, window.innerHeight - 220) }}
+      ref={menuRef}
+      role="menu"
+      aria-label={`${tab.title ?? tab.baseTitle} 标签页操作`}
+      className="fixed z-dropdown max-h-[calc(100vh-16px)] w-[180px] overflow-y-auto rounded-xl border border-slate-200 bg-white p-1.5 shadow-lg"
+      style={{ left: position.left, top: position.top }}
     >
-      {items.map((item, index) => (
-        <div key={item.label}>
-          {index === 3 && <div className="my-1 border-t border-slate-100" aria-hidden="true" />}
+      {visibleItems.map((item, index) => (
+        <Fragment key={item.label}>
+          {item.separatorBefore && index > 0 && <div className="my-1 border-t border-slate-100" aria-hidden="true" />}
           <button
             type="button"
             disabled={item.disabled}
             onClick={item.onSelect}
-            className="block w-full rounded-lg px-2.5 py-1.5 text-left text-[12px] text-slate-600 transition hover:bg-slate-50 disabled:cursor-default disabled:text-slate-300 disabled:hover:bg-transparent"
+            role="menuitem"
+            className="block w-full rounded-lg px-2.5 py-1.5 text-left text-[12px] text-slate-600 transition hover:bg-slate-50"
           >
             {item.label}
           </button>
-        </div>
+        </Fragment>
       ))}
     </div>
   );

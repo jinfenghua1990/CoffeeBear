@@ -145,6 +145,7 @@ export const MODULES: ModuleDef[] = [
       || p.startsWith("/logistics/bills"),
     items: [
       { href: "/finance", label: "财务工作台", icon: "finance" },
+      { href: "/finance/vouchers", label: "自动凭证", icon: "finance" },
       { href: "/finance/monthly-send", label: "月结中心", icon: "mail" },
       { href: "/finance/bank-transactions?view=summary", label: "银行账务", icon: "wallet", activeByPath: true },
       { href: "/finance/invoices", label: "发票管理", icon: "tax" },
