@@ -1344,6 +1344,7 @@ export type JackyunFileImportRow = {
 
 export type SupplierRecord = {
   id: number;
+  partnerId: number | null;
   name: string;
   platform: string;
   externalShopId: string;
@@ -2894,6 +2895,7 @@ export type WorkbenchOrder = {
   /** 人工覆盖的类型（goods/consumable/空=自动判定） */
   orderKindOverride?: string;
   supplier: string | null;
+  supplierPartnerId?: number | null;
   buyer: string | null;
   amount: number | null;
   goodsTotal: number | null;
@@ -2967,6 +2969,7 @@ export type WorkbenchDetail = {
 };
 
 export type WorkbenchSupplierSummary = {
+  partnerId: number | null;
   supplierName: string;
   orderCount: number;
   totalPurchase: number;
@@ -3102,6 +3105,10 @@ export const procurementWorkbenchApi = {
   supplierDetail: (supplierName: string) =>
     jsonFetch<WorkbenchSupplierDetail>(
       `/api/v1/procurement-workbench/suppliers/${encodeURIComponent(supplierName)}`
+    ),
+  supplierDetailByPartner: (partnerId: number) =>
+    jsonFetch<WorkbenchSupplierDetail>(
+      `/api/v1/procurement-workbench/suppliers/by-partner/${partnerId}`
     ),
   /** 供应商改名/归一：该供应商全部订单统一改为新名称，同名自动合并（双副本同步+审计） */
   renameSupplier: (oldName: string, newName: string) =>
