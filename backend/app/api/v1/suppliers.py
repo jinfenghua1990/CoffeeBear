@@ -273,43 +273,29 @@ def update_supplier(
     if not row:
         raise HTTPException(404, "供应商不存在")
 
-    row.name = payload.name.strip()
+    partner = db.get(BusinessPartner, row.partner_id) if row.partner_id else None
+
+    # V2: Supplier 只维护采购渠道画像，不再反向覆盖统一往来主体。
+    # 名称/税号/联系人/电话/地址/银行账户只能在 BusinessPartner 主档维护。
     row.platform = payload.platform.strip()
     row.external_shop_id = payload.external_shop_id.strip()
-    row.contact = payload.contact.strip()
-    row.tax_no = business_partner_service.normalize_tax_no(payload.tax_no)
-    row.phone = payload.phone.strip()
-    row.address = payload.address.strip()
     row.notes = payload.notes.strip()
     row.is_temp = payload.is_temp
 
-    partner = db.get(BusinessPartner, row.partner_id) if row.partner_id else None
     if partner is not None and partner.status == "active":
-        detail = business_partner_service.partner_detail(db, partner.id) or {}
-        roles = sorted(set([*(partner.roles or []), "supplier"]))
-        business_partner_service.update_partner(
-            db,
-            partner.id,
-            {
-                "name": payload.name.strip(),
-                "roles": roles,
-                "tax_no": row.tax_no,
-                "contact": payload.contact.strip(),
-                "phone": payload.phone.strip(),
-                "address": payload.address.strip(),
-                "notes": payload.notes.strip(),
-                "bank_accounts": [
-                    {
-                        "bank_name": account.get("bankName", ""),
-                        "account_no": account.get("accountNo", ""),
-                        "account_name": account.get("accountName", ""),
-                        "is_primary": bool(account.get("isPrimary")),
-                    }
-                    for account in detail.get("bankAccounts", [])
-                ],
-                "former_names": detail.get("formerNames", []),
-            },
-        )
+        # 兼容旧报表：legacy Supplier 字段只镜像 canonical 主档，不再成为写入源。
+        row.contact = partner.contact or ""
+        row.tax_no = partner.tax_no or ""
+        row.phone = partner.phone or ""
+        row.address = partner.address or ""
+    else:
+        # 仅对尚未完成 canonical 迁移的旧资料保留兼容编辑能力；
+        # 本次同步完成后会自动生成/绑定 BusinessPartner。
+        row.name = payload.name.strip()
+        row.contact = payload.contact.strip()
+        row.tax_no = business_partner_service.normalize_tax_no(payload.tax_no)
+        row.phone = payload.phone.strip()
+        row.address = payload.address.strip()
 
     business_partner_service.sync_business_partners(db)
     db.commit()
@@ -321,7 +307,13 @@ def update_supplier(
         "supplier.profile_updated",
         "supplier",
         str(row.id),
-        {"name": row.name, "partnerId": row.partner_id},
+        {
+            "name": row.name,
+            "partnerId": row.partner_id,
+            "platform": row.platform,
+            "externalShopId": row.external_shop_id,
+            "scope": "procurement_profile_only",
+        },
     )
     return _serialize(row, partner=partner)
 
