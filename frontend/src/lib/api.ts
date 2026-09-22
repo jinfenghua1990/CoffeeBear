@@ -38,6 +38,26 @@ export async function authenticatedFetch(
   return res;
 }
 
+/**
+ * 下载受保护的二进制文件。
+ *
+ * 归档文件接口属于鉴权 API，不能用普通 <a href> 直接打开，否则浏览器
+ * 不会携带 Bearer 令牌，页面看起来像“写入成功但下载失败/401”。
+ */
+export async function downloadAuthenticatedFile(url: string, filename = "下载文件"): Promise<void> {
+  const res = await authenticatedFetch(url, { cache: "no-store" });
+  if (!res.ok) throw new Error(await readErrorDetail(res, "下载失败"));
+  const blob = await res.blob();
+  const objectUrl = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = objectUrl;
+  link.download = filename || "下载文件";
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  window.setTimeout(() => URL.revokeObjectURL(objectUrl), 0);
+}
+
 /** FastAPI 的 detail 可能是字符串（HTTPException）或 422 校验错误数组；统一转成可读文案。 */
 function detailToMessage(detail: unknown, fallback: string): string {
   if (typeof detail === "string" && detail.trim()) return detail;
@@ -1553,8 +1573,14 @@ export type BusinessPartnerDetail = BusinessPartnerListItem & {
   }>;
   invoices: Array<{
     id: number; no: string; date: string | null; direction: string; status: string;
-    sellerName: string; buyerName: string; amount: number; bankPaidAmount: number;
+    sellerName: string; buyerName: string; amount: number; effectiveAmount?: number; bankPaidAmount: number;
     bankRemainingAmount: number; matchStatus: string; category: string; verified: boolean;
+    invoiceColor?: "blue" | "red" | "unknown" | string;
+    invoiceStatusLabel?: string;
+    redStatus?: string;
+    redOffsetAmount?: number;
+    redRelatedInvoiceNo?: string;
+    accountingException?: string;
   }>;
   payments: Array<{
     id: number; date: string | null; transactionTime: string | null; direction: string; amount: number;

@@ -1302,10 +1302,17 @@ def _invoice_rows(db: Session, links: list[BusinessPartnerLink]) -> list[dict[st
     invoice_ids = {row.source_id for row in links if row.source_type == "tax_invoice"}
     invoices = _source_rows(db, "tax_invoice", invoice_ids)
     paid = _invoice_payment_amounts(db, invoice_ids)
+    # 与发票管理页共用同一套跨账期红蓝票派生逻辑，避免往来单位页把已红冲
+    # 的蓝票继续当成正常有效金额，或把红字票只显示成一条普通负数发票。
+    from app.services.tax_invoice_service import red_accounting_context
+
+    red_context = red_accounting_context(db, list(invoices.values()))
     rows = []
     for row in invoices.values():
         amount = _decimal(row.total_amount)
         bank_paid = paid.get(row.id, Decimal("0"))
+        trace = red_context.get(row.id, {})
+        effective_amount = _decimal(trace.get("remainingAfterRedAmount"))
         rows.append({
             "id": row.id,
             "no": f"{row.invoice_code or ''}{row.invoice_number or ''}",
@@ -1315,11 +1322,18 @@ def _invoice_rows(db: Session, links: list[BusinessPartnerLink]) -> list[dict[st
             "sellerName": row.seller_name or "",
             "buyerName": row.buyer_name or "",
             "amount": _number(amount),
+            "effectiveAmount": _number(effective_amount),
             "bankPaidAmount": _number(bank_paid),
-            "bankRemainingAmount": _number(amount - bank_paid),
+            "bankRemainingAmount": _number(effective_amount - bank_paid),
             "matchStatus": row.match_status or "",
             "category": row.category or "",
             "verified": bool(row.verified),
+            "invoiceColor": trace.get("invoiceColor", "unknown"),
+            "invoiceStatusLabel": trace.get("invoiceStatusLabel", "待确认发票"),
+            "redStatus": trace.get("redStatus", "unknown"),
+            "redOffsetAmount": _number(trace.get("redOffsetAmount")),
+            "redRelatedInvoiceNo": trace.get("redRelatedInvoiceNo", ""),
+            "accountingException": trace.get("accountingException", ""),
         })
     return sorted(rows, key=lambda row: row.get("date") or "", reverse=True)
 

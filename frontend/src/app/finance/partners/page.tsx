@@ -6,6 +6,7 @@ import Link from "@/components/workspace/workspace-link";
 import {
   authenticatedFetch,
   businessPartnerApi,
+  downloadAuthenticatedFile,
   type BusinessPartnerDetail,
   type BusinessPartnerBankAccount,
   type BusinessPartnerInput,
@@ -372,6 +373,14 @@ export default function BusinessPartnersPage() {
     }
   }
 
+  async function downloadRaw(url: string, filename: string) {
+    try {
+      await downloadAuthenticatedFile(url, filename);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "下载原始文件失败");
+    }
+  }
+
   const tabs: Array<[DetailTab, string, number?]> = detail ? [
     ["overview", "往来概览"],
     ["purchases", `采购 ${detail.purchases.length}`],
@@ -487,7 +496,7 @@ export default function BusinessPartnersPage() {
 
       {form && <PartnerForm form={form} setForm={setForm} editing={editingId != null} saving={saving} onClose={() => { setForm(null); setEditingId(null); }} onSave={() => void saveForm()} />}
       {duplicatePrompt && <DuplicateDialog mine={duplicatePrompt.mine} other={duplicatePrompt.other} saving={savingDuplicate} onDecide={(same) => void decideDuplicate(same)} onDefer={deferDuplicate} />}
-      {rawDetail && <RawDialog detail={rawDetail} onClose={() => setRawDetail(null)} />}
+      {rawDetail && <RawDialog detail={rawDetail} onClose={() => setRawDetail(null)} onDownload={(url, filename) => void downloadRaw(url, filename)} />}
     </div>
   );
 }
@@ -528,8 +537,10 @@ function Invoices({ rows }: { rows: BusinessPartnerDetail["invoices"] }) {
       <thead className="bg-slate-50 text-slate-500">
         <tr>
           <th className="px-3 py-2">日期 / 发票号</th>
+          <th className="px-3 py-2">发票状态</th>
           <th className="px-3 py-2">开票双方</th>
           <th className="px-3 py-2 text-right">价税合计</th>
+          <th className="px-3 py-2 text-right">红冲后有效额</th>
           <th className="px-3 py-2 text-right">银行已关联</th>
           <th className="px-3 py-2 text-right">待匹配</th>
           <th className="px-3 py-2">匹配状态</th>
@@ -546,11 +557,19 @@ function Invoices({ rows }: { rows: BusinessPartnerDetail["invoices"] }) {
               <div className="text-slate-600">{dateText(row.date)}</div>
               <div className="mt-0.5 font-mono text-[10px] text-slate-500">{row.no || "—"}</div>
             </td>
+            <td className="px-3 py-2.5">
+              <span className={`rounded-md px-2 py-1 font-medium ${row.invoiceColor === "red" ? "bg-rose-50 text-rose-700" : row.redStatus === "fully_red_offset" ? "bg-orange-100 text-orange-800" : row.redStatus === "partially_red_offset" ? "bg-amber-50 text-amber-700" : row.redStatus === "blue_red_pending" || row.redStatus === "over_red_offset" ? "bg-red-50 text-red-700" : "bg-emerald-50 text-emerald-700"}`}>
+                {row.invoiceStatusLabel || (row.invoiceColor === "red" ? "红字发票" : "蓝字发票")}
+              </span>
+              {row.redRelatedInvoiceNo && <div className="mt-1 max-w-[180px] truncate text-[10px] text-rose-600" title={row.redRelatedInvoiceNo}>对应 {row.redRelatedInvoiceNo}</div>}
+              {row.accountingException && <div className="mt-1 max-w-[220px] text-[10px] text-rose-600" title={row.accountingException}>{row.accountingException}</div>}
+            </td>
             <td className="max-w-[360px] px-3 py-2.5">
               <div className="truncate font-medium text-slate-700">销方：{row.sellerName || "—"}</div>
               <div className="mt-0.5 truncate text-[10px] text-slate-400">购方：{row.buyerName || "—"}</div>
             </td>
             <td className="px-3 py-2.5 text-right font-medium tabular-nums text-slate-800">{money(row.amount)}</td>
+            <td className={`px-3 py-2.5 text-right font-medium tabular-nums ${Number(row.effectiveAmount ?? row.amount) + 0.005 < Number(row.amount) ? "text-amber-700" : "text-slate-800"}`}>{money(row.effectiveAmount ?? row.amount)}</td>
             <td className="px-3 py-2.5 text-right tabular-nums text-emerald-700">{money(row.bankPaidAmount)}</td>
             <td className={`px-3 py-2.5 text-right tabular-nums ${remaining > 0.005 ? "font-medium text-amber-700" : "text-slate-400"}`}>{money(remaining)}</td>
             <td className="px-3 py-2.5">
@@ -694,4 +713,4 @@ function DuplicateDialog({ mine, other, saving, onDecide, onDefer }: { mine: Bus
   </div>;
 }
 
-function RawDialog({ detail, onClose }: { detail: BankRawDetail; onClose: () => void }) { return <div className="fixed inset-0 z-[60] flex items-center justify-center bg-slate-900/35 p-4"><div className="max-h-[calc(100vh-40px)] w-full max-w-3xl overflow-y-auto rounded-2xl bg-white shadow-2xl"><div className="sticky top-0 flex items-start justify-between border-b border-slate-100 bg-white px-5 py-4"><div><h3 className="text-base font-semibold text-slate-900">银行原始流水记录</h3><p className="mt-1 text-xs text-slate-500">第 {detail.sourceRowNumber ?? detail.raw.rowNumber ?? "—"} 行 · 流水号 {detail.serialNo || "—"}</p></div><button type="button" onClick={onClose} className="text-xl text-slate-400 hover:text-slate-700">×</button></div><div className="grid gap-2 p-5 sm:grid-cols-4"><Info label="交易日期" value={detail.txnDate} /><Info label="交易时间" value={detail.transactionTime || ""} /><Info label="凭证号码" value={detail.voucherNo} /><Info label="我方账号" value={detail.accountNo} /></div><div className="px-5 pb-5"><div className="rounded-xl border border-slate-200"><div className="border-b border-slate-100 px-3 py-2 text-xs font-medium text-slate-700">完整原始字段</div><div className="grid gap-px bg-slate-100 sm:grid-cols-2">{Object.entries(detail.raw.fields || {}).map(([key, value]) => <div key={key} className="bg-white px-3 py-2"><div className="text-[10px] text-slate-400">{key}</div><div className="mt-1 break-all text-xs text-slate-700">{rawValue(value)}</div></div>)}{!Object.keys(detail.raw.fields || {}).length && <pre className="overflow-x-auto bg-white p-3 text-xs text-slate-600">{JSON.stringify(detail.raw, null, 2)}</pre>}</div></div>{detail.sourceFile && <div className="mt-3 text-xs text-slate-500">来源文件：{detail.sourceFile.fileName} · SHA256：{detail.sourceFile.sha256}{detail.sourceFile.downloadUrl && <a className="ml-2 font-medium text-blue-600" href={detail.sourceFile.downloadUrl}>下载原文件</a>}</div>}</div></div></div>; }
+function RawDialog({ detail, onClose, onDownload }: { detail: BankRawDetail; onClose: () => void; onDownload: (url: string, filename: string) => void }) { return <div className="fixed inset-0 z-[60] flex items-center justify-center bg-slate-900/35 p-4"><div className="max-h-[calc(100vh-40px)] w-full max-w-3xl overflow-y-auto rounded-2xl bg-white shadow-2xl"><div className="sticky top-0 flex items-start justify-between border-b border-slate-100 bg-white px-5 py-4"><div><h3 className="text-base font-semibold text-slate-900">银行原始流水记录</h3><p className="mt-1 text-xs text-slate-500">第 {detail.sourceRowNumber ?? detail.raw.rowNumber ?? "—"} 行 · 流水号 {detail.serialNo || "—"}</p></div><button type="button" onClick={onClose} className="text-xl text-slate-400 hover:text-slate-700">×</button></div><div className="grid gap-2 p-5 sm:grid-cols-4"><Info label="交易日期" value={detail.txnDate} /><Info label="交易时间" value={detail.transactionTime || ""} /><Info label="凭证号码" value={detail.voucherNo} /><Info label="我方账号" value={detail.accountNo} /></div><div className="px-5 pb-5"><div className="rounded-xl border border-slate-200"><div className="border-b border-slate-100 px-3 py-2 text-xs font-medium text-slate-700">完整原始字段</div><div className="grid gap-px bg-slate-100 sm:grid-cols-2">{Object.entries(detail.raw.fields || {}).map(([key, value]) => <div key={key} className="bg-white px-3 py-2"><div className="text-[10px] text-slate-400">{key}</div><div className="mt-1 break-all text-xs text-slate-700">{rawValue(value)}</div></div>)}{!Object.keys(detail.raw.fields || {}).length && <pre className="overflow-x-auto bg-white p-3 text-xs text-slate-600">{JSON.stringify(detail.raw, null, 2)}</pre>}</div></div>{detail.sourceFile && <div className="mt-3 text-xs text-slate-500">来源文件：{detail.sourceFile.fileName} · SHA256：{detail.sourceFile.sha256}{detail.sourceFile.downloadUrl && <button type="button" className="ml-2 font-medium text-blue-600 hover:text-blue-700" onClick={() => onDownload(detail.sourceFile!.downloadUrl!, detail.sourceFile!.fileName)}>下载原文件</button>}</div>}</div></div></div>; }

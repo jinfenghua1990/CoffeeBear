@@ -1,4 +1,5 @@
 from typing import Any
+from urllib.parse import urlencode
 
 from app.adapters.base import AdapterNotConfigured
 from app.config import settings
@@ -22,10 +23,15 @@ class Alibaba1688Adapter:
 
     def get_authorization_url(self, state: str) -> str:
         self.ensure_configured()
-        return (
-            f"{OAUTH_AUTHORIZE_URL}?client_id={settings.ALIBABA_1688_APP_KEY}"
-            f"&site=alibaba&redirect_uri={settings.ALIBABA_1688_REDIRECT_URI}&state={state}"
+        query = urlencode(
+            {
+                "client_id": settings.ALIBABA_1688_APP_KEY,
+                "site": "alibaba",
+                "redirect_uri": settings.ALIBABA_1688_REDIRECT_URI,
+                "state": state,
+            }
         )
+        return f"{OAUTH_AUTHORIZE_URL}?{query}"
 
     def handle_callback(self, code: str, state: str) -> dict[str, Any]:
         self.ensure_configured()

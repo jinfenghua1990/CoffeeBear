@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { authenticatedFetch, type ReconTxn } from "@/lib/api";
+import { authenticatedFetch, downloadAuthenticatedFile, type ReconTxn } from "@/lib/api";
 import { BankSummaryPanel } from "@/app/finance/bank-transactions/bank-summary-panel";
 import { useTabRuntime, useTabScopedState, useTabTitle, useWorkspace } from "@/lib/workspace/tab-store";
 
@@ -282,6 +282,14 @@ export default function BankTransactionsPage() {
     }
   }
 
+  async function downloadRawFile(url: string, filename: string) {
+    try {
+      await downloadAuthenticatedFile(url, filename);
+    } catch (caught) {
+      setRawError(caught instanceof Error ? caught.message : "下载原始文件失败");
+    }
+  }
+
   const bankTabs = (
     <div className="mx-auto w-full max-w-[1600px] pb-3">
       <div className="inline-flex overflow-hidden rounded-lg border border-slate-200 bg-white p-0.5 text-xs shadow-sm" role="tablist" aria-label="银行模块视图">
@@ -448,7 +456,7 @@ export default function BankTransactionsPage() {
               </div>
               <div className="mb-4 flex flex-wrap gap-x-5 gap-y-1 text-[11px] text-slate-400">
                 <span>来源文件：{rawDetail.sourceFile?.fileName || "历史记录/未关联"}</span>
-                {rawDetail.sourceFile?.downloadUrl && <a href={rawDetail.sourceFile.downloadUrl} className="font-medium text-blue-600 hover:text-blue-700">下载原始文件</a>}
+                {rawDetail.sourceFile?.downloadUrl && <button type="button" onClick={() => void downloadRawFile(rawDetail.sourceFile!.downloadUrl!, rawDetail.sourceFile!.fileName)} className="font-medium text-blue-600 hover:text-blue-700">下载原始文件</button>}
                 {rawDetail.sourceFile && <span>SHA256：{rawDetail.sourceFile.sha256}</span>}
                 <span>历史来源：{rawDetail.raw.sourceHistory?.length ?? 0} 个</span>
               </div>
