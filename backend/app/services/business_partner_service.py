@@ -710,14 +710,9 @@ def _sync_supplier_master(ctx: SyncContext) -> None:
 
         new_name = str(supplier.name or "").strip()
         if new_name and normalize_name(new_name) != partner.normalized_name:
-            if partner.legacy_supplier_id == supplier.id:
-                _add_identifier(ctx, partner, kind="alias", value=partner.name, source="supplier")
-                partner.name = new_name
-                partner.normalized_name = normalize_name(new_name)
-                ctx.index.add_identifier(partner.id, "name", partner.normalized_name)
-                ctx.updated_partners += 1
-            else:
-                _add_identifier(ctx, partner, kind="alias", value=new_name, source="supplier")
+            # V2: Supplier 是渠道/采购画像。即使它曾是 legacy_supplier_id，
+            # 名称也只能作为 alias 参与识别，不能反向重命名 canonical 主体。
+            _add_identifier(ctx, partner, kind="alias", value=new_name, source="supplier")
 
         if not partner.contact and supplier.contact:
             partner.contact = supplier.contact
