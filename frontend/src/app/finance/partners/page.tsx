@@ -11,6 +11,7 @@ import {
   type BusinessPartnerInput,
   type BusinessPartnerListItem,
   type BusinessPartnerRole,
+  type PartnerReferenceCoverage,
 } from "@/lib/api";
 import { useTabScopedState, useTabTitle } from "@/lib/workspace/tab-store";
 
@@ -132,6 +133,7 @@ export default function BusinessPartnersPage() {
   const [rawLoading, setRawLoading] = useState(false);
   const [duplicatePrompt, setDuplicatePrompt] = useState<{ mine: BusinessPartnerDetail; other: BusinessPartnerDetail } | null>(null);
   const [savingDuplicate, setSavingDuplicate] = useState(false);
+  const [coverage, setCoverage] = useState<PartnerReferenceCoverage | null>(null);
   // 「稍后处理」只关弹窗，本次会话内对同一组合不再弹。
   const [deferredDuplicates, setDeferredDuplicates] = useState<string[]>([]);
   const initialSelection = useRef(false);
@@ -164,6 +166,11 @@ export default function BusinessPartnersPage() {
     try {
       const response = await businessPartnerApi.list(keyword.trim(), role);
       setItems(response.items);
+      try {
+        setCoverage(await businessPartnerApi.coverage());
+      } catch {
+        // 覆盖率是运维提示；读取失败不阻塞主档使用。
+      }
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "加载往来单位失败");
     } finally {
@@ -332,11 +339,11 @@ export default function BusinessPartnersPage() {
     try {
       const next = await businessPartnerApi.decideDuplicate(detail.id, other.id, {
         same,
-        note: same ? "财务中心人工确认同一主体，登记曾用名" : "财务中心人工确认不是同一主体",
+        note: same ? "财务中心人工确认同一主体，合并到当前 canonical 主档" : "财务中心人工确认不是同一主体",
       });
       setDetail(next);
       setDuplicatePrompt(null);
-      setMessage(same ? `已登记曾用名：之后带「${other.name}」的发票和流水会回到本档案。` : `已记录「${detail.name}」与「${other.name}」不是同一主体。`);
+      setMessage(same ? `已合并主体「${other.name}」：采购、发票、银行及其他业务事实已统一归到「${next.name}」。` : `已记录「${detail.name}」与「${other.name}」不是同一主体。`);
       await loadList();
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "保存判断失败");
@@ -385,6 +392,13 @@ export default function BusinessPartnersPage() {
             <div className="mt-0.5 flex flex-wrap items-baseline gap-x-3 gap-y-1">
               <h1 className="text-xl font-semibold tracking-tight text-slate-900">往来单位档案</h1>
               <p className="text-xs text-slate-500">统一查看采购、入库、发票、银行与销售来源；原始记录不改写。</p>
+              {coverage && <div className="mt-1 flex flex-wrap items-center gap-2 text-[10px]">
+                <span className={coverage.unlinkedFacts > 0 ? "rounded bg-amber-50 px-2 py-0.5 font-medium text-amber-700" : "rounded bg-emerald-50 px-2 py-0.5 font-medium text-emerald-700"}>
+                  主数据覆盖 {(coverage.coverage * 100).toFixed(1)}%
+                </span>
+                <span className="text-slate-400">已归档 {coverage.linkedFacts}/{coverage.totalFacts} 条业务事实</span>
+                {coverage.unlinkedFacts > 0 && <span className="font-medium text-amber-600">未归档 {coverage.unlinkedFacts} 条</span>}
+              </div>}
             </div>
           </div>
           <div className="flex flex-wrap gap-2">
@@ -643,7 +657,7 @@ function DuplicateDialog({ mine, other, saving, onDecide, onDefer }: { mine: Bus
     <div className="max-h-[calc(100vh-40px)] w-full max-w-xl overflow-y-auto rounded-2xl bg-white shadow-2xl">
       <div className="border-b border-slate-100 px-5 py-4">
         <h3 className="text-base font-semibold text-slate-900">疑似同一主体，请确认</h3>
-        <p className="mt-1 text-xs text-slate-500">名称去掉括号内容和公司后缀后相同。系统不会自动合并，请人工判断这两个档案是不是同一主体。</p>
+        <p className="mt-1 text-xs text-slate-500">名称去掉括号内容和公司后缀后相同。系统不会自动合并，请人工判断；确认后会保留一个唯一主体 ID。</p>
       </div>
       <div className="space-y-3 p-5">
         <div className="overflow-hidden rounded-xl border border-amber-200">
@@ -669,12 +683,12 @@ function DuplicateDialog({ mine, other, saving, onDecide, onDefer }: { mine: Bus
             </tbody>
           </table>
         </div>
-        <p className="text-[11px] leading-4 text-slate-500">确认为同一主体后，对方名称会登记为本档案的曾用名，之后带该名称的发票和流水会回到本档案；两个档案已有的采购、发票和流水记录都不会被改动。</p>
+        <p className="text-[11px] leading-4 text-slate-500">确认为同一主体后，对方名称会登记为曾用名；采购、发票、银行、入库等记录只迁移 canonical partner ID，原始名称、税号和账号不改写，对方档案归档保留审计。</p>
       </div>
       <div className="flex flex-wrap justify-end gap-2 border-t border-slate-100 px-5 py-4">
         <button type="button" onClick={onDefer} disabled={saving} className="rounded-lg px-3 py-2 text-sm text-slate-600 hover:bg-slate-100 disabled:opacity-50">稍后处理</button>
         <button type="button" onClick={() => onDecide(false)} disabled={saving} className="rounded-lg border border-slate-200 px-3 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50">不是同一主体</button>
-        <button type="button" onClick={() => onDecide(true)} disabled={saving} className="rounded-lg bg-amber-600 px-4 py-2 text-sm font-medium text-white hover:bg-amber-700 disabled:opacity-50">{saving ? "保存中…" : "确认为同一主体（登记曾用名）"}</button>
+        <button type="button" onClick={() => onDecide(true)} disabled={saving} className="rounded-lg bg-amber-600 px-4 py-2 text-sm font-medium text-white hover:bg-amber-700 disabled:opacity-50">{saving ? "合并中…" : "确认为同一主体并合并"}</button>
       </div>
     </div>
   </div>;
