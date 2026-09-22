@@ -1,10 +1,9 @@
 name: CI
 
 on:
-  # Daily development changes are validated at PR boundaries instead of on every
-  # direct develop push. This avoids duplicate push + pull_request CI runs.
+  # 直提模式：push 到 develop 或 main 都触发 CI；PR 保留为可选防护。
   push:
-    branches: [main]
+    branches: [develop, main]
   pull_request:
     branches: [develop, main]
     types: [opened, synchronize, reopened, ready_for_review]

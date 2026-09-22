@@ -198,7 +198,7 @@ PostgreSQL / Redis 只属于基础设施，不作为公开业务端口。
 
 ## 12. CI 必须守住的门槛
 
-Pull Request 必须验证：
+Push（直提 develop/main）或 Pull Request 必须验证：
 
 - Fresh PostgreSQL 全量 Alembic migration
 - Runtime undefined-name scan
