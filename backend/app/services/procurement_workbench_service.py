@@ -1175,5 +1175,10 @@ def suppliers(db: Session, limit: int = 200, offset: int = 0) -> dict:
 
 
 def supplier_workbench(db: Session, supplier_name: str) -> dict | None:
-    """单个供应商详情：历史合作 + 常购 SKU + 最近订单。"""
+    """兼容旧名称路径；V2 页面优先使用 supplier_workbench_by_partner。"""
     return supplier_detail(db, supplier_name)
+
+
+def supplier_workbench_by_partner(db: Session, partner_id: int) -> dict | None:
+    """按 canonical BusinessPartner ID 读取供应商历史，不再依赖名称 join。"""
+    return supplier_detail(db, partner_id=partner_id)
