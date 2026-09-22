@@ -74,6 +74,18 @@ function bankPaymentClass(row: TaxInvoiceRow) {
   return "bg-amber-50 text-amber-700";
 }
 
+function isCorporatePaymentVerified(row: TaxInvoiceRow) {
+  if (row.direction !== "input" || row.bankPaymentStatus !== "matched" || row.paymentMethod !== "corporate") return false;
+  const paidAmount = Number(row.bankPaidAmount);
+  const effectiveAmount = Number(row.bankEffectiveInvoiceAmount || row.totalAmount);
+  const remainingAmount = Number(row.bankRemainingAmount);
+  return Number.isFinite(paidAmount)
+    && Number.isFinite(effectiveAmount)
+    && Number.isFinite(remainingAmount)
+    && Math.abs(paidAmount - effectiveAmount) <= 0.005
+    && remainingAmount <= 0.005;
+}
+
 function matchesInvoiceLifecycle(row: TaxInvoiceRow, filter: InvoiceStatusFilter) {
   if (filter === "all") return true;
   if (filter === "blue_active") return row.invoiceColor === "blue" && row.redStatus === "none";
@@ -495,7 +507,10 @@ export default function InvoiceManagementPage() {
       <section className="mt-3 overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
         <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-100 bg-slate-50/40 px-4 py-1.5 text-[11px] text-slate-400">
           <span>共 <span className="tabular-nums text-slate-600">{visibleRows.length}</span> 张 · 财务净额 <span className="tabular-nums text-slate-600">{money(String(visibleTotalAmount))}</span></span>
-          <span>{typeFilter !== "all" ? `分类：${direction === "output" ? outputCategoryLabel(typeFilter as string) : typeFilter === "group:operating" ? "计入运营成本（货款/平台服务费/其他）" : categoryLabel(typeFilter)}` : ""}</span>
+          <div className="flex flex-wrap items-center gap-2">
+            {direction === "input" && <span className="inline-flex items-center gap-1 rounded-full bg-emerald-50 px-2 py-0.5 font-medium text-emerald-700"><span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />绿色高亮 = 对公付款金额已核对</span>}
+            <span>{typeFilter !== "all" ? `分类：${direction === "output" ? outputCategoryLabel(typeFilter as string) : typeFilter === "group:operating" ? "计入运营成本（货款/平台服务费/其他）" : categoryLabel(typeFilter)}` : ""}</span>
+          </div>
         </div>
 
         {selectedIds.size > 0 && (
@@ -540,8 +555,9 @@ export default function InvoiceManagementPage() {
             <tbody className="divide-y divide-slate-100">
               {visibleRows.map((row) => {
                 const category = rowCategoryValue(row);
+                const corporatePaymentVerified = isCorporatePaymentVerified(row);
                 return (
-                <tr key={row.id} className={`transition hover:bg-indigo-50/40 ${selectedId === row.id ? "bg-indigo-50/60" : ""}`}>
+                <tr key={row.id} className={`transition ${selectedId === row.id ? "bg-indigo-50/60" : corporatePaymentVerified ? "bg-emerald-50/80 hover:bg-emerald-100/90" : "hover:bg-indigo-50/40"}`}>
                   <td className="px-4 py-2.5"><input type="checkbox" checked={selectedIds.has(row.id)} disabled={row.invoiceColor === "red"} onChange={() => toggleRowSelected(row.id)} onClick={(event) => event.stopPropagation()} title={row.invoiceColor === "red" ? "红字发票分类继承蓝字票，不单独批量分类" : undefined} className="h-3.5 w-3.5 accent-indigo-600 disabled:opacity-30" /></td>
                   <td className="px-3 py-2.5"><div className="font-mono font-medium text-slate-800">{invoiceNo(row)}</div></td>
                   <td className="max-w-[210px] truncate px-3 py-2.5 text-slate-700" title={row.direction === "output" ? `销项抬头：${row.buyerName || "未记录购买方"} · 本单位：${row.sellerName || "—"}` : row.sellerName}>{row.direction === "output" ? <><span className="mr-1 inline-block rounded border border-violet-200 bg-violet-50 px-1 align-[-1px] text-[10px] leading-4 text-violet-700">购方</span><span className="font-medium">{row.buyerName || "未记录购买方"}</span><div className="mt-0.5 truncate text-[10px] text-slate-400">本单位：{row.sellerName || "—"}</div></> : (row.sellerName || "未记录开票方")}</td>
@@ -571,9 +587,9 @@ export default function InvoiceManagementPage() {
                     {row.direction !== "input" || row.bankPaymentStatus === "not_applicable" ? (
                       <span className="text-slate-300">—</span>
                     ) : row.bankPaymentStatus === "matched" ? (
-                      <span className={`whitespace-nowrap rounded-full border px-2 py-0.5 text-[10px] font-medium ${paymentMethodClass("corporate")}`}>
-                        对公账户支出
-                      </span>
+                      corporatePaymentVerified ? (
+                        <span title="银行流水已全额核对，付款方式为对公账户支出" className="whitespace-nowrap rounded-full border border-emerald-300 bg-emerald-600 px-2 py-0.5 text-[10px] font-semibold text-white shadow-sm">✓ 对公已核对</span>
+                      ) : <span className={`whitespace-nowrap rounded-full border px-2 py-0.5 text-[10px] font-medium ${paymentMethodClass("corporate")}`}>对公账户支出</span>
                     ) : (
                       <select
                         value={row.manualPaymentMethod || ""}
@@ -593,10 +609,10 @@ export default function InvoiceManagementPage() {
                   <td className="px-3 py-2.5">
                     {row.direction === "input" ? (
                       <span
-                        title={row.bankPaymentStatus === "partial" || row.bankPaymentStatus === "matched" ? `已核对 ${money(row.bankPaidAmount)} / 剩余 ${money(row.bankRemainingAmount)}` : undefined}
-                        className={`whitespace-nowrap rounded-full px-2 py-0.5 text-[10px] font-medium ${bankPaymentClass(row)}`}
+                        title={row.bankPaymentStatus === "partial" || row.bankPaymentStatus === "matched" ? `已核对 ${money(row.bankPaidAmount)} / 剩余 ${money(row.bankRemainingAmount)}${corporatePaymentVerified ? " · 对公金额一致" : ""}` : undefined}
+                        className={`whitespace-nowrap rounded-full px-2 py-0.5 text-[10px] font-medium ${bankPaymentClass(row)} ${corporatePaymentVerified ? "ring-1 ring-emerald-300" : ""}`}
                       >
-                        {bankPaymentLabel(row)}
+                        {corporatePaymentVerified ? "✓ 金额一致" : bankPaymentLabel(row)}
                       </span>
                     ) : <span className="text-slate-300">—</span>}
                   </td>
