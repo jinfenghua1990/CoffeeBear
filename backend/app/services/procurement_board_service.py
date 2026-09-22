@@ -16,7 +16,11 @@ from datetime import date, datetime, timedelta
 from decimal import Decimal
 from zoneinfo import ZoneInfo
 
+import logging
+
 from sqlalchemy.orm import Session
+
+log = logging.getLogger(__name__)
 
 from app.config import settings
 from app.services.procurement_chain_service import (
@@ -57,7 +61,7 @@ def overview(db: Session) -> dict:
                 elif dt == today - timedelta(days=1):
                     yesterday_count += 1
             except Exception:
-                pass
+                log.warning("看板 orderDate 解析失败：%r", d)
         # 与采购工作台共用唯一待办口径，避免看板与工作台出现不同统计。
         queue = _pending_queue(row)
         if queue == "refine":
@@ -315,7 +319,7 @@ def _supplier_profile(db: Session, row: dict, supplier_name: str) -> dict:
             else:
                 last_recent = f"{(today - dt).days} 天前"
         except Exception:
-            pass
+            log.warning("看板 lastOrderDate 解析失败：%r", last_date)
     return {
         "supplierName": supplier_name,
         "badge": "优选",   # 简化标签

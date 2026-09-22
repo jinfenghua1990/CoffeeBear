@@ -17,6 +17,7 @@
 """
 from __future__ import annotations
 
+import logging
 from datetime import datetime
 from decimal import Decimal
 
@@ -35,6 +36,8 @@ from app.services.procurement_chain_service import (
     order_time,
     parse_decimal,
 )
+
+log = logging.getLogger(__name__)
 
 AUTO_THRESHOLD = Decimal("0.90")
 PENDING_THRESHOLD = Decimal("0.55")
@@ -335,8 +338,8 @@ def prelink_inbound(db: Session, actor: str = "system", auto: bool = True, commi
             try:
                 link_objs = [db.get(ProcurementChainLink, item["linkId"]) for item in auto_linked]
                 seed_for_link_batch(db, [l for l in link_objs if l is not None])
-            except Exception:
-                pass
+            except Exception as exc:
+                log.warning("prelink 反填 seed_for_link_batch 失败：%s", exc)
         if auto:
             from app.services.procurement_chain_service import auto_confirm_pending_links
             auto_confirm_result = auto_confirm_pending_links(db, actor=actor)

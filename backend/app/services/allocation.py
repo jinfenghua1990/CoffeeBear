@@ -36,10 +36,9 @@ def distribute_expense(amount, weights: list, method: str) -> list[Decimal]:
     wsum = sum(ws)
     if wsum == 0:
         return []
-    if method == "manual":
-        shares = [total * w for w in ws]  # 手工模式 w 即比例
-    else:
-        shares = [total * w / wsum for w in ws]
+    # 手工模式 w 即比例；其余模式 w 为数量/金额权重。权重和不为 1 时
+    # 做归一化（除以权重和），避免尾差全部落入最后一项导致失真。
+    shares = [total * w / wsum for w in ws]
     shares = [s.quantize(Decimal("0.01")) for s in shares]
     diff = total - sum(shares)
     if shares:

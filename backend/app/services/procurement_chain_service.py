@@ -5,6 +5,7 @@
 """
 
 import json
+import logging
 import re
 import unicodedata
 from datetime import datetime
@@ -47,6 +48,8 @@ from app.services.tax_invoice_service import (
     sync_business_match_status,
     unlink_purchase as unlink_tax_invoice_purchase,
 )
+
+log = logging.getLogger(__name__)
 
 AMOUNT_TOLERANCE = Decimal("0.02")  # 金额容差 2%
 
@@ -847,7 +850,7 @@ class ProcurementChainMatcher:
             try:
                 seed_allocations_for_link(self.db, link)
             except Exception:  # 反填失败不应阻塞主链路
-                pass
+                log.warning("seed_allocations_for_link 反填失败：link=%s", link.id)
         return link
 
     def replace_link(self, link_id: int, target_id: int, note: str = "") -> ProcurementChainLink:
@@ -901,7 +904,7 @@ class ProcurementChainMatcher:
             try:
                 seed_allocations_for_link(self.db, link)
             except Exception:
-                pass
+                log.warning("seed_allocations_for_link 反填失败：link=%s", link.id)
         return link
 
     def _validate_order_and_target(self, order_id: int, target_type: str, target_id: int) -> None:

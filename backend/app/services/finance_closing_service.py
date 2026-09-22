@@ -95,12 +95,13 @@ def foreign_trade_summary(
                 bucket["profitIncome"] += amount
             if row["cashEffect"]:
                 bucket["cashIn"] += amount
-        else:
+        elif row["direction"] == "expense":
             bucket["expense"] += amount
             if row["profitEffect"]:
                 bucket["profitExpense"] += amount
             if row["cashEffect"]:
                 bucket["cashOut"] += amount
+        # 其他方向（脏数据）跳过，避免被静默误分类为支出
     return {
         "rowCount": len(rows),
         "rows": rows,
