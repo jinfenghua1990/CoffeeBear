@@ -194,6 +194,58 @@ def _sync_bank_accounts(db: Session) -> int:
     return changed
 
 
+def repoint_partner_references(db: Session, *, from_partner_id: int, to_partner_id: int) -> dict[str, int]:
+    """Move every direct operational FK from one partner to another.
+
+    Used by canonical master merges. Raw source names/tax numbers/accounts are untouched;
+    only the canonical identity reference changes.
+    """
+    if from_partner_id == to_partner_id:
+        return {"moved": 0, "bySource": {}}
+
+    bindings: list[tuple[str, type[Any], str]] = []
+    seen: set[tuple[type[Any], str]] = set()
+    for (source_type, _role), (model, attr) in SOURCE_BINDINGS.items():
+        key = (model, attr)
+        if key in seen:
+            continue
+        seen.add(key)
+        bindings.append((source_type, model, attr))
+    # Generic sales_orders has no BusinessPartnerLink source yet, but may already carry
+    # a canonical customer FK from a normalized sales import.
+    if (SalesOrder, "customer_partner_id") not in seen:
+        bindings.append(("sales_order", SalesOrder, "customer_partner_id"))
+
+    moved_by_source: dict[str, int] = {}
+    for source_type, model, attr in bindings:
+        column = getattr(model, attr)
+        rows = db.query(model).filter(column == from_partner_id).all()
+        if not rows:
+            continue
+        for row in rows:
+            setattr(row, attr, to_partner_id)
+        moved_by_source[source_type] = len(rows)
+
+    # Audit links remain the evidence trail, but their canonical target must follow the merge.
+    link_rows = (
+        db.query(BusinessPartnerLink)
+        .filter(BusinessPartnerLink.partner_id == from_partner_id)
+        .all()
+    )
+    for row in link_rows:
+        row.partner_id = to_partner_id
+        if row.status == "linked":
+            row.match_method = row.match_method or "master_merge"
+    if link_rows:
+        moved_by_source["business_partner_link"] = len(link_rows)
+
+    db.flush()
+    return {
+        "moved": sum(moved_by_source.values()),
+        "bySource": dict(sorted(moved_by_source.items())),
+    }
+
+
 def materialize_partner_references(db: Session) -> dict[str, int]:
     """Copy linked audit relationships into source-table FKs; idempotent."""
     changed_by_source: dict[str, int] = defaultdict(int)
