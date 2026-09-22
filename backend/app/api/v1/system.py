@@ -158,6 +158,19 @@ def system_update_upload_local_changes(request: Request) -> dict[str, Any]:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
+@router.post("/update/local-changes/sync", dependencies=[Depends(require_roles("admin"))])
+def system_update_sync_local_changes(request: Request) -> dict[str, Any]:
+    if settings.DEPLOYMENT_MODE == "container":
+        from fastapi import HTTPException
+        raise HTTPException(status_code=409, detail="容器模式禁止从运行实例同步本地代码。")
+    from app.services import system_update_service
+    try:
+        return system_update_service.sync_local_changes(actor=current_actor(request))
+    except (ValueError, RuntimeError) as exc:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
 @router.patch("/update/settings", dependencies=[Depends(require_roles("admin"))])
 def system_update_settings(body: SystemUpdateSettingsBody) -> dict[str, Any]:
     from app.services import system_update_service

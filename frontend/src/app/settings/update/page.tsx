@@ -4,7 +4,7 @@ import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } fro
 import {
   systemUpdateApi,
   type SystemLocalChanges,
-  type SystemLocalUploadResult,
+  type SystemLocalSyncResult,
   type SystemUpdateMode,
   type SystemUpdateLevel,
   type SystemUpdateReadiness,
@@ -122,7 +122,7 @@ export default function SystemUpdatePage() {
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [localChanges, setLocalChanges] = useState<SystemLocalChanges | null>(null);
-  const [localUpload, setLocalUpload] = useState<SystemLocalUploadResult | null>(null);
+  const [localSync, setLocalSync] = useState<SystemLocalSyncResult | null>(null);
   const [localError, setLocalError] = useState("");
   const [showLocalFiles, setShowLocalFiles] = useState(false);
   const [showAllChecks, setShowAllChecks] = useState(false);
@@ -276,7 +276,7 @@ export default function SystemUpdatePage() {
         next.lastCheckError
           ? ""
           : next.updateAvailable
-            ? `发现 ${next.changes?.length || 1} 项更新，可以直接点击“立即更新”。`
+            ? `发现 ${next.changes?.length || 1} 项更新，可以直接点击“从云端同步到本地”。`
             : "检查完成，当前已经是最新版本。",
       );
       await loadReadiness();
@@ -296,8 +296,8 @@ export default function SystemUpdatePage() {
       if (next) {
         setNotice(
           next.dirty
-            ? `检测到 ${next.eligibleCount} 个可上传代码文件，${next.excludedCount} 个受保护文件不会上传。`
-            : "本地工作区干净，没有待上传修改。",
+            ? `检测到 ${next.eligibleCount} 个可同步代码文件，${next.excludedCount} 个受保护文件不会上传。`
+            : "本地工作区干净，没有待同步修改。",
         );
       }
     } finally {
@@ -305,21 +305,21 @@ export default function SystemUpdatePage() {
     }
   }
 
-  async function uploadLocalVersion() {
+  async function syncLocalVersion() {
     if (!localChanges?.eligibleCount) return;
     const confirmed = window.confirm(
-      `将 ${localChanges.eligibleCount} 个代码文件上传到新的 local/* GitHub 分支。\n\n本地当前分支、暂存区和工作区不会被切换或清空。\n受保护的 Excel、数据库、备份和凭证不会上传。\n\n确认继续？`,
+      `将 ${localChanges.eligibleCount} 个代码文件提交并推送到当前配置的 ${status?.settings.branch || "develop"} 分支。\n\n同步前会先检查云端是否有新提交；如果云端领先或历史分叉，操作会停止，不会强制覆盖。\n受保护的 Excel、数据库、备份和凭证不会上传。\n\n确认继续？`,
     );
     if (!confirmed) return;
 
-    setBusy("local-upload");
+    setBusy("local-sync");
     setLocalError("");
     setNotice("");
     try {
-      const result = await systemUpdateApi.uploadLocalChanges();
-      setLocalUpload(result);
+      const result = await systemUpdateApi.syncLocalChanges();
+      setLocalSync(result);
       setLocalChanges(result.localChanges);
-      setNotice(`本地修改已上传：${result.branch} · ${result.shortSha}。本地代码保持原样，可继续修改。`);
+      setNotice(`本地修改已同步到云端：${result.branch} · ${result.shortSha}。`);
       await load(true);
     } catch (caught) {
       setLocalError(caught instanceof Error ? caught.message : String(caught));
@@ -543,7 +543,7 @@ export default function SystemUpdatePage() {
                         ) : null}
                       </div>
                       <p className="mt-1 text-[11px] leading-5 text-slate-400 dark:text-slate-400">
-                        检测你直接在本机修改的代码，并手动上传为独立 local/* 交接分支；不会切换当前分支，也不会清空本地修改。
+                        检测你直接在本机修改的代码，并安全提交到当前配置的 {status.settings.branch} 分支；云端领先或历史分叉时会停止，不会强制覆盖。
                       </p>
                     </div>
                     <div className="flex items-center gap-2">
@@ -557,11 +557,11 @@ export default function SystemUpdatePage() {
                       </button>
                       <button
                         type="button"
-                        onClick={() => void uploadLocalVersion()}
+                        onClick={() => void syncLocalVersion()}
                         disabled={Boolean(busy || status.running || !localChanges?.eligibleCount)}
                         className="app-button-primary h-8 rounded-lg px-3 text-[10px] font-semibold shadow-none disabled:cursor-not-allowed disabled:opacity-40"
                       >
-                        {busy === "local-upload" ? "上传中…" : "上传本地修改"}
+                        {busy === "local-sync" ? "同步中…" : "同步到云端"}
                       </button>
                     </div>
                   </div>
@@ -580,7 +580,7 @@ export default function SystemUpdatePage() {
                           <div className="mt-1 font-mono text-[11px] font-semibold text-slate-700 dark:text-slate-100">{shortSha(localChanges.baseSha)}</div>
                         </div>
                         <div className="rounded-xl border border-blue-100 bg-blue-50/60 px-3 py-2.5 dark:border-blue-500/20 dark:bg-blue-500/10">
-                          <div className="text-[10px] text-blue-500 dark:text-blue-300">可上传代码</div>
+                          <div className="text-[10px] text-blue-500 dark:text-blue-300">可同步代码</div>
                           <div className="mt-1 text-[14px] font-semibold text-blue-700 dark:text-blue-200">{localChanges.eligibleCount} 个文件</div>
                         </div>
                         <div className="rounded-xl border border-amber-100 bg-amber-50/60 px-3 py-2.5 dark:border-amber-500/20 dark:bg-amber-500/10">
@@ -595,7 +595,7 @@ export default function SystemUpdatePage() {
                             ? <>代码变化 <strong className="font-semibold text-emerald-600">+{localChanges.totalAdded}</strong> / <strong className="font-semibold text-rose-600">-{localChanges.totalDeleted}</strong>
                                 {localChanges.impactedModules?.length ? <> · {localChanges.impactedModules.join("、")}</> : null}
                               </>
-                            : "没有可上传的代码修改"}
+                            : "没有可同步的代码修改"}
                         </div>
                         {(localChanges.files.length || localChanges.excludedFiles.length) ? (
                           <button
@@ -629,15 +629,15 @@ export default function SystemUpdatePage() {
                         </div>
                       )}
 
-                      {(localUpload || localChanges.lastUpload) && (
+                      {(localSync || localChanges.lastSync) && (
                         <div className="mt-3 rounded-xl border border-emerald-100 bg-emerald-50/60 px-3 py-2.5 text-[11px] leading-5 text-emerald-700 dark:border-emerald-500/20 dark:bg-emerald-500/10 dark:text-emerald-300">
-                          最近交接：
-                          <span className="ml-1 font-mono font-semibold">{(localUpload || localChanges.lastUpload)?.branch}</span>
+                          最近同步：
+                          <span className="ml-1 font-mono font-semibold">{(localSync || localChanges.lastSync)?.branch}</span>
                           {" · "}
-                          <span className="font-mono">{(localUpload || localChanges.lastUpload)?.shortSha}</span>
+                          <span className="font-mono">{(localSync || localChanges.lastSync)?.shortSha}</span>
                           {" · "}
-                          {fmtDate((localUpload || localChanges.lastUpload)?.uploadedAt)}
-                          <div className="mt-0.5 text-[10px] opacity-80">GitHub 已保存快照，本机当前工作区保持原样。</div>
+                          {fmtDate((localSync || localChanges.lastSync)?.syncedAt)}
+                          <div className="mt-0.5 text-[10px] opacity-80">GitHub 与本地 develop 已完成快进同步。</div>
                         </div>
                       )}
 
@@ -720,7 +720,7 @@ export default function SystemUpdatePage() {
                                 : "h-8 cursor-default rounded-lg border border-emerald-200 bg-emerald-50 px-3 text-[10px] font-semibold text-emerald-700 dark:border-emerald-500/30 dark:bg-emerald-500/10 dark:text-emerald-300"
                             }
                           >
-                            {status.running ? "更新进行中…" : status.updateAvailable ? "立即更新" : "当前已是最新版本"}
+                            {status.running ? "同步进行中…" : status.updateAvailable ? "从云端同步到本地" : "当前已是最新版本"}
                           </button>
                           <button
                             type="button"

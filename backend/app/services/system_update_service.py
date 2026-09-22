@@ -577,6 +577,7 @@ def local_changes_payload(*, include_diff: bool = False) -> dict[str, Any]:
                 patch = result.stdout[:120000]
 
     last_upload = _read_json(_local_handoff_path(), {})
+    last_sync = _read_json(_state_dir() / "local-sync.json", {})
     return {
         "dirty": bool(entries),
         "baseSha": base_sha,
@@ -591,6 +592,7 @@ def local_changes_payload(*, include_diff: bool = False) -> dict[str, Any]:
         "protectedRules": list(_LOCAL_HANDOFF_PROTECTED_RULES),
         "diffPreview": patch,
         "lastUpload": last_upload or None,
+        "lastSync": last_sync or None,
         "worktreePreserved": True,
         "checkedAt": _now_iso(),
     }
@@ -622,6 +624,66 @@ def _raise_git_result(result: subprocess.CompletedProcess[str], fallback: str) -
         return
     detail = (result.stderr or result.stdout or fallback).strip()
     raise RuntimeError(detail[-1600:])
+
+
+def _create_worktree_snapshot_commit(
+    *,
+    base_sha: str,
+    eligible_paths: list[str],
+    message: str,
+    index_prefix: str,
+) -> str:
+    """Create a commit from allowed worktree paths without touching the real index."""
+    index_path = _state_dir() / f".{index_prefix}-index-{uuid.uuid4().hex}"
+    try:
+        index_path.unlink(missing_ok=True)
+        read_tree = _run_git_with_index(index_path, ["read-tree", base_sha], timeout=30)
+        _raise_git_result(read_tree, "无法创建临时 Git 索引")
+
+        staged = _run_git_with_index(
+            index_path,
+            ["add", "-A", "--", *eligible_paths],
+            timeout=120,
+        )
+        _raise_git_result(staged, "无法暂存本地修改快照")
+
+        staged_names_result = _run_git_with_index(
+            index_path,
+            ["diff", "--cached", "--name-only", "--no-renames"],
+            timeout=30,
+        )
+        _raise_git_result(staged_names_result, "无法校验本地修改快照")
+        staged_names = [
+            _normalize_repo_path(line.strip())
+            for line in staged_names_result.stdout.splitlines()
+            if line.strip()
+        ]
+        unexpected = [path for path in staged_names if path not in eligible_paths]
+        if unexpected:
+            raise RuntimeError(f"快照出现未授权文件：{', '.join(unexpected[:8])}")
+        for path in staged_names:
+            allowed, reason = _local_handoff_file_policy(path, tracked=True)
+            if not allowed:
+                raise RuntimeError(f"受保护文件禁止进入同步提交：{path}（{reason}）")
+
+        tree_result = _run_git_with_index(index_path, ["write-tree"], timeout=30)
+        _raise_git_result(tree_result, "无法生成本地修改快照")
+        tree_sha = tree_result.stdout.strip()
+        base_tree = _git("rev-parse", f"{base_sha}^{{tree}}", timeout=10)
+        if tree_sha == base_tree:
+            raise ValueError("允许同步的文件没有形成有效代码变更")
+
+        commit_result = _run(
+            ["git", "commit-tree", tree_sha, "-p", base_sha, "-m", message],
+            timeout=30,
+        )
+        _raise_git_result(commit_result, "无法创建本地同步提交")
+        commit_sha = commit_result.stdout.strip()
+        if not _SHA_RE.fullmatch(commit_sha):
+            raise RuntimeError("Git 返回的同步 commit 无效")
+        return commit_sha
+    finally:
+        index_path.unlink(missing_ok=True)
 
 
 def _next_local_handoff_branch(remote: str) -> str:
@@ -676,60 +738,20 @@ def upload_local_changes(*, actor: str = "system") -> dict[str, Any]:
 
         base_sha = str(payload["baseSha"])
         branch = _next_local_handoff_branch(remote)
-        index_path = _state_dir() / f".local-handoff-index-{uuid.uuid4().hex}"
         local_ref_created = False
         commit_sha = ""
         try:
-            index_path.unlink(missing_ok=True)
-            read_tree = _run_git_with_index(index_path, ["read-tree", base_sha], timeout=30)
-            _raise_git_result(read_tree, "无法创建临时 Git 索引")
-
-            staged = _run_git_with_index(
-                index_path,
-                ["add", "-A", "--", *eligible_paths],
-                timeout=120,
-            )
-            _raise_git_result(staged, "无法暂存本地修改快照")
-
-            staged_names_result = _run_git_with_index(
-                index_path,
-                ["diff", "--cached", "--name-only", "--no-renames"],
-                timeout=30,
-            )
-            _raise_git_result(staged_names_result, "无法校验本地修改快照")
-            staged_names = [
-                _normalize_repo_path(line.strip())
-                for line in staged_names_result.stdout.splitlines()
-                if line.strip()
-            ]
-            unexpected = [path for path in staged_names if path not in eligible_paths]
-            if unexpected:
-                raise RuntimeError(f"快照出现未授权文件：{', '.join(unexpected[:8])}")
-            for path in staged_names:
-                allowed, reason = _local_handoff_file_policy(path, tracked=True)
-                if not allowed:
-                    raise RuntimeError(f"受保护文件禁止进入交接分支：{path}（{reason}）")
-
-            tree_result = _run_git_with_index(index_path, ["write-tree"], timeout=30)
-            _raise_git_result(tree_result, "无法生成本地修改快照")
-            tree_sha = tree_result.stdout.strip()
-            base_tree = _git("rev-parse", f"{base_sha}^{{tree}}", timeout=10)
-            if tree_sha == base_tree:
-                raise ValueError("允许上传的文件没有形成有效代码变更")
-
             message = (
                 "local: 本地修改交接 "
                 + datetime.now(ZoneInfo(settings.TZ)).strftime("%Y-%m-%d %H:%M")
                 + f"\n\nUploaded by system update center · actor={actor}"
             )
-            commit_result = _run(
-                ["git", "commit-tree", tree_sha, "-p", base_sha, "-m", message],
-                timeout=30,
+            commit_sha = _create_worktree_snapshot_commit(
+                base_sha=base_sha,
+                eligible_paths=eligible_paths,
+                message=message,
+                index_prefix="local-handoff",
             )
-            _raise_git_result(commit_result, "无法创建本地修改交接提交")
-            commit_sha = commit_result.stdout.strip()
-            if not _SHA_RE.fullmatch(commit_sha):
-                raise RuntimeError("Git 返回的交接 commit 无效")
 
             ref_result = _run(
                 ["git", "update-ref", f"refs/heads/{branch}", commit_sha],
@@ -747,9 +769,6 @@ def upload_local_changes(*, actor: str = "system") -> dict[str, Any]:
             if local_ref_created:
                 _run(["git", "update-ref", "-d", f"refs/heads/{branch}"], timeout=20)
             raise
-        finally:
-            index_path.unlink(missing_ok=True)
-
         record = {
             "branch": branch,
             "commitSha": commit_sha,
@@ -768,6 +787,146 @@ def upload_local_changes(*, actor: str = "system") -> dict[str, Any]:
             **record,
             "message": "本地修改已上传到独立 GitHub 分支；当前工作区和分支未被切换。",
             "localChanges": local_changes_payload(include_diff=False),
+        }
+
+
+def _git_ancestry_relation(current_sha: str, remote_sha: str) -> str:
+    """Describe whether two commits are equal, ahead, behind, or diverged."""
+    if current_sha == remote_sha:
+        return "same"
+
+    current_is_ancestor = _run(
+        ["git", "merge-base", "--is-ancestor", current_sha, remote_sha],
+        timeout=20,
+    )
+    if current_is_ancestor.returncode not in {0, 1}:
+        _raise_git_result(current_is_ancestor, "无法判断本地与云端 Git 历史")
+    if current_is_ancestor.returncode == 0:
+        return "remote_ahead"
+
+    remote_is_ancestor = _run(
+        ["git", "merge-base", "--is-ancestor", remote_sha, current_sha],
+        timeout=20,
+    )
+    if remote_is_ancestor.returncode not in {0, 1}:
+        _raise_git_result(remote_is_ancestor, "无法判断本地与云端 Git 历史")
+    return "local_ahead" if remote_is_ancestor.returncode == 0 else "diverged"
+
+
+def sync_local_changes(*, actor: str = "system") -> dict[str, Any]:
+    """Commit allowed local code changes to develop and push with fast-forward safety."""
+    if settings.DEPLOYMENT_MODE == "container":
+        raise ValueError("容器模式不支持从运行实例同步本地代码")
+
+    with _LOCK:
+        runtime = _read_json(_status_path(), {})
+        if runtime.get("phase") in _ACTIVE_PHASES and _pid_running(runtime.get("pid")):
+            raise ValueError("系统更新正在执行，完成后再同步本地修改")
+        lock_owner = _read_update_lock_owner() if _repo_update_lock_dir().exists() else {}
+        if _pid_running(lock_owner.get("pid")):
+            raise ValueError("系统更新全局锁正在占用，完成后再同步本地修改")
+
+        cfg = load_update_settings()
+        branch = str(cfg["branch"])
+        remote = str(cfg["remote"])
+        current_branch = _git("branch", "--show-current", timeout=10)
+        if current_branch != branch:
+            raise ValueError(f"当前分支是 {current_branch or '(detached)'}，只能在 {branch} 上同步")
+
+        remote_probe = _run(["git", "remote", "get-url", remote], timeout=10)
+        _raise_git_result(remote_probe, "无法读取 Git 远端")
+        remote_url = remote_probe.stdout.strip()
+        if _is_legacy_repo_remote(remote_url):
+            raise ValueError("当前远端仍是旧 ecommerce-dashboard，禁止同步本地修改")
+
+        payload = local_changes_payload(include_diff=False)
+        eligible_paths = [str(item["path"]) for item in payload["files"]]
+        if len(eligible_paths) > 500:
+            raise ValueError("本次修改文件超过 500 个，请先拆分后再同步")
+
+        base_sha = str(payload["baseSha"])
+        _git("fetch", "--quiet", remote, branch, timeout=120)
+        remote_sha = _git("rev-parse", "FETCH_HEAD", timeout=10)
+        if not _SHA_RE.fullmatch(remote_sha):
+            raise RuntimeError("远端返回的 commit 无效")
+        relation = _git_ancestry_relation(base_sha, remote_sha)
+        if relation == "remote_ahead":
+            raise ValueError("云端 develop 已有新提交，请先执行“从云端同步到本地”，再上传本地修改")
+        if relation == "diverged":
+            raise ValueError("本地与云端 develop 已分叉，禁止覆盖；请先人工合并后再同步")
+        if not eligible_paths and relation == "same":
+            if payload["dirty"]:
+                raise ValueError("检测到的修改全部属于受保护文件，未同步任何业务数据")
+            raise ValueError("本地与云端已经一致，没有需要同步的代码")
+        if not eligible_paths and payload["dirty"]:
+            raise ValueError("检测到的修改全部属于受保护文件，未同步任何业务数据")
+
+        commit_sha = ""
+        branch_updated = False
+        push_completed = False
+        try:
+            if eligible_paths:
+                message = (
+                    "sync: 同步本地修改到 develop "
+                    + datetime.now(ZoneInfo(settings.TZ)).strftime("%Y-%m-%d %H:%M")
+                    + f"\n\nSynced by system update center · actor={actor}"
+                )
+                commit_sha = _create_worktree_snapshot_commit(
+                    base_sha=base_sha,
+                    eligible_paths=eligible_paths,
+                    message=message,
+                    index_prefix="local-sync",
+                )
+                ref_result = _run(
+                    ["git", "update-ref", f"refs/heads/{branch}", commit_sha, base_sha],
+                    timeout=20,
+                )
+                _raise_git_result(ref_result, "无法更新本地 develop 分支")
+                branch_updated = True
+
+            pushed_sha = commit_sha or base_sha
+            push_result = _run(
+                ["git", "push", remote, f"refs/heads/{branch}:refs/heads/{branch}"],
+                timeout=180,
+            )
+            _raise_git_result(push_result, "无法把本地 develop 同步到 GitHub")
+            push_completed = True
+
+            if eligible_paths:
+                staged = _run(["git", "add", "-A", "--", *eligible_paths], timeout=120)
+                _raise_git_result(staged, "云端已同步，但本地索引未能整理，请检查工作区状态")
+        except Exception:
+            if branch_updated and not push_completed:
+                _run(
+                    ["git", "update-ref", f"refs/heads/{branch}", base_sha, commit_sha],
+                    timeout=20,
+                )
+            raise
+
+        record = {
+            "branch": branch,
+            "commitSha": pushed_sha,
+            "shortSha": pushed_sha[:10],
+            "baseSha": base_sha,
+            "remoteShaBefore": remote_sha,
+            "syncedAt": _now_iso(),
+            "syncedBy": actor,
+            "fileCount": len(eligible_paths),
+            "excludedCount": int(payload["excludedCount"]),
+            "files": eligible_paths[:200],
+            "worktreePreserved": True,
+        }
+        _atomic_json(_state_dir() / "local-sync.json", record)
+        checked = check_for_updates(actor=actor, automatic=False)
+        return {
+            "ok": True,
+            **record,
+            "message": (
+                f"本地代码已同步到 GitHub {branch}；"
+                + ("受保护文件仍保留在本地，未上传。" if payload["excludedCount"] else "本地工作区已与云端代码一致。")
+            ),
+            "localChanges": local_changes_payload(include_diff=False),
+            "status": checked,
         }
 
 

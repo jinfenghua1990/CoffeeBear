@@ -360,6 +360,20 @@ export type SystemLocalHandoffRecord = {
   worktreePreserved: boolean;
 };
 
+export type SystemLocalSyncRecord = {
+  branch: string;
+  commitSha: string;
+  shortSha: string;
+  baseSha: string;
+  remoteShaBefore: string;
+  syncedAt: string;
+  syncedBy: string;
+  fileCount: number;
+  excludedCount: number;
+  files: string[];
+  worktreePreserved: boolean;
+};
+
 export type SystemLocalChanges = {
   dirty: boolean;
   baseSha: string;
@@ -374,6 +388,7 @@ export type SystemLocalChanges = {
   protectedRules: string[];
   diffPreview?: string;
   lastUpload?: SystemLocalHandoffRecord | null;
+  lastSync?: SystemLocalSyncRecord | null;
   worktreePreserved: boolean;
   checkedAt: string;
 };
@@ -384,6 +399,13 @@ export type SystemLocalUploadResult = SystemLocalHandoffRecord & {
   localChanges: SystemLocalChanges;
 };
 
+export type SystemLocalSyncResult = SystemLocalSyncRecord & {
+  ok: boolean;
+  message: string;
+  localChanges: SystemLocalChanges;
+  status?: SystemUpdateStatus;
+};
+
 export const systemUpdateApi = {
   status: () => jsonFetch<SystemUpdateStatus>("/api/v1/system/update/status"),
   readiness: () => jsonFetch<SystemUpdateReadiness>("/api/v1/system/update/readiness"),
@@ -391,6 +413,8 @@ export const systemUpdateApi = {
     jsonFetch<SystemLocalChanges>(`/api/v1/system/update/local-changes?include_diff=${includeDiff ? "true" : "false"}`),
   uploadLocalChanges: () =>
     jsonFetch<SystemLocalUploadResult>("/api/v1/system/update/local-changes/upload", { method: "POST" }),
+  syncLocalChanges: () =>
+    jsonFetch<SystemLocalSyncResult>("/api/v1/system/update/local-changes/sync", { method: "POST" }),
   check: () => jsonFetch<SystemUpdateStatus>("/api/v1/system/update/check", { method: "POST" }),
   saveSettings: (body: Partial<Pick<SystemUpdateSettings, "enabled" | "mode" | "checkIntervalMinutes" | "autoUpdateHour" | "autoUpdateWindowMinutes" | "autoInstallLevel">>) =>
     jsonFetch<{ ok: boolean; settings: SystemUpdateSettings }>("/api/v1/system/update/settings", {
