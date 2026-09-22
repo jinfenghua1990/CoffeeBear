@@ -273,7 +273,7 @@ def bulk_set_payment_method(
     request: Request,
     db: Session = Depends(get_db),
 ) -> dict:
-    """人工维护进项发票个人垫付标记：personal=个人垫付；空=清除。
+    """人工维护进项发票付款方式：personal=个人垫付；platform_auto_debit=平台自动扣款货款；空=清除。
     对公付款必须由已确认银行付款关联生成，销项发票不适用。"""
     try:
         updated = service.set_invoice_payment_methods(

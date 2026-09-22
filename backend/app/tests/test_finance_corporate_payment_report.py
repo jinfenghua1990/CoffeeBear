@@ -640,3 +640,22 @@ def test_report_exposes_manual_and_derived_payment_method_for_mixed_invoice(db_s
     assert row["manualPaymentMethod"] == "personal"
     assert row["paymentMethod"] == "mixed"
     assert row["paymentMethodLabel"] == "对公 + 个人垫付"
+
+
+def test_report_exposes_platform_auto_debit_as_separate_payment_source(db_session):
+    invoice = TaxInvoice(
+        invoice_key=f"pytest-platform-auto-debit-{uuid4().hex[:10]}",
+        invoice_number=f"INV-PLATFORM-{uuid4().hex[:10]}",
+        direction="input",
+        status="issued",
+        total_amount=Decimal("1000.00"),
+        payment_method="platform_auto_debit",
+    )
+
+    payment_source = service._payment_source(db_session, invoice, "unpaid")
+
+    assert payment_source == (
+        "platform_auto_debit",
+        "平台自动扣款货款",
+        "人工已确认平台自动扣款货款（不经过银行流水）",
+    )

@@ -195,10 +195,11 @@ function outputCategoryLabel(value: string): string {
   return OUTPUT_CATEGORY_META[value]?.label ?? (value || "待判断");
 }
 
-/** 进项发票支付方式：已确认银行付款可推导为对公；无证据保持“未设置”，不自动猜个人垫付。 */
+/** 进项发票支付方式：已确认银行付款可推导为对公；无银行证据时可人工标记个人垫付或平台自动扣款货款。 */
 const PAYMENT_METHOD_META: Record<string, { label: string; cls: string }> = {
   corporate: { label: "对公账户支出", cls: "border-blue-200 bg-blue-50 text-blue-700" },
   personal: { label: "个人垫付", cls: "border-amber-200 bg-amber-50 text-amber-700" },
+  platform_auto_debit: { label: "平台自动扣款货款", cls: "border-cyan-200 bg-cyan-50 text-cyan-700" },
   mixed: { label: "对公 + 个人垫付", cls: "border-violet-200 bg-violet-50 text-violet-700" },
   "": { label: "未设置", cls: "border-slate-200 bg-slate-100 text-slate-500" },
 };
@@ -368,13 +369,13 @@ export default function InvoiceManagementPage() {
       setError(caught instanceof Error ? caught.message : String(caught));
     }
   }
-  async function changePaymentMethod(id: number, paymentMethod: "personal" | "") {
+  async function changePaymentMethod(id: number, paymentMethod: "personal" | "platform_auto_debit" | "") {
     setError("");
     setMessage("");
     try {
       await taxInvoiceApi.bulkSetPaymentMethod([id], paymentMethod);
       await load();
-      setMessage(paymentMethod ? "已标记个人垫付。" : "已清除人工付款方式标记。");
+      setMessage(paymentMethod === "personal" ? "已标记个人垫付。" : paymentMethod === "platform_auto_debit" ? "已标记平台自动扣款货款。" : "已清除人工付款方式标记。");
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : String(caught));
     }
@@ -436,7 +437,7 @@ export default function InvoiceManagementPage() {
       <header className="app-page-header -mx-1 bg-[#f4f7fb]/95 pb-2 backdrop-blur">
         <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
           <h1 className="text-lg font-semibold tracking-tight text-slate-900">发票管理</h1>
-          <p className="text-xs text-slate-500">发票业务匹配、银行付款核对分开管理；进项付款方式以银行证据为准，个人垫付需人工明确</p>
+          <p className="text-xs text-slate-500">发票业务匹配、银行付款核对分开管理；对公付款以银行证据为准，个人垫付或平台自动扣款货款需人工明确</p>
           <Link href="/data-center-import?tab=tax" className="text-xs text-indigo-600 hover:underline">查看原始导入批次与明细</Link>
         </div>
       </header>
@@ -593,13 +594,14 @@ export default function InvoiceManagementPage() {
                     ) : (
                       <select
                         value={row.manualPaymentMethod || ""}
-                        onChange={(event) => void changePaymentMethod(row.id, event.target.value as "personal" | "")}
+                        onChange={(event) => void changePaymentMethod(row.id, event.target.value as "personal" | "platform_auto_debit" | "")}
                         onClick={(event) => event.stopPropagation()}
-                        title={row.bankPaymentStatus === "partial" ? "银行已部分付款；可标记剩余部分是否个人垫付" : "无银行付款证据时可人工标记个人垫付"}
+                        title={row.bankPaymentStatus === "partial" ? "银行已部分付款；可标记剩余部分是否个人垫付" : "无银行付款证据时可标记个人垫付或平台自动扣款货款"}
                         className={`max-w-[150px] rounded-full border px-2 py-0.5 text-[10px] font-medium outline-none ${paymentMethodClass(row.paymentMethod || "")}`}
                       >
                         <option value="">{row.bankPaymentStatus === "partial" ? "对公部分付款" : "未设置"}</option>
                         <option value="personal">{row.bankPaymentStatus === "partial" ? "对公 + 个人垫付" : "个人垫付"}</option>
+                        {(row.bankPaymentStatus === "unmatched" || row.manualPaymentMethod === "platform_auto_debit") && <option value="platform_auto_debit">平台自动扣款货款</option>}
                       </select>
                     )}
                   </td>
@@ -898,11 +900,12 @@ function InvoiceDetailModal({ row, onRefresh, onClose }: { row: TaxInvoiceRow; o
                   <select
                     value={row.manualPaymentMethod || ""}
                     onChange={(event) => void handlePaymentMethodChange(event.target.value)}
-                    title={row.bankPaymentStatus === "partial" ? "银行已部分付款；可标记剩余部分个人垫付" : "可人工标记个人垫付；对公付款必须由银行核对产生"}
+                    title={row.bankPaymentStatus === "partial" ? "银行已部分付款；可标记剩余部分个人垫付" : "可人工标记个人垫付或平台自动扣款货款；对公付款必须由银行核对产生"}
                     className={`cursor-pointer appearance-none whitespace-nowrap rounded-full border py-0.5 pl-2 pr-5 text-[10px] font-medium outline-none ${paymentMethodClass(row.paymentMethod || "")}`}
                   >
                     <option value="">{row.bankPaymentStatus === "partial" ? "对公部分付款" : "付款方式未设置"}</option>
                     <option value="personal">{row.bankPaymentStatus === "partial" ? "对公 + 个人垫付" : "个人垫付"}</option>
+                    {(row.bankPaymentStatus === "unmatched" || row.manualPaymentMethod === "platform_auto_debit") && <option value="platform_auto_debit">平台自动扣款货款</option>}
                   </select>
                   <span className="pointer-events-none absolute right-1.5 text-[8px] text-current opacity-50">▾</span>
                 </span>

@@ -63,6 +63,19 @@ def test_input_invoice_can_be_marked_personal_without_bank_evidence(db_session):
     assert row["bankRemainingAmount"] == "100.00"
 
 
+def test_input_invoice_can_be_marked_platform_auto_debit_without_bank_evidence(db_session):
+    invoice = _invoice(db_session, "input")
+
+    service.set_invoice_payment_methods(
+        db_session, [invoice.id], "platform_auto_debit", actor="pytest"
+    )
+
+    row = _listed(db_session, invoice.id)
+    assert row["manualPaymentMethod"] == "platform_auto_debit"
+    assert row["paymentMethod"] == "platform_auto_debit"
+    assert row["bankPaymentStatus"] == "unmatched"
+
+
 def test_input_invoice_cannot_fake_corporate_payment_manually(db_session):
     invoice = _invoice(db_session, "input")
 

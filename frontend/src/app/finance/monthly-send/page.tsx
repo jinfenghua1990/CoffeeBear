@@ -248,7 +248,7 @@ type CorporateInvoiceRow = {
   bankReconciliationStatus?: "paid" | "partial" | "unpaid" | "not_applicable" | "overpaid_after_red" | "red_overpayment_settled" | string;
   bankReconciliationApplicable?: boolean;
   bankReconciliationReason?: string;
-  paymentSource: "corporate" | "personal" | "mixed" | "not_applicable" | string;
+  paymentSource: "corporate" | "personal" | "platform_auto_debit" | "mixed" | "not_applicable" | string;
   paymentSourceLabel: string;
   expenseNature: string;
   expenseNatureLabel: string;
@@ -295,6 +295,7 @@ type CorporatePaymentReport = {
     notApplicableInvoiceCount?: number;
     corporateInvoiceCount?: number;
     personalInvoiceCount?: number;
+    platformAutoDebitInvoiceCount?: number;
     mixedInvoiceCount?: number;
     notApplicablePaymentCount?: number;
     personalInferredAmount?: string;
@@ -1124,6 +1125,7 @@ export default function MonthlySendPage() {
               notApplicableInvoiceCount: viewInvoices.filter((row) => status(row) === "not_applicable").length,
               corporateInvoiceCount: viewInvoices.filter((row) => row.paymentSource === "corporate").length,
               personalInvoiceCount: viewInvoices.filter((row) => row.paymentSource === "personal").length,
+              platformAutoDebitInvoiceCount: viewInvoices.filter((row) => row.paymentSource === "platform_auto_debit").length,
               mixedInvoiceCount: viewInvoices.filter((row) => row.paymentSource === "mixed").length,
               notApplicablePaymentCount: viewInvoices.filter((row) => row.paymentSource === "not_applicable").length,
               personalInferredAmount: viewInvoices
@@ -1141,11 +1143,12 @@ export default function MonthlySendPage() {
 
     return (
       <>
-        {corporatePayment && viewSummary && <div className="grid grid-cols-2 gap-px bg-slate-100 sm:grid-cols-6">
+        {corporatePayment && viewSummary && <div className="grid grid-cols-2 gap-px bg-slate-100 sm:grid-cols-7">
           {([
             ["发票价税合计", money(viewSummary.invoiceTotal), `${viewSummary.invoiceCount} 张进项票`],
             ["对公支付", money(viewSummary.allocatedTotal), `${viewSummary.corporateInvoiceCount || 0} 张对公 · ${viewSummary.paymentCount} 笔银行流水`],
             ["个人支付", money(viewSummary.personalInferredAmount ?? viewSummary.outstandingTotal), `${viewSummary.personalInvoiceCount || 0} 张个人支付`],
+            ["平台扣款", String(viewSummary.platformAutoDebitInvoiceCount || 0), "张平台自动扣款货款"],
             ["红冲待处理", money(viewSummary.redSettlementRemainingAmount || viewSummary.overpaidAfterRedAmount || 0), `${viewSummary.crossPeriodRedCount || 0} 张跨期红字 · ${viewSummary.overpaidAfterRedCount || 0} 张超额付款`],
             ["主体不符", String(viewSummary.companyMismatchInvoiceCount || 0), money(viewSummary.companyMismatchInvoiceAmount || 0)],
             ["费用性质", String(Object.keys(viewSummary.expenseNatureCounts || {}).length), "类"],
@@ -1160,7 +1163,7 @@ export default function MonthlySendPage() {
               </tr></thead>
               <tbody className="divide-y divide-slate-100">{viewInvoices.map((row) => {
                 const checked = selection ? selection.selected.includes(row.invoiceKey) : true;
-                return <tr key={row.invoiceId} className={selection && !checked ? "bg-slate-50/70 text-slate-400" : row.invoiceColor === "red" ? "bg-rose-50/35" : row.redStatus === "fully_red_offset" ? "bg-violet-50/25" : row.paymentSource === "personal" ? "bg-amber-50/25" : ""}>
+                return <tr key={row.invoiceId} className={selection && !checked ? "bg-slate-50/70 text-slate-400" : row.invoiceColor === "red" ? "bg-rose-50/35" : row.redStatus === "fully_red_offset" ? "bg-violet-50/25" : row.paymentSource === "personal" ? "bg-amber-50/25" : row.paymentSource === "platform_auto_debit" ? "bg-cyan-50/25" : ""}>
                 {selection && <td className="px-3 py-2.5"><input type="checkbox" checked={checked} onChange={() => selection.onToggle(row.invoiceKey)} aria-label={`选择发票 ${row.invoiceNumber}`} className="h-4 w-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500" /></td>}
                 <td className="whitespace-nowrap px-3 py-2.5 text-slate-600">{row.invoiceDate || "—"}</td>
                 <td className="max-w-[220px] px-3 py-2.5"><div className="truncate font-medium text-slate-800">{row.supplierName || "—"}</div><div className="mt-0.5 truncate font-mono text-[10px] text-slate-400">{row.supplierTaxId || ""}</div></td>
@@ -1173,12 +1176,12 @@ export default function MonthlySendPage() {
                   {row.redRelatedInvoiceNo && <div className="mt-1 text-[10px] text-slate-400">{row.invoiceColor === "red" ? "冲销蓝票" : "对应红票"} · <span className="font-mono">{row.redRelatedInvoiceNo}</span></div>}
                 </td>
                 <td className="px-3 py-2.5"><div className="font-medium text-slate-700">{row.expenseNatureLabel || "待分类"}</div><div className="mt-0.5 text-[10px] text-slate-400">{row.invoiceColor === "red" ? "红冲 · " : ""}{row.expenseNatureBasis || ""}</div></td>
-                <td className="px-3 py-2.5"><span className={`rounded-full px-2 py-1 text-[10px] font-medium ${row.paymentSource === "corporate" ? "bg-emerald-50 text-emerald-700" : row.paymentSource === "personal" ? "bg-amber-50 text-amber-700" : row.paymentSource === "mixed" ? "bg-blue-50 text-blue-700" : "bg-slate-100 text-slate-500"}`}>{row.paymentSourceLabel || "—"}</span></td>
+                <td className="px-3 py-2.5"><span className={`rounded-full px-2 py-1 text-[10px] font-medium ${row.paymentSource === "corporate" ? "bg-emerald-50 text-emerald-700" : row.paymentSource === "personal" ? "bg-amber-50 text-amber-700" : row.paymentSource === "platform_auto_debit" ? "bg-cyan-50 text-cyan-700" : row.paymentSource === "mixed" ? "bg-blue-50 text-blue-700" : "bg-slate-100 text-slate-500"}`}>{row.paymentSourceLabel || "—"}</span></td>
                 <td className={`px-3 py-2.5 text-right font-semibold tabular-nums ${row.invoiceColor === "red" ? "text-rose-700" : "text-slate-800"}`}>{money(row.invoiceTotalAmount)}</td>
                 <td className="px-3 py-2.5 text-right tabular-nums text-emerald-700">{row.paymentSource === "not_applicable" ? <span className="text-slate-300">—</span> : money(row.invoiceCorporatePaidTotal)}</td>
-                <td className="px-3 py-2.5"><div className="space-y-1">{row.payments.length ? row.payments.map((payment) => <div key={payment.linkId} className="text-[11px] text-slate-600"><span>{payment.paymentDate}</span><span className="mx-1 text-slate-300">·</span><span>{money(payment.allocatedAmount)}</span><div className="text-[10px] text-slate-400">{payment.paymentAccount || payment.paymentAccountName || "未记录账户"}{payment.voucherNo ? ` · ${payment.voucherNo}` : ""}</div></div>) : row.paymentSource === "personal" ? <span className="text-amber-600">无对公流水 · 按个人支付</span> : row.paymentSource === "not_applicable" ? <span className="text-slate-400" title={row.bankReconciliationReason || "该发票不参与银行付款核对"}>不适用</span> : <span className="text-slate-300">未记录银行付款</span>}{corporateBankStatus(row) === "overpaid_after_red" && <div className="rounded bg-rose-50 px-2 py-1 text-[10px] font-medium text-rose-700">红冲后历史超额 {money(row.invoiceOverpaidAmount)} · 当前待处理 {money(row.invoiceOverpaidUnsettledAmount || row.invoiceOverpaidAmount)}</div>}{corporateBankStatus(row) === "red_overpayment_settled" && <div className="rounded bg-emerald-50 px-2 py-1 text-[10px] font-medium text-emerald-700">红冲超额 {money(row.invoiceOverpaidAmount)} 已完成退款/冲抵</div>}{row.redCrossPeriod && <div className="text-[10px] text-violet-600">跨期红冲 · 原蓝票账期 {row.redRelatedInvoicePeriod || "待核"}</div>}</div></td>
+                <td className="px-3 py-2.5"><div className="space-y-1">{row.payments.length ? row.payments.map((payment) => <div key={payment.linkId} className="text-[11px] text-slate-600"><span>{payment.paymentDate}</span><span className="mx-1 text-slate-300">·</span><span>{money(payment.allocatedAmount)}</span><div className="text-[10px] text-slate-400">{payment.paymentAccount || payment.paymentAccountName || "未记录账户"}{payment.voucherNo ? ` · ${payment.voucherNo}` : ""}</div></div>) : row.paymentSource === "personal" ? <span className="text-amber-600">无对公流水 · 按个人支付</span> : row.paymentSource === "platform_auto_debit" ? <span className="text-cyan-700">平台自动扣款货款 · 无银行流水</span> : row.paymentSource === "not_applicable" ? <span className="text-slate-400" title={row.bankReconciliationReason || "该发票不参与银行付款核对"}>不适用</span> : <span className="text-slate-300">未记录银行付款</span>}{corporateBankStatus(row) === "overpaid_after_red" && <div className="rounded bg-rose-50 px-2 py-1 text-[10px] font-medium text-rose-700">红冲后历史超额 {money(row.invoiceOverpaidAmount)} · 当前待处理 {money(row.invoiceOverpaidUnsettledAmount || row.invoiceOverpaidAmount)}</div>}{corporateBankStatus(row) === "red_overpayment_settled" && <div className="rounded bg-emerald-50 px-2 py-1 text-[10px] font-medium text-emerald-700">红冲超额 {money(row.invoiceOverpaidAmount)} 已完成退款/冲抵</div>}{row.redCrossPeriod && <div className="text-[10px] text-violet-600">跨期红冲 · 原蓝票账期 {row.redRelatedInvoicePeriod || "待核"}</div>}</div></td>
                 <td className="max-w-[260px] px-3 py-2.5 text-slate-600">{row.purchaseOrderNos.join("、") || "—"}</td>
-                <td className="px-3 py-2.5 text-right">{readOnly ? <span className="text-[11px] text-slate-300">只读预览</span> : row.paymentSource === "not_applicable" ? <span className="text-[11px] text-slate-300">—</span> : <button type="button" onClick={goMatch} className="rounded-md border border-blue-200 px-2.5 py-1.5 text-[11px] font-medium text-blue-600 hover:bg-blue-50">{row.paymentSource === "corporate" ? "查看银行流水" : "匹配银行流水"}</button>}</td>
+                <td className="px-3 py-2.5 text-right">{readOnly ? <span className="text-[11px] text-slate-300">只读预览</span> : row.paymentSource === "not_applicable" ? <span className="text-[11px] text-slate-300">—</span> : row.paymentSource === "platform_auto_debit" ? <span className="text-[11px] font-medium text-cyan-700">平台扣款</span> : <button type="button" onClick={goMatch} className="rounded-md border border-blue-200 px-2.5 py-1.5 text-[11px] font-medium text-blue-600 hover:bg-blue-50">{row.paymentSource === "corporate" ? "查看银行流水" : "匹配银行流水"}</button>}</td>
               </tr>;
               })}</tbody>
             </table>
@@ -1419,7 +1422,7 @@ export default function MonthlySendPage() {
         <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 px-4 py-4">
           <div>
             <h2 className="text-base font-semibold text-slate-900">{sel?.month || ""}月-已收票付款明细</h2>
-            <p className="mt-1 text-xs text-slate-400">{corporateView === "adjust" ? "财务主视图按“支付方式 + 费用性质”归纳：银行流水匹配成功为对公支付，无对公流水的有效进项票按个人支付；对公行同步展示付款时间、账号、凭证和金额。" : `发送前只读预览 · ${corporatePayment?.adjusted ? `当前保存版本 v${corporatePayment.version || "—"}，显示 ${corporatePayment.selectedCount || 0}/${corporatePayment.sourceCount || 0} 张发票` : "尚未人工调整，按当前全部发票发送"}；是否纳入本次发送以月结清单勾选状态为准。`}</p>
+            <p className="mt-1 text-xs text-slate-400">{corporateView === "adjust" ? "财务主视图按“支付方式 + 费用性质”归纳：银行流水匹配成功为对公支付，无对公流水的有效进项票默认按个人支付；人工标记的平台自动扣款货款单独列示；对公行同步展示付款时间、账号、凭证和金额。" : `发送前只读预览 · ${corporatePayment?.adjusted ? `当前保存版本 v${corporatePayment.version || "—"}，显示 ${corporatePayment.selectedCount || 0}/${corporatePayment.sourceCount || 0} 张发票` : "尚未人工调整，按当前全部发票发送"}；是否纳入本次发送以月结清单勾选状态为准。`}</p>
           </div>
           <div className="flex flex-wrap items-center gap-2">
             <div className="flex overflow-hidden rounded-lg border border-slate-200 bg-white text-xs">

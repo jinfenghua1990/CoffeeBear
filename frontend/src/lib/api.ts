@@ -2143,10 +2143,10 @@ export type TaxInvoiceRow = {
   verified: boolean;
   /** 认证所属月份，如 2026-08 */
   verifiedMonth: string;
-  /** 进项发票最终付款方式：corporate=对公；personal=个人垫付；mixed=对公+个人；空=未设置。销项不适用。 */
-  paymentMethod: "corporate" | "personal" | "mixed" | "";
-  /** 人工补充字段只允许 personal/空；corporate/mixed 必须由银行付款事实派生。 */
-  manualPaymentMethod: "personal" | "";
+  /** 进项发票最终付款方式：corporate=对公；personal=个人垫付；platform_auto_debit=平台自动扣款货款；mixed=对公+个人；空=未设置。销项不适用。 */
+  paymentMethod: "corporate" | "personal" | "platform_auto_debit" | "mixed" | "";
+  /** 人工补充字段：personal=个人垫付；platform_auto_debit=平台自动扣款货款；空=未设置。 */
+  manualPaymentMethod: "personal" | "platform_auto_debit" | "";
   /** 凭证颜色与红冲生命周期分离：blue=蓝字原票，red=红字冲销票。 */
   invoiceColor: "blue" | "red" | "unknown" | string;
   invoiceStatusLabel: string;

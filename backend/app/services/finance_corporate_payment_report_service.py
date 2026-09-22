@@ -1,4 +1,4 @@
-"""月度「已收票付款方式核对」清单（对公 / 个人 / 混合）。
+"""月度「已收票付款方式核对」清单（对公 / 个人 / 平台扣款 / 混合）。
 
 以已经落库的银行付款↔进项发票关联为唯一付款事实，并按发票展示采购订单关联。
 当月进项发票全部保留用于财务交付，但只有有效、正数金额发票参与银行付款核对；
@@ -35,6 +35,7 @@ TARGET_TYPE = "bank_transaction"
 _PAYMENT_SOURCE_LABELS = {
     "corporate": "对公支付",
     "personal": "个人支付",
+    "platform_auto_debit": "平台自动扣款货款",
     "mixed": "混合支付",
     "not_applicable": "不适用",
 }
@@ -99,6 +100,8 @@ def _payment_source(
             if invoice.payment_method == "personal"
             else "未匹配到对公银行支出流水，按月结规则系统推定"
         )
+    elif key == "platform_auto_debit":
+        basis = "人工已确认平台自动扣款货款（不经过银行流水）"
     else:
         basis = tax_invoice_service.bank_payment_reconciliation_ineligible_reason(invoice, db=db)
 
@@ -107,6 +110,8 @@ def _payment_source(
         label = "个人支付（系统推定）"
     elif key == "personal":
         label = "个人支付（已确认）"
+    elif key == "platform_auto_debit":
+        label = "平台自动扣款货款"
     elif key == "mixed" and invoice.payment_method != "personal":
         label = "混合支付（系统推定）"
     return key, label, basis
@@ -608,6 +613,7 @@ def build_report(
             ),
             "corporateInvoiceCount": sum(1 for row in invoice_rows if row["paymentSource"] == "corporate"),
             "personalInvoiceCount": sum(1 for row in invoice_rows if row["paymentSource"] == "personal"),
+            "platformAutoDebitInvoiceCount": sum(1 for row in invoice_rows if row["paymentSource"] == "platform_auto_debit"),
             "mixedInvoiceCount": sum(1 for row in invoice_rows if row["paymentSource"] == "mixed"),
             "notApplicablePaymentCount": sum(
                 1 for row in invoice_rows if row["paymentSource"] == "not_applicable"
@@ -808,6 +814,7 @@ def apply_invoice_selection(report: dict[str, Any], selected_keys: list[str]) ->
         "notApplicableInvoiceCount": sum(1 for row in invoice_rows if status_of(row) == "not_applicable"),
         "corporateInvoiceCount": sum(1 for row in invoice_rows if row.get("paymentSource") == "corporate"),
         "personalInvoiceCount": sum(1 for row in invoice_rows if row.get("paymentSource") == "personal"),
+        "platformAutoDebitInvoiceCount": sum(1 for row in invoice_rows if row.get("paymentSource") == "platform_auto_debit"),
         "mixedInvoiceCount": sum(1 for row in invoice_rows if row.get("paymentSource") == "mixed"),
         "notApplicablePaymentCount": sum(
             1 for row in invoice_rows if row.get("paymentSource") == "not_applicable"
@@ -900,6 +907,8 @@ def corporate_payment_xlsx(report: dict[str, Any]) -> bytes:
             (
                 None
                 if bank_status == "not_applicable"
+                else 0
+                if row.get("paymentSource") == "platform_auto_debit"
                 else float(_dec(row["invoiceOutstandingAmount"]))
             ),
             "、".join(str(payment.get("paymentDate") or "") for payment in payments),
@@ -919,6 +928,8 @@ def corporate_payment_xlsx(report: dict[str, Any]) -> bytes:
                 if bank_status == "partial"
                 else "不适用"
                 if bank_status == "not_applicable"
+                else "平台自动扣款货款"
+                if row.get("paymentSource") == "platform_auto_debit"
                 else "未匹配（按个人支付）"
             ),
         ])
@@ -946,6 +957,7 @@ def corporate_payment_xlsx(report: dict[str, Any]) -> bytes:
     summary.append(["个人支付/未对公匹配金额", float(_dec(s.get("personalInferredAmount", s.get("outstandingTotal"))))])
     summary.append(["对公支付发票张数", s.get("corporateInvoiceCount", 0)])
     summary.append(["个人支付发票张数", s.get("personalInvoiceCount", 0)])
+    summary.append(["平台自动扣款货款发票张数", s.get("platformAutoDebitInvoiceCount", 0)])
     summary.append(["混合支付发票张数", s.get("mixedInvoiceCount", 0)])
     summary.append(["支付方式不适用发票张数", s.get("notApplicablePaymentCount", 0)])
     summary.append(["关联银行付款笔数", s.get("paymentCount", 0)])
