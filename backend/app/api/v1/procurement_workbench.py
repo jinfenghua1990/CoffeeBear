@@ -78,13 +78,18 @@ def orders(
 
 @router.get("/invoice-reconciliation")
 def invoice_reconciliation(
-    supplier: str = Query("", description="只看该供应商（宽松匹配，供供应商画像用）"),
+    partner_id: int | None = Query(None, ge=1, description="V2 统一往来主体 ID（优先）"),
+    supplier: str = Query("", description="兼容旧数据：按供应商名称过滤"),
     db: Session = Depends(get_db),
 ) -> dict:
-    """发票维度对账：按开票日期限制可用订单，再按订单日期 FIFO 多单配平（纯推导，不落库）。"""
+    """发票维度对账：canonical partner 优先，再按开票日期/FIFO 多单配平（纯推导）。"""
     from app.services import invoice_reconciliation
 
-    return invoice_reconciliation.reconcile(db, supplier=supplier or None)
+    return invoice_reconciliation.reconcile(
+        db,
+        supplier=supplier or None,
+        partner_id=partner_id,
+    )
 
 
 @router.post("/invoice-match")
@@ -321,6 +326,15 @@ def supplier_list(
 ) -> dict:
     """供应商聚合列表（管理视角）。"""
     return service.suppliers(db, limit=limit, offset=offset)
+
+
+@router.get("/suppliers/by-partner/{partner_id}")
+def supplier_workbench_by_partner(partner_id: int, db: Session = Depends(get_db)) -> dict:
+    """V2：按唯一往来主体 ID 查看供应商历史，名称只用于展示。"""
+    data = service.supplier_workbench_by_partner(db, partner_id)
+    if data is None:
+        raise HTTPException(status_code=404, detail="供应商不存在或暂无采购事实")
+    return data
 
 
 @router.get("/suppliers/{supplier_name}")

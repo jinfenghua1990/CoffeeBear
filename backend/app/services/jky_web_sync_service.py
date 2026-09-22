@@ -631,6 +631,21 @@ def sync_all(
 
     stats["remarkMatch"] = run_verified_remark_match(db, actor=actor)
 
+    # V2 主数据：销售客户、采购入库供应商同步后立即物化 canonical partner FK。
+    try:
+        from app.services.partner_master_service import rebuild_partner_master
+
+        stats["partnerMaster"] = rebuild_partner_master(
+            db,
+            actor=actor,
+            run_payment_match=False,
+        )
+        db.commit()
+    except Exception as exc:
+        db.rollback()
+        errors.append(f"统一往来主体: {exc}")
+        stats["partnerMaster"] = {"status": "failed", "error": str(exc)[:500]}
+
     # 状态机：登录态问题优先；否则有失败→partial，全成功→success
     if session_status == SESSION_NEED_LOGIN:
         status = "need_login"

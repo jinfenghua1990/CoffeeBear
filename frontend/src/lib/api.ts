@@ -1344,6 +1344,7 @@ export type JackyunFileImportRow = {
 
 export type SupplierRecord = {
   id: number;
+  partnerId: number | null;
   name: string;
   platform: string;
   externalShopId: string;
@@ -1503,6 +1504,19 @@ export type BusinessPartnerDetail = BusinessPartnerListItem & {
   }>;
 };
 
+export type PartnerReferenceCoverage = {
+  sources: Record<string, {
+    total: number;
+    linked: number;
+    unlinked: number;
+    coverage: number;
+  }>;
+  totalFacts: number;
+  linkedFacts: number;
+  unlinkedFacts: number;
+  coverage: number;
+};
+
 export type BusinessPartnerInput = {
   name: string;
   roles: BusinessPartnerRole[];
@@ -1524,6 +1538,8 @@ export const businessPartnerApi = {
       `/api/v1/finance/partners?keyword=${encodeURIComponent(keyword)}&role=${encodeURIComponent(role)}`,
     ),
   detail: (id: number) => jsonFetch<BusinessPartnerDetail>(`/api/v1/finance/partners/${id}`),
+  coverage: () =>
+    jsonFetch<PartnerReferenceCoverage>("/api/v1/finance/partners/coverage"),
   recheck: (id: number) => jsonFetch<{
     ok: boolean;
     partnerId: number;
@@ -2829,6 +2845,7 @@ export type WorkbenchOrderItem = {
   /** 人工覆盖的类型（goods/consumable/空=自动判定） */
   orderKindOverride?: string;
   supplier: string;
+  supplierPartnerId?: number | null;
   amount: number | null;
   paidAmount?: number | null;
   freight: number | null;
@@ -2894,6 +2911,7 @@ export type WorkbenchOrder = {
   /** 人工覆盖的类型（goods/consumable/空=自动判定） */
   orderKindOverride?: string;
   supplier: string | null;
+  supplierPartnerId?: number | null;
   buyer: string | null;
   amount: number | null;
   goodsTotal: number | null;
@@ -2967,6 +2985,7 @@ export type WorkbenchDetail = {
 };
 
 export type WorkbenchSupplierSummary = {
+  partnerId: number | null;
   supplierName: string;
   orderCount: number;
   totalPurchase: number;
@@ -2985,6 +3004,7 @@ export type InvoiceReconciliation = {
   matchingRule: "invoice_issue_date_cutoff_then_order_date_fifo" | string;
   skippedZeroOrders: number;
   suppliers: Array<{
+    partnerId?: number | null; identityKey?: string;
     supplier: string; supplierNorm: string; hasOrders: boolean;
     orderCount: number; orderTotal: number; invoiceCount: number; invoiceTotal: number;
     matchedTotal: number; remainingOrders: number; remainingOrderTotal: number;
@@ -3007,7 +3027,7 @@ export type InvoiceReconciliation = {
         source: "manual" | "source_ref" | "auto"; linkId?: number }>;
     }> }>;
   }>;
-  expenseSellers: Array<{ seller: string; invoiceCount: number; invoiceTotal: number }>;
+  expenseSellers: Array<{ partnerId?: number | null; seller: string; invoiceCount: number; invoiceTotal: number }>;
 };
 
 export const procurementWorkbenchApi = {
@@ -3081,11 +3101,15 @@ export const procurementWorkbenchApi = {
       `/api/v1/procurement-workbench/orders/${orderId}/kind-override`,
       { method: "PATCH", body: JSON.stringify({ kind }) }
     ),
-  /** 发票维度对账：进项发票按供应商 FIFO 顺序配平采购订单（纯推导） */
-  invoiceReconciliation: (supplier?: string) =>
-    jsonFetch<import("./api").InvoiceReconciliation>(
-      `/api/v1/procurement-workbench/invoice-reconciliation${supplier ? `?supplier=${encodeURIComponent(supplier)}` : ""}`
-    ),
+  /** 发票维度对账：V2 以 canonical partnerId 为主，supplier 仅作历史兼容。 */
+  invoiceReconciliation: (params?: { partnerId?: number; supplier?: string }) => {
+    const q = new URLSearchParams();
+    if (params?.partnerId != null) q.set("partner_id", String(params.partnerId));
+    if (params?.supplier) q.set("supplier", params.supplier);
+    return jsonFetch<import("./api").InvoiceReconciliation>(
+      `/api/v1/procurement-workbench/invoice-reconciliation${q.toString() ? `?${q}` : ""}`
+    );
+  },
   /** 供应商画像手工微调：把采购订单挂到进项发票（manual 关联，落库） */
   createInvoiceMatch: (invoiceId: number, poId: number) =>
     jsonFetch<{ ok: boolean; id: number }>("/api/v1/procurement-workbench/invoice-match", {
@@ -3102,6 +3126,10 @@ export const procurementWorkbenchApi = {
   supplierDetail: (supplierName: string) =>
     jsonFetch<WorkbenchSupplierDetail>(
       `/api/v1/procurement-workbench/suppliers/${encodeURIComponent(supplierName)}`
+    ),
+  supplierDetailByPartner: (partnerId: number) =>
+    jsonFetch<WorkbenchSupplierDetail>(
+      `/api/v1/procurement-workbench/suppliers/by-partner/${partnerId}`
     ),
   /** 供应商改名/归一：该供应商全部订单统一改为新名称，同名自动合并（双副本同步+审计） */
   renameSupplier: (oldName: string, newName: string) =>

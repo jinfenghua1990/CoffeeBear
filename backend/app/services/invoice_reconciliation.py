@@ -5,7 +5,7 @@
 累加到与发票票面金额一致即"对上了"——这张发票覆盖的订单一目了然。
 
 规则：
-- 按**归一化供应商名**分组（发票 seller_name ↔ 订单 supplier_name）；
+- V2 按**canonical partner_id**分组；仅对尚未物化的历史数据回退严格名称归一化；
 - 组内订单按下单时间升序、发票按开票日期升序；
 - 发票按开票日期升序；每张发票只匹配“开票日当天及之前”的采购订单；
 - 符合日期条件的订单按下单日期升序消耗金额，直到发票票面金额耗尽（容差 ±0.05 元）；
@@ -26,6 +26,7 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from app.models.alibaba1688_import import Alibaba1688Order
+from app.models.business_partner import BusinessPartner
 from app.models.purchase import ExternalPurchaseOrder, JackyunPurchaseOrderLink
 from app.models.tax import TaxInvoice, TaxInvoiceLink
 
@@ -181,15 +182,27 @@ def _explicit_link_map(db: Session, inv_ids: list[int], po_rows: list) -> dict[i
     return result
 
 
-def reconcile(db: Session, supplier: str | None = None) -> dict[str, Any]:
-    """supplier 传入时只输出该供应商的分组（供供应商画像的发票匹配清单使用）。"""
+def reconcile(
+    db: Session,
+    supplier: str | None = None,
+    partner_id: int | None = None,
+) -> dict[str, Any]:
+    """按 canonical partner 优先做 FIFO 对账；名称只作为旧数据兼容 fallback。"""
+    from app.services import business_partner_service
+
+    target_partner_id = int(partner_id) if partner_id else None
     target_norm = normalize_supplier(supplier) if supplier else ""
+    if target_partner_id is None and supplier:
+        resolution = business_partner_service.SyncContext(db).index.resolve(name=supplier)
+        if resolution.partner is not None:
+            target_partner_id = int(resolution.partner.id)
     po_rows = (
         db.query(
             ExternalPurchaseOrder.id,
             ExternalPurchaseOrder.external_order_id,
             ExternalPurchaseOrder.platform,
             ExternalPurchaseOrder.supplier_name,
+            ExternalPurchaseOrder.supplier_partner_id,
             ExternalPurchaseOrder.ordered_at,
             ExternalPurchaseOrder.order_amount,
             ExternalPurchaseOrder.paid_amount,
@@ -224,12 +237,56 @@ def reconcile(db: Session, supplier: str | None = None) -> dict[str, Any]:
             continue
         effective_amount_by_invoice[invoice.id] = amount
         inv_rows.append(invoice)
-    if supplier:
-        # 只保留与目标供应商宽松匹配的订单/发票，缩小配平范围
+    if target_partner_id is not None:
+        partner = db.get(BusinessPartner, target_partner_id)
+        partner_norm = normalize_supplier(partner.name) if partner is not None else ""
+        po_rows = [
+            r for r in po_rows
+            if r.supplier_partner_id == target_partner_id
+            or (
+                r.supplier_partner_id is None
+                and partner_norm
+                and _matches(normalize_supplier(r.supplier_name), partner_norm)
+            )
+        ]
+        inv_rows = [
+            v for v in inv_rows
+            if v.seller_partner_id == target_partner_id
+            or (
+                v.seller_partner_id is None
+                and partner_norm
+                and _matches(normalize_supplier(v.seller_name), partner_norm)
+            )
+        ]
+    elif supplier:
         po_rows = [r for r in po_rows if _matches(normalize_supplier(r.supplier_name), target_norm)]
         inv_rows = [v for v in inv_rows if _matches(normalize_supplier(v.seller_name), target_norm)]
 
-    # 按归一化供应商分组；订单池用 list，队首订单可被多张发票渐进消耗；
+    partner_ids = {
+        int(value)
+        for value in [
+            *(r.supplier_partner_id for r in po_rows),
+            *(v.seller_partner_id for v in inv_rows),
+            target_partner_id,
+        ]
+        if value is not None
+    }
+    partner_names = {
+        int(row.id): row.name
+        for row in (
+            db.query(BusinessPartner).filter(BusinessPartner.id.in_(partner_ids)).all()
+            if partner_ids else []
+        )
+    }
+
+    def identity_key(partner_value: int | None, name: str | None) -> str:
+        if partner_value is not None:
+            return f"partner:{int(partner_value)}"
+        normalized = normalize_supplier(name)
+        return f"name:{normalized}" if normalized else ""
+
+    # V2 按 canonical partner 分组；无 partner FK 的旧数据才回退严格名称。
+    # 订单池用 list，队首订单可被多张发票渐进消耗；
     # po_all 保存同一批 dict 引用（含 0 金额单），配平结束后 remaining 即该单未配平余量
     po_pool: dict[str, list[dict[str, Any]]] = {}
     po_all: dict[str, list[dict[str, Any]]] = {}
@@ -237,11 +294,31 @@ def reconcile(db: Session, supplier: str | None = None) -> dict[str, Any]:
     po_meta: dict[str, dict[str, Any]] = {}
     skipped_zero = 0
     for r in po_rows:
-        # 供应商模式下统一挂到目标分组：宽松匹配进来的简称/全称归并到一起配平
-        norm = target_norm or normalize_supplier(r.supplier_name)
-        if not norm:
+        key = (
+            f"partner:{target_partner_id}"
+            if target_partner_id is not None
+            else identity_key(r.supplier_partner_id, r.supplier_name)
+        )
+        if not key:
             continue
-        meta = po_meta.setdefault(norm, {"supplier": r.supplier_name, "orderTotal": Decimal("0"), "orderCount": 0})
+        canonical_name = (
+            partner_names.get(int(r.supplier_partner_id))
+            if r.supplier_partner_id is not None
+            else None
+        )
+        meta = po_meta.setdefault(
+            key,
+            {
+                "partnerId": (
+                    int(r.supplier_partner_id)
+                    if r.supplier_partner_id is not None
+                    else target_partner_id
+                ),
+                "supplier": canonical_name or r.supplier_name,
+                "orderTotal": Decimal("0"),
+                "orderCount": 0,
+            },
+        )
         amount = (_dec(r.paid_amount) if r.paid_amount is not None else _dec(r.order_amount)) + _dec(r.adjustment_amount)
         meta["orderTotal"] += amount
         meta["orderCount"] += 1
@@ -251,28 +328,32 @@ def reconcile(db: Session, supplier: str | None = None) -> dict[str, Any]:
             "_orderedAt": r.ordered_at,
             "orderAmount": float(amount), "remaining": amount,
         }
-        po_all.setdefault(norm, []).append(order_entry)
+        po_all.setdefault(key, []).append(order_entry)
         po_entry_by_id[r.id] = order_entry
         if amount <= 0:
             skipped_zero += 1
             continue
-        po_pool.setdefault(norm, []).append(order_entry)
+        po_pool.setdefault(key, []).append(order_entry)
 
     # 明确关联优先：人工 manual 优先于 source_ref；没有明确关联的发票才走 FIFO。
     explicit_map = _explicit_link_map(db, [v.id for v in inv_rows], po_rows)
 
-    # 发票按供应商分组（保持时间升序）；供应商模式下归并到目标分组
+    # 发票同样按 canonical partner 分组；没有 direct FK 的历史数据才回退名称。
     inv_by_supplier: dict[str, list[TaxInvoice]] = {}
     for inv in inv_rows:
-        norm = target_norm or normalize_supplier(inv.seller_name)
-        if norm:
-            inv_by_supplier.setdefault(norm, []).append(inv)
+        key = (
+            f"partner:{target_partner_id}"
+            if target_partner_id is not None
+            else identity_key(inv.seller_partner_id, inv.seller_name)
+        )
+        if key:
+            inv_by_supplier.setdefault(key, []).append(inv)
 
     suppliers_out: list[dict[str, Any]] = []
     expense_sellers: list[dict[str, Any]] = []
-    for norm, invoices in inv_by_supplier.items():
-        pool = po_pool.get(norm, [])
-        meta = po_meta.get(norm)
+    for key, invoices in inv_by_supplier.items():
+        pool = po_pool.get(key, [])
+        meta = po_meta.get(key)
         month_buckets: dict[str, list[dict[str, Any]]] = {}
         inv_total = Decimal("0")
         matched_total = Decimal("0")
@@ -403,9 +484,21 @@ def reconcile(db: Session, supplier: str | None = None) -> dict[str, Any]:
                 "futureOrderCount": future_order_count,
             })
 
+        partner_value = (
+            (meta or {}).get("partnerId")
+            or invoices[0].seller_partner_id
+            or target_partner_id
+        )
+        display_supplier = (
+            partner_names.get(int(partner_value))
+            if partner_value is not None
+            else None
+        ) or (meta or {}).get("supplier") or invoices[0].seller_name
         entry = {
-            "supplier": (meta or {}).get("supplier") or invoices[0].seller_name,
-            "supplierNorm": norm,
+            "partnerId": int(partner_value) if partner_value is not None else None,
+            "supplier": display_supplier,
+            "supplierNorm": normalize_supplier(display_supplier),
+            "identityKey": key,
             "hasOrders": bool(meta),
             "orderCount": (meta or {}).get("orderCount", 0),
             "orderTotal": float((meta or {}).get("orderTotal", Decimal("0"))),
@@ -432,7 +525,7 @@ def reconcile(db: Session, supplier: str | None = None) -> dict[str, Any]:
                     "date": o["date"], "orderAmount": float(_dec(o["orderAmount"])),
                     "remaining": float(o["remaining"]),
                 }
-                for o in po_all.get(norm, [])
+                for o in po_all.get(key, [])
             ],
             "months": [
                 {"month": m, "invoices": month_buckets[m]}
@@ -443,7 +536,9 @@ def reconcile(db: Session, supplier: str | None = None) -> dict[str, Any]:
             suppliers_out.append(entry)
         elif len(invoices) <= 12:  # 无订单的费用类卖方（航司/酒店等），折叠展示
             expense_sellers.append({
-                "seller": invoices[0].seller_name, "invoiceCount": len(invoices),
+                "partnerId": int(partner_value) if partner_value is not None else None,
+                "seller": display_supplier,
+                "invoiceCount": len(invoices),
                 "invoiceTotal": float(inv_total),
             })
 

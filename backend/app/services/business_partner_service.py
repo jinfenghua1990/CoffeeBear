@@ -21,9 +21,11 @@ from app.models.alibaba1688_import import Alibaba1688Order
 from app.models.bank import BankTransaction
 from app.models.business_partner import (
     BusinessPartner,
+    BusinessPartnerBankAccount,
     BusinessPartnerDuplicateReview,
     BusinessPartnerIdentifier,
     BusinessPartnerLink,
+    BusinessPartnerRole,
 )
 from app.models.consumable_purchase import ConsumablePurchase
 from app.models.finance import FinanceLegalEntity
@@ -38,7 +40,10 @@ from app.models.tax import TaxInvoice, TaxInvoiceLink
 
 
 PARTNER_ROLES = {"supplier", "customer", "counterparty"}
-IDENTIFIER_KINDS = {"name", "alias", "former_name", "tax_no", "bank_account", "customer_code"}
+IDENTIFIER_KINDS = {
+    "name", "alias", "former_name", "tax_no", "bank_account",
+    "customer_code", "platform_account",
+}
 SOURCE_LABELS = {
     "supplier": "历史供应商档案",
     "external_purchase_order": "采购订单",
@@ -164,7 +169,31 @@ def _primary_bank_account(rows: list[dict[str, Any]]) -> dict[str, Any]:
     return next((row for row in rows if row.get("is_primary")), rows[0] if rows else {})
 
 
-def _bank_accounts_payload(partner: BusinessPartner) -> list[dict[str, Any]]:
+def _bank_accounts_payload(db: Session, partner: BusinessPartner) -> list[dict[str, Any]]:
+    """Read the relational bank-account master first; JSON is compatibility fallback only."""
+    relation_rows = (
+        db.query(BusinessPartnerBankAccount)
+        .filter(
+            BusinessPartnerBankAccount.partner_id == partner.id,
+            BusinessPartnerBankAccount.status == "active",
+        )
+        .order_by(
+            BusinessPartnerBankAccount.is_primary.desc(),
+            BusinessPartnerBankAccount.id.asc(),
+        )
+        .all()
+    )
+    if relation_rows:
+        return [
+            {
+                "bankName": row.bank_name or "",
+                "accountNo": row.normalized_account_no or normalize_account(row.account_no),
+                "accountName": row.account_name or "",
+                "isPrimary": bool(row.is_primary),
+            }
+            for row in relation_rows
+        ]
+
     raw_rows = partner.bank_accounts if isinstance(partner.bank_accounts, list) else []
     rows: list[dict[str, Any]] = []
     seen: set[str] = set()
@@ -258,6 +287,8 @@ class PartnerIndex:
         self.by_tax: dict[str, set[int]] = defaultdict(set)
         self.by_account: dict[str, set[int]] = defaultdict(set)
         self.by_name: dict[str, set[int]] = defaultdict(set)
+        self.by_customer_code: dict[str, set[int]] = defaultdict(set)
+        self.by_platform_account: dict[str, set[int]] = defaultdict(set)
         self.by_canonical_name: dict[str, set[int]] = defaultdict(set)
         self.by_loose_name: dict[str, set[int]] = defaultdict(set)
         self.add_many(partners)
@@ -279,6 +310,10 @@ class PartnerIndex:
             self.by_tax[value].add(partner_id)
         elif kind == "bank_account":
             self.by_account[value].add(partner_id)
+        elif kind == "customer_code":
+            self.by_customer_code[value].add(partner_id)
+        elif kind == "platform_account":
+            self.by_platform_account[value].add(partner_id)
         elif kind in {"name", "alias", "former_name"}:
             self.by_name[value].add(partner_id)
             if kind == "name":
@@ -292,9 +327,19 @@ class PartnerIndex:
     def _active(ids: Iterable[int], partners: dict[int, BusinessPartner]) -> list[int]:
         return sorted({pid for pid in ids if partners.get(pid) is not None and partners[pid].status == "active"})
 
-    def resolve(self, *, name: str = "", tax_no: str = "", account_no: str = "") -> Resolution:
+    def resolve(
+        self,
+        *,
+        name: str = "",
+        tax_no: str = "",
+        account_no: str = "",
+        customer_code: str = "",
+        platform_account: str = "",
+    ) -> Resolution:
         tax = normalize_tax_no(tax_no)
         account = normalize_account(account_no)
+        customer = normalize_identifier("customer_code", customer_code)
+        platform_id = normalize_identifier("platform_account", platform_account)
         exact_name = normalize_name(name)
 
         if tax:
@@ -310,6 +355,20 @@ class PartnerIndex:
                 return Resolution(self.partners[account_ids[0]], "bank_account", confidence=0.99)
             if len(account_ids) > 1:
                 return Resolution(None, candidates=account_ids)
+
+        if customer:
+            customer_ids = self._active(self.by_customer_code.get(customer, set()), self.partners)
+            if len(customer_ids) == 1:
+                return Resolution(self.partners[customer_ids[0]], "customer_code", confidence=1.0)
+            if len(customer_ids) > 1:
+                return Resolution(None, candidates=customer_ids)
+
+        if platform_id:
+            platform_ids = self._active(self.by_platform_account.get(platform_id, set()), self.partners)
+            if len(platform_ids) == 1:
+                return Resolution(self.partners[platform_ids[0]], "platform_account", confidence=0.995)
+            if len(platform_ids) > 1:
+                return Resolution(None, candidates=platform_ids)
 
         if exact_name:
             canonical_ids = self._active(self.by_canonical_name.get(exact_name, set()), self.partners)
@@ -592,23 +651,41 @@ def _write_link(
 
 
 def _sync_supplier_master(ctx: SyncContext) -> None:
+    """Treat Supplier rows as procurement profiles of a canonical BusinessPartner.
+
+    Multiple Supplier rows (for example different platform shops) may point to one partner.
+    Only the designated legacy_supplier_id profile may drive the canonical display name;
+    other profile names become aliases instead of creating/renaming identities.
+    """
     for supplier in ctx.db.query(Supplier).order_by(Supplier.id).all():
-        partner = next(
-            (row for row in ctx.index.partners.values() if row.legacy_supplier_id == supplier.id),
-            None,
+        partner = (
+            ctx.index.partners.get(int(supplier.partner_id))
+            if supplier.partner_id is not None
+            else None
         )
+        if partner is not None and partner.status == "archived":
+            partner = None
+
+        if partner is None:
+            partner = next(
+                (
+                    row for row in ctx.index.partners.values()
+                    if row.status == "active" and row.legacy_supplier_id == supplier.id
+                ),
+                None,
+            )
+
         if partner is None:
             resolution = ctx.index.resolve(
                 name=supplier.name,
                 tax_no=supplier.tax_no,
                 account_no=supplier.bank_account_no,
             )
-            if resolution.partner is not None and resolution.partner.legacy_supplier_id is None:
+            if resolution.partner is not None:
                 partner = resolution.partner
-                partner.legacy_supplier_id = supplier.id
-                ctx.updated_partners += 1
             else:
-                # 近似候选不自动合并；旧供应商本身是一个真实独立档案。
+                # Ambiguous candidates are not auto-merged. The Supplier profile itself is
+                # a real procurement fact, so it gets an independent canonical partner.
                 partner = _create_partner(
                     ctx,
                     name=supplier.name,
@@ -624,21 +701,26 @@ def _sync_supplier_master(ctx: SyncContext) -> None:
                     address=supplier.address,
                     notes=supplier.notes,
                 )
-        else:
-            # 旧档案是人工维护入口；名称变更以它为准，但把旧名保留为别名。
-            new_name = str(supplier.name or "").strip()
-            if new_name and normalize_name(new_name) != partner.normalized_name:
-                _add_identifier(ctx, partner, kind="alias", value=partner.name, source="supplier")
-                partner.name = new_name
-                partner.normalized_name = normalize_name(new_name)
-                ctx.index.add_identifier(partner.id, "name", partner.normalized_name)
-                ctx.updated_partners += 1
-            if not partner.contact and supplier.contact:
-                partner.contact = supplier.contact
-            if not partner.phone and supplier.phone:
-                partner.phone = supplier.phone
-            if not partner.address and supplier.address:
-                partner.address = supplier.address
+
+        if supplier.partner_id != partner.id:
+            supplier.partner_id = partner.id
+        if partner.legacy_supplier_id is None:
+            partner.legacy_supplier_id = supplier.id
+            ctx.updated_partners += 1
+
+        new_name = str(supplier.name or "").strip()
+        if new_name and normalize_name(new_name) != partner.normalized_name:
+            # V2: Supplier 是渠道/采购画像。即使它曾是 legacy_supplier_id，
+            # 名称也只能作为 alias 参与识别，不能反向重命名 canonical 主体。
+            _add_identifier(ctx, partner, kind="alias", value=new_name, source="supplier")
+
+        if not partner.contact and supplier.contact:
+            partner.contact = supplier.contact
+        if not partner.phone and supplier.phone:
+            partner.phone = supplier.phone
+        if not partner.address and supplier.address:
+            partner.address = supplier.address
+
         _apply_identity(
             ctx,
             partner,
@@ -650,6 +732,14 @@ def _sync_supplier_master(ctx: SyncContext) -> None:
             roles=["supplier"],
             source="supplier",
         )
+        if supplier.external_shop_id:
+            _add_identifier(
+                ctx,
+                partner,
+                kind="platform_account",
+                value=f"{(supplier.platform or 'supplier').strip().lower()}:{supplier.external_shop_id}",
+                source="supplier",
+            )
         _write_link(
             ctx,
             source_type="supplier",
@@ -660,9 +750,8 @@ def _sync_supplier_master(ctx: SyncContext) -> None:
             raw_account_no=supplier.bank_account_no,
             roles=["supplier"],
             force_partner=partner,
-            force_method="legacy_supplier",
+            force_method="supplier_profile",
         )
-
 
 def _sync_procurement_sources(ctx: SyncContext) -> None:
     def source(
@@ -670,10 +759,19 @@ def _sync_procurement_sources(ctx: SyncContext) -> None:
         rows: Iterable[Any],
         *,
         name_getter,
+        partner_id_getter=None,
+        platform_account_getter=None,
     ) -> None:
         for row in rows:
             raw_name = str(name_getter(row) or "").strip()
-            if not raw_name:
+            platform_account = (
+                str(platform_account_getter(row) or "").strip()
+                if platform_account_getter
+                else ""
+            )
+            partner_id = int(partner_id_getter(row) or 0) if partner_id_getter else 0
+            force_partner = ctx.index.partners.get(partner_id) if partner_id else None
+            if not raw_name and not platform_account and force_partner is None:
                 continue
             _write_link(
                 ctx,
@@ -682,38 +780,52 @@ def _sync_procurement_sources(ctx: SyncContext) -> None:
                 relation_role="supplier",
                 raw_name=raw_name,
                 roles=["supplier"],
-                resolution=ctx.index.resolve(name=raw_name),
+                force_partner=force_partner,
+                force_method="direct_partner_fk" if force_partner else None,
+                resolution=None if force_partner else ctx.index.resolve(
+                    name=raw_name,
+                    platform_account=platform_account,
+                ),
             )
 
     source(
         "external_purchase_order",
         ctx.db.query(ExternalPurchaseOrder).all(),
         name_getter=lambda row: row.supplier_name,
+        partner_id_getter=lambda row: row.supplier_partner_id,
     )
     source(
         "alibaba1688_order",
         ctx.db.query(Alibaba1688Order).filter(Alibaba1688Order.row_status != "deleted").all(),
         name_getter=lambda row: row.seller_company_name or row.seller_member_name,
+        partner_id_getter=lambda row: row.supplier_partner_id,
+        platform_account_getter=lambda row: (
+            f"1688:{row.seller_member_name}" if row.seller_member_name else ""
+        ),
     )
     source(
         "jackyun_purchase_order",
         ctx.db.query(JackyunPurchaseOrder).all(),
         name_getter=lambda row: row.supplier_name,
+        partner_id_getter=lambda row: row.supplier_partner_id,
     )
     source(
         "jackyun_purchase_settlement",
         ctx.db.query(JackyunPurchaseSettlement).all(),
         name_getter=lambda row: row.supplier_name,
+        partner_id_getter=lambda row: row.supplier_partner_id,
     )
     source(
         "jackyun_purchase_return",
         ctx.db.query(JackyunPurchaseReturn).all(),
         name_getter=lambda row: row.supplier_name,
+        partner_id_getter=lambda row: row.supplier_partner_id,
     )
     source(
         "consumable_purchase",
         ctx.db.query(ConsumablePurchase).filter(ConsumablePurchase.status != "cancelled").all(),
         name_getter=lambda row: row.supplier_name,
+        partner_id_getter=lambda row: row.supplier_partner_id,
     )
     source(
         "inbound_document",
@@ -721,12 +833,40 @@ def _sync_procurement_sources(ctx: SyncContext) -> None:
             JackyunGoodsDocument.document_type == "inbound"
         ).all(),
         name_getter=lambda row: row.supplier_name,
+        partner_id_getter=lambda row: row.supplier_partner_id,
     )
     source(
         "jky_web_stockin_order",
         ctx.db.query(JkyWebStockinOrder).all(),
         name_getter=lambda row: row.supplier_name,
+        partner_id_getter=lambda row: row.supplier_partner_id,
     )
+
+    # 1688 seller member 是比展示名称更稳定的平台身份；一旦订单已归到主体，
+    # 将其沉淀为 platform_account，后续同 member 的不同店铺名仍回到同一主体。
+    for row in (
+        ctx.db.query(Alibaba1688Order)
+        .filter(Alibaba1688Order.row_status != "deleted")
+        .all()
+    ):
+        member = str(row.seller_member_name or "").strip()
+        if not member:
+            continue
+        link = ctx.link_by_key.get(
+            _source_key("alibaba1688_order", row.id, "supplier")
+        )
+        if link is None or link.partner_id is None or link.status != "linked":
+            continue
+        partner = ctx.index.partners.get(int(link.partner_id))
+        if partner is None or partner.status != "active":
+            continue
+        _add_identifier(
+            ctx,
+            partner,
+            kind="platform_account",
+            value=f"1688:{member}",
+            source="alibaba1688_order",
+        )
 
 
 def _own_entity_keys(db: Session) -> tuple[set[str], set[str]]:
@@ -754,6 +894,7 @@ def _sync_invoice_sources(ctx: SyncContext) -> None:
 
         if not seller_own and (invoice.seller_name or invoice.seller_tax_id):
             role = "supplier" if buyer_own or direction == "input" else "counterparty"
+            force_partner = ctx.index.partners.get(int(invoice.seller_partner_id or 0))
             _write_link(
                 ctx,
                 source_type="tax_invoice",
@@ -762,11 +903,17 @@ def _sync_invoice_sources(ctx: SyncContext) -> None:
                 raw_name=invoice.seller_name,
                 raw_tax_no=invoice.seller_tax_id,
                 roles=[role],
-                resolution=ctx.index.resolve(name=invoice.seller_name, tax_no=invoice.seller_tax_id),
+                force_partner=force_partner,
+                force_method="direct_partner_fk" if force_partner else None,
+                resolution=None if force_partner else ctx.index.resolve(
+                    name=invoice.seller_name,
+                    tax_no=invoice.seller_tax_id,
+                ),
             )
 
         if not buyer_own and (invoice.buyer_name or invoice.buyer_tax_id):
             role = "customer" if seller_own or direction == "output" else "counterparty"
+            force_partner = ctx.index.partners.get(int(invoice.buyer_partner_id or 0))
             _write_link(
                 ctx,
                 source_type="tax_invoice",
@@ -775,7 +922,12 @@ def _sync_invoice_sources(ctx: SyncContext) -> None:
                 raw_name=invoice.buyer_name,
                 raw_tax_no=invoice.buyer_tax_id,
                 roles=[role],
-                resolution=ctx.index.resolve(name=invoice.buyer_name, tax_no=invoice.buyer_tax_id),
+                force_partner=force_partner,
+                force_method="direct_partner_fk" if force_partner else None,
+                resolution=None if force_partner else ctx.index.resolve(
+                    name=invoice.buyer_name,
+                    tax_no=invoice.buyer_tax_id,
+                ),
             )
 
 
@@ -790,9 +942,27 @@ def _active_invoice_partner_ids(ctx: SyncContext, txn_id: int) -> list[int]:
         )
         .all()
     )
-    invoice_ids = {row.invoice_id for row in invoice_links}
+    invoice_ids = {int(row.invoice_id) for row in invoice_links}
     if not invoice_ids:
         return []
+
+    # V2 first uses the direct seller_partner_id on the invoice.
+    direct_ids = {
+        int(partner_id)
+        for (partner_id,) in (
+            ctx.db.query(TaxInvoice.seller_partner_id)
+            .filter(
+                TaxInvoice.id.in_(invoice_ids),
+                TaxInvoice.seller_partner_id.isnot(None),
+            )
+            .all()
+        )
+        if partner_id is not None
+    }
+    if direct_ids:
+        return sorted(direct_ids)
+
+    # Compatibility fallback for pre-materialization data.
     partner_ids = {
         row.partner_id
         for row in ctx.link_by_key.values()
@@ -802,19 +972,36 @@ def _active_invoice_partner_ids(ctx: SyncContext, txn_id: int) -> list[int]:
         and row.status == "linked"
         and row.partner_id is not None
     }
-    return sorted(partner_ids)
+    return sorted(int(value) for value in partner_ids)
 
 
 def _sync_bank_sources(ctx: SyncContext) -> None:
     for txn in ctx.db.query(BankTransaction).all():
+        direct_partner = ctx.index.partners.get(int(txn.counterparty_partner_id or 0))
         invoice_partner_ids = _active_invoice_partner_ids(ctx, txn.id)
         evidence: dict[str, Any] = {"direction": txn.direction or ""}
+        if direct_partner is not None:
+            evidence["directPartnerId"] = direct_partner.id
         if invoice_partner_ids:
             evidence["invoicePartnerIds"] = invoice_partner_ids
         raw_name = str(txn.counterparty_name or "").strip()
         raw_account_no = str(txn.counterparty_account or "").strip()
         # 利息、手续费等没有对方户名和账号的流水不属于任何往来单位，既不建档也不进待确认。
-        if not raw_name and not raw_account_no and not invoice_partner_ids:
+        if not raw_name and not raw_account_no and not invoice_partner_ids and direct_partner is None:
+            continue
+        if direct_partner is not None:
+            _write_link(
+                ctx,
+                source_type="bank_transaction",
+                source_id=txn.id,
+                relation_role="counterparty",
+                raw_name=raw_name,
+                raw_account_no=raw_account_no,
+                roles=["counterparty"],
+                force_partner=direct_partner,
+                force_method="direct_partner_fk",
+                force_evidence=evidence,
+            )
             continue
         if len(invoice_partner_ids) == 1:
             _write_link(
@@ -860,6 +1047,7 @@ def _sync_sales_sources(ctx: SyncContext) -> None:
         customer_name = _customer_name(row)
         if not customer_name and not row.customer_code:
             continue
+        force_partner = ctx.index.partners.get(int(row.customer_partner_id or 0))
         link = _write_link(
             ctx,
             source_type="jky_web_sales_order",
@@ -867,7 +1055,12 @@ def _sync_sales_sources(ctx: SyncContext) -> None:
             relation_role="customer",
             raw_name=customer_name,
             roles=["customer"],
-            resolution=ctx.index.resolve(name=customer_name),
+            force_partner=force_partner,
+            force_method="direct_partner_fk" if force_partner else None,
+            resolution=None if force_partner else ctx.index.resolve(
+                name=customer_name,
+                customer_code=row.customer_code or "",
+            ),
         )
         if link.partner_id and row.customer_code:
             partner = ctx.index.partners[link.partner_id]
@@ -880,20 +1073,32 @@ def _sync_sales_sources(ctx: SyncContext) -> None:
             )
 
 
-def sync_business_partners(db: Session) -> dict[str, int]:
-    """从所有已落库事实增量回填往来单位和关联，不提交事务。"""
+def sync_business_partners(db: Session) -> dict[str, Any]:
+    """从所有已落库事实增量回填统一主体，并物化到业务表 partner 外键。
+
+    BusinessPartnerLink 继续保留审计证据；V2 正常查询路径使用各业务表自己的
+    partner_id/supplier_partner_id/customer_partner_id。
+    """
     ctx = SyncContext(db)
     _sync_supplier_master(ctx)
     _sync_procurement_sources(ctx)
     _sync_invoice_sources(ctx)
     _sync_bank_sources(ctx)
     _sync_sales_sources(ctx)
+
+    # 局部导入避免 partner_reference_service 反向导入本模块形成循环。
+    from app.services.partner_reference_service import materialize_partner_references
+
+    materialized = materialize_partner_references(db)
     return {
         "createdPartners": ctx.created_partners,
         "updatedPartners": ctx.updated_partners,
         "createdLinks": ctx.created_links,
         "updatedLinks": ctx.updated_links,
         "needsReview": ctx.needs_review,
+        "materializedRefs": int(materialized.get("materialized", 0)),
+        "roleRowsCreated": int(materialized.get("rolesCreated", 0)),
+        "bankAccountsChanged": int(materialized.get("bankAccountsChanged", 0)),
     }
 
 
@@ -924,7 +1129,7 @@ def _partner_core(db: Session, partner: BusinessPartner) -> dict[str, Any]:
         "bankName": partner.bank_name or "",
         "bankAccountNo": partner.bank_account_no or "",
         "bankAccountName": partner.bank_account_name or "",
-        "bankAccounts": _bank_accounts_payload(partner),
+        "bankAccounts": _bank_accounts_payload(db, partner),
         "roles": _roles(partner.roles),
         "status": partner.status,
         "notes": partner.notes or "",
@@ -1537,6 +1742,174 @@ def add_identifier(db: Session, partner_id: int, *, kind: str, value: str) -> Bu
     return row
 
 
+def _merge_partner_into(
+    db: Session,
+    *,
+    target: BusinessPartner,
+    source: BusinessPartner,
+    actor: str = "",
+    note: str = "",
+) -> dict[str, Any]:
+    """把重复主档并入唯一主体；原始业务字段不改写，被并档主体仅归档。"""
+    target_tax = normalize_tax_no(target.tax_no)
+    source_tax = normalize_tax_no(source.tax_no)
+    if target_tax and source_tax and target_tax != source_tax:
+        raise ValueError(
+            f"两个档案税号冲突（{target_tax} / {source_tax}），不能直接合并"
+        )
+
+    ctx = SyncContext(db)
+    _add_identifier(ctx, target, kind="former_name", value=source.name, source="master_merge")
+
+    source_identifiers = (
+        db.query(BusinessPartnerIdentifier)
+        .filter(BusinessPartnerIdentifier.partner_id == source.id)
+        .all()
+    )
+    for item in source_identifiers:
+        kind = "former_name" if item.kind == "name" else item.kind
+        if kind not in IDENTIFIER_KINDS:
+            continue
+        _add_identifier(
+            ctx,
+            target,
+            kind=kind,
+            value=item.value,
+            source="master_merge",
+            is_primary=False,
+        )
+
+    target.roles = _roles([*(target.roles or []), *(source.roles or [])])
+    if not target.tax_no and source.tax_no:
+        target.tax_no = source.tax_no
+    if not target.contact and source.contact:
+        target.contact = source.contact
+    if not target.phone and source.phone:
+        target.phone = source.phone
+    if not target.address and source.address:
+        target.address = source.address
+    if not target.notes and source.notes:
+        target.notes = source.notes
+
+    target_accounts = _bank_accounts_payload(db, target)
+    source_accounts = _bank_accounts_payload(db, source)
+    combined: dict[str, dict[str, Any]] = {}
+    for item in [*target_accounts, *source_accounts]:
+        normalized = normalize_account(item.get("accountNo"))
+        if not normalized:
+            continue
+        current = combined.get(normalized)
+        if current is None:
+            combined[normalized] = {
+                "bank_name": item.get("bankName") or "",
+                "account_no": normalized,
+                "account_name": item.get("accountName") or "",
+                "is_primary": bool(item.get("isPrimary")),
+            }
+        else:
+            current["bank_name"] = current["bank_name"] or item.get("bankName") or ""
+            current["account_name"] = current["account_name"] or item.get("accountName") or ""
+            current["is_primary"] = bool(current["is_primary"] or item.get("isPrimary"))
+
+    merged_accounts = list(combined.values())
+    if merged_accounts:
+        current_primary = normalize_account(target.bank_account_no)
+        primary_index = next(
+            (
+                index for index, item in enumerate(merged_accounts)
+                if current_primary and normalize_account(item["account_no"]) == current_primary
+            ),
+            next((index for index, item in enumerate(merged_accounts) if item["is_primary"]), 0),
+        )
+        for index, item in enumerate(merged_accounts):
+            item["is_primary"] = index == primary_index
+        primary = merged_accounts[primary_index]
+        target.bank_accounts = merged_accounts
+        target.bank_name = str(primary.get("bank_name") or "")
+        target.bank_account_no = normalize_account(primary.get("account_no"))
+        target.bank_account_name = str(primary.get("account_name") or "")
+        _replace_manual_identifiers(
+            db,
+            target,
+            kind="bank_account",
+            values=[str(item["account_no"]) for item in merged_accounts],
+            primary_value=target.bank_account_no,
+        )
+
+    for supplier in db.query(Supplier).filter(Supplier.partner_id == source.id).all():
+        supplier.partner_id = target.id
+    if target.legacy_supplier_id is None and source.legacy_supplier_id is not None:
+        target.legacy_supplier_id = source.legacy_supplier_id
+    source.legacy_supplier_id = None
+
+    target_roles = {
+        row.role: row
+        for row in db.query(BusinessPartnerRole)
+        .filter(BusinessPartnerRole.partner_id == target.id)
+        .all()
+    }
+    for row in (
+        db.query(BusinessPartnerRole)
+        .filter(BusinessPartnerRole.partner_id == source.id)
+        .all()
+    ):
+        if row.role in target_roles:
+            db.delete(row)
+        else:
+            row.partner_id = target.id
+            target_roles[row.role] = row
+
+    target_banks = {
+        row.normalized_account_no: row
+        for row in db.query(BusinessPartnerBankAccount)
+        .filter(BusinessPartnerBankAccount.partner_id == target.id)
+        .all()
+    }
+    for row in (
+        db.query(BusinessPartnerBankAccount)
+        .filter(BusinessPartnerBankAccount.partner_id == source.id)
+        .all()
+    ):
+        existing = target_banks.get(row.normalized_account_no)
+        if existing is None:
+            row.partner_id = target.id
+            target_banks[row.normalized_account_no] = row
+            continue
+        existing.bank_name = existing.bank_name or row.bank_name
+        existing.account_name = existing.account_name or row.account_name
+        existing.verified = bool(existing.verified or row.verified)
+        existing.status = "active" if "active" in {existing.status, row.status} else existing.status
+        db.delete(row)
+
+    from app.services.partner_reference_service import (
+        materialize_partner_references,
+        repoint_partner_references,
+    )
+
+    moved = repoint_partner_references(
+        db,
+        from_partner_id=source.id,
+        to_partner_id=target.id,
+    )
+
+    source.status = "archived"
+    merge_note = f"已合并至往来主体 #{target.id} {target.name}"
+    if note:
+        merge_note += f"；{note}"
+    source.notes = (source.notes + "\n" + merge_note).strip() if source.notes else merge_note
+
+    db.flush()
+    materialized = materialize_partner_references(db)
+    return {
+        "targetPartnerId": target.id,
+        "archivedPartnerId": source.id,
+        "movedFacts": int(moved.get("moved", 0)),
+        "movedBySource": moved.get("bySource", {}),
+        "materializedRefs": int(materialized.get("materialized", 0)),
+        "actor": str(actor or ""),
+    }
+
+
 def decide_duplicate(
     db: Session,
     partner_id: int,
@@ -1546,10 +1919,11 @@ def decide_duplicate(
     note: str = "",
     actor: str = "",
 ) -> dict[str, Any]:
-    """人工判断两个档案是否同一主体；确认同一时双向登记曾用名。
+    """人工判断两个档案是否同一真实主体。
 
-    只登记曾用名和判断结果，不移动任何来源记录：两个档案的事实仍然各自可追溯，
-    但之后带旧名的发票/流水会按名称回到本档案。
+    same=True 会执行真正的主档合并：业务表 direct partner FK、审计 links、
+    Supplier 画像、角色和银行账户全部归到 partner_id；other_partner_id 仅归档保留。
+    same=False 只记录“不是同一主体”的人工结论。
     """
     partner = db.get(BusinessPartner, partner_id)
     other = db.get(BusinessPartner, other_partner_id)
@@ -1563,6 +1937,18 @@ def decide_duplicate(
     decision = "same" if same else "different"
     clean_note = str(note or "").strip()
     decided_by = str(actor or "").strip()
+
+    merge_result: dict[str, Any] | None = None
+    if same:
+        # 先做税号冲突等安全检查；失败时不写任何 review 结论。
+        merge_result = _merge_partner_into(
+            db,
+            target=partner,
+            source=other,
+            actor=actor,
+            note=clean_note,
+        )
+
     existing = {
         (row.partner_id, row.other_partner_id): row
         for row in db.query(BusinessPartnerDuplicateReview)
@@ -1584,17 +1970,16 @@ def decide_duplicate(
                     decided_by=decided_by,
                 )
             )
-            continue
-        row.decision = decision
-        row.note = clean_note
-        row.decided_by = decided_by
-    if same:
-        # 曾用名和别名一样参与名称匹配：两个方向都登记，任意一侧的旧名都能回到本档案。
-        add_identifier(db, partner.id, kind="former_name", value=other.name)
-        add_identifier(db, other.id, kind="former_name", value=partner.name)
-    db.flush()
-    return partner_detail(db, partner_id) or {}
+        else:
+            row.decision = decision
+            row.note = clean_note
+            row.decided_by = decided_by
 
+    db.flush()
+    detail = partner_detail(db, partner_id) or {}
+    if merge_result is not None:
+        detail["mergeResult"] = merge_result
+    return detail
 
 def claim_review_link(db: Session, *, partner_id: int, link_id: int, note: str = "") -> BusinessPartnerLink:
     partner = db.get(BusinessPartner, partner_id)
@@ -1623,4 +2008,8 @@ def claim_review_link(db: Session, *, partner_id: int, link_id: int, note: str =
         roles=["supplier" if link.relation_role in {"supplier", "seller"} else "customer" if link.relation_role in {"customer", "buyer"} else "counterparty"],
         source="manual",
     )
+    # 人工确认必须立即写回业务事实的 canonical FK，不能等下一次“核对全部来源”。
+    from app.services.partner_reference_service import materialize_partner_references
+
+    materialize_partner_references(db)
     return link

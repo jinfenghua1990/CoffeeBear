@@ -91,6 +91,10 @@ type DisplayRow = {
   pendingCount: number | null;
 };
 
+function supplierIdentityKey(partnerId: number | null | undefined, name: string | null | undefined): string {
+  return partnerId != null ? `partner:${partnerId}` : `name:${(name ?? "").trim()}`;
+}
+
 function purchaseTypeLabel(type: SupplierRecord["purchaseType"]): string {
   return type === "regular" ? "常购供应商" : "临时供应商";
 }
@@ -164,7 +168,6 @@ export default function SuppliersPage() {
   const [form, setForm] = useState<FormState | null>(null);
   const [saving, setSaving] = useState(false);
   const [notice, setNotice] = useState<{ tone: "ok" | "err"; text: string } | null>(null);
-  const [deleteTarget, setDeleteTarget] = useState<SupplierRecord | null>(null);
 
   const [wbMap, setWbMap] = useState<Record<string, WorkbenchSupplierSummary>>({});
   const [summary, setSummary] = useState<WorkbenchSummary | null>(null);
@@ -216,14 +219,17 @@ export default function SuppliersPage() {
         ]);
         if (!alive) return;
         const map: Record<string, WorkbenchSupplierSummary> = {};
-        for (const it of wb.items) map[it.supplierName] = it;
+        for (const it of wb.items) {
+          map[supplierIdentityKey(it.partnerId, it.supplierName)] = it;
+        }
         setWbMap(map);
         setSummary(sum);
         const counts: Record<string, number> = {};
         for (const g of inv.groups) {
           for (const o of g.items) {
-            if (!o.supplier) continue;
-            counts[o.supplier] = (counts[o.supplier] ?? 0) + 1;
+            if (!o.supplier && o.supplierPartnerId == null) continue;
+            const key = supplierIdentityKey(o.supplierPartnerId, o.supplier);
+            counts[key] = (counts[key] ?? 0) + 1;
           }
         }
         setInvCounts(counts);
@@ -237,7 +243,8 @@ export default function SuppliersPage() {
   const displayRows = useMemo<DisplayRow[]>(
     () =>
       rows.map((r) => {
-        const wb = wbMap[r.name];
+        const identityKey = supplierIdentityKey(r.partnerId, r.name);
+        const wb = wbMap[identityKey];
         return {
           record: r,
           totalPurchase: wb ? wb.totalPurchase : null,
@@ -245,7 +252,7 @@ export default function SuppliersPage() {
           uninvoiced: wb ? wb.uninvoiced : null,
           wbOrderCount: wb ? wb.orderCount : null,
           lastOrderDate: wb?.lastOrderDate || null,
-          pendingCount: invCounts[r.name] ?? (wb ? 0 : null),
+          pendingCount: invCounts[identityKey] ?? (wb ? 0 : null),
         };
       }),
     [rows, wbMap, invCounts],
@@ -321,19 +328,21 @@ export default function SuppliersPage() {
     setSelectedId(null);
   }
 
-  // 选中供应商后拉取工作台明细（采购记录等）
+  // 选中供应商后按 canonical partnerId 拉取工作台明细；旧数据才回退名称路径。
   useEffect(() => {
     setDetail(null);
-    if (!selectedName) return;
+    if (!selected) return;
     let alive = true;
     setDetailLoading(true);
-    procurementWorkbenchApi
-      .supplierDetail(selectedName)
+    const request = selected.record.partnerId != null
+      ? procurementWorkbenchApi.supplierDetailByPartner(selected.record.partnerId)
+      : procurementWorkbenchApi.supplierDetail(selected.record.name);
+    request
       .then((d) => { if (alive) setDetail(d); })
       .catch(() => { /* 明细拉取失败时展示空态 */ })
       .finally(() => { if (alive) setDetailLoading(false); });
     return () => { alive = false; };
-  }, [selectedName]);
+  }, [selected]);
 
   useEffect(() => { setTab("orders"); }, [selectedName]);
 
@@ -410,21 +419,6 @@ export default function SuppliersPage() {
       await load();
     } catch (error) {
       setNotice({ tone: "err", text: error instanceof Error ? error.message : "保存失败" });
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  async function confirmDelete() {
-    if (!deleteTarget) return;
-    setSaving(true);
-    try {
-      await supplierApi.remove(deleteTarget.id);
-      setNotice({ tone: "ok", text: `已删除供应商「${deleteTarget.name}」` });
-      setDeleteTarget(null);
-      await load();
-    } catch (error) {
-      setNotice({ tone: "err", text: error instanceof Error ? error.message : "删除失败" });
     } finally {
       setSaving(false);
     }
@@ -622,13 +616,6 @@ export default function SuppliersPage() {
                           className="rounded px-1.5 py-1 text-xs font-medium text-slate-600 hover:bg-slate-100"
                         >
                           编辑
-                        </button>
-                        <button
-                          type="button"
-                          onClick={(e) => { e.stopPropagation(); setDeleteTarget(row.record); }}
-                          className="rounded px-1.5 py-1 text-xs font-medium text-red-500 hover:bg-red-50"
-                        >
-                          删除
                         </button>
                       </td>
                     </tr>
@@ -868,13 +855,21 @@ export default function SuppliersPage() {
                           </div>
                         ))}
                       </dl>
-                      <div className="mt-4 flex justify-end">
+                      <div className="mt-4 flex justify-end gap-2">
+                        {selected.record.partnerId != null && (
+                          <Link
+                            href="/finance/partners"
+                            className="rounded-lg border border-slate-300 px-3 py-1.5 text-xs font-medium text-slate-600 hover:bg-slate-50"
+                          >
+                            编辑往来主档
+                          </Link>
+                        )}
                         <button
                           type="button"
                           onClick={() => openEdit(selected.record)}
                           className="rounded-lg border border-slate-300 px-3 py-1.5 text-xs font-medium text-slate-600 hover:bg-slate-50"
                         >
-                          编辑资料
+                          编辑采购画像
                         </button>
                       </div>
                     </>
@@ -897,31 +892,21 @@ export default function SuppliersPage() {
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-2">
                 <span className="h-4 w-1.5 rounded bg-violet-600" />
-                <h3 className="text-base font-semibold text-slate-900">{form.id == null ? "新增供应商" : `编辑供应商（ID ${form.id}）`}</h3>
+                <div>
+                  <h3 className="text-base font-semibold text-slate-900">编辑采购画像</h3>
+                  <div className="mt-0.5 text-[11px] text-slate-400">主体名称、税号、联系人、地址及银行账户统一在往来单位主档维护。</div>
+                </div>
               </div>
               <button type="button" onClick={() => setForm(null)} className="rounded p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-600" aria-label="关闭">✕</button>
             </div>
             <div className="mt-4 grid grid-cols-2 gap-3">
-              <label className="col-span-2 block">
-                <span className="text-xs font-medium text-slate-600">供应商名称 <span className="text-red-500">*</span></span>
-                <input
-                  value={form.name}
-                  onChange={(e) => setForm({ ...form, name: e.target.value })}
-                  className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-1.5 text-sm outline-none focus:border-violet-400"
-                  placeholder="如：杭州XX食品有限公司"
-                />
-              </label>
-              <label className="col-span-2 block">
-                <span className="text-xs font-medium text-slate-600">税号（统一社会信用代码，唯一，用于自动识别）</span>
-                <input
-                  value={form.taxNo}
-                  onChange={(e) => setForm({ ...form, taxNo: e.target.value })}
-                  className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-1.5 font-mono text-sm outline-none focus:border-violet-400"
-                  placeholder="如：91330100MA27X8888B"
-                />
-              </label>
+              <div className="col-span-2 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2.5">
+                <div className="text-[10px] text-slate-400">统一往来主体</div>
+                <div className="mt-1 text-sm font-medium text-slate-800">{form.name || "—"}</div>
+                <div className="mt-1 font-mono text-[11px] text-slate-500">{form.taxNo || "税号未维护"}</div>
+              </div>
               <label className="block">
-                <span className="text-xs font-medium text-slate-600">平台</span>
+                <span className="text-xs font-medium text-slate-600">采购平台 / 渠道</span>
                 <select
                   value={form.platform}
                   onChange={(e) => setForm({ ...form, platform: e.target.value })}
@@ -938,40 +923,20 @@ export default function SuppliersPage() {
                   className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-1.5 text-sm outline-none focus:border-violet-400"
                 />
               </label>
-              <label className="block">
-                <span className="text-xs font-medium text-slate-600">联系人</span>
-                <input
-                  value={form.contact}
-                  onChange={(e) => setForm({ ...form, contact: e.target.value })}
-                  className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-1.5 text-sm outline-none focus:border-violet-400"
-                />
-              </label>
-              <label className="block">
-                <span className="text-xs font-medium text-slate-600">电话</span>
-                <input
-                  value={form.phone}
-                  onChange={(e) => setForm({ ...form, phone: e.target.value })}
-                  className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-1.5 text-sm outline-none focus:border-violet-400"
-                />
-              </label>
               <label className="col-span-2 block">
-                <span className="text-xs font-medium text-slate-600">地址</span>
-                <input
-                  value={form.address}
-                  onChange={(e) => setForm({ ...form, address: e.target.value })}
-                  className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-1.5 text-sm outline-none focus:border-violet-400"
-                />
-              </label>
-              <label className="col-span-2 block">
-                <span className="text-xs font-medium text-slate-600">备注</span>
+                <span className="text-xs font-medium text-slate-600">采购画像备注</span>
                 <input
                   value={form.notes}
                   onChange={(e) => setForm({ ...form, notes: e.target.value })}
                   className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-1.5 text-sm outline-none focus:border-violet-400"
+                  placeholder="例如：1688店铺、MOQ、结算习惯、采购侧备注"
                 />
               </label>
-              <div className="col-span-2 rounded-lg bg-slate-50 px-3 py-2 text-xs text-slate-500">
-                供应商类型由有效采购次数自动计算，不在档案中手工维护。
+              <div className="col-span-2 flex items-center justify-between rounded-lg bg-slate-50 px-3 py-2 text-xs text-slate-500">
+                <span>供应商类型由真实采购次数自动计算；身份资料只维护一份。</span>
+                <Link href="/finance/partners" className="font-medium text-violet-600 hover:text-violet-700">
+                  去往来单位主档维护
+                </Link>
               </div>
             </div>
             <div className="mt-5 flex justify-end gap-2">
@@ -984,23 +949,7 @@ export default function SuppliersPage() {
         </div>
       )}
 
-      {deleteTarget && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40 p-4" onClick={() => !saving && setDeleteTarget(null)}>
-          <div className="w-full max-w-sm rounded-xl bg-white p-5 shadow-xl" onClick={(e) => e.stopPropagation()}>
-            <h3 className="text-base font-semibold text-slate-900">确认删除供应商？</h3>
-            <p className="mt-2 text-sm text-slate-600">
-              将删除「{deleteTarget.name}」{deleteTarget.taxNo ? `（税号 ${deleteTarget.taxNo}）` : ""}。
-              <span className="text-red-500">此操作不可恢复。</span>
-            </p>
-            <div className="mt-4 flex justify-end gap-2">
-              <button type="button" onClick={() => setDeleteTarget(null)} disabled={saving} className="rounded-lg border border-slate-300 px-4 py-1.5 text-sm text-slate-600 hover:bg-slate-50 disabled:opacity-50">取消</button>
-              <button type="button" onClick={() => void confirmDelete()} disabled={saving} className="rounded-lg bg-red-600 px-4 py-1.5 text-sm font-medium text-white hover:bg-red-700 disabled:opacity-50">
-                {saving ? "删除中…" : "确认删除"}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+
     </div>
   );
 }

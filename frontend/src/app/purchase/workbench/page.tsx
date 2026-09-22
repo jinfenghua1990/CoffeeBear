@@ -3655,6 +3655,7 @@ function SupplierDetailPanel({ detail, loading, onRenamed }: {
   onRenamed?: (newName: string) => void | Promise<void>;
 }) {
   const supplierName = detail?.supplierName ?? null;
+  const supplierPartnerId = detail?.partnerId ?? null;
   const [invoiceData, setInvoiceData] = useState<InvoiceReconciliation | null>(null);
   const [invoiceLoading, setInvoiceLoading] = useState(false);
   const [editingName, setEditingName] = useState(false);
@@ -3692,12 +3693,15 @@ function SupplierDetailPanel({ detail, loading, onRenamed }: {
     }
     let cancelled = false;
     setInvoiceLoading(true);
-    procurementWorkbenchApi.invoiceReconciliation(supplierName)
+    procurementWorkbenchApi.invoiceReconciliation({
+      partnerId: supplierPartnerId ?? undefined,
+      supplier: supplierName,
+    })
       .then((data) => { if (!cancelled) setInvoiceData(data); })
       .catch(() => { if (!cancelled) setInvoiceData(null); })
       .finally(() => { if (!cancelled) setInvoiceLoading(false); });
     return () => { cancelled = true; };
-  }, [supplierName]);
+  }, [supplierName, supplierPartnerId]);
 
   useEffect(() => loadInvoiceMatch(), [loadInvoiceMatch]);
 

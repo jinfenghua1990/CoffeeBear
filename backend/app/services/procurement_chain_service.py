@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session
 
 from app.core.audit import audit
 from app.models.alibaba1688_import import Alibaba1688FileImport, Alibaba1688Order
+from app.models.business_partner import BusinessPartner
 from app.models.catalog import Warehouse
 from app.models.consumable import Consumable, InboundConsumableUsage
 from app.models.consumable_purchase import ConsumablePurchase, ConsumablePurchaseItem, ConsumableReceipt
@@ -1338,6 +1339,21 @@ def run_full_procurement_automation(db: Session, actor: str = "system") -> dict:
         db.rollback()
         result["ok"] = False
         result["errors"].append(f"采购单自动关联：{exc}")
+    try:
+        # V2 主数据必须成为所有导入/自动化的最后一道收口：
+        # 新采购、入库、发票等一旦落库，立即解析并物化 canonical partner FK。
+        from app.services.partner_master_service import rebuild_partner_master
+
+        result["partnerMaster"] = rebuild_partner_master(
+            db,
+            actor=actor,
+            run_payment_match=True,
+        )
+        db.commit()
+    except Exception as exc:
+        db.rollback()
+        result["ok"] = False
+        result["errors"].append(f"统一往来主体重建：{exc}")
     return result
 
 
@@ -1887,7 +1903,21 @@ def _pair_supplier_key(
         (order.seller_company_name if order is not None else "")
         or (external.supplier_name if external is not None else "")
     )
+    supplier_partner_id = _pair_supplier_partner_id(order, external)
     return normalize_supplier_name(supplier)
+
+
+def _pair_supplier_partner_id(
+    order: Alibaba1688Order | None,
+    external: ExternalPurchaseOrder | None,
+) -> int | None:
+    """Canonical supplier identity for an order pair; raw names are display/audit only."""
+    order_partner = int(order.supplier_partner_id) if order is not None and order.supplier_partner_id else None
+    external_partner = int(external.supplier_partner_id) if external is not None and external.supplier_partner_id else None
+    if order_partner and external_partner and order_partner != external_partner:
+        # Keep deterministic behavior; coverage/audit tooling can surface the conflicting refs.
+        return order_partner
+    return order_partner or external_partner
 
 
 def _pair_order_id(
@@ -2404,6 +2434,7 @@ def _order_row(
         # 订单类型人工覆盖（goods/consumable/空）：自动判定仅作默认，见 _order_kind
         "orderKindOverride": (external.order_kind_override or "") if external is not None else "",
         "supplier": supplier,
+        "supplierPartnerId": supplier_partner_id,
         "buyer": buyer,
         "targetWarehouseId": target_warehouse.id if target_warehouse is not None else None,
         "targetWarehouseName": target_warehouse.name if target_warehouse is not None else "",
@@ -3123,6 +3154,7 @@ def _standalone_jackyun_purchase_rows(db: Session) -> list[dict]:
             "platform": "吉客云",
             "orderNo": po.purch_no or po.jackyun_purch_id,
             "supplier": po.supplier_name or "",
+            "supplierPartnerId": int(po.supplier_partner_id) if po.supplier_partner_id else None,
             "buyer": "",
             "amount": float(amount),
             "paidAmount": None,
@@ -3146,31 +3178,62 @@ def _standalone_jackyun_purchase_rows(db: Session) -> list[dict]:
 
 
 def supplier_summaries(db: Session, limit: int = 200, offset: int = 0) -> dict:
-    """供应商聚合列表：统一统计采购工作台订单 + 独立吉客云采购单。"""
+    """供应商聚合列表：canonical partnerId 为主键，名称仅用于显示/兼容。"""
     pairs, pf = chain_snapshot(db)
     rows = [_order_row(db, order, external, pf=pf) for order, external in pairs]
     jackyun_rows = _standalone_jackyun_purchase_rows(db)
-    by_supplier: dict[str, dict] = {}
-    sku_counter: dict[str, dict[str, dict]] = {}
+    all_rows = [*rows, *jackyun_rows]
 
-    def ensure_supplier_bucket(supplier: str) -> dict:
-        if supplier not in by_supplier:
-            by_supplier[supplier] = {
-                "supplierName": supplier,
+    partner_ids = {
+        int(row["supplierPartnerId"])
+        for row in all_rows
+        if row.get("supplierPartnerId")
+    }
+    partner_names = {
+        int(row.id): row.name
+        for row in (
+            db.query(BusinessPartner)
+            .filter(
+                BusinessPartner.id.in_(partner_ids),
+                BusinessPartner.status == "active",
+            )
+            .all()
+            if partner_ids
+            else []
+        )
+    }
+
+    by_supplier: dict[tuple[str, str], dict] = {}
+    sku_counter: dict[tuple[str, str], dict[str, dict]] = {}
+
+    def identity_key(row: dict) -> tuple[str, str] | None:
+        partner_id = row.get("supplierPartnerId")
+        if partner_id:
+            return ("partner", str(int(partner_id)))
+        fallback = normalize_supplier_name(row.get("supplier"))
+        return ("name", fallback) if fallback else None
+
+    def ensure_supplier_bucket(key: tuple[str, str], row: dict) -> dict:
+        if key not in by_supplier:
+            partner_id = int(key[1]) if key[0] == "partner" else None
+            raw_name = normalize_supplier_name(row.get("supplier"))
+            by_supplier[key] = {
+                "partnerId": partner_id,
+                "supplierName": partner_names.get(partner_id, raw_name) if partner_id else raw_name,
                 "orderCount": 0,
                 "totalPurchase": 0.0,
                 "uninvoiced": 0.0,
                 "uninbound": 0.0,
                 "lastOrderDate": None,
             }
-            sku_counter[supplier] = {}
-        return by_supplier[supplier]
+            sku_counter[key] = {}
+        return by_supplier[key]
 
     for row in rows:
-        supplier = normalize_supplier_name(row.get("supplier"))
-        if not supplier:
+        key = identity_key(row)
+        if key is None:
             continue
-        info = ensure_supplier_bucket(supplier)
+        info = ensure_supplier_bucket(key, row)
         info["orderCount"] += 1
         amount = float(row.get("amount") or 0)
         info["totalPurchase"] += amount
@@ -3188,15 +3251,15 @@ def supplier_summaries(db: Session, limit: int = 200, offset: int = 0) -> dict:
         for alloc in row.get("allocations") or []:
             sku_code = alloc.get("skuCode") or "未编码商品"
             name = alloc.get("goodsName") or sku_code
-            if sku_code not in sku_counter[supplier]:
-                sku_counter[supplier][sku_code] = {"skuCode": sku_code, "goodsName": name, "count": 0}
-            sku_counter[supplier][sku_code]["count"] += 1
+            if sku_code not in sku_counter[key]:
+                sku_counter[key][sku_code] = {"skuCode": sku_code, "goodsName": name, "count": 0}
+            sku_counter[key][sku_code]["count"] += 1
 
     for row in jackyun_rows:
-        supplier = normalize_supplier_name(row.get("supplier"))
-        if not supplier:
+        key = identity_key(row)
+        if key is None:
             continue
-        info = ensure_supplier_bucket(supplier)
+        info = ensure_supplier_bucket(key, row)
         info["orderCount"] += 1
         amount = float(row.get("amount") or 0)
         info["totalPurchase"] += amount
@@ -3206,9 +3269,8 @@ def supplier_summaries(db: Session, limit: int = 200, offset: int = 0) -> dict:
             info["lastOrderDate"] = date
 
     items = []
-    for supplier in sorted(by_supplier.keys()):
-        info = by_supplier[supplier]
-        often = sorted(sku_counter[supplier].values(), key=lambda x: x["count"], reverse=True)[:5]
+    for key, info in by_supplier.items():
+        often = sorted(sku_counter[key].values(), key=lambda x: x["count"], reverse=True)[:5]
         items.append({
             **info,
             "totalPurchase": round(info["totalPurchase"], 2),
@@ -3217,26 +3279,50 @@ def supplier_summaries(db: Session, limit: int = 200, offset: int = 0) -> dict:
             "oftenSkus": often,
         })
 
+    items.sort(key=lambda item: (item["supplierName"], item.get("partnerId") or 0))
     return {"total": len(items), "items": items[offset:offset + limit]}
 
 
-def supplier_detail(db: Session, supplier_name: str) -> dict | None:
-    """单个供应商详情：采购工作台 + 独立吉客云历史采购统一展示。"""
+def supplier_detail(
+    db: Session,
+    supplier_name: str = "",
+    *,
+    partner_id: int | None = None,
+) -> dict | None:
+    """单个供应商详情：优先按 canonical partnerId，旧名称路径仅作兼容。"""
     supplier_key = normalize_supplier_name(supplier_name)
-    if not supplier_key:
+    if partner_id is None and not supplier_key:
         return None
+
     pairs, pf = chain_snapshot(db)
-    rows = [
-        _order_row(db, order, external, pf=pf)
-        for order, external in pairs
-        if _pair_supplier_key(db, pf, order, external) == supplier_key
-    ]
-    matched = [r for r in rows if normalize_supplier_name(r.get("supplier")) == supplier_key]
-    matched.extend(
-        row
-        for row in _standalone_jackyun_purchase_rows(db)
-        if normalize_supplier_name(row.get("supplier")) == supplier_key
-    )
+    if partner_id is not None:
+        rows = [
+            _order_row(db, order, external, pf=pf)
+            for order, external in pairs
+            if _pair_supplier_partner_id(order, external) == partner_id
+        ]
+        matched = [row for row in rows if row.get("supplierPartnerId") == partner_id]
+        matched.extend(
+            row
+            for row in _standalone_jackyun_purchase_rows(db)
+            if row.get("supplierPartnerId") == partner_id
+        )
+        partner = db.get(BusinessPartner, partner_id)
+        display_name = partner.name if partner is not None and partner.status == "active" else supplier_key
+    else:
+        rows = [
+            _order_row(db, order, external, pf=pf)
+            for order, external in pairs
+            if _pair_supplier_key(db, pf, order, external) == supplier_key
+        ]
+        matched = [r for r in rows if normalize_supplier_name(r.get("supplier")) == supplier_key]
+        matched.extend(
+            row
+            for row in _standalone_jackyun_purchase_rows(db)
+            if normalize_supplier_name(row.get("supplier")) == supplier_key
+        )
+        display_name = supplier_key
+
     if not matched:
         return None
 
@@ -3256,8 +3342,8 @@ def supplier_detail(db: Session, supplier_name: str) -> dict | None:
     )
 
     sku_counter: dict[str, dict] = {}
-    for r in matched:
-        for alloc in r.get("allocations") or []:
+    for row in matched:
+        for alloc in row.get("allocations") or []:
             sku_code = alloc.get("skuCode") or "未编码商品"
             name = alloc.get("goodsName") or sku_code
             if sku_code not in sku_counter:
@@ -3265,9 +3351,9 @@ def supplier_detail(db: Session, supplier_name: str) -> dict | None:
             sku_counter[sku_code]["count"] += 1
 
     often = sorted(sku_counter.values(), key=lambda x: x["count"], reverse=True)[:8]
-
     return {
-        "supplierName": supplier_key,
+        "partnerId": partner_id,
+        "supplierName": display_name,
         "orderCount": len(matched),
         "totalPurchase": round(total, 2),
         "uninvoiced": round(uninvoiced, 2),
@@ -3276,7 +3362,6 @@ def supplier_detail(db: Session, supplier_name: str) -> dict | None:
         "oftenSkus": often,
         "recentOrders": matched[:10],
     }
-
 
 def order_supplier_history(db: Session, supplier_name: str, exclude_order_id: int | None = None) -> dict:
     """某个订单的供应商历史：合作次数、累计金额、未开发票、最近采购、常购 SKU。"""

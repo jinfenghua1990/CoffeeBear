@@ -185,25 +185,60 @@ def _linked_partner_ids(
     source_ids: list[int],
     relation_role: str,
 ) -> dict[int, int]:
-    """返回已确认归档来源 → 统一往来单位。
+    """返回来源事实 → 统一往来主体。
 
-    needs_review 不参与付款自动匹配；只有已经 linked 且 partner_id 唯一存在的来源
-    才能作为主体身份强证据。
+    V2 优先读取业务事实自己的 partner FK；BusinessPartnerLink 仅作为兼容回退与
+    审计证据。这样付款核对不再依赖每次重新做名称/账号归档。
     """
     if not source_ids:
         return {}
+
+    result: dict[int, int] = {}
+    if source_type == "tax_invoice":
+        attr = (
+            TaxInvoice.seller_partner_id
+            if relation_role == "seller"
+            else TaxInvoice.buyer_partner_id
+            if relation_role == "buyer"
+            else None
+        )
+        if attr is not None:
+            rows = (
+                db.query(TaxInvoice.id, attr)
+                .filter(TaxInvoice.id.in_(source_ids), attr.isnot(None))
+                .all()
+            )
+            result.update({int(source_id): int(partner_id) for source_id, partner_id in rows})
+    elif source_type == "bank_transaction" and relation_role == "counterparty":
+        rows = (
+            db.query(BankTransaction.id, BankTransaction.counterparty_partner_id)
+            .filter(
+                BankTransaction.id.in_(source_ids),
+                BankTransaction.counterparty_partner_id.isnot(None),
+            )
+            .all()
+        )
+        result.update({int(source_id): int(partner_id) for source_id, partner_id in rows})
+
+    missing = [source_id for source_id in source_ids if source_id not in result]
+    if not missing:
+        return result
+
     rows = (
         db.query(BusinessPartnerLink)
         .filter(
             BusinessPartnerLink.source_type == source_type,
-            BusinessPartnerLink.source_id.in_(source_ids),
+            BusinessPartnerLink.source_id.in_(missing),
             BusinessPartnerLink.relation_role == relation_role,
             BusinessPartnerLink.status == "linked",
             BusinessPartnerLink.partner_id.isnot(None),
         )
         .all()
     )
-    return {int(row.source_id): int(row.partner_id) for row in rows if row.partner_id is not None}
+    result.update(
+        {int(row.source_id): int(row.partner_id) for row in rows if row.partner_id is not None}
+    )
+    return result
 
 
 def _candidate_evidence(

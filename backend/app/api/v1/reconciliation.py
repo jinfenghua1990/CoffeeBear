@@ -253,8 +253,20 @@ def create_transaction(body: TxnBody, request: Request,
         )
     except ValueError as exc:
         raise HTTPException(400, str(exc))
-    return {"id": row.id, "created": created,
-            "fingerprint": row.fingerprint[:16], "amount": str(row.amount)}
+    from app.services.partner_master_service import rebuild_partner_master
+    partner_master = rebuild_partner_master(
+        db,
+        actor=current_actor(request),
+        run_payment_match=True,
+    )
+    db.commit()
+    return {
+        "id": row.id,
+        "created": created,
+        "fingerprint": row.fingerprint[:16],
+        "amount": str(row.amount),
+        "partnerMaster": partner_master,
+    }
 
 
 @router.post("/import-bank")
@@ -289,7 +301,14 @@ async def import_bank_xlsx(
         raise HTTPException(413, str(exc))
     except (ValueError, RuntimeError) as exc:
         raise HTTPException(400, str(exc))
-    return {"ok": True, **result}
+    from app.services.partner_master_service import rebuild_partner_master
+    partner_master = rebuild_partner_master(
+        db,
+        actor=actor,
+        run_payment_match=True,
+    )
+    db.commit()
+    return {"ok": True, **result, "partnerMaster": partner_master}
 
 
 # ---------- 应收结算 ----------
