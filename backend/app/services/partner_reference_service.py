@@ -298,10 +298,19 @@ def materialize_partner_references(db: Session) -> dict[str, int]:
     }
 
 
-def _coverage(db: Session, model: type[Any], attr: str) -> dict[str, Any]:
-    total = db.query(model).count()
+def _coverage(
+    db: Session,
+    model: type[Any],
+    attr: str,
+    *eligibility,
+) -> dict[str, Any]:
+    """Coverage only counts facts that are expected to have an external party."""
+    query = db.query(model)
+    if eligibility:
+        query = query.filter(*eligibility)
+    total = query.count()
     column = getattr(model, attr)
-    linked = db.query(model).filter(column.isnot(None)).count()
+    linked = query.filter(column.isnot(None)).count()
     return {
         "total": total,
         "linked": linked,
@@ -314,19 +323,54 @@ def partner_reference_coverage(db: Session) -> dict[str, Any]:
     """Operational observability for the canonical identity rollout."""
     sources = {
         "suppliers": _coverage(db, Supplier, "partner_id"),
-        "externalPurchases": _coverage(db, ExternalPurchaseOrder, "supplier_partner_id"),
-        "alibaba1688": _coverage(db, Alibaba1688Order, "supplier_partner_id"),
-        "jackyunPurchases": _coverage(db, JackyunPurchaseOrder, "supplier_partner_id"),
-        "jackyunSettlements": _coverage(db, JackyunPurchaseSettlement, "supplier_partner_id"),
-        "jackyunReturns": _coverage(db, JackyunPurchaseReturn, "supplier_partner_id"),
-        "inboundDocuments": _coverage(db, JackyunGoodsDocument, "supplier_partner_id"),
-        "consumablePurchases": _coverage(db, ConsumablePurchase, "supplier_partner_id"),
-        "jkyStockin": _coverage(db, JkyWebStockinOrder, "supplier_partner_id"),
-        "taxInvoiceSeller": _coverage(db, TaxInvoice, "seller_partner_id"),
-        "taxInvoiceBuyer": _coverage(db, TaxInvoice, "buyer_partner_id"),
-        "bankTransactions": _coverage(db, BankTransaction, "counterparty_partner_id"),
+        "externalPurchases": _coverage(
+            db, ExternalPurchaseOrder, "supplier_partner_id",
+            ExternalPurchaseOrder.supplier_name != "",
+        ),
+        "alibaba1688": _coverage(
+            db, Alibaba1688Order, "supplier_partner_id",
+            Alibaba1688Order.row_status != "deleted",
+        ),
+        "jackyunPurchases": _coverage(
+            db, JackyunPurchaseOrder, "supplier_partner_id",
+            JackyunPurchaseOrder.supplier_name != "",
+        ),
+        "jackyunSettlements": _coverage(
+            db, JackyunPurchaseSettlement, "supplier_partner_id",
+            JackyunPurchaseSettlement.supplier_name != "",
+        ),
+        "jackyunReturns": _coverage(
+            db, JackyunPurchaseReturn, "supplier_partner_id",
+            JackyunPurchaseReturn.supplier_name != "",
+        ),
+        "inboundDocuments": _coverage(
+            db, JackyunGoodsDocument, "supplier_partner_id",
+            JackyunGoodsDocument.document_type == "inbound",
+            JackyunGoodsDocument.supplier_name != "",
+        ),
+        "consumablePurchases": _coverage(
+            db, ConsumablePurchase, "supplier_partner_id",
+            ConsumablePurchase.supplier_name != "",
+        ),
+        "jkyStockin": _coverage(
+            db, JkyWebStockinOrder, "supplier_partner_id",
+            JkyWebStockinOrder.supplier_name != "",
+        ),
+        # 输入票的卖方、输出票的买方才是外部往来主体；自己的那一侧不计入覆盖率。
+        "taxInvoiceSeller": _coverage(
+            db, TaxInvoice, "seller_partner_id",
+            TaxInvoice.direction == "input",
+        ),
+        "taxInvoiceBuyer": _coverage(
+            db, TaxInvoice, "buyer_partner_id",
+            TaxInvoice.direction == "output",
+        ),
+        # 利息/手续费等没有对方身份的银行行不是“漏匹配”。
+        "bankTransactions": _coverage(
+            db, BankTransaction, "counterparty_partner_id",
+            (BankTransaction.counterparty_name != "") | (BankTransaction.counterparty_account != ""),
+        ),
         "jkySales": _coverage(db, JkyWebSalesOrder, "customer_partner_id"),
-        "salesOrders": _coverage(db, SalesOrder, "customer_partner_id"),
     }
     total = sum(row["total"] for row in sources.values())
     linked = sum(row["linked"] for row in sources.values())
