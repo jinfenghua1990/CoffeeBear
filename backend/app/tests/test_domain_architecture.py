@@ -20,8 +20,6 @@ def test_tax_invoice_domain_exposes_canonical_state_mutators():
     source = _text("backend/app/services/tax_invoice_service.py")
     assert "def sync_business_match_status(" in source
     assert "def set_invoice_verified(" in source
-    assert "def clear_manual_personal_payment_method(" in source
-
 
 def test_procurement_auto_invoice_links_must_store_allocated_amount():
     source = _text("backend/app/services/procurement_chain_service.py")
@@ -33,5 +31,4 @@ def test_bank_reconciliation_domain_does_not_write_invoice_manual_payment_fact()
     source = _text("backend/app/services/payment_invoice_match_service.py")
     assert "invoice.payment_method =" not in source
     assert "inv.payment_method =" not in source
-    assert "_clear_manual_personal_on_bank_evidence" in source
-    assert "clear_manual_personal_payment_method" in source
+    assert "_clear_manual_personal_on_bank_evidence" not in source

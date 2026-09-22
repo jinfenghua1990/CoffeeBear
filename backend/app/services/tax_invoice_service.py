@@ -2990,36 +2990,6 @@ PAYMENT_METHOD_LABELS = {
 }
 
 
-def clear_manual_personal_payment_method(
-    db: Session,
-    invoice: TaxInvoice,
-    *,
-    actor: str = "system",
-    reason: str = "银行付款事实发生变化",
-    commit: bool = False,
-) -> bool:
-    """银行付款证据变化时清除旧 personal 人工标记。
-
-    payment_method 是税务发票域的人工补充事实；银行匹配域只能通过本入口请求清除，
-    不得直接修改 TaxInvoice.payment_method。返回是否真的发生了变更。
-    """
-    if invoice.payment_method != "personal":
-        return False
-    invoice.payment_method = ""
-    audit(
-        db,
-        actor,
-        "tax.invoice.clear_manual_payment_method",
-        "tax_invoices",
-        invoice.id,
-        {"reason": reason, "previous": "personal", "current": ""},
-        commit=False,
-    )
-    if commit:
-        db.commit()
-    return True
-
-
 def set_invoice_payment_methods(
     db: Session, invoice_ids: list[int], payment_method: str, actor: str = "system"
 ) -> list[TaxInvoice]:
