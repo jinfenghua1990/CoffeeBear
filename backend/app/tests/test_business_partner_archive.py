@@ -220,7 +220,7 @@ def test_duplicate_decision_different_clears_suggestion_for_both_partners(db_ses
     assert {row["possibleDuplicateCount"] for row in service.list_partners(db_session, keyword="庚注塑厂")["items"]} == {0}
 
 
-def test_duplicate_decision_same_registers_former_names_and_keeps_old_name_sources(db_session):
+def test_duplicate_decision_same_merges_into_one_canonical_partner(db_session):
     ids = _duplicate_pair(
         db_session,
         plain_name="义乌市辛注塑厂",
@@ -239,12 +239,18 @@ def test_duplicate_decision_same_registers_former_names_and_keeps_old_name_sourc
     )
     assert detail["possibleDuplicates"] == []
     assert detail["formerNames"] == ["义乌市辛注塑厂（个体工商户）"]
-    assert {row["possibleDuplicateCount"] for row in service.list_partners(db_session, keyword="辛注塑厂")["items"]} == {0}
-    other = service.partner_detail(db_session, licensed_id)
-    assert other is not None
-    assert other["formerNames"] == ["义乌市辛注塑厂"]
+    assert detail["taxNo"] == "92330782MAEBFPHX0B"
+    assert detail["mergeResult"]["targetPartnerId"] == plain_id
+    assert detail["mergeResult"]["archivedPartnerId"] == licensed_id
 
-    # 后到的、用旧名开的发票仍然自动回到该档案，不会因为曾用名登记而变成待确认。
+    # 合并后只能剩一个活跃主体；原主体仅以 archived 审计壳保留。
+    active = service.list_partners(db_session, keyword="辛注塑厂")["items"]
+    assert [row["id"] for row in active] == [plain_id]
+    archived = db_session.get(service.BusinessPartner, licensed_id)
+    assert archived is not None
+    assert archived.status == "archived"
+
+    # 后到的旧法人名称发票必须直接落到保留主体，不再分叉出第二个主体。
     invoice = _invoice(
         db_session,
         seller="义乌市辛注塑厂（个体工商户）",
@@ -257,8 +263,9 @@ def test_duplicate_decision_same_registers_former_names_and_keeps_old_name_sourc
         .filter_by(source_type="tax_invoice", source_id=invoice.id, relation_role="seller")
         .one()
     )
-    assert link.partner_id == licensed_id
+    assert link.partner_id == plain_id
     assert link.status == "linked"
+    assert invoice.seller_partner_id == plain_id
 
 
 def test_duplicate_decision_same_keeps_plain_name_sources_linked(db_session):
