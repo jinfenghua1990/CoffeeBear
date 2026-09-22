@@ -370,3 +370,51 @@ def test_output_red_discount_adjusts_sales_basis_and_does_not_create_unbilled_in
     assert Decimal(detail["adjustedSales"]) == Decimal("700.00")
     assert Decimal(detail["invoiced"]) == Decimal("700.00")
     assert Decimal(detail["unbilled"]) == Decimal("0.00")
+
+
+def test_unbilled_income_xlsx_matches_delivery_tabs():
+    report = {
+        "year": 2026,
+        "month": 8,
+        "period": "2026-08",
+        "salesAmount": "100.00",
+        "redSalesAdjustmentAmount": "-5.00",
+        "adjustedSalesAmount": "95.00",
+        "invoicedAmount": "5.00",
+        "unbilledAmount": "90.00",
+        "details": [
+            {
+                "period": "2026-08", "taxCode": "A", "taxName": "食品",
+                "product": "商品A", "quantity": "2", "sales": "60.00",
+                "redSalesAdjustment": "-5.00", "adjustedSales": "55.00",
+                "invoiced": "5.00", "unbilled": "50.00", "cost": "30.00",
+            },
+            {
+                "period": "2026-08", "taxCode": "A", "taxName": "食品",
+                "product": "商品B", "quantity": "1", "sales": "40.00",
+                "redSalesAdjustment": "0.00", "adjustedSales": "40.00",
+                "invoiced": "0.00", "unbilled": "40.00", "cost": "20.00",
+            },
+        ],
+    }
+
+    workbook = load_workbook(BytesIO(svc.unbilled_income_xlsx(report)), data_only=True)
+
+    assert workbook.sheetnames == ["无票收入-汇总", "无票收入-明细"]
+    summary = workbook["无票收入-汇总"]
+    assert summary.cell(row=10, column=1).value == "月度时间"
+    assert summary.cell(row=10, column=4).value == "发货数量"
+    assert summary.cell(row=11, column=3).value == "食品"
+    assert summary.cell(row=11, column=4).value == 3.0
+    assert summary.cell(row=11, column=5).value == 100.0
+    assert summary.cell(row=11, column=7).value == 95.0
+    assert summary.cell(row=11, column=2).number_format == "@"
+    assert summary.cell(row=12, column=3).value == "合计"
+
+    detail = workbook["无票收入-明细"]
+    assert detail.cell(row=10, column=4).value == "产品"
+    assert detail.cell(row=10, column=8).value == "调整后销售金额"
+    assert detail.cell(row=11, column=4).value == "商品A"
+    assert detail.cell(row=12, column=4).value == "商品B"
+    assert detail.cell(row=13, column=4).value == "合计"
+    assert detail.cell(row=13, column=8).value == 95.0

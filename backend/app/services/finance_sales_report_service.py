@@ -762,24 +762,62 @@ def build_unbilled_income_report(
     }
 
 
-def unbilled_income_xlsx(report: dict[str, Any]) -> bytes:
-    """无票收入表：上半部分汇总（销售总额 − 已开票 = 无票收入），下半部分为
-    「税务编号 + 产品」明细（月度时间/税务编号/税收分类名称/产品/发货数量/销售金额/
-    已开票金额/无票收入/销售成本 + 合计）。"""
-    wb = Workbook()
-    ws = wb.active
-    ws.title = "无票收入"
+def _unbilled_value(detail: dict[str, Any], key: str, fallback: str = "0") -> Decimal:
+    value = detail.get(key)
+    if value in (None, ""):
+        value = fallback
+    return to_decimal(value)
+
+
+def _unbilled_summary_details(details: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """按税务编号 + 税收分类名称聚合，生成汇总页使用的行。"""
+    grouped: dict[tuple[str, str], dict[str, Any]] = {}
+    for detail in details:
+        key = (str(detail.get("taxCode") or ""), str(detail.get("taxName") or ""))
+        row = grouped.setdefault(
+            key,
+            {
+                "period": detail.get("period", ""),
+                "taxCode": key[0],
+                "taxName": key[1],
+                "quantity": Decimal("0"),
+                "sales": Decimal("0"),
+                "redSalesAdjustment": Decimal("0"),
+                "adjustedSales": Decimal("0"),
+                "invoiced": Decimal("0"),
+                "unbilled": Decimal("0"),
+                "cost": Decimal("0"),
+            },
+        )
+        row["quantity"] += _unbilled_value(detail, "quantity")
+        row["sales"] += _unbilled_value(detail, "sales")
+        row["redSalesAdjustment"] += _unbilled_value(detail, "redSalesAdjustment")
+        row["adjustedSales"] += _unbilled_value(detail, "adjustedSales", detail.get("sales") or "0")
+        row["invoiced"] += _unbilled_value(detail, "invoiced")
+        row["unbilled"] += _unbilled_value(detail, "unbilled")
+        row["cost"] += _unbilled_value(detail, "cost")
+    return sorted(grouped.values(), key=lambda row: row["sales"], reverse=True)
+
+
+def _write_unbilled_sheet(
+    ws: Any,
+    report: dict[str, Any],
+    details: list[dict[str, Any]],
+    *,
+    include_product: bool,
+) -> None:
     head = Font(bold=True, size=13)
     bold = Font(bold=True)
     gray = Font(size=9, color="999999")
 
     ws["A1"] = f"{report['year']}年{report['month']:02d}月销售出库-无票收入"
     ws["A1"].font = head
+    adjusted_label = "调整后销售金额" if include_product else "红冲后-销售金额"
     summary_rows = [
         ("月度时间", report["period"], None),
         ("销售总金额", float(report["salesAmount"]), "0.00"),
         ("销项红字调整", float(report.get("redSalesAdjustmentAmount", 0)), "0.00"),
-        ("调整后销售金额", float(report.get("adjustedSalesAmount", report["salesAmount"])), "0.00"),
+        (adjusted_label, float(report.get("adjustedSalesAmount", report["salesAmount"])), "0.00"),
         ("已开票净额", float(report["invoicedAmount"]), "0.00"),
         ("无票收入", float(report["unbilledAmount"]), "0.00"),
     ]
@@ -792,19 +830,24 @@ def unbilled_income_xlsx(report: dict[str, Any]) -> bytes:
     ws.cell(row=ws.max_row, column=1).font = gray
     ws.append([])
 
-    details = report.get("details") or []
-    ws.append(["月度时间", "税务编号", "税收分类名称", "产品", "发货数量", "销售金额", "销项红字调整", "调整后销售金额", "已开票金额", "无票收入", "销售成本"])
-
+    if include_product:
+        headers = ["月度时间", "税务编号", "税收分类名称", "产品", "发货数量", "销售金额", "销项红字调整", "调整后销售金额", "已开票金额", "无票收入", "销售成本"]
+    else:
+        headers = ["月度时间", "税务编号", "税收分类名称", "发货数量", "销售金额", "销项红字调整", "红冲后-销售金额", "已开票金额", "无票收入", "销售成本"]
+    ws.append(headers)
     header_row = ws.max_row
     for cell in ws[header_row]:
         cell.font = bold
-    totals = {"quantity": 0.0, "sales": 0.0, "red": 0.0, "adjusted": 0.0, "invoiced": 0.0, "unbilled": 0.0, "cost": 0.0}
-    for d in details:
-        quantity, sales, cost = float(d["quantity"]), float(d["sales"]), float(d["cost"])
-        red_adjustment = float(d.get("redSalesAdjustment") or 0)
-        adjusted_sales = float(d.get("adjustedSales") or sales)
-        invoiced = float(d.get("invoiced") or 0)
-        unbilled = float(d.get("unbilled") or 0)
+
+    totals = {"quantity": Decimal("0"), "sales": Decimal("0"), "red": Decimal("0"), "adjusted": Decimal("0"), "invoiced": Decimal("0"), "unbilled": Decimal("0"), "cost": Decimal("0")}
+    for detail in details:
+        quantity = _unbilled_value(detail, "quantity")
+        sales = _unbilled_value(detail, "sales")
+        red_adjustment = _unbilled_value(detail, "redSalesAdjustment")
+        adjusted_sales = _unbilled_value(detail, "adjustedSales", detail.get("sales") or "0")
+        invoiced = _unbilled_value(detail, "invoiced")
+        unbilled = _unbilled_value(detail, "unbilled")
+        cost = _unbilled_value(detail, "cost")
         totals["quantity"] += quantity
         totals["sales"] += sales
         totals["red"] += red_adjustment
@@ -812,17 +855,46 @@ def unbilled_income_xlsx(report: dict[str, Any]) -> bytes:
         totals["invoiced"] += invoiced
         totals["unbilled"] += unbilled
         totals["cost"] += cost
-        ws.append([d["period"], d["taxCode"], d.get("taxName", ""), d["product"], quantity, sales, red_adjustment, adjusted_sales, invoiced, unbilled, cost])
-    ws.append(["", "", "", "合计", totals["quantity"], totals["sales"], totals["red"], totals["adjusted"], totals["invoiced"], totals["unbilled"], totals["cost"]])
+        if include_product:
+            ws.append([detail["period"], detail["taxCode"], detail.get("taxName", ""), detail["product"], float(quantity), float(sales), float(red_adjustment), float(adjusted_sales), float(invoiced), float(unbilled), float(cost)])
+        else:
+            ws.append([detail["period"], detail["taxCode"], detail.get("taxName", ""), float(quantity), float(sales), float(red_adjustment), float(adjusted_sales), float(invoiced), float(unbilled), float(cost)])
+
+    total_label_column = 4 if include_product else 3
+    total_row = [""] * len(headers)
+    total_row[total_label_column - 1] = "合计"
+    numeric_start = total_label_column + 1
+    total_values = [totals["quantity"], totals["sales"], totals["red"], totals["adjusted"], totals["invoiced"], totals["unbilled"], totals["cost"]]
+    total_row[numeric_start - 1:] = [float(value) for value in total_values]
+    ws.append(total_row)
     for cell in ws[ws.max_row]:
         cell.font = bold
-    for col in (5, 6, 7, 8, 9, 10, 11):
+    for row_idx in range(header_row, ws.max_row + 1):
+        ws.cell(row=row_idx, column=2).number_format = "@"
+    for col in range(numeric_start, len(headers) + 1):
         for row_idx in range(header_row, ws.max_row + 1):
-            ws.cell(row=row_idx, column=col).number_format = "0.00" if col != 5 else "0.####"
+            ws.cell(row=row_idx, column=col).number_format = "0.00" if col != numeric_start else "0.####"
 
-    for idx, width in ((1, 14), (2, 26), (3, 18), (4, 34), (5, 12), (6, 14), (7, 14), (8, 14), (9, 14), (10, 14), (11, 14)):
+    widths = (14, 26, 18, 34, 12, 14, 14, 18, 14, 14, 14) if include_product else (14, 26, 18, 12, 14, 14, 18, 14, 14, 14)
+    for idx, width in enumerate(widths, start=1):
         ws.column_dimensions[get_column_letter(idx)].width = width
     ws.freeze_panes = f"A{header_row + 1}"
+
+
+def unbilled_income_xlsx(report: dict[str, Any]) -> bytes:
+    """按财务交付模板生成「无票收入-汇总」和「无票收入-明细」两个页签。"""
+    wb = Workbook()
+    summary_ws = wb.active
+    summary_ws.title = "无票收入-汇总"
+    detail_ws = wb.create_sheet("无票收入-明细")
+    details = report.get("details") or []
+    _write_unbilled_sheet(
+        summary_ws,
+        report,
+        _unbilled_summary_details(details),
+        include_product=False,
+    )
+    _write_unbilled_sheet(detail_ws, report, details, include_product=True)
 
     output = BytesIO()
     wb.save(output)
