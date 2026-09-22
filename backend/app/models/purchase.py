@@ -20,7 +20,6 @@ class Supplier(Base, PkMixin, TimestampMixin):
         BigInteger,
         ForeignKey("business_partners.id", ondelete="SET NULL"),
         nullable=True,
-        unique=True,
         index=True,
     )
     platform: Mapped[str] = mapped_column(String(32), default="1688")
