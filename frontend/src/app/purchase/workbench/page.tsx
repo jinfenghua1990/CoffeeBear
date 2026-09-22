@@ -2874,7 +2874,7 @@ function OrderConsumableSection({ order, materials }: { order: WorkbenchOrderRow
         items,
       });
       setCreating(false);
-      setForm({ orderedOn: inputDate(new Date()), lines: [{ consumable_id: "", quantity: "", unit_cost: "", total_amount: "" }] });
+      setForm({ orderedOn: inputDate(new Date()), lines: [{ _key: newRequestKey(), consumable_id: "", quantity: "", unit_cost: "", total_amount: "" }] });
       setMessage("耗材入库单已建立；到货后在本区块「登记收货」，实收数量会计入本平台耗材库存台账。");
       await load();
     } catch (caught) {
