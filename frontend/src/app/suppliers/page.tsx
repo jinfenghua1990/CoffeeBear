@@ -855,13 +855,21 @@ export default function SuppliersPage() {
                           </div>
                         ))}
                       </dl>
-                      <div className="mt-4 flex justify-end">
+                      <div className="mt-4 flex justify-end gap-2">
+                        {selected.record.partnerId != null && (
+                          <Link
+                            href="/finance/partners"
+                            className="rounded-lg border border-slate-300 px-3 py-1.5 text-xs font-medium text-slate-600 hover:bg-slate-50"
+                          >
+                            编辑往来主档
+                          </Link>
+                        )}
                         <button
                           type="button"
                           onClick={() => openEdit(selected.record)}
                           className="rounded-lg border border-slate-300 px-3 py-1.5 text-xs font-medium text-slate-600 hover:bg-slate-50"
                         >
-                          编辑资料
+                          编辑采购画像
                         </button>
                       </div>
                     </>
@@ -884,31 +892,21 @@ export default function SuppliersPage() {
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-2">
                 <span className="h-4 w-1.5 rounded bg-violet-600" />
-                <h3 className="text-base font-semibold text-slate-900">{form.id == null ? "新增供应商" : `编辑供应商（ID ${form.id}）`}</h3>
+                <div>
+                  <h3 className="text-base font-semibold text-slate-900">编辑采购画像</h3>
+                  <div className="mt-0.5 text-[11px] text-slate-400">主体名称、税号、联系人、地址及银行账户统一在往来单位主档维护。</div>
+                </div>
               </div>
               <button type="button" onClick={() => setForm(null)} className="rounded p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-600" aria-label="关闭">✕</button>
             </div>
             <div className="mt-4 grid grid-cols-2 gap-3">
-              <label className="col-span-2 block">
-                <span className="text-xs font-medium text-slate-600">供应商名称 <span className="text-red-500">*</span></span>
-                <input
-                  value={form.name}
-                  onChange={(e) => setForm({ ...form, name: e.target.value })}
-                  className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-1.5 text-sm outline-none focus:border-violet-400"
-                  placeholder="如：杭州XX食品有限公司"
-                />
-              </label>
-              <label className="col-span-2 block">
-                <span className="text-xs font-medium text-slate-600">税号（统一社会信用代码，唯一，用于自动识别）</span>
-                <input
-                  value={form.taxNo}
-                  onChange={(e) => setForm({ ...form, taxNo: e.target.value })}
-                  className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-1.5 font-mono text-sm outline-none focus:border-violet-400"
-                  placeholder="如：91330100MA27X8888B"
-                />
-              </label>
+              <div className="col-span-2 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2.5">
+                <div className="text-[10px] text-slate-400">统一往来主体</div>
+                <div className="mt-1 text-sm font-medium text-slate-800">{form.name || "—"}</div>
+                <div className="mt-1 font-mono text-[11px] text-slate-500">{form.taxNo || "税号未维护"}</div>
+              </div>
               <label className="block">
-                <span className="text-xs font-medium text-slate-600">平台</span>
+                <span className="text-xs font-medium text-slate-600">采购平台 / 渠道</span>
                 <select
                   value={form.platform}
                   onChange={(e) => setForm({ ...form, platform: e.target.value })}
@@ -925,40 +923,20 @@ export default function SuppliersPage() {
                   className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-1.5 text-sm outline-none focus:border-violet-400"
                 />
               </label>
-              <label className="block">
-                <span className="text-xs font-medium text-slate-600">联系人</span>
-                <input
-                  value={form.contact}
-                  onChange={(e) => setForm({ ...form, contact: e.target.value })}
-                  className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-1.5 text-sm outline-none focus:border-violet-400"
-                />
-              </label>
-              <label className="block">
-                <span className="text-xs font-medium text-slate-600">电话</span>
-                <input
-                  value={form.phone}
-                  onChange={(e) => setForm({ ...form, phone: e.target.value })}
-                  className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-1.5 text-sm outline-none focus:border-violet-400"
-                />
-              </label>
               <label className="col-span-2 block">
-                <span className="text-xs font-medium text-slate-600">地址</span>
-                <input
-                  value={form.address}
-                  onChange={(e) => setForm({ ...form, address: e.target.value })}
-                  className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-1.5 text-sm outline-none focus:border-violet-400"
-                />
-              </label>
-              <label className="col-span-2 block">
-                <span className="text-xs font-medium text-slate-600">备注</span>
+                <span className="text-xs font-medium text-slate-600">采购画像备注</span>
                 <input
                   value={form.notes}
                   onChange={(e) => setForm({ ...form, notes: e.target.value })}
                   className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-1.5 text-sm outline-none focus:border-violet-400"
+                  placeholder="例如：1688店铺、MOQ、结算习惯、采购侧备注"
                 />
               </label>
-              <div className="col-span-2 rounded-lg bg-slate-50 px-3 py-2 text-xs text-slate-500">
-                供应商类型由有效采购次数自动计算，不在档案中手工维护。
+              <div className="col-span-2 flex items-center justify-between rounded-lg bg-slate-50 px-3 py-2 text-xs text-slate-500">
+                <span>供应商类型由真实采购次数自动计算；身份资料只维护一份。</span>
+                <Link href="/finance/partners" className="font-medium text-violet-600 hover:text-violet-700">
+                  去往来单位主档维护
+                </Link>
               </div>
             </div>
             <div className="mt-5 flex justify-end gap-2">
