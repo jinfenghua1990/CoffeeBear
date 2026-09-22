@@ -91,6 +91,10 @@ type DisplayRow = {
   pendingCount: number | null;
 };
 
+function supplierIdentityKey(partnerId: number | null | undefined, name: string | null | undefined): string {
+  return partnerId != null ? `partner:${partnerId}` : `name:${(name ?? "").trim()}`;
+}
+
 function purchaseTypeLabel(type: SupplierRecord["purchaseType"]): string {
   return type === "regular" ? "常购供应商" : "临时供应商";
 }
@@ -216,14 +220,17 @@ export default function SuppliersPage() {
         ]);
         if (!alive) return;
         const map: Record<string, WorkbenchSupplierSummary> = {};
-        for (const it of wb.items) map[it.supplierName] = it;
+        for (const it of wb.items) {
+          map[supplierIdentityKey(it.partnerId, it.supplierName)] = it;
+        }
         setWbMap(map);
         setSummary(sum);
         const counts: Record<string, number> = {};
         for (const g of inv.groups) {
           for (const o of g.items) {
-            if (!o.supplier) continue;
-            counts[o.supplier] = (counts[o.supplier] ?? 0) + 1;
+            if (!o.supplier && o.supplierPartnerId == null) continue;
+            const key = supplierIdentityKey(o.supplierPartnerId, o.supplier);
+            counts[key] = (counts[key] ?? 0) + 1;
           }
         }
         setInvCounts(counts);
@@ -237,7 +244,8 @@ export default function SuppliersPage() {
   const displayRows = useMemo<DisplayRow[]>(
     () =>
       rows.map((r) => {
-        const wb = wbMap[r.name];
+        const identityKey = supplierIdentityKey(r.partnerId, r.name);
+        const wb = wbMap[identityKey];
         return {
           record: r,
           totalPurchase: wb ? wb.totalPurchase : null,
@@ -245,7 +253,7 @@ export default function SuppliersPage() {
           uninvoiced: wb ? wb.uninvoiced : null,
           wbOrderCount: wb ? wb.orderCount : null,
           lastOrderDate: wb?.lastOrderDate || null,
-          pendingCount: invCounts[r.name] ?? (wb ? 0 : null),
+          pendingCount: invCounts[identityKey] ?? (wb ? 0 : null),
         };
       }),
     [rows, wbMap, invCounts],
@@ -321,19 +329,21 @@ export default function SuppliersPage() {
     setSelectedId(null);
   }
 
-  // 选中供应商后拉取工作台明细（采购记录等）
+  // 选中供应商后按 canonical partnerId 拉取工作台明细；旧数据才回退名称路径。
   useEffect(() => {
     setDetail(null);
-    if (!selectedName) return;
+    if (!selected) return;
     let alive = true;
     setDetailLoading(true);
-    procurementWorkbenchApi
-      .supplierDetail(selectedName)
+    const request = selected.record.partnerId != null
+      ? procurementWorkbenchApi.supplierDetailByPartner(selected.record.partnerId)
+      : procurementWorkbenchApi.supplierDetail(selected.record.name);
+    request
       .then((d) => { if (alive) setDetail(d); })
       .catch(() => { /* 明细拉取失败时展示空态 */ })
       .finally(() => { if (alive) setDetailLoading(false); });
     return () => { alive = false; };
-  }, [selectedName]);
+  }, [selected]);
 
   useEffect(() => { setTab("orders"); }, [selectedName]);
 
