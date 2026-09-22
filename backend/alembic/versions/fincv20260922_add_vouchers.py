@@ -1,7 +1,7 @@
 """add finance vouchers (auto bookkeeping)
 
 Revision ID: fincv20260922
-Revises: finc20260920
+Revises: partnerv220260922
 Create Date: 2026-09-22
 """
 from alembic import op
@@ -9,7 +9,7 @@ import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
 
 revision = "fincv20260922"
-down_revision = "finc20260920"
+down_revision = "partnerv220260922"
 branch_labels = None
 depends_on = None
 
