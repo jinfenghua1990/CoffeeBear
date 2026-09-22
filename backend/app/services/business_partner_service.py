@@ -1842,10 +1842,11 @@ def decide_duplicate(
     note: str = "",
     actor: str = "",
 ) -> dict[str, Any]:
-    """人工判断两个档案是否同一主体；确认同一时双向登记曾用名。
+    """人工判断两个档案是否同一真实主体。
 
-    只登记曾用名和判断结果，不移动任何来源记录：两个档案的事实仍然各自可追溯，
-    但之后带旧名的发票/流水会按名称回到本档案。
+    same=True 会执行真正的主档合并：业务表 direct partner FK、审计 links、
+    Supplier 画像、角色和银行账户全部归到 partner_id；other_partner_id 仅归档保留。
+    same=False 只记录“不是同一主体”的人工结论。
     """
     partner = db.get(BusinessPartner, partner_id)
     other = db.get(BusinessPartner, other_partner_id)
@@ -1859,6 +1860,18 @@ def decide_duplicate(
     decision = "same" if same else "different"
     clean_note = str(note or "").strip()
     decided_by = str(actor or "").strip()
+
+    merge_result: dict[str, Any] | None = None
+    if same:
+        # 先做税号冲突等安全检查；失败时不写任何 review 结论。
+        merge_result = _merge_partner_into(
+            db,
+            target=partner,
+            source=other,
+            actor=actor,
+            note=clean_note,
+        )
+
     existing = {
         (row.partner_id, row.other_partner_id): row
         for row in db.query(BusinessPartnerDuplicateReview)
@@ -1880,17 +1893,16 @@ def decide_duplicate(
                     decided_by=decided_by,
                 )
             )
-            continue
-        row.decision = decision
-        row.note = clean_note
-        row.decided_by = decided_by
-    if same:
-        # 曾用名和别名一样参与名称匹配：两个方向都登记，任意一侧的旧名都能回到本档案。
-        add_identifier(db, partner.id, kind="former_name", value=other.name)
-        add_identifier(db, other.id, kind="former_name", value=partner.name)
-    db.flush()
-    return partner_detail(db, partner_id) or {}
+        else:
+            row.decision = decision
+            row.note = clean_note
+            row.decided_by = decided_by
 
+    db.flush()
+    detail = partner_detail(db, partner_id) or {}
+    if merge_result is not None:
+        detail["mergeResult"] = merge_result
+    return detail
 
 def claim_review_link(db: Session, *, partner_id: int, link_id: int, note: str = "") -> BusinessPartnerLink:
     partner = db.get(BusinessPartner, partner_id)
