@@ -161,7 +161,14 @@ def map_purchase(
 ) -> dict:
     """把已确认的采购报表映射为 JackyunPurchaseOrder（幂等，可重复触发）。"""
     try:
-        return service.map_purchase_import(db, import_id, actor=current_actor(request))
+        result = service.map_purchase_import(db, import_id, actor=current_actor(request))
+        from app.services.procurement_chain_service import run_full_procurement_automation
+
+        result["automation"] = run_full_procurement_automation(
+            db,
+            actor=current_actor(request),
+        )
+        return result
     except LookupError as exc:
         raise HTTPException(404, str(exc))
     except ValueError as exc:
@@ -176,7 +183,16 @@ def map_outbound(
 ) -> dict:
     """把已确认的销售出库报表映射为吉客云出库单及货品明细。"""
     try:
-        return service.map_outbound_documents(db, import_id, actor=current_actor(request))
+        result = service.map_outbound_documents(db, import_id, actor=current_actor(request))
+        from app.services.partner_master_service import rebuild_partner_master
+
+        result["partnerMaster"] = rebuild_partner_master(
+            db,
+            actor=current_actor(request),
+            run_payment_match=False,
+        )
+        db.commit()
+        return result
     except LookupError as exc:
         raise HTTPException(404, str(exc))
     except ValueError as exc:
