@@ -737,6 +737,14 @@ def _sync_supplier_master(ctx: SyncContext) -> None:
             roles=["supplier"],
             source="supplier",
         )
+        if supplier.external_shop_id:
+            _add_identifier(
+                ctx,
+                partner,
+                kind="platform_account",
+                value=f"{(supplier.platform or 'supplier').strip().lower()}:{supplier.external_shop_id}",
+                source="supplier",
+            )
         _write_link(
             ctx,
             source_type="supplier",
@@ -826,6 +834,32 @@ def _sync_procurement_sources(ctx: SyncContext) -> None:
         name_getter=lambda row: row.supplier_name,
         partner_id_getter=lambda row: row.supplier_partner_id,
     )
+
+    # 1688 seller member 是比展示名称更稳定的平台身份；一旦订单已归到主体，
+    # 将其沉淀为 platform_account，后续同 member 的不同店铺名仍回到同一主体。
+    for row in (
+        ctx.db.query(Alibaba1688Order)
+        .filter(Alibaba1688Order.row_status != "deleted")
+        .all()
+    ):
+        member = str(row.seller_member_name or "").strip()
+        if not member:
+            continue
+        link = ctx.link_by_key.get(
+            _source_key("alibaba1688_order", row.id, "supplier")
+        )
+        if link is None or link.partner_id is None or link.status != "linked":
+            continue
+        partner = ctx.index.partners.get(int(link.partner_id))
+        if partner is None or partner.status != "active":
+            continue
+        _add_identifier(
+            ctx,
+            partner,
+            kind="platform_account",
+            value=f"1688:{member}",
+            source="alibaba1688_order",
+        )
 
 
 def _own_entity_keys(db: Session) -> tuple[set[str], set[str]]:
@@ -1016,7 +1050,10 @@ def _sync_sales_sources(ctx: SyncContext) -> None:
             roles=["customer"],
             force_partner=force_partner,
             force_method="direct_partner_fk" if force_partner else None,
-            resolution=None if force_partner else ctx.index.resolve(name=customer_name),
+            resolution=None if force_partner else ctx.index.resolve(
+                name=customer_name,
+                customer_code=row.customer_code or "",
+            ),
         )
         if link.partner_id and row.customer_code:
             partner = ctx.index.partners[link.partner_id]
