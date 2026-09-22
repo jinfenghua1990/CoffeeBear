@@ -8,12 +8,12 @@ import pytest
 from openpyxl import load_workbook
 
 from app.models.bank import BankAccount, BankTransaction
-from app.models.purchase import ExternalPurchaseOrder, PurchaseAllocationItem, Supplier
+from app.models.purchase import ExternalPurchaseOrder, Supplier
 from app.models.tax import TaxInvoice, TaxInvoiceLink
 from app.services import finance_corporate_payment_report_service as service
 
 
-def test_build_report_links_bank_invoice_purchase_and_product(db_session):
+def test_build_report_links_bank_invoice_purchase(db_session):
     token = uuid4().hex[:10]
     seller = f"测试供应商-{token}"
     company = f"测试公司-{token}"
@@ -50,16 +50,6 @@ def test_build_report_links_bank_invoice_purchase_and_product(db_session):
     db_session.add(po)
     db_session.flush()
 
-    item = PurchaseAllocationItem(
-        po_id=po.id,
-        sku_code=f"SKU-{token}",
-        goods_name="测试商品",
-        quantity=Decimal("10"),
-        unit_price=Decimal("100"),
-        amount=Decimal("1000"),
-        source="manual",
-    )
-    db_session.add(item)
 
     txn = BankTransaction(
         account_id=account.id,
@@ -116,17 +106,14 @@ def test_build_report_links_bank_invoice_purchase_and_product(db_session):
     assert report["invoiceRows"][0]["paymentSourceLabel"] == "对公支付"
     assert report["invoiceRows"][0]["expenseNatureLabel"] == "货款"
     assert po.external_order_id in report["invoiceRows"][0]["purchaseOrderNos"]
-    assert report["productDetails"][0]["skuCode"] == item.sku_code
-    assert Decimal(report["productDetails"][0]["unitPrice"]) == Decimal("100")
 
     blob = service.corporate_payment_xlsx(report)
     wb = load_workbook(BytesIO(blob), read_only=True)
-    assert wb.sheetnames == ["月度汇总", "已收票对公核对", "商品明细"]
+    assert wb.sheetnames == ["月度汇总", "已收票对公核对"]
     invoice_ws = wb["已收票对公核对"]
     headers = {cell.value: cell.column for cell in invoice_ws[1]}
     assert invoice_ws["D2"].value == invoice.invoice_number
     assert invoice_ws.cell(2, headers["发票属性"]).value == "蓝字发票"
-    assert wb["商品明细"]["G2"].value == item.sku_code
 
 
 def test_report_keeps_received_invoice_even_when_bank_link_is_unconfirmed(db_session):
@@ -188,7 +175,6 @@ def test_corporate_payment_xlsx_keeps_one_row_per_invoice_with_multiple_payments
             "paidInvoiceCount": 1,
             "partialInvoiceCount": 0,
             "unpaidInvoiceCount": 0,
-            "productRowCount": 0,
         },
         "invoiceRows": [
             {
@@ -238,7 +224,6 @@ def test_corporate_payment_xlsx_keeps_one_row_per_invoice_with_multiple_payments
             }
         ],
         "rows": [],
-        "productDetails": [],
     }
 
     wb = load_workbook(BytesIO(service.corporate_payment_xlsx(report)), read_only=True)
@@ -411,7 +396,6 @@ def test_adjustment_persists_selected_invoices_and_recomputes_summary(db_session
     assert Decimal(current["summary"]["invoiceTotal"]) == Decimal("100.00")
     assert Decimal(current["summary"]["outstandingTotal"]) == Decimal("100.00")
     assert current["summary"]["unpaidInvoiceCount"] == 1
-    assert current["summary"]["productRowCount"] == 0
 
     again = service.save_corporate_payment_adjustment(
         db_session, company=company, year=2026, month=8,

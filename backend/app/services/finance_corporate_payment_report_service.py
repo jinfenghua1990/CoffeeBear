@@ -1,6 +1,6 @@
 """月度「已收票付款方式核对」清单（对公 / 个人 / 混合）。
 
-以已经落库的银行付款↔进项发票关联为唯一付款事实，再向采购订单与商品分配明细下钻。
+以已经落库的银行付款↔进项发票关联为唯一付款事实，并按发票展示采购订单关联。
 当月进项发票全部保留用于财务交付，但只有有效、正数金额发票参与银行付款核对；
 红冲、作废、待确认或非正数金额发票明确标记为“无需核对银行付款”。
 """
@@ -21,7 +21,7 @@ from sqlalchemy.orm import Session
 from app.core.audit import audit
 from app.models.bank import BankAccount, BankTransaction
 from app.models.finance import FinanceCorporatePaymentAdjustment
-from app.models.purchase import ExternalPurchaseOrder, PurchaseAllocationItem, Supplier
+from app.models.purchase import Supplier
 from app.models.tax import TaxInvoice, TaxInvoiceLink
 from app.services import invoice_reconciliation, tax_invoice_service
 from app.services.monthly_core import month_bounds
@@ -325,7 +325,7 @@ def build_report(
 ) -> dict[str, Any]:
     """按“当月收到的进项发票”组织财务核对清单。
 
-    发票是月度交付的主维度；银行付款、采购订单和商品明细都挂在发票下面。
+    发票是月度交付的主维度；银行付款和采购订单关联都挂在发票下面。
     已收票但尚未匹配银行付款的发票也必须进入清单，不能因为未付款而被漏掉。
     selected_keys 以 invoice_key 为规范键；兼容历史唯一的发票号码，歧义号码拒绝猜测。
     """
@@ -390,30 +390,6 @@ def build_report(
         tax_invoice_service.invoice_line_summaries(db, classification_invoices)
         if classification_invoices else {}
     )
-    order_ids = sorted({
-        int(order["orderId"])
-        for covered in purchase_map.values()
-        for order in covered
-        if order.get("orderId") is not None
-    })
-    orders = (
-        db.query(ExternalPurchaseOrder).filter(ExternalPurchaseOrder.id.in_(order_ids)).all()
-        if order_ids
-        else []
-    )
-    order_map = {row.id: row for row in orders}
-    items = (
-        db.query(PurchaseAllocationItem)
-        .filter(PurchaseAllocationItem.po_id.in_(order_ids))
-        .order_by(PurchaseAllocationItem.po_id, PurchaseAllocationItem.id)
-        .all()
-        if order_ids
-        else []
-    )
-    items_by_order: dict[int, list[PurchaseAllocationItem]] = defaultdict(list)
-    for item in items:
-        items_by_order[item.po_id].append(item)
-
     invoice_rows: list[dict[str, Any]] = []
     flat_rows: list[dict[str, Any]] = []
     for inv in invoices:
@@ -566,35 +542,6 @@ def build_report(
             "payments": payments,
         })
 
-    product_details: list[dict[str, Any]] = []
-    for inv_id, covered in purchase_map.items():
-        inv = invoice_map.get(inv_id)
-        if inv is None:
-            continue
-        for coverage in covered:
-            po_id = int(coverage.get("orderId") or 0)
-            order = order_map.get(po_id)
-            order_no = str(coverage.get("orderNo") or (order.external_order_id if order else ""))
-            covered_amount = _dec(coverage.get("consumed"))
-            item_rows = items_by_order.get(po_id) or [None]
-            for item in item_rows:
-                product_details.append({
-                    "invoiceId": inv.id,
-                    "invoiceKey": inv.invoice_key,
-                    "invoiceNumber": inv.invoice_number,
-                    "invoiceDate": inv.issue_date.strftime("%Y-%m-%d") if inv.issue_date else "",
-                    "supplierName": inv.seller_name,
-                    "purchaseOrderId": po_id or None,
-                    "purchaseOrderNo": order_no,
-                    "platform": (order.platform if order else str(coverage.get("platform") or "")),
-                    "invoiceCoveredOrderAmount": str(covered_amount),
-                    "skuCode": item.sku_code if item else "",
-                    "productName": item.goods_name if item else (order.title if order else ""),
-                    "quantity": str(_dec(item.quantity)) if item else "",
-                    "unitPrice": str(_dec(item.unit_price)) if item else "",
-                    "itemAmount": str(_dec(item.amount)) if item else "",
-                })
-
     unique_txns = {payment["paymentId"] for row in invoice_rows for payment in row["payments"]}
     payment_total = sum((_dec(txn_map[i].amount) for i in unique_txns if i in txn_map), Decimal("0"))
     invoice_total = sum((_dec(row["invoiceTotalAmount"]) for row in invoice_rows), Decimal("0"))
@@ -659,11 +606,9 @@ def build_report(
             "expenseNatureCounts": dict(
                 Counter(row["expenseNatureLabel"] for row in invoice_rows)
             ),
-            "productRowCount": len(product_details),
         },
         "invoiceRows": invoice_rows,
         "rows": flat_rows,
-        "productDetails": product_details,
     }
     if selected_keys is not None:
         return apply_invoice_selection(report, selected_keys)
@@ -802,7 +747,6 @@ def apply_invoice_selection(report: dict[str, Any], selected_keys: list[str]) ->
     ]
     kept_ids = {row["invoiceId"] for row in invoice_rows}
     flat_rows = [row for row in report.get("rows", []) if row.get("invoiceId") in kept_ids]
-    product_details = [row for row in report.get("productDetails", []) if row.get("invoiceId") in kept_ids]
 
     unique_txns = {payment["paymentId"] for row in invoice_rows for payment in row.get("payments", [])}
     payment_by_id = {
@@ -862,14 +806,12 @@ def apply_invoice_selection(report: dict[str, Any], selected_keys: list[str]) ->
         "expenseNatureCounts": dict(
             Counter(str(row.get("expenseNatureLabel") or "待分类") for row in invoice_rows)
         ),
-        "productRowCount": len(product_details),
     }
     return {
         **report,
         "summary": summary,
         "invoiceRows": invoice_rows,
         "rows": flat_rows,
-        "productDetails": product_details,
     }
 
 def _style_sheet(ws) -> None:
@@ -965,22 +907,6 @@ def corporate_payment_xlsx(report: dict[str, Any]) -> bytes:
         ])
     _style_sheet(ws)
 
-    detail = wb.create_sheet("商品明细")
-    detail.append([
-        "发票号码", "发票日期", "供应商", "采购订单号", "采购平台", "发票覆盖订单金额",
-        "商品编码", "商品名称", "数量", "采购单价", "商品金额",
-    ])
-    for row in report.get("productDetails", []):
-        detail.append([
-            row["invoiceNumber"], row["invoiceDate"], row["supplierName"],
-            row["purchaseOrderNo"], row["platform"], float(_dec(row["invoiceCoveredOrderAmount"])),
-            row["skuCode"], row["productName"],
-            float(_dec(row["quantity"])) if row["quantity"] != "" else None,
-            float(_dec(row["unitPrice"])) if row["unitPrice"] != "" else None,
-            float(_dec(row["itemAmount"])) if row["itemAmount"] != "" else None,
-        ])
-    _style_sheet(detail)
-
     summary = wb.create_sheet("月度汇总", 0)
     s = report.get("summary", {})
     summary.append(["指标", "数值"])
@@ -1006,7 +932,6 @@ def corporate_payment_xlsx(report: dict[str, Any]) -> bytes:
     summary.append(["混合支付发票张数", s.get("mixedInvoiceCount", 0)])
     summary.append(["支付方式不适用发票张数", s.get("notApplicablePaymentCount", 0)])
     summary.append(["关联银行付款笔数", s.get("paymentCount", 0)])
-    summary.append(["商品明细行数", s.get("productRowCount", 0)])
     for label, count in sorted((s.get("expenseNatureCounts") or {}).items()):
         summary.append([f"费用性质：{label}", count])
     _style_sheet(summary)

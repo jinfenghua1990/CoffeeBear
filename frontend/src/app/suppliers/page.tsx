@@ -4,8 +4,10 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import Link from "next/link";
 import {
+  businessPartnerApi,
   procurementWorkbenchApi,
   supplierApi,
+  PartnerReferenceCoverage,
   SupplierInput,
   SupplierRecord,
   WorkbenchOrder,
@@ -172,6 +174,9 @@ export default function SuppliersPage() {
   const [wbMap, setWbMap] = useState<Record<string, WorkbenchSupplierSummary>>({});
   const [summary, setSummary] = useState<WorkbenchSummary | null>(null);
   const [invCounts, setInvCounts] = useState<Record<string, number>>({});
+  const [coverage, setCoverage] = useState<PartnerReferenceCoverage | null>(null);
+  const [coverageLoading, setCoverageLoading] = useState(true);
+  const [coverageSyncing, setCoverageSyncing] = useState(false);
 
   const [sortKey, setSortKey] = useTabScopedState<SortKey>("suppliers.sortKey", "totalPurchase");
   const [sortDir, setSortDir] = useTabScopedState<SortDir>("suppliers.sortDir", "desc");
@@ -197,6 +202,35 @@ export default function SuppliersPage() {
   }, [keyword, status]);
 
   useEffect(() => { void load(); }, [load]);
+
+  const loadCoverage = useCallback(async () => {
+    try {
+      const data = await businessPartnerApi.coverage();
+      setCoverage(data);
+    } catch {
+      setCoverage(null);
+    } finally {
+      setCoverageLoading(false);
+    }
+  }, []);
+
+  useEffect(() => { void loadCoverage(); }, [loadCoverage]);
+
+  async function refreshMasterData() {
+    setCoverageSyncing(true);
+    try {
+      const result = await businessPartnerApi.sync();
+      await Promise.all([load(), loadCoverage()]);
+      setNotice({
+        tone: "ok",
+        text: `主数据已重建：新增主体 ${result.createdPartners} 个，归集来源 ${result.createdLinks + result.updatedLinks} 条。`,
+      });
+    } catch (error) {
+      setNotice({ tone: "err", text: error instanceof Error ? error.message : "主数据重建失败" });
+    } finally {
+      setCoverageSyncing(false);
+    }
+  }
 
   // 搜索 300ms 防抖
   useEffect(() => {
@@ -514,6 +548,44 @@ export default function SuppliersPage() {
           {notice.text}
         </div>
       )}
+
+      <section className="rounded-xl border border-violet-200 bg-violet-50/50 p-4">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <h2 className="text-sm font-semibold text-slate-800">往来主体覆盖率</h2>
+            <p className="mt-1 max-w-3xl text-xs leading-5 text-slate-500">
+              采购、发票、付款流水等有身份事实的记录统一归集到 BusinessPartner；这里的付款流水状态不代表采购、入库或业务闭环。
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={() => void refreshMasterData()}
+            disabled={coverageSyncing}
+            className="rounded-lg bg-violet-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-violet-700 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {coverageSyncing ? "主数据重建中…" : "重建并刷新"}
+          </button>
+        </div>
+        {coverageLoading ? (
+          <div className="mt-3 text-xs text-slate-400">正在读取主体覆盖率…</div>
+        ) : coverage ? (
+          <div className="mt-3 grid grid-cols-2 gap-3 md:grid-cols-4">
+            {[
+              ["总体覆盖率", `${Math.round(Math.max(0, Math.min(1, coverage.coverage)) * 100)}%`],
+              ["应归集事实", String(coverage.totalFacts)],
+              ["已归集", String(coverage.linkedFacts)],
+              ["待处理", String(coverage.unlinkedFacts)],
+            ].map(([label, value]) => (
+              <div key={label} className="rounded-lg border border-white bg-white/80 px-3 py-2">
+                <div className="text-[11px] text-slate-400">{label}</div>
+                <div className="mt-1 text-lg font-semibold tabular-nums text-slate-800">{value}</div>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <div className="mt-3 text-xs text-amber-700">暂时无法读取主体覆盖率，档案列表仍可正常使用。</div>
+        )}
+      </section>
 
       {/* KPI 卡片行 */}
       <div className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-5">
