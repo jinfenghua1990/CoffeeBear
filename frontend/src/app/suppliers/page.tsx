@@ -168,7 +168,6 @@ export default function SuppliersPage() {
   const [form, setForm] = useState<FormState | null>(null);
   const [saving, setSaving] = useState(false);
   const [notice, setNotice] = useState<{ tone: "ok" | "err"; text: string } | null>(null);
-  const [deleteTarget, setDeleteTarget] = useState<SupplierRecord | null>(null);
 
   const [wbMap, setWbMap] = useState<Record<string, WorkbenchSupplierSummary>>({});
   const [summary, setSummary] = useState<WorkbenchSummary | null>(null);
@@ -425,21 +424,6 @@ export default function SuppliersPage() {
     }
   }
 
-  async function confirmDelete() {
-    if (!deleteTarget) return;
-    setSaving(true);
-    try {
-      await supplierApi.remove(deleteTarget.id);
-      setNotice({ tone: "ok", text: `已删除供应商「${deleteTarget.name}」` });
-      setDeleteTarget(null);
-      await load();
-    } catch (error) {
-      setNotice({ tone: "err", text: error instanceof Error ? error.message : "删除失败" });
-    } finally {
-      setSaving(false);
-    }
-  }
-
   function changeStatus(next: StatusFilter) {
     setStatus(next);
     setSortKey("totalPurchase");
@@ -632,13 +616,6 @@ export default function SuppliersPage() {
                           className="rounded px-1.5 py-1 text-xs font-medium text-slate-600 hover:bg-slate-100"
                         >
                           编辑
-                        </button>
-                        <button
-                          type="button"
-                          onClick={(e) => { e.stopPropagation(); setDeleteTarget(row.record); }}
-                          className="rounded px-1.5 py-1 text-xs font-medium text-red-500 hover:bg-red-50"
-                        >
-                          删除
                         </button>
                       </td>
                     </tr>
@@ -994,23 +971,7 @@ export default function SuppliersPage() {
         </div>
       )}
 
-      {deleteTarget && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40 p-4" onClick={() => !saving && setDeleteTarget(null)}>
-          <div className="w-full max-w-sm rounded-xl bg-white p-5 shadow-xl" onClick={(e) => e.stopPropagation()}>
-            <h3 className="text-base font-semibold text-slate-900">确认删除供应商？</h3>
-            <p className="mt-2 text-sm text-slate-600">
-              将删除「{deleteTarget.name}」{deleteTarget.taxNo ? `（税号 ${deleteTarget.taxNo}）` : ""}。
-              <span className="text-red-500">此操作不可恢复。</span>
-            </p>
-            <div className="mt-4 flex justify-end gap-2">
-              <button type="button" onClick={() => setDeleteTarget(null)} disabled={saving} className="rounded-lg border border-slate-300 px-4 py-1.5 text-sm text-slate-600 hover:bg-slate-50 disabled:opacity-50">取消</button>
-              <button type="button" onClick={() => void confirmDelete()} disabled={saving} className="rounded-lg bg-red-600 px-4 py-1.5 text-sm font-medium text-white hover:bg-red-700 disabled:opacity-50">
-                {saving ? "删除中…" : "确认删除"}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+
     </div>
   );
 }
