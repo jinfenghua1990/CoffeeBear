@@ -1,7 +1,7 @@
 from decimal import Decimal
 from datetime import date, datetime
 
-from sqlalchemy import BigInteger, Boolean, Date, DateTime, Numeric, String, Text, UniqueConstraint
+from sqlalchemy import BigInteger, Boolean, Date, DateTime, ForeignKey, Numeric, String, Text, UniqueConstraint
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -48,6 +48,9 @@ class BankTransaction(Base, PkMixin, TimestampMixin):
     amount: Mapped[Decimal | None] = mapped_column(MONEY, nullable=True)
     counterparty_name: Mapped[str] = mapped_column(String(256), default="", index=True)
     counterparty_account: Mapped[str] = mapped_column(String(128), default="")
+    counterparty_partner_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("business_partners.id", ondelete="SET NULL"), nullable=True, index=True,
+    )
     summary: Mapped[str] = mapped_column(Text, default="")
     serial_no: Mapped[str] = mapped_column(String(128), default="", index=True)
     voucher_no: Mapped[str] = mapped_column(String(128), default="", index=True)

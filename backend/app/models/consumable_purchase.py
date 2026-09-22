@@ -21,6 +21,9 @@ class ConsumablePurchase(Base, PkMixin, TimestampMixin):
     request_key: Mapped[str] = mapped_column(String(36), unique=True)
     request_fingerprint: Mapped[str] = mapped_column(String(64))
     supplier_name: Mapped[str] = mapped_column(String(256))
+    supplier_partner_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("business_partners.id", ondelete="SET NULL"), nullable=True, index=True,
+    )
     ordered_on: Mapped[date] = mapped_column(Date)
     source_order_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey("alibaba1688_orders.id"), nullable=True)
     reference_no: Mapped[str] = mapped_column(String(128), default="")

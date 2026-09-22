@@ -1,7 +1,7 @@
 from decimal import Decimal
 from datetime import datetime
 
-from sqlalchemy import BigInteger, DateTime, Index, Numeric, String, Text
+from sqlalchemy import BigInteger, DateTime, ForeignKey, Index, Numeric, String, Text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -23,6 +23,9 @@ class SalesOrder(Base, PkMixin, TimestampMixin):
     identity_keys: Mapped[list] = mapped_column(JSONB, default=list)
     source_history: Mapped[list] = mapped_column(JSONB, default=list)
     store_id: Mapped[int | None] = mapped_column(BigInteger, index=True, nullable=True)
+    customer_partner_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("business_partners.id", ondelete="SET NULL"), nullable=True, index=True,
+    )
     platform: Mapped[str] = mapped_column(String(64), default="", index=True)
     order_type: Mapped[str] = mapped_column(String(64), default="")
     order_status: Mapped[str] = mapped_column(String(64), default="", index=True)

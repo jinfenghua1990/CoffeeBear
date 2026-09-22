@@ -13,6 +13,7 @@ from app.db import get_db
 from app.models.business_partner import BusinessPartner
 from app.services import business_partner_service as partner_service
 from app.services import payment_invoice_match_service as payment_match_service
+from app.services import partner_reference_service
 
 
 router = APIRouter(prefix="/finance/partners", tags=["finance-partners"])
@@ -117,6 +118,32 @@ def sync_partners(request: Request, db: Session = Depends(get_db)) -> dict[str, 
         {**result, "paymentPeriods": payment.get("periods", [])},
     )
     return {"ok": True, **result}
+
+
+@router.get("/reference-coverage")
+def reference_coverage(db: Session = Depends(get_db)) -> dict[str, Any]:
+    """Phase 1 只读覆盖率：查看业务事实有多少已经落 canonical partner FK。"""
+    return partner_reference_service.partner_reference_coverage(db)
+
+
+@router.post("/materialize-references")
+def materialize_references(
+    request: Request,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    """幂等回填已确认 BusinessPartnerLink 到业务表 direct FK。"""
+    result = partner_reference_service.materialize_partner_references(db)
+    db.commit()
+    coverage = partner_reference_service.partner_reference_coverage(db)
+    audit(
+        db,
+        current_actor(request),
+        "business_partner.references_materialized",
+        "business_partner",
+        "",
+        {**result, "coverage": coverage.get("coverage", 0)},
+    )
+    return {"ok": True, **result, "coverage": coverage}
 
 
 @router.post("/{partner_id}/recheck")

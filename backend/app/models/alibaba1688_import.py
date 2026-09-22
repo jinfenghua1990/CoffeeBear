@@ -48,6 +48,12 @@ class Alibaba1688Order(Base, PkMixin, TimestampMixin):
     buyer_company_name: Mapped[str] = mapped_column(String(256), default="")
     buyer_member_name: Mapped[str] = mapped_column(String(128), default="")
     seller_company_name: Mapped[str] = mapped_column(String(256), default="")
+    supplier_partner_id: Mapped[int | None] = mapped_column(
+        BigInteger,
+        ForeignKey("business_partners.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
     # 采购订单的计划入库仓库；实际入库完成后，以入库单上的仓库为准。
     warehouse_id: Mapped[int | None] = mapped_column(
         BigInteger, ForeignKey("warehouses.id"), nullable=True, index=True,

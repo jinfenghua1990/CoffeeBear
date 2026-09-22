@@ -3,7 +3,7 @@
 from datetime import datetime
 from decimal import Decimal
 
-from sqlalchemy import BigInteger, Boolean, DateTime, Integer, Numeric, String, Text, UniqueConstraint
+from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, Integer, Numeric, String, Text, UniqueConstraint
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -71,8 +71,14 @@ class TaxInvoice(Base, PkMixin, TimestampMixin):
     issue_date: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
     seller_name: Mapped[str] = mapped_column(String(256), default="", index=True)
     seller_tax_id: Mapped[str] = mapped_column(String(64), default="", index=True)
+    seller_partner_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("business_partners.id", ondelete="SET NULL"), nullable=True, index=True,
+    )
     buyer_name: Mapped[str] = mapped_column(String(256), default="", index=True)
     buyer_tax_id: Mapped[str] = mapped_column(String(64), default="", index=True)
+    buyer_partner_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("business_partners.id", ondelete="SET NULL"), nullable=True, index=True,
+    )
     amount_excl_tax: Mapped[Decimal | None] = mapped_column(MONEY, nullable=True)
     tax_amount: Mapped[Decimal | None] = mapped_column(MONEY, nullable=True)
     total_amount: Mapped[Decimal | None] = mapped_column(MONEY, nullable=True)

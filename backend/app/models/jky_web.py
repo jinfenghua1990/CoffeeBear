@@ -10,7 +10,9 @@ from datetime import datetime
 from decimal import Decimal
 
 from sqlalchemy import (
+    BigInteger,
     DateTime,
+    ForeignKey,
     Index,
     Numeric,
     String,
@@ -53,6 +55,9 @@ class JkyWebSalesOrder(Base, PkMixin, TimestampMixin):
     real_fee: Mapped[Decimal | None] = mapped_column(MONEY, nullable=True)  # 实付金额
     customer_code: Mapped[str] = mapped_column(String(128), default="")
     customer_account: Mapped[str] = mapped_column(String(256), default="")
+    customer_partner_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("business_partners.id", ondelete="SET NULL"), nullable=True, index=True,
+    )
     city: Mapped[str] = mapped_column(String(64), default="")
     raw: Mapped[dict] = mapped_column(JSONB, default=dict)
 
@@ -193,6 +198,9 @@ class JkyWebStockinOrder(Base, PkMixin, TimestampMixin):
     bill_no: Mapped[str] = mapped_column(String(128), default="", index=True)  # 关联单号
     source_bill_no: Mapped[str] = mapped_column(String(128), default="", index=True)  # 来源单号
     supplier_name: Mapped[str] = mapped_column(String(256), default="", index=True)  # 供应商
+    supplier_partner_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("business_partners.id", ondelete="SET NULL"), nullable=True, index=True,
+    )
     logistic_name: Mapped[str] = mapped_column(String(128), default="")
     logistic_no: Mapped[str] = mapped_column(String(128), default="")
     company_name: Mapped[str] = mapped_column(String(256), default="")
