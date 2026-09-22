@@ -40,7 +40,10 @@ from app.models.tax import TaxInvoice, TaxInvoiceLink
 
 
 PARTNER_ROLES = {"supplier", "customer", "counterparty"}
-IDENTIFIER_KINDS = {"name", "alias", "former_name", "tax_no", "bank_account", "customer_code"}
+IDENTIFIER_KINDS = {
+    "name", "alias", "former_name", "tax_no", "bank_account",
+    "customer_code", "platform_account",
+}
 SOURCE_LABELS = {
     "supplier": "历史供应商档案",
     "external_purchase_order": "采购订单",
@@ -284,6 +287,8 @@ class PartnerIndex:
         self.by_tax: dict[str, set[int]] = defaultdict(set)
         self.by_account: dict[str, set[int]] = defaultdict(set)
         self.by_name: dict[str, set[int]] = defaultdict(set)
+        self.by_customer_code: dict[str, set[int]] = defaultdict(set)
+        self.by_platform_account: dict[str, set[int]] = defaultdict(set)
         self.by_canonical_name: dict[str, set[int]] = defaultdict(set)
         self.by_loose_name: dict[str, set[int]] = defaultdict(set)
         self.add_many(partners)
@@ -305,6 +310,10 @@ class PartnerIndex:
             self.by_tax[value].add(partner_id)
         elif kind == "bank_account":
             self.by_account[value].add(partner_id)
+        elif kind == "customer_code":
+            self.by_customer_code[value].add(partner_id)
+        elif kind == "platform_account":
+            self.by_platform_account[value].add(partner_id)
         elif kind in {"name", "alias", "former_name"}:
             self.by_name[value].add(partner_id)
             if kind == "name":
@@ -318,9 +327,19 @@ class PartnerIndex:
     def _active(ids: Iterable[int], partners: dict[int, BusinessPartner]) -> list[int]:
         return sorted({pid for pid in ids if partners.get(pid) is not None and partners[pid].status == "active"})
 
-    def resolve(self, *, name: str = "", tax_no: str = "", account_no: str = "") -> Resolution:
+    def resolve(
+        self,
+        *,
+        name: str = "",
+        tax_no: str = "",
+        account_no: str = "",
+        customer_code: str = "",
+        platform_account: str = "",
+    ) -> Resolution:
         tax = normalize_tax_no(tax_no)
         account = normalize_account(account_no)
+        customer = normalize_identifier("customer_code", customer_code)
+        platform_id = normalize_identifier("platform_account", platform_account)
         exact_name = normalize_name(name)
 
         if tax:
@@ -336,6 +355,20 @@ class PartnerIndex:
                 return Resolution(self.partners[account_ids[0]], "bank_account", confidence=0.99)
             if len(account_ids) > 1:
                 return Resolution(None, candidates=account_ids)
+
+        if customer:
+            customer_ids = self._active(self.by_customer_code.get(customer, set()), self.partners)
+            if len(customer_ids) == 1:
+                return Resolution(self.partners[customer_ids[0]], "customer_code", confidence=1.0)
+            if len(customer_ids) > 1:
+                return Resolution(None, candidates=customer_ids)
+
+        if platform_id:
+            platform_ids = self._active(self.by_platform_account.get(platform_id, set()), self.partners)
+            if len(platform_ids) == 1:
+                return Resolution(self.partners[platform_ids[0]], "platform_account", confidence=0.995)
+            if len(platform_ids) > 1:
+                return Resolution(None, candidates=platform_ids)
 
         if exact_name:
             canonical_ids = self._active(self.by_canonical_name.get(exact_name, set()), self.partners)
