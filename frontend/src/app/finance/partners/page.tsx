@@ -550,8 +550,11 @@ function Invoices({ rows }: { rows: BusinessPartnerDetail["invoices"] }) {
         {rows.map((row) => {
           const remaining = Math.max(0, Number(row.bankRemainingAmount || 0));
           const paid = Number(row.bankPaidAmount || 0);
-          const settled = remaining <= 0.005 && Number(row.amount || 0) > 0;
-          const partial = paid > 0.005 && !settled;
+          const effectiveAmount = Number(row.effectiveAmount ?? row.amount ?? 0);
+          // 红字票和已全额红冲蓝字票不进入银行付款核对；不能因有效金额为 0 被误判为“已匹配”。
+          const redOffset = row.redStatus === "fully_red_offset" || row.redStatus === "red_invoice";
+          const settled = !redOffset && remaining <= 0.005 && effectiveAmount > 0.005;
+          const partial = !redOffset && paid > 0.005 && !settled;
           return <tr key={row.id} className="hover:bg-slate-50/60">
             <td className="px-3 py-2.5">
               <div className="text-slate-600">{dateText(row.date)}</div>
