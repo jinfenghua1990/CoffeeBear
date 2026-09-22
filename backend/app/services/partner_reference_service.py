@@ -246,6 +246,57 @@ def repoint_partner_references(db: Session, *, from_partner_id: int, to_partner_
     }
 
 
+def _sync_generic_sales_partner_refs(db: Session) -> int:
+    """Propagate customer identity from JKY Web orders into normalized SalesOrder rows.
+
+    Order/trade IDs are stable business identifiers. A key is usable only when every
+    JKY row carrying it points to the same canonical partner; conflicting keys are ignored.
+    Raw customer names are deliberately not used here.
+    """
+    key_partners: dict[str, set[int]] = defaultdict(set)
+    for row in (
+        db.query(JkyWebSalesOrder)
+        .filter(JkyWebSalesOrder.customer_partner_id.isnot(None))
+        .all()
+    ):
+        partner_id = int(row.customer_partner_id)
+        for value in (row.trade_no, row.source_trade_no):
+            key = str(value or "").strip()
+            if key:
+                key_partners[key].add(partner_id)
+
+    stable = {
+        key: next(iter(partner_ids))
+        for key, partner_ids in key_partners.items()
+        if len(partner_ids) == 1
+    }
+    if not stable:
+        return 0
+
+    changed = 0
+    for row in db.query(SalesOrder).all():
+        keys = [
+            str(row.order_no or "").strip(),
+            str(row.source_order_id or "").strip(),
+            *[
+                str(value or "").strip()
+                for value in (row.identity_keys if isinstance(row.identity_keys, list) else [])
+            ],
+        ]
+        candidates = {
+            stable[key]
+            for key in keys
+            if key and key in stable
+        }
+        if len(candidates) != 1:
+            continue
+        partner_id = next(iter(candidates))
+        if row.customer_partner_id != partner_id:
+            row.customer_partner_id = partner_id
+            changed += 1
+    return changed
+
+
 def materialize_partner_references(db: Session) -> dict[str, int]:
     """Copy linked audit relationships into source-table FKs; idempotent."""
     changed_by_source: dict[str, int] = defaultdict(int)
@@ -286,6 +337,10 @@ def materialize_partner_references(db: Session) -> dict[str, int]:
         if supplier is not None and supplier.partner_id != partner.id:
             supplier.partner_id = partner.id
             changed_by_source["supplier"] += 1
+
+    sales_rows = _sync_generic_sales_partner_refs(db)
+    if sales_rows:
+        changed_by_source["sales_order"] += sales_rows
 
     role_rows = _sync_roles(db)
     bank_rows = _sync_bank_accounts(db)
