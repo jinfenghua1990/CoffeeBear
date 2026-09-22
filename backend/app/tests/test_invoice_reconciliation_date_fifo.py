@@ -1,6 +1,7 @@
 from datetime import datetime
 from decimal import Decimal
 
+from app.models.business_partner import BusinessPartner
 from app.models.purchase import ExternalPurchaseOrder, JackyunPurchaseOrder, JackyunPurchaseOrderLink
 from app.models.tax import TaxInvoice, TaxInvoiceLink
 from app.services import invoice_reconciliation
@@ -283,4 +284,54 @@ def test_supplier_match_does_not_accept_arbitrary_prefix():
         invoice_reconciliation.normalize_supplier("北京华"),
         invoice_reconciliation.normalize_supplier("北京华贸世纪"),
     )
+
+def test_fifo_groups_different_raw_names_by_canonical_partner_id(db_session):
+    """采购店铺名与开票法人名完全不同时，只要 partner_id 相同就必须进入同一 FIFO 池。"""
+    partner = BusinessPartner(
+        name="合锦（广州）供应链有限公司",
+        normalized_name="合锦(广州)供应链有限公司",
+        tax_no="91440101MA5AQUHB7W",
+        roles=["supplier"],
+        status="active",
+    )
+    db_session.add(partner)
+    db_session.flush()
+
+    order = ExternalPurchaseOrder(
+        external_order_id="CANON-FIFO-PO-001",
+        platform="1688",
+        supplier_name="合锦1688店铺",
+        supplier_partner_id=partner.id,
+        ordered_at=datetime(2026, 7, 20, 10, 0),
+        order_amount=Decimal("3080.00"),
+        paid_amount=Decimal("3080.00"),
+    )
+    invoice = TaxInvoice(
+        invoice_key="CANON-FIFO-INV-001",
+        direction="input",
+        invoice_number="CANON-FIFO-INV-001",
+        status="issued",
+        issue_date=datetime(2026, 7, 24, 12, 0),
+        seller_name="合锦（广州）供应链有限公司",
+        seller_tax_id="91440101MA5AQUHB7W",
+        seller_partner_id=partner.id,
+        total_amount=Decimal("3080.00"),
+    )
+    db_session.add_all([order, invoice])
+    db_session.flush()
+
+    result = reconcile(db_session, partner_id=partner.id)
+
+    assert len(result["suppliers"]) == 1
+    entry = result["suppliers"][0]
+    assert entry["partnerId"] == partner.id
+    assert entry["supplier"] == "合锦（广州）供应链有限公司"
+    assert entry["orderCount"] == 1
+    invoice_row = next(
+        item for month in entry["months"] for item in month["invoices"]
+        if item["invoiceId"] == invoice.id
+    )
+    assert invoice_row["status"] == "matched"
+    assert invoice_row["coveredTotal"] == 3080.0
+    assert [row["orderNo"] for row in invoice_row["covered"]] == [order.external_order_id]
 
