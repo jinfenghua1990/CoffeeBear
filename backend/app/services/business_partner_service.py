@@ -618,23 +618,41 @@ def _write_link(
 
 
 def _sync_supplier_master(ctx: SyncContext) -> None:
+    """Treat Supplier rows as procurement profiles of a canonical BusinessPartner.
+
+    Multiple Supplier rows (for example different platform shops) may point to one partner.
+    Only the designated legacy_supplier_id profile may drive the canonical display name;
+    other profile names become aliases instead of creating/renaming identities.
+    """
     for supplier in ctx.db.query(Supplier).order_by(Supplier.id).all():
-        partner = next(
-            (row for row in ctx.index.partners.values() if row.legacy_supplier_id == supplier.id),
-            None,
+        partner = (
+            ctx.index.partners.get(int(supplier.partner_id))
+            if supplier.partner_id is not None
+            else None
         )
+        if partner is not None and partner.status == "archived":
+            partner = None
+
+        if partner is None:
+            partner = next(
+                (
+                    row for row in ctx.index.partners.values()
+                    if row.status == "active" and row.legacy_supplier_id == supplier.id
+                ),
+                None,
+            )
+
         if partner is None:
             resolution = ctx.index.resolve(
                 name=supplier.name,
                 tax_no=supplier.tax_no,
                 account_no=supplier.bank_account_no,
             )
-            if resolution.partner is not None and resolution.partner.legacy_supplier_id is None:
+            if resolution.partner is not None:
                 partner = resolution.partner
-                partner.legacy_supplier_id = supplier.id
-                ctx.updated_partners += 1
             else:
-                # 近似候选不自动合并；旧供应商本身是一个真实独立档案。
+                # Ambiguous candidates are not auto-merged. The Supplier profile itself is
+                # a real procurement fact, so it gets an independent canonical partner.
                 partner = _create_partner(
                     ctx,
                     name=supplier.name,
@@ -650,21 +668,31 @@ def _sync_supplier_master(ctx: SyncContext) -> None:
                     address=supplier.address,
                     notes=supplier.notes,
                 )
-        else:
-            # 旧档案是人工维护入口；名称变更以它为准，但把旧名保留为别名。
-            new_name = str(supplier.name or "").strip()
-            if new_name and normalize_name(new_name) != partner.normalized_name:
+
+        if supplier.partner_id != partner.id:
+            supplier.partner_id = partner.id
+        if partner.legacy_supplier_id is None:
+            partner.legacy_supplier_id = supplier.id
+            ctx.updated_partners += 1
+
+        new_name = str(supplier.name or "").strip()
+        if new_name and normalize_name(new_name) != partner.normalized_name:
+            if partner.legacy_supplier_id == supplier.id:
                 _add_identifier(ctx, partner, kind="alias", value=partner.name, source="supplier")
                 partner.name = new_name
                 partner.normalized_name = normalize_name(new_name)
                 ctx.index.add_identifier(partner.id, "name", partner.normalized_name)
                 ctx.updated_partners += 1
-            if not partner.contact and supplier.contact:
-                partner.contact = supplier.contact
-            if not partner.phone and supplier.phone:
-                partner.phone = supplier.phone
-            if not partner.address and supplier.address:
-                partner.address = supplier.address
+            else:
+                _add_identifier(ctx, partner, kind="alias", value=new_name, source="supplier")
+
+        if not partner.contact and supplier.contact:
+            partner.contact = supplier.contact
+        if not partner.phone and supplier.phone:
+            partner.phone = supplier.phone
+        if not partner.address and supplier.address:
+            partner.address = supplier.address
+
         _apply_identity(
             ctx,
             partner,
@@ -686,9 +714,8 @@ def _sync_supplier_master(ctx: SyncContext) -> None:
             raw_account_no=supplier.bank_account_no,
             roles=["supplier"],
             force_partner=partner,
-            force_method="legacy_supplier",
+            force_method="supplier_profile",
         )
-
 
 def _sync_procurement_sources(ctx: SyncContext) -> None:
     def source(
