@@ -1931,4 +1931,8 @@ def claim_review_link(db: Session, *, partner_id: int, link_id: int, note: str =
         roles=["supplier" if link.relation_role in {"supplier", "seller"} else "customer" if link.relation_role in {"customer", "buyer"} else "counterparty"],
         source="manual",
     )
+    # 人工确认必须立即写回业务事实的 canonical FK，不能等下一次“核对全部来源”。
+    from app.services.partner_reference_service import materialize_partner_references
+
+    materialize_partner_references(db)
     return link
