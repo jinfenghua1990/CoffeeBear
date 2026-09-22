@@ -765,12 +765,18 @@ def _sync_procurement_sources(ctx: SyncContext) -> None:
         *,
         name_getter,
         partner_id_getter=None,
+        platform_account_getter=None,
     ) -> None:
         for row in rows:
             raw_name = str(name_getter(row) or "").strip()
+            platform_account = (
+                str(platform_account_getter(row) or "").strip()
+                if platform_account_getter
+                else ""
+            )
             partner_id = int(partner_id_getter(row) or 0) if partner_id_getter else 0
             force_partner = ctx.index.partners.get(partner_id) if partner_id else None
-            if not raw_name and force_partner is None:
+            if not raw_name and not platform_account and force_partner is None:
                 continue
             _write_link(
                 ctx,
@@ -781,7 +787,10 @@ def _sync_procurement_sources(ctx: SyncContext) -> None:
                 roles=["supplier"],
                 force_partner=force_partner,
                 force_method="direct_partner_fk" if force_partner else None,
-                resolution=None if force_partner else ctx.index.resolve(name=raw_name),
+                resolution=None if force_partner else ctx.index.resolve(
+                    name=raw_name,
+                    platform_account=platform_account,
+                ),
             )
 
     source(
@@ -795,6 +804,9 @@ def _sync_procurement_sources(ctx: SyncContext) -> None:
         ctx.db.query(Alibaba1688Order).filter(Alibaba1688Order.row_status != "deleted").all(),
         name_getter=lambda row: row.seller_company_name or row.seller_member_name,
         partner_id_getter=lambda row: row.supplier_partner_id,
+        platform_account_getter=lambda row: (
+            f"1688:{row.seller_member_name}" if row.seller_member_name else ""
+        ),
     )
     source(
         "jackyun_purchase_order",
