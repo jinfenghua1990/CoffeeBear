@@ -18,9 +18,10 @@ class BusinessPartner(Base, PkMixin, TimestampMixin):
     __tablename__ = "business_partners"
 
     # 旧供应商档案只作为历史入口，不再承担跨财务来源的唯一身份。
+    # 仅保留历史 Supplier ID 作为兼容/审计值，不再建立反向 FK。
+    # Canonical 依赖方向必须单向：Supplier.partner_id -> BusinessPartner.id。
     legacy_supplier_id: Mapped[int | None] = mapped_column(
         BigInteger,
-        ForeignKey("suppliers.id", ondelete="SET NULL"),
         nullable=True,
         unique=True,
         index=True,
