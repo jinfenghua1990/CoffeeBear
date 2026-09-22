@@ -1504,6 +1504,19 @@ export type BusinessPartnerDetail = BusinessPartnerListItem & {
   }>;
 };
 
+export type PartnerReferenceCoverage = {
+  sources: Record<string, {
+    total: number;
+    linked: number;
+    unlinked: number;
+    coverage: number;
+  }>;
+  totalFacts: number;
+  linkedFacts: number;
+  unlinkedFacts: number;
+  coverage: number;
+};
+
 export type BusinessPartnerInput = {
   name: string;
   roles: BusinessPartnerRole[];
@@ -1525,6 +1538,8 @@ export const businessPartnerApi = {
       `/api/v1/finance/partners?keyword=${encodeURIComponent(keyword)}&role=${encodeURIComponent(role)}`,
     ),
   detail: (id: number) => jsonFetch<BusinessPartnerDetail>(`/api/v1/finance/partners/${id}`),
+  coverage: () =>
+    jsonFetch<PartnerReferenceCoverage>("/api/v1/finance/partners/coverage"),
   recheck: (id: number) => jsonFetch<{
     ok: boolean;
     partnerId: number;
