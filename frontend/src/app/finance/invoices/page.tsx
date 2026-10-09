@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { taxInvoiceApi, type TaxInvoiceCategoryOutput, type TaxInvoiceCategoryV2, type TaxInvoiceImportRow, type TaxInvoiceLinesResponse, type TaxInvoiceProcessingStatus, type TaxInvoicePurchaseCandidate, type TaxInvoiceRow, type TaxInvoiceSummary } from "@/lib/api";
+import BankReconciliationBadge from "@/components/bank-reconciliation-badge";
 import { useTabActive, useTabScopedState } from "@/lib/workspace/tab-store";
 
 type FilterValue = "input" | "output";
@@ -54,24 +55,6 @@ function matchLabel(value: string) {
 function businessMatchStatus(row: TaxInvoiceRow) {
   // 发票自己的业务匹配只认采购/销售域的显式状态；禁止回退到旧 matchStatus。
   return row.businessMatchStatus;
-}
-
-function bankPaymentLabel(row: TaxInvoiceRow) {
-  if (row.direction !== "input" || row.bankPaymentStatus === "not_applicable") return "—";
-  if (row.bankPaymentStatus === "overpaid_after_red") return "红冲后超额付款";
-  if (row.bankPaymentStatus === "red_overpayment_settled") return "红冲超额已处理";
-  if (row.bankPaymentStatus === "matched") return "已付清核对";
-  if (row.bankPaymentStatus === "partial") return "部分付款核对";
-  return "待付款核对";
-}
-
-function bankPaymentClass(row: TaxInvoiceRow) {
-  if (row.direction !== "input" || row.bankPaymentStatus === "not_applicable") return "text-slate-300";
-  if (row.bankPaymentStatus === "overpaid_after_red") return "bg-rose-100 text-rose-800";
-  if (row.bankPaymentStatus === "red_overpayment_settled") return "bg-emerald-100 text-emerald-800";
-  if (row.bankPaymentStatus === "matched") return "bg-emerald-50 text-emerald-700";
-  if (row.bankPaymentStatus === "partial") return "bg-blue-50 text-blue-700";
-  return "bg-amber-50 text-amber-700";
 }
 
 function isCorporatePaymentVerified(row: TaxInvoiceRow) {
@@ -631,12 +614,20 @@ export default function InvoiceManagementPage() {
                   <td className="px-3 py-2.5"><span title={`业务已匹配 ${money(row.businessMatchedAmount)} / 剩余 ${money(row.businessRemainingAmount)}`} className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${matchClass(businessMatchStatus(row))}`}>{matchLabel(businessMatchStatus(row))}</span></td>
                   <td className="px-3 py-2.5">
                     {row.direction === "input" ? (
-                      <span
-                        title={row.bankPaymentStatus === "partial" || row.bankPaymentStatus === "matched" ? `已核对 ${money(row.bankPaidAmount)} / 剩余 ${money(row.bankRemainingAmount)}${corporatePaymentVerified ? " · 对公金额一致" : ""}` : undefined}
-                        className={`whitespace-nowrap rounded-full px-2 py-0.5 text-[10px] font-medium ${bankPaymentClass(row)} ${corporatePaymentVerified ? "ring-1 ring-emerald-300" : ""}`}
-                      >
-                        {corporatePaymentVerified ? "✓ 金额一致" : bankPaymentLabel(row)}
-                      </span>
+                      row.bankPaymentStatus === "not_applicable" ? (
+                        <span className="text-slate-300">—</span>
+                      ) : corporatePaymentVerified ? (
+                        <span
+                          title={`已核对 ${money(row.bankPaidAmount)} / 剩余 ${money(row.bankRemainingAmount)} · 对公金额一致`}
+                          className="inline-flex items-center whitespace-nowrap rounded-full bg-emerald-600 px-2 py-0.5 text-[10px] font-medium text-white shadow-sm ring-1 ring-emerald-300"
+                        >
+                          ✓ 金额一致
+                        </span>
+                      ) : (
+                        <span title={`已核对 ${money(row.bankPaidAmount)} / 剩余 ${money(row.bankRemainingAmount)}`}>
+                          <BankReconciliationBadge status={row.bankPaymentStatus} />
+                        </span>
+                      )
                     ) : <span className="text-slate-300">—</span>}
                   </td>
                   <td className="px-4 py-2.5 text-right"><button type="button" onClick={(event) => { event.stopPropagation(); setSelectedId(row.id); }} className="text-indigo-600 hover:text-indigo-800">查看详情</button></td>

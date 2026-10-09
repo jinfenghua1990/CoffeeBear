@@ -3,6 +3,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { authenticatedFetch } from "@/lib/api";
+import BankReconciliationBadge, {
+  bankReconciliationBadgeClass,
+  bankReconciliationStatusLabel,
+} from "@/components/bank-reconciliation-badge";
 import { useTabRuntime, useTabScopedState, useTabTitle, useWorkspace } from "@/lib/workspace/tab-store";
 
 type Pkg = { id: number; version: number; status: string; sha256: string; createdAt: string | null };
@@ -315,32 +319,6 @@ type PickerInvoice = { id: number; invoiceNumber: string; sellerName: string; is
 
 function corporateBankStatus(row: CorporateInvoiceRow) {
   return row.bankReconciliationStatus || row.invoiceStatus;
-}
-
-function corporateBankStatusLabel(status: string) {
-  if (status === "overpaid_after_red") return "红冲后超额付款待处理";
-  if (status === "red_overpayment_settled") return "红冲超额已处理";
-  if (status === "paid") return "银行付款已核对";
-  if (status === "partial") return "银行付款部分核对";
-  if (status === "not_applicable") return "无需核对银行付款";
-  return "待核对银行付款";
-}
-
-function bankReconciliationBadgeClass(status: string) {
-  if (status === "paid") return "bg-emerald-600 text-white shadow-sm";
-  if (status === "partial") return "bg-amber-500 text-white";
-  if (status === "overpaid_after_red") return "bg-rose-600 text-white";
-  if (status === "red_overpayment_settled") return "bg-emerald-50 text-emerald-700 ring-1 ring-inset ring-emerald-200";
-  if (status === "not_applicable") return "bg-slate-50 text-slate-400 ring-1 ring-inset ring-slate-200";
-  return "bg-white text-slate-500 ring-1 ring-inset ring-slate-300";
-}
-
-function bankMatchStatusLabel(status: string) {
-  if (status === "overpaid_after_red") return "红冲后超额付款";
-  if (status === "red_overpayment_settled") return "红冲超额已处理";
-  if (status === "matched") return "银行付款已核对";
-  if (status === "partial") return "银行付款部分核对";
-  return "待核对银行付款";
 }
 
 function invoiceColorLabel(row: CorporateInvoiceRow) {
@@ -1198,7 +1176,7 @@ export default function MonthlySendPage() {
                   {row.redRelatedInvoiceNo && <div className="mt-1 text-[10px] text-slate-400">{row.invoiceColor === "red" ? "冲销蓝票" : "对应红票"} · <span className="font-mono">{row.redRelatedInvoiceNo}</span></div>}
                 </td>
                 <td className="px-3 py-2.5"><div className="font-medium text-slate-700">{row.expenseNatureLabel || "待分类"}</div><div className="mt-0.5 text-[10px] text-slate-400">{row.invoiceColor === "red" ? "红冲 · " : ""}{row.expenseNatureBasis || ""}</div></td>
-                <td className="px-3 py-2.5"><span className={`inline-flex items-center gap-1 whitespace-nowrap rounded-full px-2.5 py-1 text-[11px] font-semibold ${bankReconciliationBadgeClass(corporateBankStatus(row))}`}>{corporateBankStatus(row) === "paid" ? "✓ " : ""}{corporateBankStatusLabel(corporateBankStatus(row))}</span><div className="mt-1"><span className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${row.paymentSource === "corporate" ? "bg-emerald-50 text-emerald-700" : row.paymentSource === "personal" ? "bg-amber-50 text-amber-700" : row.paymentSource === "platform_auto_debit" ? "bg-cyan-50 text-cyan-700" : row.paymentSource === "mixed" ? "bg-blue-50 text-blue-700" : "bg-slate-100 text-slate-500"}`}>{row.paymentSourceLabel || "—"}</span></div></td>
+                <td className="px-3 py-2.5"><div className="inline-flex items-center"><span className={`inline-flex items-center gap-1 whitespace-nowrap rounded-full px-2.5 py-1 text-[11px] font-semibold ${bankReconciliationBadgeClass(corporateBankStatus(row))}`}>{corporateBankStatus(row) === "paid" ? "✓ " : ""}{bankReconciliationStatusLabel(corporateBankStatus(row))}</span></div><div className="mt-1"><span className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${row.paymentSource === "corporate" ? "bg-emerald-50 text-emerald-700" : row.paymentSource === "personal" ? "bg-amber-50 text-amber-700" : row.paymentSource === "platform_auto_debit" ? "bg-cyan-50 text-cyan-700" : row.paymentSource === "mixed" ? "bg-blue-50 text-blue-700" : "bg-slate-100 text-slate-500"}`}>{row.paymentSourceLabel || "—"}</span></div></td>
                 <td className={`px-3 py-2.5 text-right font-semibold tabular-nums ${row.invoiceColor === "red" ? "text-rose-700" : "text-slate-800"}`}>{money(row.invoiceTotalAmount)}</td>
                 <td className="px-3 py-2.5 text-right tabular-nums text-emerald-700">{row.paymentSource === "not_applicable" ? <span className="text-slate-300">—</span> : money(row.invoiceCorporatePaidTotal)}</td>
                 <td className="px-3 py-2.5"><div className="space-y-1">{row.payments.length ? row.payments.map((payment) => <div key={payment.linkId} className="text-[11px] text-slate-600"><span>{payment.paymentDate}</span><span className="mx-1 text-slate-300">·</span><span className="font-semibold text-slate-800">{money(payment.allocatedAmount)}</span><div className="text-[10px] text-slate-400">{payment.paymentAccount || payment.paymentAccountName || "未记录账户"}{payment.voucherNo ? ` · ${payment.voucherNo}` : ""}</div></div>) : row.paymentSource === "personal" ? <span className="text-amber-600">无对公流水 · 按个人支付</span> : row.paymentSource === "platform_auto_debit" ? <span className="text-cyan-700">平台自动扣款货款 · 无银行流水</span> : row.paymentSource === "not_applicable" ? <span className="text-slate-400" title={row.bankReconciliationReason || "该发票不参与银行付款核对"}>不适用</span> : <span className="text-slate-300">未记录银行付款</span>}{corporateBankStatus(row) === "overpaid_after_red" && <div className="rounded bg-rose-50 px-2 py-1 text-[10px] font-medium text-rose-700">红冲后历史超额 {money(row.invoiceOverpaidAmount)} · 当前待处理 {money(row.invoiceOverpaidUnsettledAmount || row.invoiceOverpaidAmount)}</div>}{corporateBankStatus(row) === "red_overpayment_settled" && <div className="rounded bg-emerald-50 px-2 py-1 text-[10px] font-medium text-emerald-700">红冲超额 {money(row.invoiceOverpaidAmount)} 已完成退款/冲抵</div>}{row.redCrossPeriod && <div className="text-[10px] text-violet-600">跨期红冲 · 原蓝票账期 {row.redRelatedInvoicePeriod || "待核"}</div>}</div></td>
@@ -1465,7 +1443,7 @@ export default function MonthlySendPage() {
                     <td className="px-4 py-3">
                       {row.links.length ? <div className="space-y-1">{row.links.map((link) => <div key={link.linkId || `${row.id}-${link.txnId}`} className="text-xs"><div className="flex flex-wrap items-center gap-2"><span className="text-slate-600">{link.txnDate}</span><span className="font-medium text-slate-700">{money(link.allocatedAmount || 0)}</span>{link.linkId && <button type="button" onClick={() => void unlinkPayment(link.linkId!)} disabled={busy} className="text-[10px] text-rose-500 hover:underline disabled:opacity-40">解除</button>}</div><div className="text-[10px] text-slate-400">{link.accountNo || link.accountName || "未记录账户"}{link.voucherNo ? ` · ${link.voucherNo}` : ""}</div></div>)}</div> : <span className="text-xs text-slate-300">尚未关联银行付款</span>}
                     </td>
-                    <td className="px-4 py-3"><span className={`inline-flex rounded-full px-2 py-1 text-[10px] font-medium ${row.bankMatchStatus === "matched" ? "bg-emerald-50 text-emerald-700" : row.bankMatchStatus === "partial" ? "bg-amber-50 text-amber-700" : "bg-slate-100 text-slate-500"}`}>{bankMatchStatusLabel(row.bankMatchStatus)}</span></td>
+                    <td className="px-4 py-3"><BankReconciliationBadge status={row.bankMatchStatus} /></td>
                     <td className="px-4 py-3 text-right"><button type="button" onClick={() => { setPickerQuery(""); setPickerInvoice(row); }} disabled={busy || Number(row.remaining) <= 0.01} className="rounded-md border border-blue-200 px-2.5 py-1.5 text-[11px] font-medium text-blue-600 hover:bg-blue-50 disabled:opacity-40">{row.bankMatchStatus === "matched" ? "银行核对完成" : "选择银行流水"}</button></td>
                   </tr>
                 ))}
