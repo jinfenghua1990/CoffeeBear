@@ -684,10 +684,11 @@ def build_unbilled_income_report(
 ) -> dict[str, Any]:
     """销售出库无票收入 = 当前销售出库口径 − 销售出库关联的已开票净额。
 
-    - 销售总金额复用 build_report 的 summary.salesAmount（与发给财务的销售汇总同口径）。
+    - 未人工调整时，销售总金额复用 build_report 的 summary.salesAmount。
+    - 存在人工调整版本时，销售总金额跟随勾选明细的红冲前销售金额。
     - 已开票金额只取已确认关联到销售订单的销项发票；未关联的服务费等销项发票
       不属于销售出库无票收入表。
-    - 人工调整版本按当前勾选的明细计算调整后销售金额、已开票净额和无票收入。
+    - 人工调整版本按当前勾选的明细计算销售总金额、调整后销售金额、已开票净额和无票收入。
     """
     from app.services.monthly_core import month_bounds
 
@@ -706,7 +707,11 @@ def build_unbilled_income_report(
         adjusted_sales_total = sales_total + red_sales_adjustment
         invoiced_total = linked_invoiced_total
     else:
-        # 当前版本只交付勾选的销售出库明细，汇总也必须跟随该版本，不能把取消的行算回去。
+        # 当前版本只交付勾选的销售出库明细，销售总额和其他汇总均跟随该版本，不能把取消的行算回去。
+        sales_total = sum(
+            (Decimal(d.get("sales") or "0") for d in details),
+            Decimal("0"),
+        )
         red_sales_adjustment = sum((Decimal(d.get("redSalesAdjustment") or "0") for d in details), Decimal("0"))
         adjusted_sales_total = sum(
             (Decimal(d.get("adjustedSales") or d.get("sales") or "0") for d in details),

@@ -25,6 +25,38 @@ def test_tax_export_auto_detects_fields_and_direction():
     assert len(parsed.rows) == 2
 
 
+def test_single_tax_invoice_direction_uses_exact_legal_entity_identity(db_session):
+    from app.models.finance import FinanceLegalEntity
+
+    own_name = f"本公司-{uuid4().hex[:8]}"
+    db_session.add(FinanceLegalEntity(code=f"OWN-{uuid4().hex[:8]}", name=own_name))
+    db_session.flush()
+    content = (
+        "发票号码,开票日期,销售方名称,销售方识别号,购买方名称,购买方识别号,金额,税额,价税合计,发票状态\n"
+        f"INV-{uuid4().hex[:8]},2026-09-01,供应商甲,SELLER-TAX,{own_name},BUYER-TAX,100,13,113,正常\n"
+    ).encode()
+    parsed = parse_tax_invoice_export(content, "single-invoice.csv", max_rows=100)
+
+    overrides = service._infer_batch_directions(db_session, parsed.rows, parsed)
+    normalized, error = service._normalize_row(
+        parsed.rows[0], parsed, direction_override=overrides.get(0, "")
+    )
+
+    assert overrides == {0: "input"}
+    assert error == ""
+    assert normalized["direction"] == "input"
+
+
+def test_single_tax_invoice_direction_stays_unknown_without_unique_own_party(db_session):
+    content = (
+        "发票号码,开票日期,销售方名称,销售方识别号,购买方名称,购买方识别号,金额,税额,价税合计,发票状态\n"
+        f"INV-{uuid4().hex[:8]},2026-09-01,未识别卖方,SELLER-TAX,未识别买方,BUYER-TAX,100,13,113,正常\n"
+    ).encode()
+    parsed = parse_tax_invoice_export(content, "unknown-party.csv", max_rows=100)
+
+    assert service._infer_batch_directions(db_session, parsed.rows, parsed) == {}
+
+
 def test_tax_xlsx_uses_base_sheet_and_validates_summary_only():
     from openpyxl import Workbook
 

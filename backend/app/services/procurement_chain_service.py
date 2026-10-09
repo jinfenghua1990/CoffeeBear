@@ -1311,7 +1311,11 @@ def purge_voided_invoice_links(db: Session, actor: str = "system", dry_run: bool
     return {"ok": True, "dryRun": False, "matched": len(items), "removed": len(items), "items": items}
 
 
-def run_full_procurement_automation(db: Session, actor: str = "system") -> dict:
+def run_full_procurement_automation(
+    db: Session,
+    actor: str = "system",
+    payment_invoice_import_id: int | None = None,
+) -> dict:
     """运行一次完整采购自动化：入库预关联、订单匹配、待确认关系清扫。"""
     result: dict = {"ok": True, "errors": []}
     try:
@@ -1351,6 +1355,7 @@ def run_full_procurement_automation(db: Session, actor: str = "system") -> dict:
             db,
             actor=actor,
             run_payment_match=True,
+            payment_invoice_import_id=payment_invoice_import_id,
         )
         db.commit()
     except Exception as exc:

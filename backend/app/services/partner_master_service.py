@@ -12,7 +12,13 @@ from app.services.partner_reference_service import partner_reference_coverage
 from app.services.supplier_sync_service import sync_suppliers_from_business_data
 
 
-def rebuild_partner_master(db: Session, *, actor: str = "system", run_payment_match: bool = True) -> dict[str, Any]:
+def rebuild_partner_master(
+    db: Session,
+    *,
+    actor: str = "system",
+    run_payment_match: bool = True,
+    payment_invoice_import_id: int | None = None,
+) -> dict[str, Any]:
     """Rebuild canonical identity from source facts without rewriting raw source fields.
 
     Order matters:
@@ -32,7 +38,13 @@ def rebuild_partner_master(db: Session, *, actor: str = "system", run_payment_ma
         "periods": [],
     }
     if run_payment_match:
-        payment = payment_invoice_match_service.auto_match_all_periods(db, actor=actor)
+        payment = (
+            payment_invoice_match_service.auto_match_invoice_import(
+                db, payment_invoice_import_id, actor=actor
+            )
+            if payment_invoice_import_id is not None
+            else payment_invoice_match_service.auto_match_all_periods(db, actor=actor)
+        )
 
     second = business_partner_service.sync_business_partners(db)
     coverage = partner_reference_coverage(db)
