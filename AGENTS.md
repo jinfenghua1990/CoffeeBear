@@ -1,8 +1,36 @@
 # AGENTS.md
 
+## Repository boundary — mandatory
+
+CoffeeBear is **DOMESTIC-only** and is the long-term source of truth for 卖咖啡的熊 China operations.
+
+Keep here:
+
+- 1688
+- 吉客云 / JackYun
+- domestic procurement, inventory, production, sales and logistics
+- domestic banking, reconciliation, tax, finance and monthly delivery
+- Business Partner / Partner 360
+- domestic AR/AP Open Items
+- domestic marketplace/channel settlement
+
+Do **not** add or restore here:
+
+- ALSVID bicycle product/vehicle/dealer/after-sales runtime
+- Shopify/ALSVID OMS behavior
+- export inventory or Germany/Europe warehouse logic
+- international shipment, export/customs/import-compliance runtime
+- foreign-trade finance, import VAT, anti-dumping/countervailing duty or export-refund runtime
+
+Those belong to `jinfenghua1990/ALSVID`.
+
+`jinfenghua1990/ChaiBen-OS` is retired and may only be inspected for migration evidence or historical edge cases. Never copy its retired mixed architecture back into CoffeeBear.
+
+Historical CoffeeBear Alembic revisions may still mention foreign-trade/ALSVID tables for existing-database migration compatibility. Their existence does not grant runtime ownership. Do not delete or rewrite historical migration chains without an explicit production database baseline/cutover plan.
+
 ## Scope
 
-These instructions apply to the entire `ecommerce-workspace` repository.
+These instructions apply to the entire `CoffeeBear` repository.
 
 This repository is maintained through frequent, user-directed incremental changes. GitHub Actions minutes are limited, so every coding agent must minimize unnecessary commits, pushes, and CI executions while preserving correctness.
 

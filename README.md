@@ -1,166 +1,83 @@
-# 电商工作平台
+# CoffeeBear — 卖咖啡的熊国内经营平台
 
-> GitHub 仓库：`jinfenghua1990/zhejiang`
+> GitHub 仓库：`jinfenghua1990/CoffeeBear`
 
-这是一个面向实际经营的电商工作平台，不是单纯的数据看板。当前系统同时承载 **内销、外贸、供应链、库存、物流、财务与月结**，并通过统一业务数据与财务事项底座把各模块串起来。
+CoffeeBear 是 **卖咖啡的熊中国国内业务** 的唯一长期业务仓库。它负责国内采购、库存、销售、物流、银行、税务、财务与月结，不再承载 ALSVID、自行车出口、欧洲经销商或外贸运行时。
 
-## 当前定位
+## 仓库边界
 
-平台分为三个主要工作入口：
+### CoffeeBear 负责
 
-### 内销工作台
+- 1688 采购、订单导入与采购链路
+- 吉客云 / JackYun 国内采购、入库、库存、销售与结算事实
+- 国内供应商、客户与统一往来单位 / Partner 360
+- 国内仓库、生产、耗材与库存盘点
+- 国内销售、售后、快递物流
+- 银行流水、回单、对账与付款核对
+- 税务发票、进项认证、红蓝票与 VAT 核对
+- FinanceEntry 国内财务事项
+- 应收 / 应付 Open Items 生命周期及银行分配
+- 天猫、京东等国内渠道结算的 gross-to-net 财务拆分
+- 月度资料完整性检查、版本化 ZIP、SMTP 发送与自动交付
 
-- 经营总览
-- 销售中心
-- 基础货品
-- 库存中心
-- 供应链中心
-- 快递物流
-- 财务中心
+### CoffeeBear 不负责
 
-### 外贸工作台
+以下业务统一归 `jinfenghua1990/ALSVID`：
 
-- 外贸总览
-- 外贸订单
-- B2B 客户 / 经销商
-- 渠道管理
-- 海外 SKU 映射
-- 国际出运 / Shipment
-- 外贸财务
-- Alsvid 业务
+- ALSVID 自行车产品、车辆、BOM 与配件
+- 德国 / 奥地利 / 欧洲经销商与售后
+- 出口商业订单事实与 Shopify 外部订单映射
+- 出口库存、德国仓库存量和经销商预留
+- 国际运输、出口报关、欧盟进口与清关
+- 关税、反倾销税、反补贴税、进口 VAT
+- 外贸收入、费用、利润与出口退税
 
-### 财务中心
+Shopify 是 ALSVID 的外部 OMS；CoffeeBear 不实现或承接 ALSVID OMS。
 
-财务中心是独立的统一财务中枢。
-
-第一维度是 **公司主体**，第二维度是 **业务范围**：
-
-```text
-公司主体
-  ↓
-全部 / 内销 / 外贸
-  ↓
-财务事项 FinanceEntry
-  ↓
-收支 / 发票税务 / 利润 / 月结
-```
-
-当前默认主体为浙江公司；以后新增奥地利、德国、香港等主体，不需要重做一套财务系统。
-
-## 核心业务链路
-
-### 内销
+## 核心国内链路
 
 ```text
-销售订单
-  ├─ 销售收入
-  ├─ 售后退款
-  └─ 销售成本
-
-采购 / 入库
-  └─ 库存采购 / 应付
-
-快递物流
-  ├─ 平时按预估成本
-  └─ 实际账单核销后替换预估
-
-以上统一进入 FinanceEntry
+1688 / 其他国内采购
+        ↓
+采购单 / 吉客云入库
+        ↓
+国内库存 / 生产 / 耗材
+        ↓
+吉客云销售 / 国内渠道
+        ↓
+渠道结算 / 银行流水 / 发票
+        ↓
+Open Items 应收应付
+        ↓
+FinanceEntry / 税务 / 月结
 ```
 
-采购入库和销售数据在各自业务模块完成，不在月结页重复上传业务源文件。
+业务事实各有唯一来源：银行流水是真实现金事实，发票是真实税务事实，Open Items 只管理应收应付未结生命周期，不重复创造付款事实。
 
-### 外贸
+## 财务中心
 
-```text
-外贸订单
-  ↓
-Shipment 出运单
-  ↓
-中国出口
-  ↓
-国际运输
-  ↓
-欧盟进口 / 清关
-  ↓
-海外末端配送
-  ↓
-财务事项 / 月结
-```
+财务主体默认且仅使用 `domestic` 业务范围。历史数据库中拆分前可能仍存在外贸表、外贸 FinanceEntry 或旧 Alembic revision，这些只用于数据库升级链与历史审计，不属于当前 CoffeeBear 运行时，也不会进入新的财务列表、汇总或月结输出。
 
-Shipment 可记录：
+当前国内财务能力包括：
 
-- 出口公司主体
-- 进口责任方
-- 进口公司主体
-- 提单 / 柜号 / Tracking
-- 出口报关 / 进口报关
-- 普通关税
-- 反倾销税
-- 反补贴税
-- 进口 VAT
-- 清关 / 港杂 / 末端配送
-- 出口退税
-- 预计与实际成本
+- 国内收入 / 成本 / 费用
+- 银行现金事实与发票匹配
+- 应收 / 应付 Open Items
+- 国内渠道结算
+- 进项发票认证与红冲核对
+- 月结资料生成、完整性检查、版本化归档与邮件发送
 
-进口税费只有在 **我方公司主体承担进口责任** 时才进入对应主体财务。海外客户、经销商或第三方代理承担的进口费用不会错误记入中国公司账。
+## 外部数据源
 
-## 财务口径
+当前国内系统使用或支持：
 
-统一财务事项模型：`FinanceEntry`。
-
-主要维度包括：
-
-- legal entity / 公司主体
-- business scope / 内销或外贸
-- 来源模块与来源单号
-- 财务类别
-- 收入 / 支出
-- 币种
-- 金额 / 税额
-- 预计 / 实际
-- 结算状态
-- 发票状态
-- 会计账期
-- 是否影响现金
-- 是否影响利润
-
-现金与利润分开处理。例如：
-
-- 可抵扣进口 VAT：影响现金，不直接影响利润
-- Shipment 货品成本：影响利润，不重复计算采购付款现金
-- 采购入库：先形成库存采购 / 应付事实，不在入库时直接扣利润
-- 物流：实际账单到达后替换原预估，不重复计算
-
-## 月结中心
-
-月结中心按 **公司主体** 切换。
-
-它不再承担采购入库、销售数据导入，而是直接读取业务数据库：
-
-- 业务数据完整性检查
-- 销售金额与销售成本检查
-- 银行交易明细
-- 银行回单
-- 无票收入
-- 外贸财务汇总
-- 月度 ZIP 打包
-- 邮件发送给财务
-- 历史版本归档
-
-如果销售 SKU 缺采购入库成本，系统会明确提示缺失 SKU，不会用虚构成本生成错误利润。
-
-## 主要外部数据源
-
-当前支持或预留：
-
-- 吉客云
+- 吉客云 / JackYun
 - 1688
 - 浙江农信文件导入
 - 税务发票清单
 - SMTP 财务邮件
-- 外贸渠道 / Shopify 后续接入
 
-外部系统未配置时必须如实显示未配置，不使用模拟数据伪装真实连接。
+外部系统未配置时必须如实显示未配置，不使用模拟数据冒充真实连接。
 
 ## 技术栈
 
@@ -182,56 +99,13 @@ Shipment 可记录：
 - Tailwind CSS 4
 - 静态导出，由 FastAPI 同端口托管
 
-### 运行方式
+## Mac 本地运行
 
-当前主要开发与验收环境：
-
-```text
-Mac 本地原生运行
-```
-
-NAS / 极空间部署暂缓，容器化与发布配置继续保留。
-
-默认服务端口：
+当前主要开发与验收环境仍支持 Mac 本地原生运行，默认服务端口：
 
 ```text
 http://127.0.0.1:8000
 ```
-
-PostgreSQL 与 Redis 不对公网开放。
-
-## 分支与开发流程
-
-当前更新主线（**直提模式**：改完直接提交推送，不再让运行实例跟踪旧仓库或旧分支）：
-
-```text
-本地直接修改
-        ↓
-main 直提 / 直接推送
-        ↓
-       CI（push 触发）
-        ↓
-Mac 本地拉取 / 验收
-```
-
-当前运行实例和系统更新中心统一跟踪 `main`；新改动一律一次提交、一次推送。
-
-GitHub 仓库远程地址：
-
-```bash
-git@github.com:jinfenghua1990/zhejiang.git
-```
-
-本地更新远程地址：
-
-```bash
-git remote set-url origin git@github.com:jinfenghua1990/zhejiang.git
-git fetch origin
-git switch main
-git pull origin main
-```
-
-## Mac 本地运行
 
 首次准备：
 
@@ -239,118 +113,27 @@ git pull origin main
 cp deploy/mac/.env.example .env
 ```
 
-然后配置：
-
-- PostgreSQL
-- Redis
-- 管理员账号
-- 数据持久化目录
-- SMTP
-- 吉客云 / 1688 等按需凭证
-
 常用命令：
 
 ```bash
-make status          # 查看运行状态
-make restart         # 重启 API / worker / beat
-make rebuild-fe      # 前端重建并重启
-make migrate         # Alembic 迁移
-make test            # 后端测试
-make tsc             # 前端类型检查
-make verify          # 本地完整验收
-make backup          # 数据库 + DATA_DIR 备份
+make status
+make restart
+make rebuild-fe
+make migrate
+make test
+make tsc
+make verify
 ```
 
-## 持久化原则
+远程仓库：
 
-代码、数据库、业务文件、备份、日志应尽量分离。
-
-推荐：
-
-```text
-代码：
-/Users/<user>/ecommerce-workspace
-
-业务数据：
-/Users/<user>/ecommerce-workspace-data/<environment>/
-
-其中：
-data/
-backups/
-logs/
+```bash
+git@github.com:jinfenghua1990/CoffeeBear.git
 ```
 
-具体以实际 `.env` 中：
+## 开发原则
 
-- `PERSIST_ROOT`
-- `DATA_DIR`
-- `BACKUP_DIR`
-- `LOG_DIR`
-
-为准。
-
-不要因为 Git 更新或切换分支覆盖业务数据。
-
-## 目录结构
-
-```text
-backend/        FastAPI / SQLAlchemy / Alembic / Celery
-frontend/       Next.js 前端
-deploy/         Mac / 容器 / NAS 部署配置
-docs/           架构、发布、持久化、集成说明
-scripts/        启动、备份、恢复、检查脚本
-data/           兼容本地默认数据目录；正式环境建议放仓库外
-backups/        兼容本地默认备份目录；正式环境建议放仓库外
-```
-
-## 安全原则
-
-- `.env` 不提交 Git
-- PostgreSQL / Redis 不开放公网
-- Mac 开发阶段不要把 8000 直接暴露公网
-- 1688 只同步已发生采购，不自动下单 / 付款
-- 原始财务资料保留版本，不覆盖历史交付包
-- 数据库结构变更必须走 Alembic
-- 较大结构调整前先做数据库与业务文件备份
-
-## 系统更新
-
-系统支持原生模式更新与容器发布身份识别。
-
-Mac 当前使用：
-
-```text
-DEPLOYMENT_MODE=native
-SYSTEM_UPDATE_BRANCH=main
-```
-
-系统更新会检查：
-
-- Git 分支 / 远端
-- 工作区状态
-- Python / Node 环境
-- Alembic
-- 备份能力
-- 前端产物
-- 健康检查
-- 磁盘空间
-
-现有 Mac 如果已经安装旧的 LaunchAgent label（例如 `com.gino.ecommerce-dashboard`），可以继续沿用；该 label 是运行配置，不要求与 GitHub 仓库名称完全一致。不要只为仓库改名而直接改 LaunchAgent，除非同时完成本机服务迁移。
-
-## 进一步文档
-
-- `deploy/mac/README.md`
-- `docs/ARCHITECTURE.md`
-- `docs/RELEASE_STANDARD.md`
-- `docs/PERSISTENCE_STANDARD.md`
-- `docs/IMPLEMENTATION_STATUS.md`
-
----
-
-项目名称统一使用：
-
-**电商工作平台**
-
-GitHub 仓库统一使用：
-
-**`zhejiang`**
+- 新的国内业务能力只进入 CoffeeBear。
+- 新的 ALSVID / 出口 / 欧洲业务能力只进入 `jinfenghua1990/ALSVID`。
+- 不因为历史 Alembic 文件仍存在，就把旧外贸运行时重新接回 CoffeeBear。
+- `jinfenghua1990/ChaiBen-OS` 已退休，只可用于迁移证据与历史边界核对。
