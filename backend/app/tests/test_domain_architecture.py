@@ -53,11 +53,17 @@ def test_coffeebear_runtime_is_domestic_only():
     models_init = _text("backend/app/models/__init__.py")
     navigation = _text("frontend/src/lib/navigation.ts")
     route_table = _text("frontend/src/lib/workspace/route-table.tsx")
+    finance_center = _text("backend/app/services/finance_center_service.py")
 
     assert "foreign_trade" not in api_router
     assert "foreign_trade" not in models_init
     assert "/foreign-trade" not in navigation
     assert "/foreign-trade" not in route_table
+
+    # 当前写路径必须强制 domestic；foreign_trade 只能作为历史只读审计兼容出现。
+    assert 'row.business_scopes = ["domestic"]' in finance_center
+    assert 'if business_scope != "domestic":' in finance_center
+    assert 'row.business_scope = "domestic"' in finance_center
 
     # 国内连接器必须继续保留在 CoffeeBear。
     assert "alibaba1688_imports" in api_router
