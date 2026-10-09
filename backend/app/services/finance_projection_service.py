@@ -4,9 +4,9 @@ CoffeeBear 只负责卖咖啡的熊的国内业务：
 - 业务表仍是真实来源，FinanceEntry 是可重建的财务投影；
 - 同一来源/类别幂等更新，不重复插入；
 - 1688、吉客云、国内销售/售后/物流继续进入财务事项池；
-- ALSVID/外贸订单与出口 Shipment 不再由 CoffeeBear 建模或投影。
+- ALSVID 订单、出口运输与欧洲财务事实不在本服务建模或投影。
 
-历史数据库中已有的 foreign_trade FinanceEntry 仍可用于审计读取，但本服务不会再创建或更新它们。
+拆分前遗留的历史财务行不参与当前业务投影。
 """
 from __future__ import annotations
 
@@ -403,11 +403,10 @@ def sync_business_period(
     month: int,
     business_scope: str = "all",
 ) -> dict[str, Any]:
-    """重建指定月份的国内财务投影。
+    """重建指定月份的国内财务投影。"""
+    if business_scope not in {"all", "domestic"}:
+        raise ValueError("CoffeeBear 仅支持国内财务投影")
 
-    `foreign_trade` 只作为旧客户端兼容输入保留，返回零变更；CoffeeBear 不再读取
-    旧外贸业务表，也不会继续生成外贸 FinanceEntry。
-    """
     start, end = month_bounds(year, month)
     totals = {"created": 0, "updated": 0, "deleted": 0}
     sources = {
@@ -421,57 +420,56 @@ def sync_business_period(
         for key in totals:
             totals[key] += int(result.get(key, 0))
 
-    if business_scope in {"all", "domestic"}:
-        orders = db.scalars(
-            select(SalesOrder).where(
-                SalesOrder.ordered_at >= start,
-                SalesOrder.ordered_at < end,
-                deal_orders_condition(),
-            )
-        ).all()
-        for row in orders:
-            merge(project_domestic_sales_order(db, row))
-        sources["domesticOrders"] = len(orders)
+    orders = db.scalars(
+        select(SalesOrder).where(
+            SalesOrder.ordered_at >= start,
+            SalesOrder.ordered_at < end,
+            deal_orders_condition(),
+        )
+    ).all()
+    for row in orders:
+        merge(project_domestic_sales_order(db, row))
+    sources["domesticOrders"] = len(orders)
 
-        refunds = db.scalars(
-            select(AftersalesOrder).where(
-                AftersalesOrder.type == "refund",
-                AftersalesOrder.created_at_src >= start,
-                AftersalesOrder.created_at_src < end,
-            )
-        ).all()
-        for row in refunds:
-            merge(project_domestic_refund(db, row))
-        sources["domesticRefunds"] = len(refunds)
+    refunds = db.scalars(
+        select(AftersalesOrder).where(
+            AftersalesOrder.type == "refund",
+            AftersalesOrder.created_at_src >= start,
+            AftersalesOrder.created_at_src < end,
+        )
+    ).all()
+    for row in refunds:
+        merge(project_domestic_refund(db, row))
+    sources["domesticRefunds"] = len(refunds)
 
-        inbound_documents = db.scalars(
-            select(JackyunGoodsDocument).where(
-                JackyunGoodsDocument.document_type == "inbound",
-                or_(
-                    and_(
-                        JackyunGoodsDocument.document_at >= start,
-                        JackyunGoodsDocument.document_at < end,
-                    ),
-                    and_(
-                        JackyunGoodsDocument.document_at.is_(None),
-                        JackyunGoodsDocument.created_at >= start,
-                        JackyunGoodsDocument.created_at < end,
-                    ),
+    inbound_documents = db.scalars(
+        select(JackyunGoodsDocument).where(
+            JackyunGoodsDocument.document_type == "inbound",
+            or_(
+                and_(
+                    JackyunGoodsDocument.document_at >= start,
+                    JackyunGoodsDocument.document_at < end,
                 ),
-            )
-        ).all()
-        for row in inbound_documents:
-            merge(project_inbound_document(db, row))
-        sources["inboundDocuments"] = len(inbound_documents)
+                and_(
+                    JackyunGoodsDocument.document_at.is_(None),
+                    JackyunGoodsDocument.created_at >= start,
+                    JackyunGoodsDocument.created_at < end,
+                ),
+            ),
+        )
+    ).all()
+    for row in inbound_documents:
+        merge(project_inbound_document(db, row))
+    sources["inboundDocuments"] = len(inbound_documents)
 
-        merge(project_domestic_logistics_period(db, year=year, month=month))
-        sources["logisticsPeriods"] = 1
+    merge(project_domestic_logistics_period(db, year=year, month=month))
+    sources["logisticsPeriods"] = 1
 
     db.commit()
     return {
         "year": year,
         "month": month,
-        "businessScope": business_scope,
+        "businessScope": "domestic",
         "sources": sources,
         **totals,
     }
