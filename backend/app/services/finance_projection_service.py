@@ -1,10 +1,12 @@
-"""业务事实 → 统一财务事项池。
+"""国内业务事实 → 统一财务事项池。
 
-原则：
-- 业务表仍是真实来源，FinanceEntry 是可重建的财务投影。
-- 同一来源/类别幂等更新，不重复插入。
-- 外贸进口费用只有 importer_kind=own_entity 且绑定我方主体时才进公司账。
-- 可抵扣进口 VAT 影响现金但不影响利润。
+CoffeeBear 只负责卖咖啡的熊的国内业务：
+- 业务表仍是真实来源，FinanceEntry 是可重建的财务投影；
+- 同一来源/类别幂等更新，不重复插入；
+- 1688、吉客云、国内销售/售后/物流继续进入财务事项池；
+- ALSVID/外贸订单与出口 Shipment 不再由 CoffeeBear 建模或投影。
+
+历史数据库中已有的 foreign_trade FinanceEntry 仍可用于审计读取，但本服务不会再创建或更新它们。
 """
 from __future__ import annotations
 
@@ -19,11 +21,14 @@ from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.models.finance import FinanceEntry
-from app.models.foreign_trade import ForeignTradeOrder, ForeignTradeShipment
 from app.models.jackyun import JackyunGoodsDocument, JackyunGoodsDocumentItem
 from app.models.sales import AftersalesOrder, SalesOrder, SalesOrderItem
-from app.services import finance_center_service, foreign_trade_service
-from app.services.inbound_cost_service import resolve_sales_sku_id, sales_sku_lookup, weighted_inbound_costs
+from app.services import finance_center_service
+from app.services.inbound_cost_service import (
+    resolve_sales_sku_id,
+    sales_sku_lookup,
+    weighted_inbound_costs,
+)
 from app.services.monthly_core import month_bounds
 from app.services.sales_scope import deal_orders_condition
 
@@ -208,8 +213,7 @@ def project_domestic_sales_order(db: Session, row: SalesOrder) -> dict[str, int]
             for item in items
         ]
         sku_ids = {sku_id for _, sku_id in resolved if sku_id is not None}
-        _, month = _period(event)
-        year, _ = _period(event)
+        year, month = _period(event)
         _, period_end = month_bounds(year, month)
         costs = weighted_inbound_costs(db, as_of=period_end, sku_ids=sku_ids)
         missing = [
@@ -219,28 +223,34 @@ def project_domestic_sales_order(db: Session, row: SalesOrder) -> dict[str, int]
         ]
         if not missing:
             cost_total = sum(
-                (_money(item.quantity) * costs[int(sku_id)] for item, sku_id in resolved if sku_id is not None),
+                (
+                    _money(item.quantity) * costs[int(sku_id)]
+                    for item, sku_id in resolved
+                    if sku_id is not None
+                ),
                 Decimal("0"),
             )
-            specs.append(EntrySpec(
-                legal_entity_id=entity.id,
-                business_scope="domestic",
-                source_type="domestic_sales_order",
-                source_id=str(row.id),
-                source_no=row.order_no,
-                category="sales_cost",
-                direction="expense",
-                currency="CNY",
-                amount=cost_total,
-                value_type="actual",
-                settlement_status="closed",
-                invoice_status="not_required",
-                occurred_at=event,
-                cash_effect=False,
-                profit_effect=True,
-                note="销售成本 · 按账期截止前采购入库加权成本",
-                raw={"costComplete": True, "itemCount": len(items)},
-            ))
+            specs.append(
+                EntrySpec(
+                    legal_entity_id=entity.id,
+                    business_scope="domestic",
+                    source_type="domestic_sales_order",
+                    source_id=str(row.id),
+                    source_no=row.order_no,
+                    category="sales_cost",
+                    direction="expense",
+                    currency="CNY",
+                    amount=cost_total,
+                    value_type="actual",
+                    settlement_status="closed",
+                    invoice_status="not_required",
+                    occurred_at=event,
+                    cash_effect=False,
+                    profit_effect=True,
+                    note="销售成本 · 按账期截止前采购入库加权成本",
+                    raw={"costComplete": True, "itemCount": len(items)},
+                )
+            )
 
     return _reconcile_source(
         db,
@@ -283,7 +293,9 @@ def project_domestic_refund(db: Session, row: AftersalesOrder) -> dict[str, int]
     )
 
 
-def project_inbound_document(db: Session, row: JackyunGoodsDocument) -> dict[str, int]:
+def project_inbound_document(
+    db: Session, row: JackyunGoodsDocument
+) -> dict[str, int]:
     """采购入库作为库存采购/应付事实进入财务事项池，但不直接影响利润或现金。"""
     if row.document_type != "inbound":
         return {"created": 0, "updated": 0, "deleted": 0}
@@ -361,7 +373,9 @@ def project_domestic_logistics_period(
             currency="CNY",
             amount=amount,
             value_type=str(payload.get("valueType") or "estimated"),
-            settlement_status="settled" if payload.get("valueType") == "actual" else "pending",
+            settlement_status=(
+                "settled" if payload.get("valueType") == "actual" else "pending"
+            ),
             invoice_status="unknown",
             occurred_at=event,
             cash_effect=False,
@@ -382,279 +396,6 @@ def project_domestic_logistics_period(
     )
 
 
-def project_foreign_order(db: Session, row: ForeignTradeOrder) -> dict[str, int]:
-    entity = finance_center_service.resolve_entity(db, row.seller_legal_entity_id)
-    if row.seller_legal_entity_id is None:
-        row.seller_legal_entity_id = entity.id
-    source_id = str(row.id)
-    event = row.paid_at or row.ordered_at or _event(row)
-    specs: list[EntrySpec] = []
-
-    paid = _money(row.paid_amount)
-    if paid:
-        specs.append(EntrySpec(
-            legal_entity_id=entity.id,
-            business_scope="foreign_trade",
-            source_type="foreign_order",
-            source_id=source_id,
-            source_no=row.external_order_no,
-            category="sales_income",
-            direction="income",
-            currency=row.currency or entity.base_currency,
-            amount=paid,
-            value_type="actual",
-            settlement_status="settled",
-            invoice_status="unknown",
-            occurred_at=event,
-            cash_effect=True,
-            profit_effect=True,
-            note=f"外贸订单实收 · {row.channel_code}",
-            raw={"channelCode": row.channel_code, "businessMode": row.business_mode},
-        ))
-
-    refund = _money(row.refund_amount)
-    if refund:
-        specs.append(EntrySpec(
-            legal_entity_id=entity.id,
-            business_scope="foreign_trade",
-            source_type="foreign_order",
-            source_id=source_id,
-            source_no=row.external_order_no,
-            category="refund",
-            direction="expense",
-            currency=row.currency or entity.base_currency,
-            amount=refund,
-            value_type="actual",
-            settlement_status="settled",
-            invoice_status="not_required",
-            occurred_at=event,
-            cash_effect=True,
-            profit_effect=True,
-            note="外贸订单退款",
-        ))
-
-    payment_fee = _money(row.payment_fee)
-    if payment_fee:
-        specs.append(EntrySpec(
-            legal_entity_id=entity.id,
-            business_scope="foreign_trade",
-            source_type="foreign_order",
-            source_id=source_id,
-            source_no=row.external_order_no,
-            category="platform_fee",
-            direction="expense",
-            currency=row.currency or entity.base_currency,
-            amount=payment_fee,
-            value_type="actual",
-            settlement_status="settled",
-            invoice_status="unknown",
-            occurred_at=event,
-            cash_effect=True,
-            profit_effect=True,
-            note="海外渠道 / 支付手续费",
-        ))
-
-    return _reconcile_source(
-        db,
-        source_type="foreign_order",
-        source_id=source_id,
-        specs=specs,
-    )
-
-
-def _shipment_actual(row: ForeignTradeShipment) -> bool:
-    return bool(
-        row.departed_at
-        or row.status in {
-            "departed", "in_transit", "arrived_eu", "import_customs",
-            "customs_cleared", "last_mile", "delivered",
-        }
-    )
-
-
-def _import_actual(row: ForeignTradeShipment) -> bool:
-    return bool(row.customs_cleared_at or row.status in {"customs_cleared", "last_mile", "delivered"})
-
-
-def project_foreign_shipment(db: Session, row: ForeignTradeShipment) -> dict[str, int]:
-    exporter = finance_center_service.resolve_entity(db, row.exporter_legal_entity_id)
-    if row.exporter_legal_entity_id is None:
-        row.exporter_legal_entity_id = exporter.id
-
-    source_id = str(row.id)
-    export_event = _event(row, "departed_at", "etd")
-    import_event = _event(row, "customs_cleared_at", "arrived_eu_at", "eta", "etd")
-    export_actual = _shipment_actual(row)
-    import_actual = _import_actual(row)
-    specs: list[EntrySpec] = []
-
-    def add_export(
-        category: str,
-        amount: Decimal,
-        currency: str,
-        *,
-        profit_effect: bool = True,
-        cash_effect: bool = True,
-        note: str,
-    ) -> None:
-        if amount == 0:
-            return
-        specs.append(EntrySpec(
-            legal_entity_id=exporter.id,
-            business_scope="foreign_trade",
-            source_type="foreign_shipment",
-            source_id=source_id,
-            source_no=row.shipment_no,
-            category=category,
-            direction="expense",
-            currency=currency,
-            amount=amount,
-            value_type="actual" if export_actual else "estimated",
-            settlement_status="pending",
-            invoice_status="pending" if cash_effect else "unknown",
-            occurred_at=export_event,
-            cash_effect=cash_effect,
-            profit_effect=profit_effect,
-            note=note,
-            raw={"shipmentStatus": row.status},
-        ))
-
-    # 出运货品成本影响利润，但采购付款由采购/银行模块处理，不能重复进入现金流。
-    add_export(
-        "shipment_goods_cost",
-        _money(row.export_purchase_cost_cny),
-        "CNY",
-        cash_effect=False,
-        note="Shipment 分摊货品成本",
-    )
-    add_export(
-        "export_fee",
-        _money(row.domestic_export_cost_cny),
-        "CNY",
-        note="国内出口 / 报关 / 提货等费用",
-    )
-    add_export(
-        "international_freight",
-        _money(row.freight_to_eu),
-        row.currency or "EUR",
-        note="国际干线运费",
-    )
-    add_export(
-        "cargo_insurance",
-        _money(row.insurance),
-        row.currency or "EUR",
-        note="国际货运保险",
-    )
-
-    estimated_refund = (
-        _money(row.export_refund_base_cny) * _money(row.export_refund_rate) / Decimal("100")
-    )
-    actual_refund = _money(row.actual_export_refund_cny)
-    if actual_refund > 0:
-        refund_event = row.export_refund_received_at or _event(row, "updated_at", "departed_at", "etd")
-        specs.append(EntrySpec(
-            legal_entity_id=exporter.id,
-            business_scope="foreign_trade",
-            source_type="foreign_shipment",
-            source_id=source_id,
-            source_no=row.shipment_no,
-            category="export_tax_refund",
-            direction="income",
-            currency="CNY",
-            amount=actual_refund,
-            value_type="actual",
-            settlement_status="settled",
-            invoice_status="not_required",
-            occurred_at=refund_event,
-            cash_effect=True,
-            profit_effect=True,
-            note="出口退税实际到账",
-            raw={"estimatedAmount": str(estimated_refund), "refundStatus": row.export_refund_status},
-        ))
-    elif estimated_refund > 0:
-        specs.append(EntrySpec(
-            legal_entity_id=exporter.id,
-            business_scope="foreign_trade",
-            source_type="foreign_shipment",
-            source_id=source_id,
-            source_no=row.shipment_no,
-            category="export_tax_refund",
-            direction="income",
-            currency="CNY",
-            amount=estimated_refund,
-            value_type="estimated",
-            settlement_status="pending",
-            invoice_status="not_required",
-            occurred_at=export_event,
-            cash_effect=True,
-            profit_effect=True,
-            note="出口退税预计",
-            raw={"refundStatus": row.export_refund_status},
-        ))
-
-    # 进口侧只有“我方公司主体作为 importer”才进入公司财务事项。
-    importer = None
-    if row.importer_kind == "own_entity" and row.importer_legal_entity_id is not None:
-        importer = finance_center_service.resolve_entity(db, row.importer_legal_entity_id)
-
-    if importer is not None:
-        costs = foreign_trade_service.shipment_costs(row)
-        import_value_type = "actual" if import_actual else "estimated"
-        common = dict(
-            legal_entity_id=importer.id,
-            business_scope="foreign_trade",
-            source_type="foreign_shipment",
-            source_id=source_id,
-            source_no=row.shipment_no,
-            direction="expense",
-            currency=row.currency or importer.base_currency,
-            value_type=import_value_type,
-            settlement_status="pending",
-            occurred_at=import_event,
-            cash_effect=True,
-        )
-        import_specs = [
-            ("customs_duty", _money(costs["customsDuty"]), True, "普通进口关税"),
-            ("anti_dumping_duty", _money(costs["antiDumpingDuty"]), True, "反倾销税"),
-            ("countervailing_duty", _money(costs["countervailingDuty"]), True, "反补贴税"),
-            (
-                "import_vat",
-                _money(costs["importVat"]),
-                not bool(row.import_vat_recoverable),
-                "进口 VAT（可抵扣时仅影响现金，不影响利润）",
-            ),
-            ("clearance_fee", _money(row.clearance_fee), True, "进口清关费"),
-            ("port_fee", _money(row.port_fee), True, "港杂 / 码头费"),
-            ("last_mile_fee", _money(row.last_mile_fee), True, "海外末端配送"),
-            ("other", _money(row.other_import_fee), True, "其他进口费用"),
-        ]
-        for category, amount, profit_effect, note in import_specs:
-            if amount == 0:
-                continue
-            specs.append(EntrySpec(
-                **common,
-                category=category,
-                amount=amount,
-                profit_effect=profit_effect,
-                invoice_status="not_required" if category in {
-                    "customs_duty", "anti_dumping_duty", "countervailing_duty", "import_vat"
-                } else "pending",
-                note=note,
-                raw={
-                    "importerKind": row.importer_kind,
-                    "importVatRecoverable": bool(row.import_vat_recoverable),
-                    "shipmentStatus": row.status,
-                },
-            ))
-
-    return _reconcile_source(
-        db,
-        source_type="foreign_shipment",
-        source_id=source_id,
-        specs=specs,
-    )
-
-
 def sync_business_period(
     db: Session,
     *,
@@ -662,6 +403,11 @@ def sync_business_period(
     month: int,
     business_scope: str = "all",
 ) -> dict[str, Any]:
+    """重建指定月份的国内财务投影。
+
+    `foreign_trade` 只作为旧客户端兼容输入保留，返回零变更；CoffeeBear 不再读取
+    旧外贸业务表，也不会继续生成外贸 FinanceEntry。
+    """
     start, end = month_bounds(year, month)
     totals = {"created": 0, "updated": 0, "deleted": 0}
     sources = {
@@ -669,8 +415,6 @@ def sync_business_period(
         "domesticRefunds": 0,
         "inboundDocuments": 0,
         "logisticsPeriods": 0,
-        "foreignOrders": 0,
-        "shipments": 0,
     }
 
     def merge(result: dict[str, int]) -> None:
@@ -719,45 +463,9 @@ def sync_business_period(
         for row in inbound_documents:
             merge(project_inbound_document(db, row))
         sources["inboundDocuments"] = len(inbound_documents)
+
         merge(project_domestic_logistics_period(db, year=year, month=month))
         sources["logisticsPeriods"] = 1
-
-    if business_scope in {"all", "foreign_trade"}:
-        foreign_orders = db.scalars(
-            select(ForeignTradeOrder).where(
-                or_(
-                    and_(ForeignTradeOrder.paid_at >= start, ForeignTradeOrder.paid_at < end),
-                    and_(
-                        ForeignTradeOrder.paid_at.is_(None),
-                        ForeignTradeOrder.ordered_at >= start,
-                        ForeignTradeOrder.ordered_at < end,
-                    ),
-                )
-            )
-        ).all()
-        for row in foreign_orders:
-            merge(project_foreign_order(db, row))
-        sources["foreignOrders"] = len(foreign_orders)
-
-        shipments = db.scalars(
-            select(ForeignTradeShipment).where(
-                or_(
-                    and_(ForeignTradeShipment.etd >= start, ForeignTradeShipment.etd < end),
-                    and_(
-                        ForeignTradeShipment.etd.is_(None),
-                        ForeignTradeShipment.created_at >= start,
-                        ForeignTradeShipment.created_at < end,
-                    ),
-                    and_(
-                        ForeignTradeShipment.export_refund_received_at >= start,
-                        ForeignTradeShipment.export_refund_received_at < end,
-                    ),
-                )
-            )
-        ).all()
-        for row in shipments:
-            merge(project_foreign_shipment(db, row))
-        sources["shipments"] = len(shipments)
 
     db.commit()
     return {
