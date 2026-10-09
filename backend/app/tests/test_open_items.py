@@ -123,17 +123,18 @@ def test_bank_transaction_can_split_but_not_overallocate(db_session):
     open_item_service.allocate_bank_transaction(
         db_session, item_id=item1.id, bank_transaction_id=txn.id, amount=Decimal("60")
     )
+    with pytest.raises(open_item_service.OpenItemError, match="银行流水可用金额"):
+        open_item_service.allocate_bank_transaction(
+            db_session, item_id=item2.id, bank_transaction_id=txn.id, amount=Decimal("50")
+        )
+
     open_item_service.allocate_bank_transaction(
         db_session, item_id=item2.id, bank_transaction_id=txn.id, amount=Decimal("40")
     )
     db_session.flush()
     assert item1.status == "closed"
     assert item2.status == "partial"
-
-    with pytest.raises(open_item_service.OpenItemError, match="银行流水可用金额"):
-        open_item_service.allocate_bank_transaction(
-            db_session, item_id=item2.id, bank_transaction_id=txn.id, amount=Decimal("20")
-        )
+    assert item2.settled_amount == Decimal("40")
 
 
 def test_source_identity_is_idempotent_and_conflict_safe(db_session):
