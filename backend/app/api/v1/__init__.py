@@ -12,7 +12,6 @@ from app.api.v1 import (
     dashboard,
     exceptions,
     finance,
-    foreign_trade,
     integrations,
     inventory_stocktakes,
     jackyun_files,
@@ -61,7 +60,6 @@ api_router.include_router(procurement_board.router)
 api_router.include_router(exceptions.router)
 api_router.include_router(finance.router)
 api_router.include_router(business_partners.router)
-api_router.include_router(foreign_trade.router)
 api_router.include_router(purchase.router)
 api_router.include_router(purchase_consistency.router)
 api_router.include_router(reconciliation.router)

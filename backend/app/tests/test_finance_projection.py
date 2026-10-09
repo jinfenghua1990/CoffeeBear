@@ -6,8 +6,7 @@ from sqlalchemy import select
 
 from app.config import settings
 from app.models.catalog import ProductSku
-from app.models.finance import FinanceEntry, FinanceLegalEntity
-from app.models.foreign_trade import ForeignTradeShipment
+from app.models.finance import FinanceEntry
 from app.models.jackyun import JackyunGoodsDocument, JackyunGoodsDocumentItem
 from app.models.logistics import LogisticsBill
 from app.models.sales import SalesOrder, SalesOrderItem
@@ -56,97 +55,15 @@ def test_domestic_sales_order_projects_actual_income(db_session):
     assert entry.profit_effect is True
 
 
-def test_shipment_import_costs_only_post_for_own_import_entity(db_session):
-    exporter = finance_center_service.resolve_entity(db_session)
-    importer = FinanceLegalEntity(
-        code="AT-PYTEST",
-        name="Austria Pytest GmbH",
-        country_code="AT",
-        base_currency="EUR",
-        status="active",
-        is_default=False,
-        business_scopes=["foreign_trade"],
-    )
-    db_session.add(importer)
-    db_session.flush()
-
-    shipment = ForeignTradeShipment(
-        shipment_no="PY-EXP-001",
-        exporter_legal_entity_id=exporter.id,
-        importer_kind="external_customer",
-        importer_legal_entity_id=None,
-        currency="EUR",
-        quantity=Decimal("10"),
-        declared_value=Decimal("10000"),
-        freight_to_eu=Decimal("1000"),
-        insurance=Decimal("100"),
-        customs_rate=Decimal("6"),
-        anti_dumping_rate=Decimal("62.1"),
-        countervailing_rate=Decimal("17.2"),
-        import_vat_rate=Decimal("20"),
-        import_vat_recoverable=True,
-        clearance_fee=Decimal("200"),
-        port_fee=Decimal("300"),
-        last_mile_fee=Decimal("400"),
-        export_purchase_cost_cny=Decimal("50000"),
-        domestic_export_cost_cny=Decimal("5000"),
-        export_refund_base_cny=Decimal("50000"),
-        export_refund_rate=Decimal("13"),
-        etd=_dt(),
-        status="preparing",
-    )
-    db_session.add(shipment)
-    db_session.flush()
-
-    projection.project_foreign_shipment(db_session, shipment)
-    db_session.flush()
-
-    external_categories = {
-        row.category
-        for row in db_session.scalars(
-            select(FinanceEntry).where(
-                FinanceEntry.source_type == "foreign_shipment",
-                FinanceEntry.source_id == str(shipment.id),
-            )
-        ).all()
-    }
-    assert "shipment_goods_cost" in external_categories
-    assert "export_tax_refund" in external_categories
-    assert "anti_dumping_duty" not in external_categories
-    assert "import_vat" not in external_categories
-
-    shipment.importer_kind = "own_entity"
-    shipment.importer_legal_entity_id = importer.id
-    shipment.status = "customs_cleared"
-    shipment.customs_cleared_at = _dt(day=28)
-    projection.project_foreign_shipment(db_session, shipment)
-    db_session.flush()
-
-    importer_entries = db_session.scalars(
-        select(FinanceEntry).where(
-            FinanceEntry.source_type == "foreign_shipment",
-            FinanceEntry.source_id == str(shipment.id),
-            FinanceEntry.legal_entity_id == importer.id,
-        )
-    ).all()
-    by_category = {row.category: row for row in importer_entries}
-
-    assert by_category["anti_dumping_duty"].profit_effect is True
-    assert by_category["countervailing_duty"].profit_effect is True
-    assert by_category["import_vat"].cash_effect is True
-    assert by_category["import_vat"].profit_effect is False
-    assert by_category["import_vat"].value_type == "actual"
-
-
-def test_actual_value_supersedes_estimate_in_forecast_profit(db_session):
+def test_actual_value_supersedes_estimate_in_domestic_forecast_profit(db_session):
     entity = finance_center_service.resolve_entity(db_session)
     common = dict(
         legal_entity_id=entity.id,
-        business_scope="foreign_trade",
+        business_scope="domestic",
         source_type="pytest_projection",
         source_id="same-source",
-        source_no="EXP-X",
-        category="export_tax_refund",
+        source_no="DOM-X",
+        category="sales_income",
         direction="income",
         currency="CNY",
         tax_amount=Decimal("0"),
@@ -177,7 +94,7 @@ def test_actual_value_supersedes_estimate_in_forecast_profit(db_session):
     data = finance_center_service.center_overview(
         db_session,
         legal_entity_id=entity.id,
-        business_scope="foreign_trade",
+        business_scope="domestic",
         year=2026,
         month=9,
     )
@@ -188,7 +105,6 @@ def test_actual_value_supersedes_estimate_in_forecast_profit(db_session):
     assert cny["actualProfit"] == "90.0000"
     assert cny["estimatedProfit"] == "90.0000"
     assert cny["actualNetCash"] == "90.0000"
-
 
 
 def test_domestic_sales_projects_cost_from_inbound_when_complete(db_session):
@@ -297,7 +213,6 @@ def test_inbound_projects_inventory_payable_without_profit_or_cash_effect(db_ses
     assert entry.profit_effect is False
 
 
-
 def test_logistics_projection_replaces_estimate_with_actual_bill(db_session):
     outbound = JackyunGoodsDocument(
         document_type="outbound",
@@ -355,3 +270,21 @@ def test_logistics_projection_replaces_estimate_with_actual_bill(db_session):
     assert rows[0].value_type == "actual"
     assert rows[0].amount == Decimal("8.4000")
     assert rows[0].settlement_status == "settled"
+
+
+def test_retired_foreign_scope_does_not_create_finance_entries(db_session):
+    result = projection.sync_business_period(
+        db_session,
+        year=2026,
+        month=9,
+        business_scope="foreign_trade",
+    )
+    assert result["created"] == 0
+    assert result["updated"] == 0
+    assert result["deleted"] == 0
+    assert result["sources"] == {
+        "domesticOrders": 0,
+        "domesticRefunds": 0,
+        "inboundDocuments": 0,
+        "logisticsPeriods": 0,
+    }

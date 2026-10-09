@@ -1,4 +1,9 @@
-"""统一财务中心：公司主体 + 财务事项池。"""
+"""统一财务中心：公司主体 + 财务事项池。
+
+CoffeeBear 的当前业务 authority 仅为 DOMESTIC / 卖咖啡的熊。历史数据库中
+已存在的 foreign_trade FinanceEntry 可以继续被只读查询用于审计，但不得再通过
+当前服务创建、更新或把公司主体配置成新的外贸业务主体。
+"""
 from __future__ import annotations
 
 from datetime import datetime, timezone
@@ -19,6 +24,7 @@ CATEGORY_LABELS = {
     "purchase_cost": "采购成本",
     "inventory_purchase": "库存采购 / 应付",
     "sales_cost": "销售成本",
+    # 下列出口类 label 仅为历史 FinanceEntry 审计兼容；CoffeeBear 不再创建这些事项。
     "shipment_goods_cost": "出运货品成本",
     "cargo_insurance": "货运保险",
     "port_fee": "港杂 / 码头费",
@@ -61,7 +67,7 @@ def ensure_default_entity(db: Session) -> FinanceLegalEntity:
         base_currency="CNY",
         status="active",
         is_default=True,
-        business_scopes=["domestic", "foreign_trade"],
+        business_scopes=["domestic"],
         note="系统初始化默认主体",
     )
     db.add(row)
@@ -149,6 +155,10 @@ def list_entries(
     status: str = "",
     limit: int = 200,
 ) -> list[dict[str, Any]]:
+    """列出财务事项。
+
+    `foreign_trade` 仅用于读取历史审计记录；当前写路径已禁止产生新的外贸事项。
+    """
     entity = resolve_entity(db, legal_entity_id)
     stmt = select(FinanceEntry).where(FinanceEntry.legal_entity_id == entity.id)
     if business_scope in {"domestic", "foreign_trade"}:
@@ -171,6 +181,7 @@ def center_overview(
     year: int | None = None,
     month: int | None = None,
 ) -> dict[str, Any]:
+    """财务汇总；历史 foreign_trade scope 只读保留用于审计。"""
     now = datetime.now(timezone.utc)
     year = year or now.year
     month = month or now.month
@@ -315,7 +326,8 @@ def save_entity(
     row.tax_id = tax_id.strip()
     row.status = status
     row.is_default = is_default
-    row.business_scopes = [scope for scope in business_scopes if scope in {"domestic", "foreign_trade"}]
+    # CoffeeBear 只允许当前国内业务主体；历史 foreign_trade scope 不再作为可写配置。
+    row.business_scopes = ["domestic"]
     row.note = note.strip()
     db.add(row)
     db.commit()
@@ -347,8 +359,8 @@ def save_entry(
     cash_effect: bool = True,
     profit_effect: bool = True,
 ) -> FinanceEntry:
-    if business_scope not in {"domestic", "foreign_trade"}:
-        raise ValueError("业务范围必须是内销或外贸")
+    if business_scope != "domestic":
+        raise ValueError("CoffeeBear 仅允许内销财务事项；ALSVID/外贸财务请在 ALSVID 系统维护")
     if direction not in {"income", "expense"}:
         raise ValueError("财务方向必须是收入或支出")
     if value_type not in {"actual", "estimated"}:
@@ -360,7 +372,7 @@ def save_entry(
     if row is None:
         raise ValueError("财务事项不存在")
     row.legal_entity_id = entity.id
-    row.business_scope = business_scope
+    row.business_scope = "domestic"
     row.source_type = source_type.strip() or "manual"
     clean_source_id = source_id.strip()
     if not clean_source_id and row.source_type == "manual":

@@ -1,13 +1,9 @@
 "use client";
 
 import Link from "@/components/workspace/workspace-link";
-import { usePathname, useSearchParams } from "next/navigation";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { authenticatedFetch } from "@/lib/api";
 import { useTabTitle } from "@/lib/workspace/tab-store";
-import { syncWorkspaceUrl } from "@/lib/workspace/url-sync";
-
-type Scope = "all" | "domestic" | "foreign_trade";
 
 type LegalEntity = {
   id: number;
@@ -63,7 +59,7 @@ type CurrencyTotal = {
 
 type CenterData = {
   entity: LegalEntity;
-  businessScope: Scope;
+  businessScope: string;
   year: number;
   month: number;
   entryCount: number;
@@ -80,26 +76,13 @@ type CenterData = {
   principle: string;
 };
 
-const SCOPE_COPY: Record<Scope, string> = {
-  all: "全部",
-  domestic: "内销",
-  foreign_trade: "外贸",
-};
-
 const CATEGORY_OPTIONS = [
   ["sales_income", "销售收入"],
   ["purchase_cost", "采购成本"],
+  ["inventory_purchase", "库存采购 / 应付"],
+  ["sales_cost", "销售成本"],
   ["platform_fee", "平台费用"],
   ["domestic_logistics", "国内物流"],
-  ["international_freight", "国际物流"],
-  ["export_fee", "出口费用"],
-  ["export_tax_refund", "出口退税"],
-  ["customs_duty", "进口关税"],
-  ["anti_dumping_duty", "反倾销税"],
-  ["countervailing_duty", "反补贴税"],
-  ["import_vat", "进口 VAT"],
-  ["clearance_fee", "清关费用"],
-  ["last_mile_fee", "海外末端配送"],
   ["refund", "退款"],
   ["exchange_gain_loss", "汇兑损益"],
   ["other", "其他"],
@@ -129,10 +112,6 @@ function money(value: string | number, currency = "CNY") {
   }
 }
 
-function scopeLabel(scope: string) {
-  return scope === "foreign_trade" ? "外贸" : "内销";
-}
-
 function statusLabel(status: string) {
   const labels: Record<string, string> = {
     pending: "待处理",
@@ -146,18 +125,9 @@ function statusLabel(status: string) {
 }
 
 export default function FinanceCenterPage() {
-  const pathname = usePathname();
-  const searchParams = useSearchParams();
-  const scopeParam = searchParams.get("scope");
-  const initialScope: Scope =
-    scopeParam === "domestic" || scopeParam === "foreign_trade" || scopeParam === "all"
-      ? scopeParam
-      : "all";
-
+  useTabTitle("财务中心");
   const [entities, setEntities] = useState<LegalEntity[]>([]);
   const [entityId, setEntityId] = useState<number | null>(null);
-  const [scope, setScope] = useState<Scope>(initialScope);
-  useTabTitle(scope === "foreign_trade" ? "外贸财务" : "财务中心");
   const [period, setPeriod] = useState(currentMonth());
   const [data, setData] = useState<CenterData | null>(null);
   const [loading, setLoading] = useState(true);
@@ -195,22 +165,9 @@ export default function FinanceCenterPage() {
     tax_id: "",
     status: "active",
     is_default: false,
-    business_scopes: ["foreign_trade"] as string[],
+    business_scopes: ["domestic"] as string[],
     note: "",
   });
-
-  useEffect(() => {
-    const next: Scope =
-      scopeParam === "domestic" || scopeParam === "foreign_trade" || scopeParam === "all"
-        ? scopeParam
-        : "all";
-    setScope((current) => current === next ? current : next);
-    if (next !== "all") {
-      setEntryForm((current) => (
-        current.business_scope === next ? current : { ...current, business_scope: next }
-      ));
-    }
-  }, [scopeParam]);
 
   const loadEntities = useCallback(async () => {
     const res = await authenticatedFetch("/api/v1/finance/entities", { cache: "no-store" });
@@ -228,7 +185,7 @@ export default function FinanceCenterPage() {
     try {
       const params = new URLSearchParams({
         legal_entity_id: String(entityId),
-        business_scope: scope,
+        business_scope: "domestic",
         year: String(periodParts.year),
         month: String(periodParts.month),
       });
@@ -242,7 +199,7 @@ export default function FinanceCenterPage() {
     } finally {
       setLoading(false);
     }
-  }, [entityId, periodParts.month, periodParts.year, scope]);
+  }, [entityId, periodParts.month, periodParts.year]);
 
   useEffect(() => {
     void loadEntities().catch((e) => setError(e instanceof Error ? e.message : String(e)));
@@ -252,19 +209,6 @@ export default function FinanceCenterPage() {
     void loadCenter();
   }, [loadCenter]);
 
-  function chooseScope(next: Scope) {
-    setScope(next);
-    setEntryForm((current) => ({
-      ...current,
-      business_scope: next === "all" ? current.business_scope : next,
-    }));
-    const params = new URLSearchParams(searchParams.toString());
-    if (next === "all") params.delete("scope");
-    else params.set("scope", next);
-    const query = params.toString();
-    syncWorkspaceUrl(query ? `${pathname}?${query}` : pathname, "replace");
-  }
-
   async function syncBusiness() {
     setSyncing(true);
     setSyncMessage("");
@@ -273,7 +217,7 @@ export default function FinanceCenterPage() {
       const params = new URLSearchParams({
         year: String(periodParts.year),
         month: String(periodParts.month),
-        business_scope: scope,
+        business_scope: "domestic",
       });
       const res = await authenticatedFetch("/api/v1/finance/sync-business?" + params.toString(), {
         method: "POST",
@@ -302,6 +246,7 @@ export default function FinanceCenterPage() {
         body: JSON.stringify({
           legal_entity_id: entityId,
           ...entryForm,
+          business_scope: "domestic",
           accounting_year: periodParts.year,
           accounting_month: periodParts.month,
           occurred_at: new Date().toISOString(),
@@ -312,6 +257,7 @@ export default function FinanceCenterPage() {
       setEntryOpen(false);
       setEntryForm((current) => ({
         ...current,
+        business_scope: "domestic",
         source_id: "",
         source_no: "",
         amount: "0",
@@ -333,7 +279,7 @@ export default function FinanceCenterPage() {
       const res = await authenticatedFetch("/api/v1/finance/entities", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(entityForm),
+        body: JSON.stringify({ ...entityForm, business_scopes: ["domestic"] }),
       });
       const body = await res.json();
       if (!res.ok) throw new Error(body.detail || "主体保存失败");
@@ -346,7 +292,7 @@ export default function FinanceCenterPage() {
         tax_id: "",
         status: "active",
         is_default: false,
-        business_scopes: ["foreign_trade"],
+        business_scopes: ["domestic"],
         note: "",
       });
       const rows = await loadEntities();
@@ -369,7 +315,7 @@ export default function FinanceCenterPage() {
             <div className="text-[10px] font-medium uppercase tracking-[0.14em] text-blue-500">FINANCE CENTER</div>
             <h1 className="mt-1 text-xl font-semibold text-slate-900">财务中心</h1>
             <p className="mt-1.5 text-sm text-slate-500">
-              公司主体是第一维度，内销 / 外贸是第二维度。业务事实先进入财务事项池，再进入收支、税务、利润和月结。
+              CoffeeBear 财务中心只处理卖咖啡的熊国内业务。业务事实先进入财务事项池，再进入收支、税务、利润和月结。
             </p>
           </div>
           <div className="flex flex-wrap gap-2">
@@ -412,19 +358,8 @@ export default function FinanceCenterPage() {
 
           <div>
             <div className="mb-1 text-[10px] font-medium text-slate-400">业务范围</div>
-            <div className="flex h-9 rounded-lg border border-slate-200 bg-slate-50 p-0.5">
-              {(Object.keys(SCOPE_COPY) as Scope[]).map((key) => (
-                <button
-                  key={key}
-                  type="button"
-                  onClick={() => chooseScope(key)}
-                  className={"rounded-md px-4 text-[11px] font-medium transition " + (
-                    scope === key ? "bg-white text-blue-700 shadow-sm" : "text-slate-500 hover:text-slate-800"
-                  )}
-                >
-                  {SCOPE_COPY[key]}
-                </button>
-              ))}
+            <div className="flex h-9 items-center rounded-lg border border-slate-200 bg-slate-50 px-4 text-[11px] font-medium text-slate-700">
+              内销
             </div>
           </div>
 
@@ -443,7 +378,7 @@ export default function FinanceCenterPage() {
             <span>主体编码：{selectedEntity.code}</span>
             <span>国家：{selectedEntity.countryCode}</span>
             <span>本位币：{selectedEntity.baseCurrency}</span>
-            <span>业务：{selectedEntity.businessScopes.map((item) => scopeLabel(item)).join(" / ") || "—"}</span>
+            <span>业务：内销</span>
           </div>
         )}
       </section>
@@ -453,16 +388,16 @@ export default function FinanceCenterPage() {
           <div className="flex items-center justify-between">
             <div>
               <h2 className="text-[13px] font-semibold text-slate-900">新增公司主体</h2>
-              <p className="mt-0.5 text-[10px] text-slate-400">后续奥地利、德国、香港主体直接在这里增加，不需要重做财务模块。</p>
+              <p className="mt-0.5 text-[10px] text-slate-400">这里只维护 CoffeeBear 国内业务使用的公司主体；ALSVID 海外主体在 ALSVID 系统维护。</p>
             </div>
             <button onClick={() => setEntityOpen(false)} className="text-[11px] text-slate-400">关闭</button>
           </div>
           <div className="mt-3 grid gap-2 md:grid-cols-3 xl:grid-cols-6">
-            <Field label="主体编码"><input className="finance-input" value={entityForm.code} onChange={(e) => setEntityForm({ ...entityForm, code: e.target.value })} placeholder="AT01" /></Field>
+            <Field label="主体编码"><input className="finance-input" value={entityForm.code} onChange={(e) => setEntityForm({ ...entityForm, code: e.target.value })} placeholder="ZJCB" /></Field>
             <Field label="公司名称"><input className="finance-input" value={entityForm.name} onChange={(e) => setEntityForm({ ...entityForm, name: e.target.value })} /></Field>
-            <Field label="国家"><input className="finance-input" value={entityForm.country_code} onChange={(e) => setEntityForm({ ...entityForm, country_code: e.target.value })} placeholder="AT" /></Field>
-            <Field label="本位币"><input className="finance-input" value={entityForm.base_currency} onChange={(e) => setEntityForm({ ...entityForm, base_currency: e.target.value })} placeholder="EUR" /></Field>
-            <Field label="税号 / VAT No."><input className="finance-input" value={entityForm.tax_id} onChange={(e) => setEntityForm({ ...entityForm, tax_id: e.target.value })} /></Field>
+            <Field label="国家"><input className="finance-input" value={entityForm.country_code} onChange={(e) => setEntityForm({ ...entityForm, country_code: e.target.value })} placeholder="CN" /></Field>
+            <Field label="本位币"><input className="finance-input" value={entityForm.base_currency} onChange={(e) => setEntityForm({ ...entityForm, base_currency: e.target.value })} placeholder="CNY" /></Field>
+            <Field label="税号"><input className="finance-input" value={entityForm.tax_id} onChange={(e) => setEntityForm({ ...entityForm, tax_id: e.target.value })} /></Field>
             <label className="flex h-[55px] items-end pb-2 text-[11px] text-slate-600"><input type="checkbox" checked={entityForm.is_default} onChange={(e) => setEntityForm({ ...entityForm, is_default: e.target.checked })} className="mr-2" />设为默认主体</label>
           </div>
           <div className="mt-3 flex justify-end">
@@ -478,17 +413,12 @@ export default function FinanceCenterPage() {
           <div className="flex items-center justify-between">
             <div>
               <h2 className="text-[13px] font-semibold text-slate-900">新增财务事项</h2>
-              <p className="mt-0.5 text-[10px] text-slate-400">目前用于人工补录/调整；后续销售、采购、Shipment 会自动写入同一事项池。</p>
+              <p className="mt-0.5 text-[10px] text-slate-400">用于国内业务人工补录/调整；销售、采购、国内物流等自动写入同一事项池。</p>
             </div>
             <button onClick={() => setEntryOpen(false)} className="text-[11px] text-slate-400">关闭</button>
           </div>
           <div className="mt-3 grid gap-2 md:grid-cols-4 xl:grid-cols-7">
-            <Field label="业务">
-              <select className="finance-input" value={entryForm.business_scope} onChange={(e) => setEntryForm({ ...entryForm, business_scope: e.target.value })}>
-                <option value="domestic">内销</option>
-                <option value="foreign_trade">外贸</option>
-              </select>
-            </Field>
+            <Field label="业务"><div className="finance-input flex items-center bg-slate-50 text-slate-600">内销</div></Field>
             <Field label="财务类别">
               <select className="finance-input" value={entryForm.category} onChange={(e) => setEntryForm({ ...entryForm, category: e.target.value })}>
                 {CATEGORY_OPTIONS.map(([key, label]) => <option key={key} value={key}>{label}</option>)}
@@ -509,7 +439,7 @@ export default function FinanceCenterPage() {
                 <option value="estimated">预计</option>
               </select>
             </Field>
-            <Field label="来源类型"><input className="finance-input" value={entryForm.source_type} onChange={(e) => setEntryForm({ ...entryForm, source_type: e.target.value })} placeholder="manual / shipment" /></Field>
+            <Field label="来源类型"><input className="finance-input" value={entryForm.source_type} onChange={(e) => setEntryForm({ ...entryForm, source_type: e.target.value })} placeholder="manual" /></Field>
             <Field label="来源单号"><input className="finance-input" value={entryForm.source_no} onChange={(e) => setEntryForm({ ...entryForm, source_no: e.target.value })} /></Field>
             <Field label="结算状态">
               <select className="finance-input" value={entryForm.settlement_status} onChange={(e) => setEntryForm({ ...entryForm, settlement_status: e.target.value })}>
@@ -562,7 +492,7 @@ export default function FinanceCenterPage() {
         ) : totals.length === 0 ? (
           <div className="px-4 py-8">
             <div className="text-[13px] font-medium text-slate-700">这个账期还没有进入统一事项池的数据。</div>
-            <p className="mt-1 text-[11px] leading-5 text-slate-400">原有银行、发票、月结功能没有丢失；V1 先把统一底座搭好，接下来再逐步让内销订单、采购、Shipment 自动生成事项。</p>
+            <p className="mt-1 text-[11px] leading-5 text-slate-400">原有银行、发票、月结功能没有丢失；国内订单、采购、入库和物流会逐步进入统一事项池。</p>
           </div>
         ) : (
           <div className="grid gap-px bg-slate-100 md:grid-cols-2 xl:grid-cols-4">
@@ -591,7 +521,7 @@ export default function FinanceCenterPage() {
           <div className="flex items-center justify-between border-b border-slate-100 px-4 py-3">
             <div>
               <h2 className="text-[13px] font-semibold text-slate-900">财务事项池</h2>
-              <p className="mt-0.5 text-[10px] text-slate-400">订单、采购、物流、Shipment、退税等最终都在这里形成统一财务事实。</p>
+              <p className="mt-0.5 text-[10px] text-slate-400">国内订单、采购、入库、物流、退款等最终都在这里形成统一财务事实。</p>
             </div>
           </div>
           {(data?.recentEntries.length ?? 0) === 0 ? (
@@ -605,7 +535,7 @@ export default function FinanceCenterPage() {
                 <tbody>
                   {data?.recentEntries.map((row) => (
                     <tr key={row.id} className="border-t border-slate-100">
-                      <td className="px-4 py-2.5"><span className={"rounded px-1.5 py-0.5 text-[9px] font-medium " + (row.businessScope === "foreign_trade" ? "bg-violet-50 text-violet-700" : "bg-sky-50 text-sky-700")}>{scopeLabel(row.businessScope)}</span></td>
+                      <td className="px-4 py-2.5"><span className="rounded bg-sky-50 px-1.5 py-0.5 text-[9px] font-medium text-sky-700">内销</span></td>
                       <td><div className="font-medium text-slate-700">{row.categoryLabel}</div><div className="text-[9px] text-slate-400">{row.direction === "income" ? "收入" : "支出"}</div></td>
                       <td><div>{row.sourceNo || row.sourceType}</div><div className="text-[9px] text-slate-400">{row.sourceType}</div></td>
                       <td className={row.direction === "income" ? "font-medium text-emerald-700" : "font-medium text-slate-700"}>{money(row.amount, row.currency)}</td>
@@ -624,8 +554,7 @@ export default function FinanceCenterPage() {
           <section className="app-card rounded-xl p-4">
             <h2 className="text-[13px] font-semibold text-slate-900">业务构成</h2>
             <div className="mt-3 space-y-2">
-              <ScopeRow label="内销" data={data?.scopeSummary.domestic} href="/finance?scope=domestic" />
-              <ScopeRow label="外贸" data={data?.scopeSummary.foreign_trade} href="/finance?scope=foreign_trade" />
+              <ScopeRow label="内销" data={data?.scopeSummary.domestic} href="/finance" />
             </div>
           </section>
 
@@ -641,7 +570,7 @@ export default function FinanceCenterPage() {
           </section>
 
           <section className="rounded-xl border border-blue-100 bg-blue-50/60 px-4 py-3 text-[10px] leading-5 text-blue-700">
-            V1 先建立统一财务底座。下一阶段内销销售/采购、外贸订单/Shipment 会按规则自动生成事项；人工补录只用于调整和无法自动识别的费用。
+            CoffeeBear 财务中心仅维护国内业务。ALSVID 的出口订单、海外仓、关税、进口 VAT、出口退税等财务事实由 ALSVID 系统负责。
           </section>
         </aside>
       </div>

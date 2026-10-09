@@ -1,10 +1,10 @@
 "use client";
 
 import Link from "@/components/workspace/workspace-link";
-import { usePathname, useRouter, useSearchParams } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { authenticatedFetch, changePassword, logout } from "@/lib/api";
-import { MODULES, moduleWorkspace, resolveModule } from "@/lib/navigation";
+import { MODULES, resolveModule } from "@/lib/navigation";
 import { syncWorkspaceUrl } from "@/lib/workspace/url-sync";
 import ThemeToggle from "@/components/theme-toggle";
 
@@ -57,17 +57,9 @@ function SearchIcon() {
 export default function TopBar() {
   const router = useRouter();
   const pathname = usePathname();
-  const searchParams = useSearchParams();
-  const active = resolveModule(pathname, searchParams);
-  const activeWorkspace = moduleWorkspace(active);
-  // 财务共享同一页面，但 scope=foreign_trade 的工作台归属由统一路由规则决定。
-  const isForeignWorkspace = activeWorkspace === "foreign";
-  const workspaceLabel = isForeignWorkspace ? "外贸工作台" : "内销工作台";
-  const workspaceHome = isForeignWorkspace ? "/foreign-trade" : "/";
-  const topModules = MODULES.filter(
-    (module) => module.showInTop !== false && moduleWorkspace(module) === (isForeignWorkspace ? "foreign" : "domestic"),
-  );
-  const [openMenu, setOpenMenu] = useState<"workspace" | "sync" | "account" | null>(null);
+  const active = resolveModule(pathname);
+  const topModules = MODULES.filter((module) => module.showInTop !== false);
+  const [openMenu, setOpenMenu] = useState<"sync" | "account" | null>(null);
   const [passwordOpen, setPasswordOpen] = useState(false);
   const [pwOld, setPwOld] = useState("");
   const [pwNew, setPwNew] = useState("");
@@ -152,7 +144,6 @@ export default function TopBar() {
   function go(href: string) {
     setOpenMenu(null);
     setSearchOpen(false);
-    // 走工作区地址同步，避开静态导出下 router.push 每次 1 秒多的 RSC 往返
     syncWorkspaceUrl(href, "push");
   }
 
@@ -207,8 +198,7 @@ export default function TopBar() {
 
   return (
     <header className="app-topbar relative z-40 flex h-14 shrink-0 items-center gap-3 border-b px-4 shadow-[0_1px_4px_rgba(15,39,70,0.04)]" ref={rootRef}>
-      {/* 品牌 + 工作台切换 */}
-      <Link href={workspaceHome} prefetch={false} className="flex shrink-0 items-center gap-2.5">
+      <Link href="/" prefetch={false} className="flex shrink-0 items-center gap-2.5">
         <span className="flex h-9 w-9 items-center justify-center rounded-full app-brand-mark">
           <svg viewBox="0 0 24 24" className="h-5 w-5" fill="none" aria-hidden="true">
             <path d="M5 8h12v7a5 5 0 0 1-5 5h-2a5 5 0 0 1-5-5V8Z" fill="currentColor" />
@@ -221,38 +211,6 @@ export default function TopBar() {
         </span>
       </Link>
 
-      <div className="relative hidden shrink-0 xl:block">
-        <button
-          type="button"
-          onClick={() => setOpenMenu((menu) => (menu === "workspace" ? null : "workspace"))}
-          className="flex items-center gap-1 rounded-lg border border-slate-200 px-2 py-1.5 text-[12px] font-medium text-slate-700 hover:bg-slate-50"
-        >
-          {workspaceLabel}
-          <ChevronDown />
-        </button>
-        {openMenu === "workspace" && (
-          <div className="absolute left-0 top-full z-dropdown mt-1.5 w-52 app-popover rounded-xl border p-1.5 shadow-lg">
-            <button
-              type="button"
-              onClick={() => go("/")}
-              className={"flex w-full items-center justify-between rounded-lg px-3 py-2 text-left text-[13px] font-medium " + (!isForeignWorkspace ? "bg-slate-50 text-slate-800" : "text-slate-600 hover:bg-slate-50")}
-            >
-              内销工作台
-              {!isForeignWorkspace && <span className="text-[10px] font-normal text-blue-600">当前</span>}
-            </button>
-            <button
-              type="button"
-              onClick={() => go("/foreign-trade")}
-              className={"flex w-full items-center justify-between rounded-lg px-3 py-2 text-left text-[13px] font-medium " + (isForeignWorkspace ? "bg-slate-50 text-slate-800" : "text-slate-600 hover:bg-slate-50")}
-            >
-              外贸工作台
-              {isForeignWorkspace && <span className="text-[10px] font-normal text-blue-600">当前</span>}
-            </button>
-          </div>
-        )}
-      </div>
-
-      {/* 一级业务导航 */}
       <nav className="top-primary-nav ml-2 flex min-w-0 max-w-[660px] flex-1 items-center gap-1 overflow-x-auto" aria-label="一级业务模块">
         {topModules.map((module) => {
           const isActive = module.key === active.key;
@@ -272,7 +230,6 @@ export default function TopBar() {
         })}
       </nav>
 
-      {/* 全局搜索 */}
       <div className="relative mx-2 hidden min-w-[180px] flex-1 max-w-[280px] 2xl:max-w-[420px] xl:block">
         <form
           onSubmit={(event) => {
@@ -320,7 +277,6 @@ export default function TopBar() {
         )}
       </div>
 
-      {/* 右侧：同步 / 异常 / 设置 / 账号 */}
       <div className="ml-auto flex shrink-0 items-center gap-1">
         <div className="relative">
           <button
