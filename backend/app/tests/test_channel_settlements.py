@@ -45,14 +45,20 @@ def test_channel_settlement_formula_and_negative_validation(db_session):
     row = _create(db_session)
     channel_settlement_service.validate_settlement(row)
 
-    with pytest.raises(channel_settlement_service.ChannelSettlementError, match="净结算额不平"):
+    with pytest.raises(
+        channel_settlement_service.ChannelSettlementError,
+        match="净结算额不平",
+    ):
         _create(
             db_session,
             external_key="SETTLE-BAD-NET",
             net_amount=Decimal("81"),
         )
 
-    with pytest.raises(channel_settlement_service.ChannelSettlementError, match="不能为负数"):
+    with pytest.raises(
+        channel_settlement_service.ChannelSettlementError,
+        match="不能为负数",
+    ):
         _create(
             db_session,
             external_key="SETTLE-NEGATIVE",
@@ -62,7 +68,10 @@ def test_channel_settlement_formula_and_negative_validation(db_session):
 
 
 def test_channel_settlement_rejects_non_cny(db_session):
-    with pytest.raises(channel_settlement_service.ChannelSettlementError, match="仅支持 CNY"):
+    with pytest.raises(
+        channel_settlement_service.ChannelSettlementError,
+        match="仅支持 CNY",
+    ):
         _create(
             db_session,
             external_key="SETTLE-EUR",
@@ -97,7 +106,9 @@ def test_materialization_is_idempotent_and_non_cash(db_session):
     assert all(entry.profit_effect is True for entry in entries)
     assert row.status == "materialized"
     assert db_session.scalar(
-        select(func.count()).select_from(FinanceEntry).where(
+        select(func.count())
+        .select_from(FinanceEntry)
+        .where(
             FinanceEntry.source_type == "channel_settlement",
             FinanceEntry.source_id == str(row.id),
         )
@@ -144,12 +155,16 @@ def test_channel_settlement_source_identity_is_idempotent(db_session):
     assert created is False
     assert second.id == first.id
 
-    with pytest.raises(channel_settlement_service.ChannelSettlementError, match="已存在"):
+    with pytest.raises(
+        channel_settlement_service.ChannelSettlementError,
+        match="已存在",
+    ):
         channel_settlement_service.create_settlement(
             db_session,
             channel="TMALL",
             shop_name="卖咖啡的熊旗舰店",
             external_key="SETTLE-IDEMPOTENT",
+            order_no="SO-CHANNEL-001",
             settle_date=date(2026, 10, 9),
             gross_amount=Decimal("101"),
             refund_amount=Decimal("10"),
@@ -157,6 +172,28 @@ def test_channel_settlement_source_identity_is_idempotent(db_session):
             rebate_amount=Decimal("2"),
             other_fee=Decimal("3"),
             net_amount=Decimal("81"),
+        )
+
+    # Even when gross/net remain unchanged, a changed deduction composition is
+    # a materially different platform statement and must not be swallowed as an
+    # idempotent retry.
+    with pytest.raises(
+        channel_settlement_service.ChannelSettlementError,
+        match="金额组成不一致",
+    ):
+        channel_settlement_service.create_settlement(
+            db_session,
+            channel="TMALL",
+            shop_name="卖咖啡的熊旗舰店",
+            external_key="SETTLE-IDEMPOTENT",
+            order_no="SO-CHANNEL-001",
+            settle_date=date(2026, 10, 9),
+            gross_amount=Decimal("100"),
+            refund_amount=Decimal("9"),
+            platform_fee=Decimal("6"),
+            rebate_amount=Decimal("2"),
+            other_fee=Decimal("3"),
+            net_amount=Decimal("80"),
         )
 
 
@@ -191,7 +228,10 @@ def test_channel_settlement_api_create_materialize_and_list(client, db_session):
     assert result["entryCount"] == 5
     assert result["openItemId"] is not None
 
-    listing = client.get("/api/v1/finance/channel-settlements", params={"channel": "JD"})
+    listing = client.get(
+        "/api/v1/finance/channel-settlements",
+        params={"channel": "JD"},
+    )
     assert listing.status_code == 200
     payload = listing.json()
     assert len(payload["items"]) == 1
