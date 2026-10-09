@@ -19,6 +19,7 @@ from app.api.v1 import (
     jky_orders,
     jky_web,
     opening,
+    open_items,
     procurement_board,
     procurement_chain,
     procurement_workbench,
@@ -60,6 +61,7 @@ api_router.include_router(procurement_board.router)
 api_router.include_router(exceptions.router)
 api_router.include_router(finance.router)
 api_router.include_router(business_partners.router)
+api_router.include_router(open_items.router)
 api_router.include_router(purchase.router)
 api_router.include_router(purchase_consistency.router)
 api_router.include_router(reconciliation.router)
