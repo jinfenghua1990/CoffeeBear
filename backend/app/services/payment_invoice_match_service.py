@@ -878,6 +878,7 @@ def _split_match_invoice_to_txns(
     actor: str, target_type: str = "bank_transaction",
     allocated_by_invoice: dict[int, Decimal] | None = None,
     allocated_by_txn: dict[int, Decimal] | None = None,
+    red_context: dict[int, dict] | None = None,
 ) -> tuple[int, Decimal]:
     """把一张发票拆给多笔流水（合计金额相等）。
 
@@ -890,7 +891,9 @@ def _split_match_invoice_to_txns(
         if allocated_by_invoice is not None
         else _invoice_bank_allocated(db, invoice.id)
     )
-    if not tax_invoice_service.is_bank_payment_reconciliation_eligible(invoice, db=db):
+    if not tax_invoice_service.is_bank_payment_reconciliation_eligible(
+        invoice, db=db, red_context=red_context
+    ):
         return 0, allocated
     count = 0
     for txn in txns:
@@ -942,6 +945,7 @@ def _split_match_txn_to_invoices(
     actor: str, target_type: str = "bank_transaction",
     allocated_by_invoice: dict[int, Decimal] | None = None,
     allocated_by_txn: dict[int, Decimal] | None = None,
+    red_context: dict[int, dict] | None = None,
 ) -> tuple[int, Decimal]:
     """把一笔流水拆给多张发票（合计金额相等）。
 
@@ -958,7 +962,9 @@ def _split_match_txn_to_invoices(
     for invoice in invoices:
         if target - allocated <= TOLERANCE:
             break
-        if not tax_invoice_service.is_bank_payment_reconciliation_eligible(invoice, db=db):
+        if not tax_invoice_service.is_bank_payment_reconciliation_eligible(
+            invoice, db=db, red_context=red_context
+        ):
             continue
         inv_amount = _invoice_target_amount(db, invoice)
         inv_used = (
@@ -1182,7 +1188,15 @@ def auto_match(db: Session, year: int, month: int, actor: str = "system") -> dic
         .filter(TaxInvoice.direction == "input")
         .all()
     )
-    invoices = [invoice for invoice in invoices if tax_invoice_service.is_bank_payment_reconciliation_eligible(invoice, db=db)]
+    # 整批共享一次红冲上下文；此前逐票重算会让自动匹配的每张候选票都全表扫一遍。
+    auto_match_red_context = tax_invoice_service.red_accounting_context(db, invoices)
+    invoices = [
+        invoice
+        for invoice in invoices
+        if tax_invoice_service.is_bank_payment_reconciliation_eligible(
+            invoice, db=db, red_context=auto_match_red_context
+        )
+    ]
     if not invoices:
         return {"year": year, "month": month, "matched": 0, "skipped": 0, "details": []}
 
@@ -1392,6 +1406,7 @@ def auto_match(db: Session, year: int, month: int, actor: str = "system") -> dic
                     db, inv, needed_txns, actor,
                     allocated_by_invoice=allocated_by_invoice,
                     allocated_by_txn=allocated_by_txn,
+                    red_context=auto_match_red_context,
                 )
                 if cnt > 0:
                     split_matched += cnt
@@ -1437,6 +1452,7 @@ def auto_match(db: Session, year: int, month: int, actor: str = "system") -> dic
                 db, txn, candidates, actor,
                 allocated_by_invoice=allocated_by_invoice,
                 allocated_by_txn=allocated_by_txn,
+                red_context=auto_match_red_context,
             )
             if cnt > 0:
                 big_txn_split_matched += cnt
