@@ -6,6 +6,7 @@ from app.api.v1 import (
     auth,
     automation,
     business_partners,
+    channel_settlements,
     closing,
     consumables,
     data_export,
@@ -62,6 +63,7 @@ api_router.include_router(exceptions.router)
 api_router.include_router(finance.router)
 api_router.include_router(business_partners.router)
 api_router.include_router(open_items.router)
+api_router.include_router(channel_settlements.router)
 api_router.include_router(purchase.router)
 api_router.include_router(purchase_consistency.router)
 api_router.include_router(reconciliation.router)
