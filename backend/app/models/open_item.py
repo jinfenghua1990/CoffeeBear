@@ -12,7 +12,7 @@ MONEY = Numeric(18, 4)
 class OpenItem(Base, PkMixin, TimestampMixin):
     """Domestic receivable/payable item that remains open until cash allocation closes it.
 
-    BusinessPartner owns counterparty identity; BankTransaction owns cash truth.  This
+    BusinessPartner owns counterparty identity; BankTransaction owns cash truth. This
     table only owns the lifecycle of the outstanding receivable/payable balance.
     """
 
@@ -47,17 +47,11 @@ class OpenItemAllocation(Base, PkMixin, TimestampMixin):
     """Allocation of one bank transaction to one open item.
 
     Allocations are voided instead of deleted so settlement history stays auditable.
+    Active-allocation uniqueness and bank capacity are enforced transactionally by the
+    service layer, which also allows a single bank transaction to settle multiple items.
     """
 
     __tablename__ = "finance_open_item_allocations"
-    __table_args__ = (
-        UniqueConstraint(
-            "open_item_id",
-            "bank_transaction_id",
-            "status",
-            name="uq_finance_open_item_allocation_active",
-        ),
-    )
 
     open_item_id: Mapped[int] = mapped_column(
         BigInteger,
