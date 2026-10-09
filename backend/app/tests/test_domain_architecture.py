@@ -21,6 +21,7 @@ def test_tax_invoice_domain_exposes_canonical_state_mutators():
     assert "def sync_business_match_status(" in source
     assert "def set_invoice_verified(" in source
 
+
 def test_procurement_auto_invoice_links_must_store_allocated_amount():
     source = _text("backend/app/services/procurement_chain_service.py")
     assert "allocated_amount=allocated_amount" in source
@@ -36,3 +37,28 @@ def test_bank_reconciliation_domain_does_not_write_invoice_manual_payment_fact()
         assert "invoice.payment_method =" not in source
         assert "inv.payment_method =" not in source
         assert "_clear_manual_personal_on_bank_evidence" not in source
+
+
+def test_coffeebear_runtime_is_domestic_only():
+    retired_runtime = (
+        "backend/app/api/v1/foreign_trade.py",
+        "backend/app/models/foreign_trade.py",
+        "backend/app/services/foreign_trade_service.py",
+        "frontend/src/app/foreign-trade",
+    )
+    for relative in retired_runtime:
+        assert not (REPO_ROOT / relative).exists(), relative
+
+    api_router = _text("backend/app/api/v1/__init__.py")
+    models_init = _text("backend/app/models/__init__.py")
+    navigation = _text("frontend/src/lib/navigation.ts")
+    route_table = _text("frontend/src/lib/workspace/route-table.tsx")
+
+    assert "foreign_trade" not in api_router
+    assert "foreign_trade" not in models_init
+    assert "/foreign-trade" not in navigation
+    assert "/foreign-trade" not in route_table
+
+    # 国内连接器必须继续保留在 CoffeeBear。
+    assert "alibaba1688_imports" in api_router
+    assert "jackyun_files" in api_router
