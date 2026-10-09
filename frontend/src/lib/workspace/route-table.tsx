@@ -2,34 +2,25 @@
 
 import { lazy, type ComponentType, type LazyExoticComponent } from "react";
 import { WORKBENCH_VIEWS, parseWorkbenchView, workbenchHref } from "@/lib/workbench-navigation";
-import { isForeignTradeFinanceRoute } from "@/lib/workspace-scope";
 
 /**
  * 工作区路由注册表：pathname → 页面组件 / Tab 标题 / Tab 身份。
  *
+ * CoffeeBear 只承载内销业务；ALSVID/外贸路由已迁出本仓库。
  * 工作区（components/workspace/workspace-host.tsx）接管页面渲染后，
  * 页面内容由这里挂载；Next 的路由只负责把地址栏同步成「激活 Tab 的 URL」。
- * 新增业务页面时：这里加一条注册 + lib/navigation.ts 加菜单，即自动接入工作区 Tabs。
  */
 export type WorkspaceKey = "domestic" | "foreign";
 
 export type RouteEntry = {
   pathname: string;
-  /** 固定工作台归属；未填写默认内销。 */
   workspace?: WorkspaceKey;
-  /** 同一页面按 query 进入不同工作台时使用；优先级高于 workspace。 */
   workspaceFor?: (search: URLSearchParams) => WorkspaceKey;
-  /** 默认 Tab 标题（列表/母页面） */
   title: string;
-  /** 业务类型：master 母页面 / 业务对象详情页 */
   businessType: string;
-  /** 参与 Tab 身份的业务参数：同 pathname 下这些参数不同 = 不同业务对象 = 不同 Tab */
   identityKeys?: string[];
-  /** 有业务参数时更精确的标题（返回 null 用默认标题） */
   titleFor?: (search: URLSearchParams) => string | null;
-  /** 默认固定（首页/工作台） */
   pinned?: boolean;
-  /** 是否允许关闭（首页不可关） */
   closable?: boolean;
   load: () => Promise<{ default: ComponentType }>;
 };
@@ -42,57 +33,6 @@ const ROUTES: RouteEntry[] = [
     pinned: true,
     closable: false,
     load: () => import("@/app/page"),
-  },
-  {
-    workspace: "foreign",
-    pathname: "/foreign-trade",
-    title: "外贸总览",
-    businessType: "master",
-    pinned: true,
-    closable: false,
-    load: () => import("@/app/foreign-trade/page"),
-  },
-  {
-    workspace: "foreign",
-    pathname: "/foreign-trade/orders",
-    title: "外贸订单",
-    businessType: "master",
-    load: () => import("@/app/foreign-trade/orders/page"),
-  },
-  {
-    workspace: "foreign",
-    pathname: "/foreign-trade/dealers",
-    title: "B2B 客户",
-    businessType: "dealer",
-    load: () => import("@/app/foreign-trade/dealers/page"),
-  },
-  {
-    workspace: "foreign",
-    pathname: "/foreign-trade/channels",
-    title: "渠道管理",
-    businessType: "master",
-    load: () => import("@/app/foreign-trade/channels/page"),
-  },
-  {
-    workspace: "foreign",
-    pathname: "/foreign-trade/sku-mappings",
-    title: "海外 SKU 映射",
-    businessType: "master",
-    load: () => import("@/app/foreign-trade/sku-mappings/page"),
-  },
-  {
-    workspace: "foreign",
-    pathname: "/foreign-trade/fulfillment",
-    title: "履约中心",
-    businessType: "master",
-    load: () => import("@/app/foreign-trade/fulfillment/page"),
-  },
-  {
-    workspace: "foreign",
-    pathname: "/foreign-trade/alsvid",
-    title: "Alsvid",
-    businessType: "master",
-    load: () => import("@/app/foreign-trade/alsvid/page"),
   },
   {
     pathname: "/sales",
@@ -167,7 +107,6 @@ const ROUTES: RouteEntry[] = [
     pathname: "/purchase/workbench",
     title: "采购订单",
     businessType: "purchase",
-    // 采购单号是业务对象：同一张采购单只保留一个 Tab，工作台母页面另外保留一个
     identityKeys: ["order"],
     titleFor: (search) => {
       const order = search.get("order");
@@ -239,8 +178,6 @@ const ROUTES: RouteEntry[] = [
     pathname: "/finance",
     title: "财务中心",
     businessType: "master",
-    workspaceFor: (search) => isForeignTradeFinanceRoute("/finance", search) ? "foreign" : "domestic",
-    titleFor: (search) => isForeignTradeFinanceRoute("/finance", search) ? "外贸财务" : null,
     load: () => import("@/app/finance/page"),
   },
   {
@@ -314,10 +251,7 @@ const ENTRY_BY_PATH = new Map(ROUTES.map((entry) => [entry.pathname, entry]));
 const IN_PAGE_REDIRECTS: Record<string, string> = {
   "/settings": "/settings/backup",
   "/supply-chain": "/purchase/workbench?view=orders",
-  "/foreign-trade/finance": "/finance?scope=foreign_trade",
   "/supply-chain/receiving/jackyun": "/supply-chain/receiving?panel=jackyun",
-  // 这两个旧导入地址必须直连数据中心：经采购工作台的 imports 视图会先开一个「数据接入」Tab
-  // 再被工作台自己重定向走，留下一个用户没要过的残留 Tab。
   "/alibaba1688-import": "/data-center-import?tab=alibaba1688",
   "/jackyun-import": "/data-center-import?tab=jackyun",
   "/payments": "/finance/monthly-send",
@@ -330,9 +264,7 @@ const IN_PAGE_REDIRECTS: Record<string, string> = {
   "/products/inventory-consumables": "/inventory?tab=consumables",
 };
 
-/** 把地址栏地址归一化成工作区可识别的正式地址（旧地址 → 新地址）。 */
 export function normalizeRoute(href: string): string {
-  // 先看原始地址：有些旧地址同时出现在 workbenchHref 的兼容表里，直连比绕一层更干净
   const [rawPathname] = href.split("?", 2);
   const direct = IN_PAGE_REDIRECTS[rawPathname];
   if (direct) return direct;
@@ -352,7 +284,6 @@ export function routeWorkspace(pathname: string, search = ""): WorkspaceKey {
   return entry.workspaceFor?.(new URLSearchParams(search)) ?? entry.workspace ?? "domestic";
 }
 
-/** 解析地址：返回注册表条目与按 query 推导后的工作台归属；未注册地址返回 null。 */
 export function resolveRoute(href: string): ResolvedRoute | null {
   const normalized = normalizeRoute(href);
   const [pathname, search = ""] = normalized.split("?", 2);
@@ -361,12 +292,10 @@ export function resolveRoute(href: string): ResolvedRoute | null {
   return { pathname, search, entry, workspace: routeWorkspace(pathname, search) };
 }
 
-/** Tab 标题：优先用业务参数推导（采购单 · CG001），否则用默认标题。 */
 export function tabTitle(entry: RouteEntry, search: string): string {
   return entry.titleFor?.(new URLSearchParams(search))?.trim() || entry.title;
 }
 
-/** Tab 身份：pathname + 业务参数，用于去重（同一业务对象只保留一个 Tab）。 */
 export function tabIdentity(pathname: string, search: string, entry: RouteEntry): string {
   const keys = entry.identityKeys ?? [];
   if (keys.length === 0) return pathname;
@@ -374,7 +303,6 @@ export function tabIdentity(pathname: string, search: string, entry: RouteEntry)
   return `${pathname}?${keys.map((key) => `${key}=${params.get(key) ?? ""}`).join("&")}`;
 }
 
-/** 业务对象标识（如采购单号），没有则为 null。 */
 export function tabBusinessId(entry: RouteEntry, search: string): string | null {
   const keys = entry.identityKeys ?? [];
   const params = new URLSearchParams(search);
@@ -385,7 +313,6 @@ export function tabBusinessId(entry: RouteEntry, search: string): string | null 
   return null;
 }
 
-/** 懒加载组件按 pathname 缓存，保证同一个页面在不同 Tab 里是同一个组件类型（不会互相重挂载）。 */
 const LAZY_CACHE = new Map<string, LazyExoticComponent<ComponentType>>();
 
 export function routeComponent(pathname: string): LazyExoticComponent<ComponentType> | null {
