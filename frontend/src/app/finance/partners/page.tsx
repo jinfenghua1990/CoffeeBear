@@ -497,7 +497,6 @@ export default function BusinessPartnersPage() {
                     <span className="text-slate-300">|</span>
                     <span>主账号 <span className="font-mono text-slate-700">{detail.bankAccountNo || "待补充"}</span></span>
                     {detail.formerNames.length > 0 && <><span className="text-slate-300">|</span><span>曾用名 {detail.formerNames.join("、")}</span></>}
-                    {detail.legacySupplierId && <Link href="/suppliers" className="font-medium text-blue-600 hover:text-blue-700">查看供应商档案 →</Link>}
                   </div>
                   <div className="mt-2 flex flex-wrap items-center gap-1.5 text-[10px]">
                     <span className={detail.taxNo ? "rounded bg-emerald-50 px-2 py-1 font-medium text-emerald-700" : "rounded bg-slate-100 px-2 py-1 text-slate-400"}>税号{detail.taxNo ? "已识别" : "待补"}</span>

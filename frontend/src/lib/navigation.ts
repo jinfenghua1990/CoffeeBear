@@ -110,16 +110,6 @@ export const MODULES: ModuleDef[] = [
     ],
   },
   {
-    key: "suppliers",
-    label: "供应商",
-    title: "供应商档案",
-    href: "/suppliers",
-    match: (p) => p.startsWith("/suppliers"),
-    items: [
-      { href: "/suppliers", label: "供应商档案", icon: "box" },
-    ],
-  },
-  {
     key: "purchase",
     label: "采购中心",
     title: "采购中心",
@@ -223,7 +213,7 @@ export const MODULES: ModuleDef[] = [
 ];
 
 /** 解析当前一级模块。顺序敏感：库存路由要先于 products / supply 判断。 */
-const RESOLVE_ORDER = ["foreign", "home", "sales", "inventory", "products", "suppliers", "purchase", "finance", "logistics", "imports", "system", "data"];
+const RESOLVE_ORDER = ["foreign", "home", "sales", "inventory", "products", "purchase", "finance", "logistics", "imports", "system", "data"];
 
 export function resolveModule(pathname: string, search?: SearchParamReader | null): ModuleDef {
   // /finance 是内外贸共用底层页面；scope=foreign_trade 时导航必须留在外贸工作台。

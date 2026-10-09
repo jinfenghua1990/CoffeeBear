@@ -1,3 +1,6 @@
+import os
+import threading
+import time
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -15,6 +18,12 @@ from app.services.procurement_chain_service import supplier_summaries
 from app.services.supplier_sync_service import normalize_supplier_name, sync_suppliers_from_business_data
 
 router = APIRouter(prefix="/suppliers", tags=["suppliers"])
+
+# 回填同步（supplier + partner 双跑）幂等但并不轻量，列表 GET 不需要每次都执行：
+# 默认 60 秒内只跑一次；可用环境变量调整，设为 0 关闭节流。
+_SUPPLIER_SYNC_THROTTLE_SECONDS = float(os.getenv("SUPPLIER_SYNC_THROTTLE_SECONDS", "60"))
+_sync_lock = threading.Lock()
+_last_sync_at = -float("inf")
 
 
 class SupplierInput(BaseModel):
@@ -100,10 +109,19 @@ def _profile_for_partner(
 
 
 def _sync_master(db: Session) -> dict[str, Any]:
-    supplier_sync = sync_suppliers_from_business_data(db)
-    partner_sync = business_partner_service.sync_business_partners(db)
-    db.commit()
-    return {"supplierSync": supplier_sync, "partnerSync": partner_sync}
+    global _last_sync_at
+    now = time.monotonic()
+    if now - _last_sync_at < _SUPPLIER_SYNC_THROTTLE_SECONDS:
+        return {}
+    with _sync_lock:
+        now = time.monotonic()
+        if now - _last_sync_at < _SUPPLIER_SYNC_THROTTLE_SECONDS:
+            return {}
+        supplier_sync = sync_suppliers_from_business_data(db)
+        partner_sync = business_partner_service.sync_business_partners(db)
+        db.commit()
+        _last_sync_at = time.monotonic()
+        return {"supplierSync": supplier_sync, "partnerSync": partner_sync}
 
 
 @router.get("")
@@ -114,10 +132,12 @@ def list_suppliers(
 ) -> list[dict[str, Any]]:
     """供应商档案 = 具有真实采购事实的 canonical BusinessPartner 供应商视图。"""
     sync = _sync_master(db)
+    supplier_sync = sync.get("supplierSync") or {}
+    partner_sync = sync.get("partnerSync") or {}
     if (
-        sync["supplierSync"].get("created")
-        or sync["supplierSync"].get("updated")
-        or sync["partnerSync"].get("materializedRefs")
+        supplier_sync.get("created")
+        or supplier_sync.get("updated")
+        or partner_sync.get("materializedRefs")
     ):
         audit(db, "system", "supplier.master_sync", "suppliers", "", sync)
 

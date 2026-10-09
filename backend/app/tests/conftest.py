@@ -20,6 +20,9 @@ import os
 from dotenv import load_dotenv
 
 load_dotenv()  # 先把 backend/.env 载入 os.environ，否则下面的 getenv 读不到
+# 测试进程内回填同步必须每次即时执行：事务回滚后库是空的，跨测试的节流会让后续
+# 测试的 GET 跳过同步、拿到空数据。节流本身只服务于生产 GET 降频。
+os.environ.setdefault("SUPPLIER_SYNC_THROTTLE_SECONDS", "0")
 if os.getenv("PYTEST_USE_TEST_DB", "1") == "1" and os.getenv("TEST_DATABASE_URL"):
     os.environ["DATABASE_URL"] = os.environ["TEST_DATABASE_URL"]
 
