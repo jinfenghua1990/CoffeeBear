@@ -15,6 +15,7 @@ import {
   type PartnerReferenceCoverage,
 } from "@/lib/api";
 import { useTabScopedState, useTabTitle } from "@/lib/workspace/tab-store";
+import { fmtDate as dateText, fmtMoney as money } from "@/lib/format";
 
 type RoleFilter = "all" | BusinessPartnerRole;
 type DetailTab = "overview" | "purchases" | "inbounds" | "invoices" | "payments" | "sales" | "review" | "profile";
@@ -52,17 +53,6 @@ const emptyForm: BusinessPartnerInput = {
   bankAccounts: [{ bankName: "", accountNo: "", accountName: "", isPrimary: true }],
   notes: "",
 };
-
-function money(value: number | null | undefined) {
-  const amount = Number(value ?? 0);
-  return Number.isFinite(amount)
-    ? `¥${amount.toLocaleString("zh-CN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
-    : "—";
-}
-
-function dateText(value: string | null | undefined) {
-  return value ? value.slice(0, 10) : "—";
-}
 
 function invoicePaymentStatus(row: BusinessPartnerDetail["invoices"][number]) {
   const effectiveAmount = Math.max(0, Number(row.effectiveAmount ?? row.amount ?? 0));
