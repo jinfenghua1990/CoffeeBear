@@ -101,7 +101,7 @@ export default function BankTransactionsPage() {
   const [rows, setRows] = useState<ReconTxn[]>([]);
   const [direction, setDirection] = useTabScopedState<DirectionFilter>("bank.direction", "all");
   const [matchFilter, setMatchFilter] = useTabScopedState<MatchFilter>("bank.match", "all");
-  const [timeScope, setTimeScope] = useTabScopedState<TimeScope>("bank.timeScope", "all");
+  const [timeScope, setTimeScope] = useTabScopedState<TimeScope>("bank.timeScope.v2", "period");
   const [query, setQuery] = useTabScopedState("bank.search", "");
   const [period, setPeriod] = useTabScopedState("bank.period", previousMonth);
   const [accountFilter, setAccountFilter] = useTabScopedState("bank.account", "");
@@ -247,6 +247,8 @@ export default function BankTransactionsPage() {
         storedPath?: string;
         bankImport?: { created: number; duplicates: number; skipped: number; rawStored?: number; accountNo?: string; accountSource?: string };
         bankImportError?: string;
+        paymentInvoiceMatch?: { matched: number; ambiguous: number; repaired: number };
+        paymentInvoiceMatchError?: string;
       };
       if (!response.ok) throw new Error(data.detail || `上传失败（${response.status}）`);
       if (data.bankImportError) {
@@ -254,7 +256,10 @@ export default function BankTransactionsPage() {
       } else if (data.bankImport) {
         const accountText = data.bankImport.accountNo ? `，真实账号 ${data.bankImport.accountNo}` : "";
         const rawText = data.bankImport.rawStored !== undefined ? `，已保存原始行 ${data.bankImport.rawStored} 笔` : "";
-        setMessage(`银行交易明细已导入 v${data.version ?? ""}：新增 ${data.bankImport.created} 笔，重复核验 ${data.bankImport.duplicates} 笔，无法识别 ${data.bankImport.skipped} 笔${accountText}${rawText}。`);
+        const matchText = data.paymentInvoiceMatch
+          ? `，付款发票自动核对新增 ${data.paymentInvoiceMatch.matched} 条${data.paymentInvoiceMatch.ambiguous ? `，另有 ${data.paymentInvoiceMatch.ambiguous} 条候选有歧义待人工` : ""}${data.paymentInvoiceMatch.repaired ? `，纠正旧自动关联 ${data.paymentInvoiceMatch.repaired} 条` : ""}`
+          : data.paymentInvoiceMatchError ? `，自动核对失败：${data.paymentInvoiceMatchError}` : "";
+        setMessage(`银行交易明细已导入 v${data.version ?? ""}：新增 ${data.bankImport.created} 笔，重复核验 ${data.bankImport.duplicates} 笔，无法识别 ${data.bankImport.skipped} 笔${accountText}${rawText}${matchText}。`);
       } else {
         setMessage(`银行交易明细已归档 v${data.version ?? ""}，但没有生成流水记录，请检查文件格式。`);
       }

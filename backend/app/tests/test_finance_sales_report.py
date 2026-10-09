@@ -266,6 +266,7 @@ def test_unbilled_adjustment_persists_selected_details_and_version(db_session):
     company = f"pytest-{uuid4().hex}"
     base = svc.build_unbilled_income_report(db_session, 2098, 8, company=company)
     assert base["sourceCount"] == 2
+    assert base["salesAmount"] == "50.00"
     selected_key = svc.unbilled_detail_key(base["details"][0])
 
     saved = svc.save_unbilled_adjustment(
@@ -280,12 +281,17 @@ def test_unbilled_adjustment_persists_selected_details_and_version(db_session):
     assert current["sourceCount"] == 2
     assert current["selectedCount"] == 1
     assert current["selectedKeys"] == [selected_key]
+    selected_sales = Decimal(current["details"][0]["sales"])
+    assert Decimal(current["salesAmount"]) == selected_sales
+    assert Decimal(current["adjustedSalesAmount"]) == selected_sales
     assert len(current["sourceDetails"]) == 2
     assert {svc.unbilled_detail_key(row) for row in current["sourceDetails"]} == {
         svc.unbilled_detail_key(row) for row in base["details"]
     }
     assert len(current["details"]) == 1
     assert svc.unbilled_detail_key(current["details"][0]) == selected_key
+    workbook = load_workbook(BytesIO(svc.unbilled_income_xlsx(current)), data_only=True)
+    assert Decimal(str(workbook["无票收入-汇总"].cell(row=3, column=2).value)) == selected_sales
 
 
 def test_output_red_discount_adjusts_sales_basis_and_does_not_create_unbilled_income(db_session):

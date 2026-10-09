@@ -65,15 +65,6 @@ def _offset_month(year: int, month: int, offset: int) -> tuple[int, int]:
     return target_year, zero_based_month + 1
 
 
-def _invoice_candidate_window(year: int, month: int):
-    """当前账期银行流水可匹配的发票窗口，统一使用业务时区 [start, end)。"""
-    start_year, start_month = _offset_month(year, month, -MATCH_WINDOW_MONTHS)
-    end_year, end_month = _offset_month(year, month, MATCH_WINDOW_MONTHS)
-    start, _ = month_bounds(start_year, start_month)
-    _, end = month_bounds(end_year, end_month)
-    return start, end
-
-
 def _dec(value: Decimal | int | str | None) -> Decimal:
     return quantize(to_decimal(value), MONEY_QUANT)
 

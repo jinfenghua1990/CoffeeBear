@@ -44,7 +44,9 @@ async def upload_import(
     automation = None
     if auto_confirm:
         from app.services.procurement_chain_service import run_full_procurement_automation
-        automation = run_full_procurement_automation(db, actor=current_actor(request))
+        automation = run_full_procurement_automation(
+            db, actor=current_actor(request), payment_invoice_import_id=row.id
+        )
     return {
         "duplicate": duplicate,
         "lifecycle": row.lifecycle,
@@ -109,7 +111,9 @@ def confirm_import(
         raise HTTPException(409, str(exc))
     result = service.serialize_import(row)
     from app.services.procurement_chain_service import run_full_procurement_automation
-    result["automation"] = run_full_procurement_automation(db, actor=current_actor(request))
+    result["automation"] = run_full_procurement_automation(
+        db, actor=current_actor(request), payment_invoice_import_id=row.id
+    )
     return result
 
 
@@ -128,7 +132,9 @@ def reprocess_import(
         raise HTTPException(409, str(exc))
     from app.services.procurement_chain_service import run_full_procurement_automation
     result = service.serialize_import(row)
-    result["automation"] = run_full_procurement_automation(db, actor=current_actor(request))
+    result["automation"] = run_full_procurement_automation(
+        db, actor=current_actor(request), payment_invoice_import_id=row.id
+    )
     return result
 
 

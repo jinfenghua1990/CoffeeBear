@@ -218,6 +218,66 @@ def test_finance_upload_has_a_server_side_size_limit(client, monkeypatch):
     assert r.status_code == 413
 
 
+def test_finance_bank_file_upload_runs_payment_invoice_matching(client, monkeypatch):
+    from types import SimpleNamespace
+
+    from app.api.v1 import finance
+
+    monkeypatch.setattr(
+        finance.finance_service,
+        "store_upload",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            id=17, version=1, sha256="a" * 64, size=4, stored_path="archive.xlsx"
+        ),
+    )
+    monkeypatch.setattr(
+        finance.reconciliation_service,
+        "import_bank_xlsx",
+        lambda *_args, **_kwargs: {"created": 1, "duplicates": 0, "skipped": 0},
+    )
+    calls = []
+    monkeypatch.setattr(
+        finance.partner_master_service,
+        "rebuild_partner_master",
+        lambda _db, *, actor, run_payment_match: calls.append(
+            ("partners", actor, run_payment_match)
+        ),
+    )
+    monkeypatch.setattr(
+        finance.payment_match_service,
+        "auto_match_periods",
+        lambda _db, periods, *, actor: calls.append(
+            ("match", periods, actor)
+        ) or {
+            "matchedLinks": 2,
+            "ambiguous": 1,
+            "repaired": 0,
+        },
+    )
+
+    response = client.post(
+        "/api/v1/finance/files",
+        files={"file": ("bank.xlsx", b"test", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
+        data={
+            "period_year": "2026",
+            "period_month": "9",
+            "category": "bank",
+            "original_name": "银行交易明细.xlsx",
+        },
+    )
+
+    assert response.status_code == 200
+    assert calls == [
+        ("partners", "pytest-admin", False),
+        ("match", [(2026, 9)], "pytest-admin"),
+    ]
+    assert response.json()["paymentInvoiceMatch"] == {
+        "matched": 2,
+        "ambiguous": 1,
+        "repaired": 0,
+    }
+
+
 def test_reconciliation_overview(client):
     """/reconciliation/overview 返回结构（real/reconciled/leftover 等 key）。"""
     r = client.get("/api/v1/reconciliation/overview")

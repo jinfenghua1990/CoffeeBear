@@ -15,7 +15,7 @@ from app.models.bank import BankTransaction
 from app.models.business_partner import BusinessPartner, BusinessPartnerIdentifier, BusinessPartnerLink
 from app.models.org import AuditLog
 from app.models.purchase import Supplier
-from app.models.tax import TaxInvoice, TaxInvoiceLink
+from app.models.tax import TaxInvoice, TaxInvoiceImport, TaxInvoiceLink
 from app.services import payment_invoice_match_service as pm
 
 
@@ -815,6 +815,34 @@ def test_auto_match_all_periods_reconciles_historical_bank_months(db_session):
     }
 
 
+def test_auto_match_invoice_import_limits_to_supplier_and_relevant_bank_periods(db_session):
+    batch = TaxInvoiceImport(
+        original_name="invoice-import.csv",
+        stored_path="/tmp/invoice-import.csv",
+        sha256=uuid4().hex + uuid4().hex,
+        lifecycle="active",
+    )
+    db_session.add(batch)
+    db_session.flush()
+    txn = _txn(db_session, month=8, amount="777.00", name="批次供应商")
+    invoice = _invoice(db_session, month=8, amount="777.00", seller="批次供应商")
+    invoice.source_import_id = batch.id
+    _txn(db_session, month=7, amount="777.00", name="其他供应商")
+    _txn(db_session, year=2025, month=12, amount="777.00", name="批次供应商")
+    db_session.commit()
+
+    result = pm.auto_match_invoice_import(db_session, batch.id, actor="pytest")
+
+    assert result["periods"] == ["2026-08"]
+    assert result["matchedLinks"] == 1
+    link = db_session.query(TaxInvoiceLink).filter_by(
+        invoice_id=invoice.id,
+        target_type="bank_transaction",
+        target_id=txn.id,
+    ).one()
+    assert link.confirmed is True
+
+
 
 def test_name_normalization_treats_full_and_half_width_parentheses_as_equal():
     assert pm._normalize_name("合锦（广州）供应链有限公司") == pm._normalize_name("合锦(广州)供应链有限公司")
@@ -1055,4 +1083,85 @@ def test_single_tax_account_history_is_not_enough_to_learn(db_session):
         invoice_id=new_invoice.id,
         target_type="bank_transaction",
         target_id=new_txn.id,
+    ).count() == 0
+
+
+# ---------- 2026-09 调整：金额优先、不限开票期间、部分匹配兜底 ----------
+
+def test_auto_match_matches_invoice_outside_old_time_window(db_session):
+    """发票开票月超出旧 ±3 个月窗口仍可等额自动匹配。"""
+    txn = _txn(db_session, year=2026, month=8, day=27, amount="3845.00", name="跨期等额供应商")
+    inv = _invoice(db_session, year=2026, month=12, day=23, amount="3845.00", seller="跨期等额供应商")
+    db_session.commit()
+
+    result = pm.auto_match(db_session, 2026, 8)
+    assert result["matched"] == 1
+    link = db_session.query(TaxInvoiceLink).filter_by(
+        invoice_id=inv.id,
+        target_type="bank_transaction",
+        target_id=txn.id,
+    ).one()
+    assert link.confirmed is True
+    assert Decimal(link.allocated_amount) == Decimal("3845.00")
+
+
+def test_auto_match_partial_single_leftover_invoice(db_session):
+    """等额轮配不上时，同主体唯一未配发票触发部分匹配，差额挂账。"""
+    txn = _txn(db_session, year=2026, month=8, day=27, amount="5000.00", name="部分匹配供应商")
+    inv = _invoice(db_session, year=2026, month=9, day=23, amount="3845.00", seller="部分匹配供应商")
+    db_session.commit()
+
+    result = pm.auto_match(db_session, 2026, 8)
+    assert result["matched"] == 0
+    assert result["partialMatched"] == 1
+    link = db_session.query(TaxInvoiceLink).filter_by(
+        invoice_id=inv.id,
+        target_type="bank_transaction",
+        target_id=txn.id,
+    ).one()
+    assert link.match_method == "auto_partial"
+    assert Decimal(link.allocated_amount) == Decimal("3845.00")
+    detail = result["partialDetails"][0]
+    assert detail["shortfall"] == "1155.00"
+    status = pm.txn_reconciliation_statuses(db_session, [txn.id])[txn.id]
+    assert status["status"] == "partial"
+
+
+def test_auto_match_no_partial_when_multiple_leftover_invoices(db_session):
+    """同主体剩余多张发票时不猜：既不拆分（合计不等）也不部分分配。"""
+    txn = _txn(db_session, year=2026, month=8, day=5, amount="5000.00", name="多候选不猜供应商")
+    inv_a = _invoice(db_session, year=2026, month=8, day=8, amount="1000.00", seller="多候选不猜供应商")
+    inv_b = _invoice(db_session, year=2026, month=8, day=9, amount="1000.00", seller="多候选不猜供应商")
+    db_session.commit()
+
+    result = pm.auto_match(db_session, 2026, 8)
+    assert result["matched"] == 0
+    assert result["splitMatched"] == 0
+    assert result["bigTxnSplitMatched"] == 0
+    assert result["partialMatched"] == 0
+    assert db_session.query(TaxInvoiceLink).filter(
+        TaxInvoiceLink.invoice_id.in_([inv_a.id, inv_b.id]),
+        TaxInvoiceLink.target_type == "bank_transaction",
+    ).count() == 0
+
+
+def test_auto_match_equal_amount_wins_before_partial(db_session):
+    """等额发票优先配满，配满后不再用剩余发票部分分配。"""
+    txn = _txn(db_session, year=2026, month=8, day=5, amount="5000.00", name="等额优先供应商")
+    inv_equal = _invoice(db_session, year=2026, month=8, day=10, amount="5000.00", seller="等额优先供应商")
+    inv_other = _invoice(db_session, year=2026, month=9, day=1, amount="3845.00", seller="等额优先供应商")
+    db_session.commit()
+
+    result = pm.auto_match(db_session, 2026, 8)
+    assert result["matched"] == 1
+    assert result["partialMatched"] == 0
+    assert db_session.query(TaxInvoiceLink).filter_by(
+        invoice_id=inv_equal.id,
+        target_type="bank_transaction",
+        target_id=txn.id,
+    ).count() == 1
+    assert db_session.query(TaxInvoiceLink).filter_by(
+        invoice_id=inv_other.id,
+        target_type="bank_transaction",
+        target_id=txn.id,
     ).count() == 0

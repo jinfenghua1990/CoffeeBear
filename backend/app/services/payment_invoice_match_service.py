@@ -22,16 +22,17 @@ from app.models.tax import TaxInvoice, TaxInvoiceLink
 from app.services import tax_invoice_service
 from app.services.monthly_core import month_bounds
 from app.services.payment_invoice_match_helpers import (
+    MATCH_WINDOW_MONTHS,
     TARGET_TYPE,
     TOLERANCE,
     _dec,
     _invoice_bank_allocated,
     _invoice_brief,
-    _invoice_candidate_window,
     _invoice_issue_date,
     _invoice_target_amount,
     _link_amount,
     _month_range,
+    _offset_month,
     _normalize_account,
     _normalize_name,
     _normalize_tax_no,
@@ -543,7 +544,15 @@ def overview(db: Session, year: int, month: int) -> dict[str, Any]:
     )
     # 红冲、作废、待确认和非正数金额发票仍保留在发票/会计模块，
     # 但不能进入“银行付款核对”池，更不能因金额 <= 0 被推导成 matched。
-    pool_rows = [row for row in pool_rows if tax_invoice_service.is_bank_payment_reconciliation_eligible(row, db=db)]
+    # 整批共享红冲上下文，避免逐票重算。
+    pool_red_context = tax_invoice_service.red_accounting_context(db, pool_rows)
+    pool_rows = [
+        row
+        for row in pool_rows
+        if tax_invoice_service.is_bank_payment_reconciliation_eligible(
+            row, db=db, red_context=pool_red_context
+        )
+    ]
     pool_ids = [row.id for row in pool_rows]
     pool_links: list[TaxInvoiceLink] = []
     if pool_ids:
@@ -573,11 +582,17 @@ def overview(db: Session, year: int, month: int) -> dict[str, Any]:
     for link in pool_links:
         linked_by_invoice.setdefault(link.invoice_id, []).append(link)
 
-    invoice_bank_context = tax_invoice_service._invoice_bank_payment_context(db, pool_rows)
+    invoice_bank_context = tax_invoice_service._invoice_bank_payment_context(
+        db, pool_rows, red_context=pool_red_context
+    )
     invoice_pool: list[dict[str, Any]] = []
     pool_by_id: dict[int, dict[str, Any]] = {}
     for invoice in pool_rows:
-        total = _invoice_target_amount(db, invoice)
+        total = _dec(
+            tax_invoice_service.effective_invoice_amount_after_red(
+                db, invoice, red_context=pool_red_context
+            )
+        )
         linked_amount = Decimal("0.0000")
         briefs: list[dict[str, Any]] = []
         for link in sorted(linked_by_invoice.get(invoice.id, []), key=lambda row: row.id):
@@ -803,7 +818,15 @@ def pending_invoices(db: Session, limit: int = 500) -> list[dict[str, Any]]:
         .order_by(TaxInvoice.issue_date.desc(), TaxInvoice.id.desc())
         .all()
     )
-    rows = [row for row in rows if tax_invoice_service.is_bank_payment_reconciliation_eligible(row, db=db)]
+    # 整批只算一次红冲上下文；此前逐票重算（每票一次 red_accounting_context），发票池接口 20 秒。
+    red_context = tax_invoice_service.red_accounting_context(db, rows)
+    rows = [
+        row
+        for row in rows
+        if tax_invoice_service.is_bank_payment_reconciliation_eligible(
+            row, db=db, red_context=red_context
+        )
+    ]
     invoice_ids = [row.id for row in rows]
     allocated_by_invoice: dict[int, Decimal] = {}
     if invoice_ids:
@@ -826,7 +849,11 @@ def pending_invoices(db: Session, limit: int = 500) -> list[dict[str, Any]]:
 
     result: list[dict[str, Any]] = []
     for invoice in rows:
-        total = _invoice_target_amount(db, invoice)
+        total = _dec(
+            tax_invoice_service.effective_invoice_amount_after_red(
+                db, invoice, red_context=red_context
+            )
+        )
         linked = allocated_by_invoice.get(invoice.id, Decimal("0"))
         remaining = total - linked
         if remaining <= TOLERANCE:
@@ -973,24 +1000,11 @@ def _split_match_txn_to_invoices(
     return count, allocated
 
 
-def auto_match_all_periods(db: Session, actor: str = "system") -> dict[str, Any]:
-    """对所有历史银行支出账期执行一次安全的付款↔进项发票自动核对。
-
-    这是“核对全部来源”使用的总入口。只按银行流水实际存在的年月遍历，
-    每个月仍复用 auto_match 的安全边界：名称/账号证据、金额一致、唯一最近日期，
-    歧义候选不落库，人工确认/拒绝不会被覆盖。
-    """
-    date_rows = (
-        db.query(BankTransaction.txn_date)
-        .filter(BankTransaction.direction == "out")
-        .all()
-    )
-    periods = sorted({
-        (value.year, value.month)
-        for (value,) in date_rows
-        if value is not None
-    })
-
+def auto_match_periods(
+    db: Session, periods: list[tuple[int, int]], actor: str = "system"
+) -> dict[str, Any]:
+    """只对指定账期执行自动匹配，并汇总各账期结果。"""
+    periods = sorted(set(periods))
     results: list[dict[str, Any]] = []
     totals = {
         "matched": 0,
@@ -1022,18 +1036,134 @@ def auto_match_all_periods(db: Session, actor: str = "system") -> dict[str, Any]
     }
 
 
+def auto_match_all_periods(db: Session, actor: str = "system") -> dict[str, Any]:
+    """显式全量核对入口：遍历所有有银行支出的历史账期。"""
+    date_rows = (
+        db.query(BankTransaction.txn_date)
+        .filter(BankTransaction.direction == "out")
+        .all()
+    )
+    periods = sorted({
+        (value.year, value.month)
+        for (value,) in date_rows
+        if value is not None
+    })
+    return auto_match_periods(db, periods, actor=actor)
+
+
+def auto_match_invoice_import(
+    db: Session, import_id: int, actor: str = "system"
+) -> dict[str, Any]:
+    """仅核对与发票批次供应商相符、且付款账期在开票月窗口内的流水。"""
+    imported_invoices = (
+        db.query(TaxInvoice)
+        .filter(
+            TaxInvoice.source_import_id == import_id,
+            TaxInvoice.direction == "input",
+        )
+        .all()
+    )
+    if not imported_invoices:
+        return auto_match_periods(db, [], actor=actor)
+
+    red_context = tax_invoice_service.red_accounting_context(db, imported_invoices)
+    invoices = [
+        invoice
+        for invoice in imported_invoices
+        if tax_invoice_service.is_bank_payment_reconciliation_eligible(
+            invoice, db=db, red_context=red_context
+        )
+    ]
+    issue_dates = {
+        invoice.id: _invoice_issue_date(invoice)
+        for invoice in invoices
+        if _invoice_issue_date(invoice) is not None
+    }
+    if not issue_dates:
+        return auto_match_periods(db, [], actor=actor)
+
+    candidate_periods = {
+        _offset_month(issue_date.year, issue_date.month, offset)
+        for issue_date in issue_dates.values()
+        for offset in range(-MATCH_WINDOW_MONTHS, MATCH_WINDOW_MONTHS + 1)
+    }
+    earliest = min(issue_dates.values())
+    latest = max(issue_dates.values())
+    start_year, start_month = _offset_month(
+        earliest.year, earliest.month, -MATCH_WINDOW_MONTHS
+    )
+    end_year, end_month = _offset_month(
+        latest.year, latest.month, MATCH_WINDOW_MONTHS
+    )
+    start, _ = _month_range(start_year, start_month)
+    _, end = _month_range(end_year, end_month)
+    txns = (
+        db.query(BankTransaction)
+        .filter(
+            BankTransaction.direction == "out",
+            BankTransaction.txn_date >= start,
+            BankTransaction.txn_date <= end,
+        )
+        .all()
+    )
+    if not txns:
+        return auto_match_periods(db, [], actor=actor)
+
+    supplier_accounts = _supplier_accounts_by_name(db)
+    invoice_partner_ids = _linked_partner_ids(
+        db,
+        source_type="tax_invoice",
+        source_ids=[invoice.id for invoice in invoices],
+        relation_role="seller",
+    )
+    txn_partner_ids = _linked_partner_ids(
+        db,
+        source_type="bank_transaction",
+        source_ids=[txn.id for txn in txns],
+        relation_role="counterparty",
+    )
+    periods: set[tuple[int, int]] = set()
+    for txn in txns:
+        period = (txn.txn_date.year, txn.txn_date.month)
+        if period not in candidate_periods:
+            continue
+        for invoice in invoices:
+            issue_date = issue_dates.get(invoice.id)
+            if issue_date is None:
+                continue
+            month_distance = abs(
+                (txn.txn_date.year * 12 + txn.txn_date.month)
+                - (issue_date.year * 12 + issue_date.month)
+            )
+            if month_distance > MATCH_WINDOW_MONTHS:
+                continue
+            evidence = _candidate_evidence(
+                txn,
+                invoice,
+                supplier_accounts,
+                invoice_partner_ids,
+                txn_partner_ids,
+            )
+            if evidence["nameMatch"] or evidence["accountMatch"] or evidence["partnerMatch"]:
+                periods.add(period)
+                break
+    return auto_match_periods(db, sorted(periods), actor=actor)
+
+
 def auto_match(db: Session, year: int, month: int, actor: str = "system") -> dict[str, Any]:
     """自动匹配当月银行付款 ↔ 进项发票。
 
-    规则：先收集“同供应商/供应商账号 + 剩余金额相等”的全部候选，
-    供应商银行账号为强证据，其次按付款日与开票日绝对距离排序；
-    只有唯一最佳候选才自动落库。已有 manual/rejected/拆分链路不会被自动改写。
+    规则（2026-09 调整）：金额优先、不限开票期间。
+    第一轮“同供应商/供应商账号 + 剩余金额相等”唯一最佳候选直接落库；
+    第二/三轮处理多笔流水合并对一张票、大流水拆多张票（需合计恰好相等）；
+    第四轮供应商账号强证据兜底；第五轮同主体唯一未配发票时部分分配、差额挂账。
+    已有 manual/rejected/拆分链路不会被自动改写。
     """
     start, end = _month_range(year, month)
-    invoice_window_start, invoice_window_end = _invoice_candidate_window(year, month)
 
     # 操作边界必须锁定当前账期：点“8 月自动匹配”只能修改 8 月银行支出。
-    # 为兼容开票/付款跨月，只有候选发票允许向前后各扩 3 个完整自然月。
+    # 候选发票不限制开票月份（2026-09 调整）：金额优先、跨期可配，
+    # 时间远近只作为同分时的排序参考，不再作为资格门槛。
     txns = (
         db.query(BankTransaction)
         .filter(
@@ -1047,14 +1177,9 @@ def auto_match(db: Session, year: int, month: int, actor: str = "system") -> dic
     if not txns:
         return {"year": year, "month": month, "matched": 0, "skipped": 0, "details": []}
 
-    # 候选进项发票允许跨月，但自动落库的银行流水仍严格属于当前账期。
     invoices = (
         db.query(TaxInvoice)
-        .filter(
-            TaxInvoice.direction == "input",
-            TaxInvoice.issue_date >= invoice_window_start,
-            TaxInvoice.issue_date < invoice_window_end,
-        )
+        .filter(TaxInvoice.direction == "input")
         .all()
     )
     invoices = [invoice for invoice in invoices if tax_invoice_service.is_bank_payment_reconciliation_eligible(invoice, db=db)]
@@ -1399,12 +1524,77 @@ def auto_match(db: Session, year: int, month: int, actor: str = "system") -> dic
             "candidateCount": evidence.get("candidateCount"),
         })
 
+    # 第五轮：部分匹配兜底（2026-09 调整）——等额/拆分轮配完后，
+    # 剩余付款若在同主体下只剩唯一一张未配发票，则按 min(付款剩余, 发票剩余)
+    # 部分分配，差额挂账待票。多张剩余票时不猜，留给人工标记。
+    partial_matched = 0
+    partial_details: list[dict] = []
+    still_open_txns = [t for t in leftover_txns if t.id not in existing_txn_ids]
+    open_invoices = [
+        inv for inv in invoices
+        if _invoice_target_amount(db, inv) - allocated_by_invoice.get(inv.id, Decimal("0")) > TOLERANCE
+    ]
+    open_groups: dict[str, list[TaxInvoice]] = {}
+    for inv in open_invoices:
+        norm = _normalize_name(inv.seller_name)
+        if norm:
+            open_groups.setdefault(norm, []).append(inv)
+    for txn in still_open_txns:
+        txn_remaining = _dec(txn.amount) - allocated_by_txn.get(txn.id, Decimal("0"))
+        if txn_remaining <= TOLERANCE:
+            continue
+        norm = _normalize_name(txn.counterparty_name)
+        candidates = [
+            inv for inv in open_groups.get(norm, [])
+            if (inv.id, txn.id) not in existing_invoice_txn
+        ]
+        if len(candidates) != 1:
+            continue
+        inv = candidates[0]
+        inv_remaining = _invoice_target_amount(db, inv) - allocated_by_invoice.get(inv.id, Decimal("0"))
+        if inv_remaining <= TOLERANCE:
+            continue
+        portion = min(txn_remaining, inv_remaining)
+        if portion <= TOLERANCE:
+            continue
+        shortfall = txn_remaining - portion
+        link_row = TaxInvoiceLink(
+            invoice_id=inv.id,
+            target_type=TARGET_TYPE,
+            target_id=txn.id,
+            allocated_amount=portion,
+            match_method="auto_partial",
+            confidence=Decimal("0.80"),
+            confirmed=True,
+            note=(
+                f"系统部分匹配：同主体唯一未配发票，配 ¥{portion}"
+                + (f"，付款差额 ¥{shortfall} 挂账待票" if shortfall > TOLERANCE else "，已全额配满")
+            ),
+        )
+        db.add(link_row)
+        db.flush()
+        allocated_by_invoice[inv.id] = allocated_by_invoice.get(inv.id, Decimal("0")) + portion
+        allocated_by_txn[txn.id] = allocated_by_txn.get(txn.id, Decimal("0")) + portion
+        existing_invoice_txn.add((inv.id, txn.id))
+        if allocated_by_txn.get(txn.id, Decimal("0")) >= _dec(txn.amount) - TOLERANCE:
+            existing_txn_ids.add(txn.id)
+        partial_matched += 1
+        partial_details.append({
+            "txnId": txn.id,
+            "txnDate": txn.txn_date.isoformat(),
+            "invoiceId": inv.id,
+            "invoiceNumber": inv.invoice_number,
+            "allocatedAmount": str(portion),
+            "shortfall": str(shortfall) if shortfall > TOLERANCE else "0",
+        })
+
     db.commit()
     audit(
         db, actor, "payment_invoice_match.auto", "tax_invoice_links", "",
         {"year": year, "month": month, "matched": matched, "skipped": skipped,
          "splitMatched": split_matched, "bigTxnSplitMatched": big_txn_split_matched,
-         "supplierMatched": supplier_matched, "repaired": len(repair_details),
+         "supplierMatched": supplier_matched, "partialMatched": partial_matched,
+         "repaired": len(repair_details),
          "ambiguous": len(ambiguous_details), "repairDetails": repair_details},
     )
     return {
@@ -1412,8 +1602,10 @@ def auto_match(db: Session, year: int, month: int, actor: str = "system") -> dic
         "matched": matched, "skipped": skipped,
         "splitMatched": split_matched, "bigTxnSplitMatched": big_txn_split_matched,
         "supplierMatched": supplier_matched,
+        "partialMatched": partial_matched,
         "repaired": len(repair_details), "ambiguous": len(ambiguous_details),
         "details": details, "splitDetails": split_details, "supplierDetails": supplier_details,
+        "partialDetails": partial_details,
         "repairDetails": repair_details, "ambiguousDetails": ambiguous_details,
     }
 

@@ -2414,7 +2414,19 @@ export const taxInvoiceApi = {
       const body = (await res.json().catch(() => ({}))) as { detail?: unknown };
       throw new Error(detailToMessage(body.detail, `上传失败（${res.status}）`));
     }
-    return res.json() as Promise<{ duplicate: boolean; lifecycle: string; import: TaxInvoiceImportRow }>;
+    return res.json() as Promise<{
+      duplicate: boolean;
+      lifecycle: string;
+      import: TaxInvoiceImportRow;
+      automation?: {
+        errors?: string[];
+        partnerMaster?: {
+          bankInvoiceMatchesCreated?: number;
+          bankInvoiceAmbiguous?: number;
+          bankInvoiceRepaired?: number;
+        };
+      };
+    }>;
   },
   confirm: (id: number) =>
     jsonFetch<TaxInvoiceImportRow>(`/api/v1/tax-invoices/imports/${id}/confirm`, { method: "POST" }),
