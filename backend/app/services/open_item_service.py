@@ -73,7 +73,12 @@ def _recompute(db: Session, item: OpenItem) -> OpenItem:
     return item
 
 
-def serialize_item(db: Session, item: OpenItem, *, include_allocations: bool = True) -> dict[str, Any]:
+def serialize_item(
+    db: Session,
+    item: OpenItem,
+    *,
+    include_allocations: bool = True,
+) -> dict[str, Any]:
     allocations: list[dict[str, Any]] = []
     if include_allocations:
         rows = db.scalars(
@@ -214,21 +219,35 @@ def allocate_bank_transaction(
     amount: Decimal,
     note: str = "",
 ) -> OpenItemAllocation:
-    item = get_open_item(db, item_id)
+    # Lock both financial facts before checking remaining capacity. This serializes
+    # concurrent allocations of the same item or bank transaction and prevents
+    # race-condition over-allocation.
+    item = db.scalar(select(OpenItem).where(OpenItem.id == item_id).with_for_update())
+    if item is None:
+        raise OpenItemError("未结项不存在")
     if item.status == "cancelled":
         raise OpenItemError("已取消的未结项不能分配银行流水")
     if item.status == "closed":
         raise OpenItemError("未结项已结清")
 
-    txn = db.get(BankTransaction, bank_transaction_id)
+    txn = db.scalar(
+        select(BankTransaction)
+        .where(BankTransaction.id == bank_transaction_id)
+        .with_for_update()
+    )
     if txn is None:
         raise OpenItemError("银行流水不存在")
     expected_direction = "in" if item.item_type == "receivable" else "out"
     if txn.direction != expected_direction:
         raise OpenItemError(
-            "应收只能分配收款流水" if item.item_type == "receivable" else "应付只能分配付款流水"
+            "应收只能分配收款流水"
+            if item.item_type == "receivable"
+            else "应付只能分配付款流水"
         )
-    if txn.counterparty_partner_id is not None and txn.counterparty_partner_id != item.partner_id:
+    if (
+        txn.counterparty_partner_id is not None
+        and txn.counterparty_partner_id != item.partner_id
+    ):
         raise OpenItemError("银行流水已归属其他往来单位")
 
     allocation_amount = _money(amount)
@@ -273,23 +292,35 @@ def allocate_bank_transaction(
 
 
 def void_allocation(db: Session, *, allocation_id: int) -> OpenItemAllocation:
-    allocation = db.get(OpenItemAllocation, allocation_id)
+    allocation = db.scalar(
+        select(OpenItemAllocation)
+        .where(OpenItemAllocation.id == allocation_id)
+        .with_for_update()
+    )
     if allocation is None:
         raise OpenItemError("未结项分配记录不存在")
     if allocation.status == "voided":
         return allocation
+    item = db.scalar(
+        select(OpenItem)
+        .where(OpenItem.id == allocation.open_item_id)
+        .with_for_update()
+    )
+    if item is None:
+        raise OpenItemError("未结项不存在")
     allocation.status = "voided"
     allocation.voided_at = datetime.now(timezone.utc)
     db.add(allocation)
     db.flush()
-    item = get_open_item(db, allocation.open_item_id)
     _recompute(db, item)
     db.flush()
     return allocation
 
 
 def cancel_open_item(db: Session, *, item_id: int) -> OpenItem:
-    item = get_open_item(db, item_id)
+    item = db.scalar(select(OpenItem).where(OpenItem.id == item_id).with_for_update())
+    if item is None:
+        raise OpenItemError("未结项不存在")
     if item.status == "cancelled":
         return item
     if _active_allocations(db, item.id):
@@ -310,7 +341,9 @@ def summary(db: Session, *, partner_id: int | None = None) -> dict[str, Any]:
     receivable = sum(
         (_remaining(row) for row in rows if row.item_type == "receivable"), ZERO
     )
-    payable = sum((_remaining(row) for row in rows if row.item_type == "payable"), ZERO)
+    payable = sum(
+        (_remaining(row) for row in rows if row.item_type == "payable"), ZERO
+    )
     return {
         "partnerId": partner_id,
         "openCount": len(rows),
