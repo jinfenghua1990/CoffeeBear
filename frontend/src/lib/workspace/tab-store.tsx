@@ -22,7 +22,7 @@ export const MAX_TABS = 12;
 
 export type WorkspaceTab = {
   id: string;
-  /** 所属独立工作台：内销 / 外贸。 */
+  /** CoffeeBear 只有内销工作台。 */
   workspace: WorkspaceKey;
   /** 该 Tab 自己的路径（不含 query） */
   pathname: string;
@@ -212,7 +212,6 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       const existing = options?.forceNew ? undefined : stateRef.current.tabs.find((tab) => tab.workspace === workspace && tab.identity === identity);
       if (existing) {
         if (existing.pathname === pathname && existing.search !== search) {
-          // 同一个业务对象：同步 query 的同时刷新标题/业务标识，避免“销售明细”仍显示旧 Tab 标题。
           stateRef.current.tabs = stateRef.current.tabs.map((tab) =>
             tab.id === existing.id
               ? {
@@ -236,7 +235,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       const workspaceTabs = stateRef.current.tabs.filter((tab) => tab.workspace === workspace);
       if (workspaceTabs.length >= MAX_TABS) {
         if (!options?.silent) {
-          setNotice(`${workspace === "foreign" ? "外贸" : "内销"}工作台最多同时打开 ${MAX_TABS} 个页面，请先关闭一些页面再打开新的。`);
+          setNotice(`内销工作台最多同时打开 ${MAX_TABS} 个页面，请先关闭一些页面再打开新的。`);
         }
         return null;
       }
@@ -363,7 +362,6 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       const workspace = entry.workspace ?? "domestic";
       const identity = tabIdentity(pathname, search, entry);
 
-      // 新地址已被同一工作台的另一个 Tab 代表：本 Tab 退场并切回那个 Tab。
       const host = stateRef.current.tabs.find(
         (tab) => tab.id !== active.id && tab.workspace === workspace && tab.identity === identity,
       );
@@ -543,7 +541,6 @@ export function useTabTitle(title: string | null | undefined) {
   const runtime = useTabRuntime();
   const api = useWorkspace();
   const tabId = runtime?.tabId;
-  // api 每次变更都会换引用，这里走 ref 让 effect 只在标题/激活 Tab 变化时才跑
   const apiRef = useRef(api);
   apiRef.current = api;
   useEffect(() => {
@@ -583,7 +580,6 @@ export function useTabScopedState<T>(key: string, initial: T | (() => T)) {
     return typeof initial === "function" ? (initial as () => T)() : initial;
   });
 
-  // set 的引用保持稳定（否则放进 effect 依赖里会反复触发）
   const set = useCallback(
     (next: T | ((prev: T) => T)) => {
       setValue((prev) => {
