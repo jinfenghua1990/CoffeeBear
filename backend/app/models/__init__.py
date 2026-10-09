@@ -12,6 +12,7 @@ from app.models import (
     jackyun,
     jackyun_import,
     logistics,
+    open_item,
     ops,
     org,
     payment,
@@ -48,6 +49,7 @@ __all__ = [
     "payment",
     "profit",
     "finance",
+    "open_item",
     "ops",
     "finance_voucher",
 ]
