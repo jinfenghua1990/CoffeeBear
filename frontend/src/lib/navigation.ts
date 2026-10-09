@@ -1,5 +1,3 @@
-import { isForeignTradeFinanceRoute, type SearchParamReader } from "@/lib/workspace-scope";
-
 /**
  * 全站导航配置（顶部一级 + 左侧二级 + 页面内 TAB）。
  * 增删菜单只改这里，不要在各页面硬编码。
@@ -21,7 +19,7 @@ export type ModuleDef = {
   label: string;
   /** 左侧栏顶部显示的模块名 */
   title: string;
-  /** 所属业务工作台；未填写时默认内销。 */
+  /** CoffeeBear 当前模块均属于国内工作台。 */
   workspace?: WorkspaceKey;
   /** 点击一级菜单的默认落地页（= 第一项） */
   href: string;
@@ -158,24 +156,6 @@ export const MODULES: ModuleDef[] = [
     ],
   },
   {
-    key: "foreign",
-    label: "总览",
-    title: "外贸中心",
-    workspace: "foreign",
-    href: "/foreign-trade",
-    match: (p) => p.startsWith("/foreign-trade"),
-    items: [
-      { href: "/foreign-trade", label: "外贸总览", icon: "home" },
-      { href: "/foreign-trade/orders", label: "外贸订单", icon: "cart" },
-      { href: "/foreign-trade/dealers", label: "B2B 客户", icon: "sales" },
-      { href: "/foreign-trade/channels", label: "渠道管理", icon: "sales" },
-      { href: "/foreign-trade/sku-mappings", label: "海外 SKU 映射", icon: "box" },
-      { href: "/foreign-trade/fulfillment", label: "履约中心", icon: "truck" },
-      { href: "/finance?scope=foreign_trade", label: "财务", icon: "wallet" },
-      { href: "/foreign-trade/alsvid", label: "Alsvid", icon: "factory" },
-    ],
-  },
-  {
     key: "imports",
     label: "数据接入",
     title: "数据接入",
@@ -213,13 +193,9 @@ export const MODULES: ModuleDef[] = [
 ];
 
 /** 解析当前一级模块。顺序敏感：库存路由要先于 products / supply 判断。 */
-const RESOLVE_ORDER = ["foreign", "home", "sales", "inventory", "products", "purchase", "finance", "logistics", "imports", "system", "data"];
+const RESOLVE_ORDER = ["home", "sales", "inventory", "products", "purchase", "finance", "logistics", "imports", "system", "data"];
 
-export function resolveModule(pathname: string, search?: SearchParamReader | null): ModuleDef {
-  // /finance 是内外贸共用底层页面；scope=foreign_trade 时导航必须留在外贸工作台。
-  if (isForeignTradeFinanceRoute(pathname, search)) {
-    return MODULES.find((item) => item.key === "foreign") ?? MODULES[0];
-  }
+export function resolveModule(pathname: string): ModuleDef {
   for (const key of RESOLVE_ORDER) {
     const module = MODULES.find((item) => item.key === key);
     if (module?.match(pathname)) return module;
@@ -243,7 +219,6 @@ function canonicalSidebarPath(href: string) {
   }
   const legacyAliases: Record<string, string> = {
     "/finance/bank-summary": "/finance/bank-transactions",
-    "/foreign-trade/finance": "/finance",
     "/supply-chain/receiving/jackyun": "/supply-chain/receiving",
     "/payments": "/finance/monthly-send",
     "/profit": "/finance/monthly-send",
