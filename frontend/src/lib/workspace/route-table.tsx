@@ -10,7 +10,7 @@ import { WORKBENCH_VIEWS, parseWorkbenchView, workbenchHref } from "@/lib/workbe
  * 工作区（components/workspace/workspace-host.tsx）接管页面渲染后，
  * 页面内容由这里挂载；Next 的路由只负责把地址栏同步成「激活 Tab 的 URL」。
  */
-export type WorkspaceKey = "domestic" | "foreign";
+export type WorkspaceKey = "domestic";
 
 export type RouteEntry = {
   pathname: string;
