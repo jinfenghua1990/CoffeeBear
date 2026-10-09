@@ -7,7 +7,6 @@ from app.models import (
     consumable,
     consumable_purchase,
     finance,
-    foreign_trade,
     integration,
     inventory_stocktake,
     jackyun,
@@ -49,7 +48,6 @@ __all__ = [
     "payment",
     "profit",
     "finance",
-    "foreign_trade",
     "ops",
     "finance_voucher",
 ]
