@@ -9,6 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.config import settings
+from app.models.business_partner import BusinessPartner
 from app.models.channel_settlement import DomesticChannelSettlement
 from app.models.finance import FinanceEntry
 from app.models.open_item import OpenItem
@@ -102,44 +103,56 @@ def create_settlement(
 ) -> tuple[DomesticChannelSettlement, bool]:
     channel = channel.strip().upper()
     external_key = external_key.strip()
+    shop_name = shop_name.strip()
+    order_no = order_no.strip()
+    currency = currency.strip().upper()
     if not channel:
         raise ChannelSettlementError("渠道不能为空")
     if not external_key:
         raise ChannelSettlementError("外部结算唯一键不能为空")
 
     if partner_id is not None:
-        try:
-            open_item_service._ensure_partner(db, partner_id)  # noqa: SLF001 - shared partner validation
-        except open_item_service.OpenItemError as exc:
-            raise ChannelSettlementError(str(exc)) from exc
+        partner = db.get(BusinessPartner, partner_id)
+        if partner is None or partner.status == "archived":
+            raise ChannelSettlementError("往来单位不存在")
 
     entity = finance_center_service.resolve_entity(db, legal_entity_id)
     existing = db.scalar(
         select(DomesticChannelSettlement).where(
             DomesticChannelSettlement.channel == channel,
-            DomesticChannelSettlement.shop_name == shop_name.strip(),
+            DomesticChannelSettlement.shop_name == shop_name,
             DomesticChannelSettlement.external_key == external_key,
         )
     )
     if existing is not None:
         comparable = (
-            _money(existing.gross_amount) == _money(gross_amount)
-            and _money(existing.net_amount) == _money(net_amount)
+            existing.legal_entity_id == entity.id
             and existing.partner_id == partner_id
+            and existing.settle_date == settle_date
+            and existing.order_no == order_no
+            and existing.currency == currency
+            and _money(existing.gross_amount) == _money(gross_amount)
+            and _money(existing.refund_amount) == _money(refund_amount)
+            and _money(existing.platform_fee) == _money(platform_fee)
+            and _money(existing.rebate_amount) == _money(rebate_amount)
+            and _money(existing.other_fee) == _money(other_fee)
+            and _money(existing.net_amount) == _money(net_amount)
         )
         if not comparable:
-            raise ChannelSettlementError("同一渠道结算唯一键已存在，但金额或往来单位不一致")
+            raise ChannelSettlementError(
+                "同一渠道结算唯一键已存在，但主体、日期、订单号或金额组成不一致"
+            )
         return existing, False
 
     row = DomesticChannelSettlement(
         legal_entity_id=entity.id,
         partner_id=partner_id,
         channel=channel,
-        shop_name=shop_name.strip(),
+        shop_name=shop_name,
         external_key=external_key,
-        order_no=order_no.strip(),
+        order_no=order_no,
         settle_date=settle_date,
-        currency=currency.strip().upper(),
+        currency=currency,
         gross_amount=_money(gross_amount),
         refund_amount=_money(refund_amount),
         platform_fee=_money(platform_fee),
@@ -166,7 +179,9 @@ def list_settlements(
 ) -> list[dict[str, Any]]:
     query = select(DomesticChannelSettlement)
     if channel.strip():
-        query = query.where(DomesticChannelSettlement.channel == channel.strip().upper())
+        query = query.where(
+            DomesticChannelSettlement.channel == channel.strip().upper()
+        )
     if status != "all":
         query = query.where(DomesticChannelSettlement.status == status)
     rows = db.scalars(
@@ -187,11 +202,18 @@ def get_settlement(db: Session, settlement_id: int) -> DomesticChannelSettlement
     return row
 
 
-def _entry_specs(row: DomesticChannelSettlement) -> list[tuple[str, str, Decimal, str]]:
+def _entry_specs(
+    row: DomesticChannelSettlement,
+) -> list[tuple[str, str, Decimal, str]]:
     return [
         ("channel_sales", "income", _money(row.gross_amount), "渠道结算销售收入"),
         ("channel_refund", "expense", _money(row.refund_amount), "渠道退款"),
-        ("channel_platform_fee", "expense", _money(row.platform_fee), "渠道平台服务费"),
+        (
+            "channel_platform_fee",
+            "expense",
+            _money(row.platform_fee),
+            "渠道平台服务费",
+        ),
         ("channel_rebate", "expense", _money(row.rebate_amount), "渠道返利/优惠承担"),
         ("channel_other_fee", "expense", _money(row.other_fee), "渠道其他扣费"),
     ]
@@ -215,7 +237,9 @@ def materialize_settlement(
     )
 
     expected_categories = {
-        category for category, _direction, amount, _note in _entry_specs(row) if amount > ZERO
+        category
+        for category, _direction, amount, _note in _entry_specs(row)
+        if amount > ZERO
     }
     existing = db.scalars(
         select(FinanceEntry).where(
@@ -224,7 +248,9 @@ def materialize_settlement(
         )
     ).all()
     for entry in existing:
-        if entry.category not in expected_categories and (entry.raw or {}).get("channelSettlement"):
+        if entry.category not in expected_categories and (entry.raw or {}).get(
+            "channelSettlement"
+        ):
             db.delete(entry)
 
     entries: list[FinanceEntry] = []
