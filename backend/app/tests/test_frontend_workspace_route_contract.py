@@ -20,8 +20,16 @@ def test_coffeebear_frontend_has_no_foreign_workspace_contract():
     assert "isForeignTradeFinanceRoute" not in navigation
     assert 'business_scope: "domestic"' in finance_page
     assert 'business_scope: "foreign_trade"' not in finance_page
-    assert "国际物流" not in finance_page
-    assert "进口 VAT" not in finance_page
+
+    # 边界说明可以提及“进口 VAT / 出口退税属于 ALSVID”，但 CoffeeBear UI
+    # 不得再暴露这些外贸类别为可选财务事项。
+    assert '["international_freight"' not in finance_page
+    assert '["export_fee"' not in finance_page
+    assert '["export_tax_refund"' not in finance_page
+    assert '["customs_duty"' not in finance_page
+    assert '["import_vat"' not in finance_page
+    assert '["clearance_fee"' not in finance_page
+    assert '["last_mile_fee"' not in finance_page
 
 
 def test_jackyun_receiving_legacy_page_only_targets_canonical_panel():
