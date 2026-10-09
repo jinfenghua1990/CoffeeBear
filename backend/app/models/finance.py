@@ -232,7 +232,7 @@ class FinanceLegalEntity(Base, PkMixin, TimestampMixin):
     tax_id: Mapped[str] = mapped_column(String(128), default="")
     status: Mapped[str] = mapped_column(String(24), default="active", index=True)
     is_default: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
-    business_scopes: Mapped[list] = mapped_column(JSONB, default=lambda: ["domestic", "foreign_trade"])
+    business_scopes: Mapped[list] = mapped_column(JSONB, default=lambda: ["domestic"])
     note: Mapped[str] = mapped_column(Text, default="")
 
 

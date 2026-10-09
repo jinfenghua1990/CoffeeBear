@@ -1,8 +1,7 @@
-"""统一财务中心：公司主体 + 财务事项池。
+"""统一财务中心：公司主体 + 国内财务事项池。
 
-CoffeeBear 的当前业务 authority 仅为 DOMESTIC / 卖咖啡的熊。历史数据库中
-已存在的 foreign_trade FinanceEntry 可以继续被只读查询用于审计，但不得再通过
-当前服务创建、更新或把公司主体配置成新的外贸业务主体。
+CoffeeBear 的业务 authority 仅为 DOMESTIC / 卖咖啡的熊。历史数据库中可能仍有
+拆分前的外贸 FinanceEntry，但当前服务不会创建、更新、查询或汇总这些历史行。
 """
 from __future__ import annotations
 
@@ -24,23 +23,9 @@ CATEGORY_LABELS = {
     "purchase_cost": "采购成本",
     "inventory_purchase": "库存采购 / 应付",
     "sales_cost": "销售成本",
-    # 下列出口类 label 仅为历史 FinanceEntry 审计兼容；CoffeeBear 不再创建这些事项。
-    "shipment_goods_cost": "出运货品成本",
-    "cargo_insurance": "货运保险",
-    "port_fee": "港杂 / 码头费",
     "platform_fee": "平台费用",
     "domestic_logistics": "国内物流",
-    "international_freight": "国际物流",
-    "export_fee": "出口费用",
-    "export_tax_refund": "出口退税",
-    "customs_duty": "进口关税",
-    "anti_dumping_duty": "反倾销税",
-    "countervailing_duty": "反补贴税",
-    "import_vat": "进口 VAT",
-    "clearance_fee": "清关费用",
-    "last_mile_fee": "海外末端配送",
     "refund": "退款",
-    "exchange_gain_loss": "汇兑损益",
     "other": "其他",
 }
 
@@ -52,11 +37,7 @@ def _decimal(value: Any) -> Decimal:
 
 
 def ensure_default_entity(db: Session) -> FinanceLegalEntity:
-    """只读路径兜底：返回默认主体；缺失时仅加入当前事务（不提交）。
-
-    持久化由启动 seed（app.seed.ensure_seed）保证，避免 GET 请求在
-    读路径上执行 commit 造成副作用。
-    """
+    """只读路径兜底：返回默认主体；缺失时仅加入当前事务（不提交）。"""
     row = db.scalar(select(FinanceLegalEntity).where(FinanceLegalEntity.code == DEFAULT_ENTITY_CODE))
     if row is not None:
         return row
@@ -86,7 +67,7 @@ def entity_dict(row: FinanceLegalEntity) -> dict[str, Any]:
         "taxId": row.tax_id,
         "status": row.status,
         "isDefault": bool(row.is_default),
-        "businessScopes": row.business_scopes or [],
+        "businessScopes": ["domestic"],
         "note": row.note,
     }
 
@@ -116,12 +97,23 @@ def resolve_entity(db: Session, legal_entity_id: int | None = None) -> FinanceLe
     return default or ensure_default_entity(db)
 
 
+def resolve_entity_by_name(db: Session, company: str) -> FinanceLegalEntity | None:
+    if not company.strip():
+        return None
+    return db.scalar(
+        select(FinanceLegalEntity).where(
+            FinanceLegalEntity.name == company.strip(),
+            FinanceLegalEntity.status != "archived",
+        )
+    )
+
+
 def entry_dict(row: FinanceEntry, entity: FinanceLegalEntity | None = None) -> dict[str, Any]:
     return {
         "id": row.id,
         "legalEntityId": row.legal_entity_id,
         "legalEntityName": entity.name if entity else "",
-        "businessScope": row.business_scope,
+        "businessScope": "domestic",
         "sourceType": row.source_type,
         "sourceId": row.source_id,
         "sourceNo": row.source_no,
@@ -155,14 +147,14 @@ def list_entries(
     status: str = "",
     limit: int = 200,
 ) -> list[dict[str, Any]]:
-    """列出财务事项。
-
-    `foreign_trade` 仅用于读取历史审计记录；当前写路径已禁止产生新的外贸事项。
-    """
+    if business_scope not in {"all", "domestic"}:
+        raise ValueError("CoffeeBear 仅提供国内财务范围")
     entity = resolve_entity(db, legal_entity_id)
-    stmt = select(FinanceEntry).where(FinanceEntry.legal_entity_id == entity.id)
-    if business_scope in {"domestic", "foreign_trade"}:
-        stmt = stmt.where(FinanceEntry.business_scope == business_scope)
+    stmt = (
+        select(FinanceEntry)
+        .where(FinanceEntry.legal_entity_id == entity.id)
+        .where(FinanceEntry.business_scope == "domestic")
+    )
     if year is not None:
         stmt = stmt.where(FinanceEntry.accounting_year == year)
     if month is not None:
@@ -181,7 +173,8 @@ def center_overview(
     year: int | None = None,
     month: int | None = None,
 ) -> dict[str, Any]:
-    """财务汇总；历史 foreign_trade scope 只读保留用于审计。"""
+    if business_scope not in {"all", "domestic"}:
+        raise ValueError("CoffeeBear 仅提供国内财务范围")
     now = datetime.now(timezone.utc)
     year = year or now.year
     month = month or now.month
@@ -190,18 +183,14 @@ def center_overview(
     stmt = (
         select(FinanceEntry)
         .where(FinanceEntry.legal_entity_id == entity.id)
+        .where(FinanceEntry.business_scope == "domestic")
         .where(FinanceEntry.accounting_year == year)
         .where(FinanceEntry.accounting_month == month)
     )
-    if business_scope in {"domestic", "foreign_trade"}:
-        stmt = stmt.where(FinanceEntry.business_scope == business_scope)
     rows = db.scalars(stmt.order_by(FinanceEntry.id.desc())).all()
 
     totals: dict[str, dict[str, Decimal]] = {}
-    scopes = {
-        "domestic": {"count": 0, "estimated": 0, "pending": 0},
-        "foreign_trade": {"count": 0, "estimated": 0, "pending": 0},
-    }
+    scopes = {"domestic": {"count": 0, "estimated": 0, "pending": 0}}
     todo = {
         "pendingConfirmation": 0,
         "pendingSettlement": 0,
@@ -210,7 +199,6 @@ def center_overview(
         "anomalies": 0,
     }
 
-    # 同一来源/类别存在“预计 + 实际”时，经营预测用实际替代预计，避免重复计算。
     actual_keys = {
         (row.source_type, row.source_id, row.category)
         for row in rows
@@ -246,10 +234,9 @@ def center_overview(
             if settled_cash:
                 bucket[f"actualCash{cash_direction}"] += _decimal(row.amount)
             elif not superseded_estimate:
-                # 未结算的实际金额和仍有效的预计金额都属于未来现金需求/流入。
                 bucket[f"forecastCash{cash_direction}"] += _decimal(row.amount)
 
-        scope = scopes.setdefault(row.business_scope, {"count": 0, "estimated": 0, "pending": 0})
+        scope = scopes["domestic"]
         scope["count"] += 1
         if row.value_type == "estimated" and not superseded_estimate:
             scope["estimated"] += 1
@@ -287,7 +274,7 @@ def center_overview(
 
     return {
         "entity": entity_dict(entity),
-        "businessScope": business_scope,
+        "businessScope": "domestic",
         "year": year,
         "month": month,
         "entryCount": len(rows),
@@ -295,7 +282,7 @@ def center_overview(
         "totalsByCurrency": totals_by_currency,
         "scopeSummary": scopes,
         "recentEntries": [entry_dict(row, entity) for row in rows[:20]],
-        "principle": "公司主体为第一维度，业务范围为第二维度；不同币种不直接相加。",
+        "principle": "CoffeeBear 财务中心仅汇总国内业务；不同币种不直接相加。",
     }
 
 
@@ -313,6 +300,7 @@ def save_entity(
     business_scopes: list[str],
     note: str,
 ) -> FinanceLegalEntity:
+    del business_scopes
     row = db.get(FinanceLegalEntity, entity_id) if entity_id else FinanceLegalEntity()
     if row is None:
         raise ValueError("公司主体不存在")
@@ -326,7 +314,6 @@ def save_entity(
     row.tax_id = tax_id.strip()
     row.status = status
     row.is_default = is_default
-    # CoffeeBear 只允许当前国内业务主体；历史 foreign_trade scope 不再作为可写配置。
     row.business_scopes = ["domestic"]
     row.note = note.strip()
     db.add(row)
