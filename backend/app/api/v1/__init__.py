@@ -1,1 +1,81 @@
-from fastapi import APIRouter\n\nfrom app.api.v1 import (\n    auth,\n    system,\n    integrations,\n    inventory_stocktakes,\n    jackyun_files,\n    logistics,\n    jky_orders,\n    sales_file,\n    alibaba1688_imports,\n    alibaba1688_browser,\n    jky_web,\n    procurement_chain,\n    procurement_workbench,\n    procurement_board,\n    exceptions,\n    finance,\n    business_partners,\n    purchase,\n    purchase_consistency,\n    reconciliation,\n    sales_outbound,\n    search,\n    suppliers,\n    profit,\n    dashboard,\n    supply_chain,\n    production_purchase_view,\n    supply_chain_material_flow,\n    opening,\n    closing,\n    consumables,\n    warehouses,\n    data_export,\n    automation,\n    tax_invoices,\n    tax_accounting,\n    finance_vouchers\n)\n\n# Domestic-only boundary: foreign-trade routes belong to ALSVID.\napi_router = APIRouter(prefix="/api/v1")\napi_router.include_router(auth.router)\napi_router.include_router(system.router)\napi_router.include_router(integrations.router)\napi_router.include_router(inventory_stocktakes.router)\napi_router.include_router(jackyun_files.router)\napi_router.include_router(logistics.router)\napi_router.include_router(jky_orders.router)\napi_router.include_router(sales_file.router)\napi_router.include_router(alibaba1688_imports.router)\napi_router.include_router(alibaba1688_browser.router)\napi_router.include_router(jky_web.router)\napi_router.include_router(procurement_chain.router)\napi_router.include_router(procurement_workbench.router)\napi_router.include_router(procurement_board.router)\napi_router.include_router(exceptions.router)\napi_router.include_router(finance.router)\napi_router.include_router(business_partners.router)\napi_router.include_router(purchase.router)\napi_router.include_router(purchase_consistency.router)\napi_router.include_router(reconciliation.router)\napi_router.include_router(sales_outbound.router)\napi_router.include_router(search.router)\napi_router.include_router(suppliers.router)\napi_router.include_router(profit.router)\napi_router.include_router(dashboard.router)\napi_router.include_router(supply_chain.router)\napi_router.include_router(production_purchase_view.router)\napi_router.include_router(supply_chain_material_flow.router)\napi_router.include_router(opening.router)\napi_router.include_router(closing.router)\napi_router.include_router(consumables.router)\napi_router.include_router(warehouses.router)\napi_router.include_router(data_export.router)\napi_router.include_router(automation.router)\napi_router.include_router(tax_invoices.router)\napi_router.include_router(tax_accounting.router)\napi_router.include_router(finance_vouchers.router)\n
+from fastapi import APIRouter
+
+from app.api.v1 import (
+    auth,
+    system,
+    integrations,
+    inventory_stocktakes,
+    jackyun_files,
+    logistics,
+    jky_orders,
+    sales_file,
+    alibaba1688_imports,
+    alibaba1688_browser,
+    jky_web,
+    procurement_chain,
+    procurement_workbench,
+    procurement_board,
+    exceptions,
+    finance,
+    business_partners,
+    purchase,
+    purchase_consistency,
+    reconciliation,
+    sales_outbound,
+    search,
+    suppliers,
+    profit,
+    dashboard,
+    supply_chain,
+    production_purchase_view,
+    supply_chain_material_flow,
+    opening,
+    closing,
+    consumables,
+    warehouses,
+    data_export,
+    automation,
+    tax_invoices,
+    tax_accounting,
+    finance_vouchers,
+)
+
+# Domestic-only boundary: foreign-trade routes belong to ALSVID.
+api_router = APIRouter(prefix="/api/v1")
+api_router.include_router(auth.router)
+api_router.include_router(system.router)
+api_router.include_router(integrations.router)
+api_router.include_router(inventory_stocktakes.router)
+api_router.include_router(jackyun_files.router)
+api_router.include_router(logistics.router)
+api_router.include_router(jky_orders.router)
+api_router.include_router(sales_file.router)
+api_router.include_router(alibaba1688_imports.router)
+api_router.include_router(alibaba1688_browser.router)
+api_router.include_router(jky_web.router)
+api_router.include_router(procurement_chain.router)
+api_router.include_router(procurement_workbench.router)
+api_router.include_router(procurement_board.router)
+api_router.include_router(exceptions.router)
+api_router.include_router(finance.router)
+api_router.include_router(business_partners.router)
+api_router.include_router(purchase.router)
+api_router.include_router(purchase_consistency.router)
+api_router.include_router(reconciliation.router)
+api_router.include_router(sales_outbound.router)
+api_router.include_router(search.router)
+api_router.include_router(suppliers.router)
+api_router.include_router(profit.router)
+api_router.include_router(dashboard.router)
+api_router.include_router(supply_chain.router)
+api_router.include_router(production_purchase_view.router)
+api_router.include_router(supply_chain_material_flow.router)
+api_router.include_router(opening.router)
+api_router.include_router(closing.router)
+api_router.include_router(consumables.router)
+api_router.include_router(warehouses.router)
+api_router.include_router(data_export.router)
+api_router.include_router(automation.router)
+api_router.include_router(tax_invoices.router)
+api_router.include_router(tax_accounting.router)
+api_router.include_router(finance_vouchers.router)
