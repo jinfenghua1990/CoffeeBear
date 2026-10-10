@@ -2,7 +2,7 @@ name: Container Candidate
 
 on:
   # develop changes are frequent; build a candidate explicitly when it is
-  # actually needed for staging/release. Hotfix branches remain automatic.
+  # actually needed for Test/release. Hotfix branches remain automatic.
   push:
     branches:
       - "hotfix/**"
@@ -22,6 +22,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+
+      - uses: docker/setup-qemu-action@v3
 
       - uses: docker/setup-buildx-action@v3
 
@@ -44,7 +46,7 @@ jobs:
         with:
           context: .
           file: ./Dockerfile
-          platforms: linux/amd64
+          platforms: linux/amd64,linux/arm64
           push: true
           build-args: |
             GIT_SHA=${{ github.sha }}
@@ -57,7 +59,9 @@ jobs:
         if: github.ref == 'refs/heads/develop'
         shell: bash
         run: |
-          docker buildx imagetools create             --tag "${{ steps.meta.outputs.image }}:candidate"             "${{ steps.meta.outputs.image }}:${{ steps.meta.outputs.sha_tag }}"
+          docker buildx imagetools create \
+            --tag "${{ steps.meta.outputs.image }}:candidate" \
+            "${{ steps.meta.outputs.image }}:${{ steps.meta.outputs.sha_tag }}"
 
       - name: Summary
         shell: bash
