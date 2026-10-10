@@ -47,3 +47,14 @@ def test_production_env_documents_distinct_app_and_migrator_connections():
     assert "MIGRATOR_DB_USER=ecommerce_migrator" in env
     assert "DATABASE_URL=postgresql+psycopg://ecommerce_app:" in env
     assert "MIGRATION_DATABASE_URL=postgresql+psycopg://ecommerce_migrator:" in env
+
+
+def test_production_env_uses_coffeebear_release_image():
+    env = _text("deploy/zspace/production.env.example")
+    assert "APP_IMAGE=ghcr.io/jinfenghua1990/coffeebear:stable" in env
+    assert "ghcr.io/jinfenghua1990/zhejiang" not in env
+
+
+def test_candidate_release_builds_multi_arch_image():
+    workflow = _text(".github/workflows/container-candidate.yml")
+    assert "platforms: linux/amd64,linux/arm64" in workflow
