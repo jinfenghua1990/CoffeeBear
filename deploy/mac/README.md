@@ -6,7 +6,7 @@
 
 - 代码主线：`main`
 - 部署方式：`native`
-- 默认端口：`8000`
+- 默认端口：`8001`
 - PostgreSQL / Redis：Mac 本机服务
 - 数据、备份、日志：尽量放在仓库目录之外
 - 系统版本中心：显示当前 Git SHA、环境、数据库 Revision
@@ -46,6 +46,39 @@ make persistence-migrate
 
 物理机器是 Mac 还是 NAS，与逻辑环境是否 production 是两回事，不强制修改现有生产数据环境。
 
+## 旧版系统更新器的一次性手动引导
+
+如果系统更新页面提示运行服务指向旧仓库（例如 `zhejiang`），不要为了通过检查而把 `origin` 改到旧仓库。CoffeeBear 的正确远程仓库是：
+
+```text
+https://github.com/jinfenghua1990/CoffeeBear.git
+```
+
+旧版更新器可能在联网检查前就拒绝 CoffeeBear 远程地址，因此首次升级需在 Mac 终端手动快进到 CoffeeBear `main`，之后系统更新页面才由新版程序接管。本次仓库识别修复本身不包含数据库迁移；以下拉取和重启命令不会删除数据库或业务文件。如果目标版本的发布说明要求数据库迁移，应先备份并确认迁移步骤。
+
+先确认仓库路径、远程地址、分支和工作区状态；若工作区有修改、不是 `main`，或远程地址不是 CoffeeBear，请停止，不要继续拉取：
+
+```bash
+cd /Users/gino/ecommerce-workspace
+git remote get-url origin
+git status --short --branch
+```
+
+确认远程是上面的 CoffeeBear 地址、当前分支为 `main` 且工作区干净后，再运行：
+
+```bash
+git pull --ff-only origin main
+```
+
+然后用这台 Mac 上 CoffeeBear 实际使用的 LaunchAgent 标签重启服务。例如当前安装使用的标签是 `com.gino.ecommerce-workspace`：
+
+```bash
+launchctl kickstart -k "gui/$(id -u)/com.gino.ecommerce-workspace"
+curl -fsS http://127.0.0.1:8001/healthz
+```
+
+健康检查成功后，重新打开 CoffeeBear 的“系统更新”页面并点击“刷新状态 / 检查更新”。其他 Mac 安装应使用各自的仓库路径、LaunchAgent 标签和端口。
+
 ## Codex 开发流程
 
 ```text
@@ -62,5 +95,5 @@ Mac 本地拉取 / 更新
 
 - `.env` 不提交 Git。
 - PostgreSQL / Redis 不开放公网。
-- 开发期不要把 Mac 的 8000 端口直接映射到公网。
+- 开发期不要把 Mac 的 8001 端口直接映射到公网。
 - 每次较大结构调整前继续执行数据库 + DATA_DIR 备份。
