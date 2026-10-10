@@ -9,7 +9,7 @@ export type IconName =
   | "factory" | "cart" | "wallet" | "finance" | "tax" | "mail" | "alert"
   | "settings" | "automation" | "flow" | "receive" | "import";
 
-export type WorkspaceKey = "domestic" | "foreign";
+export type WorkspaceKey = "domestic";
 export type SecondaryItem = { href: string; label: string; icon: IconName; activeByPath?: boolean };
 export type SecondaryGroup = { label: string; items: SecondaryItem[] };
 

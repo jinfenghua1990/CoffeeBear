@@ -311,8 +311,7 @@ def package_period(db: Session, company: str, year: int, month: int,
                    actor: str = "system", include: list[str] | None = None) -> FinanceDeliveryPackage:
     """打包账期交付 ZIP；每次生成新版本号，ZIP 落 output/V{n}，绝不覆盖。
 
-    include 控制银行/无票收入/已收票对公付款交付资料；如果该公司主体当月存在外贸 FinanceEntry，
-    系统会额外自动生成「外贸财务汇总.xlsx」，无需用户重复勾选。
+    include 控制银行/无票收入/已收票对公付款交付资料。
     """
     validate_period(year, month)
     selective = include is not None
@@ -392,19 +391,6 @@ def package_period(db: Session, company: str, year: int, month: int,
         )
     corporate_payment_name = f"{month}月-已收票对公付款明细.xlsx"
 
-    # 外贸财务汇总直接来自该公司主体的 FinanceEntry，不复制 Shipment/税费计算逻辑。
-    from app.services import finance_closing_service
-    foreign_summary_content: bytes | None = None
-    entity = finance_closing_service.resolve_entity_by_name(db, company)
-    if entity is not None:
-        foreign_summary_content = finance_closing_service.foreign_trade_xlsx(
-            db,
-            legal_entity_id=entity.id,
-            year=year,
-            month=month,
-        )
-    foreign_summary_name = f"{month}月-外贸财务汇总.xlsx"
-
     # 归档表的 stored_path 也属于不可信持久化数据：打包前再次做目录边界校验。
     source_files = [
         (f, arc_name, managed_data_file(f.stored_path, label="原始归档文件"))
@@ -440,8 +426,6 @@ def package_period(db: Session, company: str, year: int, month: int,
                 zf.writestr(unbilled_name, unbilled_content)
             if corporate_payment_content is not None:
                 zf.writestr(corporate_payment_name, corporate_payment_content)
-            if foreign_summary_content is not None:
-                zf.writestr(foreign_summary_name, foreign_summary_content)
         break
 
     try:
@@ -467,7 +451,6 @@ def package_period(db: Session, company: str, year: int, month: int,
               "files": len(source_files),
               "generatedUnbilled": unbilled_content is not None,
               "generatedCorporatePayment": corporate_payment_content is not None,
-              "generatedForeignSummary": foreign_summary_content is not None,
               "sha256": pkg.zip_sha256[:16],
           })
     return pkg

@@ -79,7 +79,7 @@ def ensure_seed(db) -> dict:
                 base_currency="CNY",
                 status="active",
                 is_default=True,
-                business_scopes=["domestic", "foreign_trade"],
+                business_scopes=["domestic"],
                 note="系统初始化默认主体",
             )
         )
