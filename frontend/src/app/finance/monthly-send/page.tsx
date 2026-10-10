@@ -1198,9 +1198,6 @@ export default function MonthlySendPage() {
           ? "M6 3h9l3 3v15H6V3Zm9 0v3h3M9 11h6M9 15h6"
           : "M4 20V8l8-4 8 4v12M7 20v-6h10v6M8 9h.01M12 9h.01M16 9h.01";
     return <span className={`inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-xl ring-1 ${tone}`} aria-hidden="true"><svg viewBox="0 0 24 24" className="h-5 w-5" fill="none"><path d={path} stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" /></svg></span>;
-Warning: truncated output (original token count: 5046)
-Total output lines: 150
-
   }
 
   /** 资料行统一用表格网格排版，桌面端对齐参考图，窄屏自动收拢。 */
@@ -1297,7 +1294,8 @@ Total output lines: 150
           <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 px-4 py-4">
             <div><h2 className="text-base font-semibold text-slate-900">本月处理清单 <span className="ml-1 text-slate-500">({readyCount}/{requiredDeliveryCount})</span></h2><p className="mt-1 text-xs text-slate-400">业务数据自动读取；这里按主体整理银行资料、系统生成资料并发送给财务</p></div>
             <div className="flex items-center gap-2">
-              <button type="button" onClick={() => { uploadKind.current = "交易明细"; fileRef.current?.click(); }} disabled={busy} className="inline-flex items-center gap-1 r…46 tokens truncated…inline-flex cursor-pointer items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs text-slate-600 hover:bg-slate-50">
+              <button type="button" onClick={() => { uploadKind.current = "交易明细"; fileRef.current?.click(); }} disabled={busy} className="inline-flex items-center gap-1 rounded-lg border border-blue-200 bg-white px-3 py-2 text-xs font-medium text-blue-600 hover:bg-blue-50 disabled:opacity-50">＋ 新增资料</button>
+              <label className="inline-flex cursor-pointer items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs text-slate-600 hover:bg-slate-50">
                 <input ref={selectAllMaterialsRef} type="checkbox" checked={allSendableSelected} onChange={() => setIncludeSel(allSendableSelected ? [] : sendableMaterialKeys)} aria-label="全选发送资料" className="h-4 w-4 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500" />
                 全选发送资料
               </label>
@@ -1350,9 +1348,6 @@ Total output lines: 150
             </div>
             <button type="button" onClick={packageAndSend} disabled={busy || !sel || !sendReady} className="flex min-w-[220px] flex-1 items-center justify-center gap-2 rounded-lg bg-emerald-600 px-4 py-2.5 text-sm font-semibold text-white shadow-sm hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-40 sm:flex-none">➤ 确认并发送给财务</button>
           </div>
-Warning: truncated output (original token count: 5630)
-Total output lines: 150
-
         </section>
       </div>}
 
@@ -1365,7 +1360,20 @@ Total output lines: 150
       {financeTab === "corporate" && <section className={`${CARD} overflow-hidden`}>
         <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 px-4 py-4">
           <div>
-            <h2 cl…630 tokens truncated…-semibold text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-40">{busy ? "发送中…" : "确认并发送给财务"}</button>
+            <h2 className="text-base font-semibold text-slate-900">{sel?.month || ""}月-已收票付款明细</h2>
+            <p className="mt-1 text-xs text-slate-400">{corporateView === "adjust" ? "财务主视图按“支付方式 + 费用性质”归纳：银行流水匹配成功为对公支付，无对公流水的有效进项票默认按个人支付；人工标记的平台自动扣款货款单独列示；对公行同步展示付款时间、账号、凭证和金额。" : `发送前只读预览 · ${corporatePayment?.adjusted ? `当前保存版本 v${corporatePayment.version || "—"}，显示 ${corporatePayment.selectedCount || 0}/${corporatePayment.sourceCount || 0} 张发票` : "尚未人工调整，按当前全部发票发送"}；是否纳入本次发送以月结清单勾选状态为准。`}</p>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <div className="flex overflow-hidden rounded-lg border border-slate-200 bg-white text-xs">
+              <button type="button" onClick={() => setCorporateView("adjust")} className={`px-3 py-2 font-medium ${corporateView === "adjust" ? "bg-slate-900 text-white" : "text-slate-600 hover:bg-slate-50"}`}>明细核对</button>
+              <button type="button" onClick={() => setCorporateView("preview")} className={`px-3 py-2 font-medium ${corporateView === "preview" ? "bg-violet-600 text-white" : "text-slate-600 hover:bg-slate-50"}`}>发送预览</button>
+            </div>
+            {corporateView === "adjust" ? <>
+              <button type="button" onClick={() => { setFinanceTab("match"); void loadMatch(); }} className="rounded-lg border border-blue-200 px-3 py-2 text-xs font-medium text-blue-600 hover:bg-blue-50">核对银行付款</button>
+              <button type="button" onClick={loadCorporatePayment} className="rounded-lg border border-slate-200 px-3 py-2 text-xs text-slate-600 hover:bg-slate-50">刷新</button>
+            </> : <>
+              <span className={`rounded-full px-2.5 py-1 text-[11px] font-medium ${includeSel.includes("已收票对公付款明细") ? "bg-emerald-50 text-emerald-700 ring-1 ring-emerald-200" : "bg-amber-50 text-amber-700 ring-1 ring-amber-200"}`}>{includeSel.includes("已收票对公付款明细") ? "已纳入本次发送" : "未纳入本次发送"}</span>
+              <button type="button" onClick={packageAndSend} disabled={busy || !sel || !sendReady || !includeSel.includes("已收票对公付款明细")} className="rounded-lg bg-blue-600 px-4 py-2 text-xs font-semibold text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-40">{busy ? "发送中…" : "确认并发送给财务"}</button>
             </>}
           </div>
         </div>

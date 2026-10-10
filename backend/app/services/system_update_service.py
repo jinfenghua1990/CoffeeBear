@@ -1348,3 +1348,587 @@ def read_history(limit: int = 20) -> list[dict[str, Any]]:
     try:
         lines = _history_path().read_text(encoding="utf-8").splitlines()
     except OSError:
+        return []
+    rows: list[dict[str, Any]] = []
+    for line in reversed(lines):
+        try:
+            item = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(item, dict):
+            rows.append(item)
+        if len(rows) >= max(1, min(limit, 100)):
+            break
+    return rows
+
+
+def check_for_updates(*, actor: str = "system", automatic: bool = False) -> dict[str, Any]:
+    """fetch 指定受控分支并比较版本；fetch 只下载对象，不改变工作区。"""
+    with _LOCK:
+        cfg = load_update_settings()
+        # enabled 只控制后台轮询；管理员手工“检查更新”始终可用。
+        if automatic and not cfg["enabled"]:
+            return status_payload(include_log=False)
+
+        current_sha = _git("rev-parse", "HEAD")
+        current_branch = _git("branch", "--show-current")
+        dirty = bool(_git("status", "--porcelain"))
+        branch = cfg["branch"]
+        remote = cfg["remote"]
+
+        _write_status({
+            "phase": "checking",
+            "progress": 5,
+            "message": "正在检查 GitHub 更新…",
+            "lastCheckAt": _now_iso(),
+            "lastCheckActor": actor,
+        })
+        try:
+            remote_probe = _run(["git", "remote", "get-url", remote], timeout=10)
+            if remote_probe.returncode != 0:
+                detail = (remote_probe.stderr or remote_probe.stdout or "无法读取 Git 远端").strip()
+                raise RuntimeError(detail[-1200:])
+            remote_url = remote_probe.stdout.strip()
+            if _is_legacy_repo_remote(remote_url):
+                raise RuntimeError(
+                    "当前运行服务未指向受控仓库 zhejiang；"
+                    "请把 origin 切换到 jinfenghua1990/zhejiang 后再检查更新"
+                )
+            _git("fetch", "--quiet", remote, branch, timeout=120)
+            latest_sha = _git("rev-parse", "FETCH_HEAD")
+            if not _SHA_RE.fullmatch(latest_sha):
+                raise RuntimeError("远端返回的 commit 无效")
+
+            ancestor = _run(["git", "merge-base", "--is-ancestor", current_sha, latest_sha], timeout=20)
+            if ancestor.returncode not in {0, 1}:
+                detail = (ancestor.stderr or ancestor.stdout or "git merge-base failed").strip()
+                raise RuntimeError(detail[-1200:])
+            diverged = current_sha != latest_sha and ancestor.returncode == 1
+            available = current_sha != latest_sha and not diverged
+            change_rows = _changes(current_sha, latest_sha) if available else []
+            for row in change_rows:
+                try:
+                    row["modules"] = _modules_for_paths(_commit_changed_files(str(row.get("sha") or "")))
+                except Exception:
+                    # 模块归属是版本概览的附加信息，读取失败不能阻塞主更新检查。
+                    row["modules"] = []
+            changed_files = _changed_files(current_sha, latest_sha) if available else []
+            try:
+                module_versions = _module_versions(
+                    current_sha,
+                    latest_sha if not diverged else current_sha,
+                )
+            except Exception:
+                # Git 对象暂时不可读时仍要返回可执行的更新结果；模块明细下一次检查再补齐。
+                module_versions = []
+            classification = _classify_update(change_rows, changed_files) if available else {
+                "updateLevel": "patch",
+                "updateLevelLabel": "小版本",
+                "impactedModules": [],
+                "changedFiles": [],
+                "changedFileCount": 0,
+                "hasMigration": False,
+                "classificationReasons": [],
+            }
+            auto_install_eligible = bool(
+                available
+                and _auto_install_allowed(classification["updateLevel"], str(cfg.get("autoInstallLevel") or "patch"))
+            )
+            payload = {
+                "phase": "idle",
+                "progress": 0,
+                "message": "发现新版本" if available else ("本地分支与远端已分叉" if diverged else "已是最新版本"),
+                "currentSha": current_sha,
+                "latestSha": latest_sha,
+                "downloadedSha": latest_sha,
+                "currentBranch": current_branch,
+                "configuredBranch": branch,
+                "dirty": dirty,
+                "updateAvailable": available,
+                "diverged": diverged,
+                "latestCommit": _commit_info(latest_sha),
+                "currentCommit": _commit_info(current_sha),
+                "changes": change_rows,
+                "moduleVersions": module_versions,
+                **classification,
+                "autoInstallEligible": auto_install_eligible,
+                "autoInstallBlockedReason": "" if auto_install_eligible else (
+                    f"{classification['updateLevelLabel']} 超出自动安装范围"
+                    if available else ""
+                ),
+                "lastCheckAt": _now_iso(),
+                "lastCheckError": "",
+                # 成功完成一次版本核对后，旧安装失败属于历史记录，不再作为
+                # 当前“需要处理”的运行态错误。历史结果仍保留在 lastInstall* / history。
+                "error": "",
+                "rollbackCause": "",
+                "rollbackErrors": [],
+                "lastAutoError": "",
+                "lastAutoErrorAt": "",
+                "automatic": automatic,
+            }
+            _write_status(payload)
+            return status_payload(include_log=False)
+        except Exception as exc:
+            _write_status({
+                "phase": "idle",
+                "progress": 0,
+                "message": "检查更新失败",
+                "lastCheckAt": _now_iso(),
+                "lastCheckError": str(exc),
+                "updateAvailable": False,
+                "diverged": False,
+                "changes": [],
+                "changedFiles": [],
+                "changedFileCount": 0,
+                "impactedModules": [],
+                "hasMigration": False,
+                "updateLevel": "patch",
+                "updateLevelLabel": "小版本",
+                "classificationReasons": [],
+                "autoInstallEligible": False,
+                "autoInstallBlockedReason": "",
+                "automatic": automatic,
+            })
+            return status_payload(include_log=False)
+
+
+def _minute_in_window(minute: int, start: int, window: int) -> bool:
+    end = (start + window) % (24 * 60)
+    if window >= 24 * 60:
+        return True
+    if start + window < 24 * 60:
+        return start <= minute < start + window
+    return minute >= start or minute < end
+
+
+def _in_auto_window(cfg: dict[str, Any]) -> bool:
+    now = datetime.now(ZoneInfo(settings.TZ))
+    start = cfg["autoUpdateHour"] * 60
+    minute = now.hour * 60 + now.minute
+    return _minute_in_window(minute, start, cfg["autoUpdateWindowMinutes"])
+
+
+def update_readiness() -> dict[str, Any]:
+    """检查当前 Mac 原生部署是否具备安全自更新条件，不修改代码和数据库。"""
+    root = _repo_root()
+    cfg = load_update_settings()
+    checks: list[dict[str, Any]] = []
+
+    def add(key: str, label: str, status: str, detail: str, *, blocking: bool = False) -> None:
+        checks.append({
+            "key": key,
+            "label": label,
+            "status": status,
+            "detail": detail,
+            "blocking": blocking,
+        })
+
+    git_dir = root / ".git"
+    add(
+        "git_repo", "Git 仓库",
+        "ok" if git_dir.exists() else "error",
+        str(root) if git_dir.exists() else f"{root} 不是 Git 工作区",
+        blocking=not git_dir.exists(),
+    )
+
+    persistence = _production_persistence_policy(root)
+    strict_persistence = settings.APP_ENV == "production"
+    persistence_ok = bool(persistence["ok"])
+    if persistence_ok:
+        persistence_detail = (
+            f"PERSIST_ROOT={persistence['persistRoot']} · "
+            f"DATA_DIR={persistence['dataDir']} · "
+            f"BACKUP_DIR={persistence['backupDir']} · "
+            f"LOG_DIR={persistence['logDir']} · PostgreSQL 独立"
+        )
+        persistence_status = "ok"
+    else:
+        persistence_detail = "；".join(str(item) for item in persistence["issues"])
+        if strict_persistence and not persistence["persistRoot"]:
+            persistence_detail += "；可在项目根目录执行 make persistence-migrate 完成一次性安全迁移"
+        persistence_status = "error" if strict_persistence else "warn"
+    add(
+        "persistence_isolation",
+        "程序 / 数据分离",
+        persistence_status,
+        persistence_detail,
+        blocking=strict_persistence and not persistence_ok,
+    )
+
+    db_roles = _migration_database_policy()
+    if not db_roles["configured"]:
+        role_status = "warn"
+        role_detail = "迁移账号尚未拆分；当前仍兼容使用 DATABASE_URL"
+        role_blocking = False
+    elif not db_roles["sameTarget"]:
+        role_status = "error"
+        role_detail = "MIGRATION_DATABASE_URL 与业务 DATABASE_URL 不是同一数据库，已阻止更新"
+        role_blocking = True
+    elif db_roles["separated"]:
+        role_status = "ok"
+        role_detail = (
+            f"业务账号 {db_roles['appUser'] or '(unknown)'} / "
+            f"迁移账号 {db_roles['migrationUser'] or '(unknown)'} 已分离"
+        )
+        role_blocking = False
+    else:
+        role_status = "warn"
+        role_detail = "业务运行与 Alembic 迁移仍共用同一数据库账号"
+        role_blocking = False
+    add(
+        "database_roles",
+        "数据库最小权限",
+        role_status,
+        role_detail,
+        blocking=role_blocking,
+    )
+
+    current_branch = ""
+    dirty = False
+    remote_url = ""
+    if git_dir.exists():
+        try:
+            current_branch = _git("branch", "--show-current", timeout=10)
+            branch_ok = current_branch == cfg["branch"]
+            add(
+                "branch", "当前分支",
+                "ok" if branch_ok else "error",
+                f"{current_branch or '(detached)'} / 目标 {cfg['branch']}",
+                blocking=not branch_ok,
+            )
+        except Exception as exc:
+            add("branch", "当前分支", "error", str(exc), blocking=True)
+
+        try:
+            dirty = bool(_git("status", "--porcelain", timeout=10))
+            add(
+                "worktree", "工作区状态",
+                "error" if dirty else "ok",
+                "存在未提交修改，自动更新会停止" if dirty else "干净，可安全快进更新",
+                blocking=dirty,
+            )
+        except Exception as exc:
+            add("worktree", "工作区状态", "error", str(exc), blocking=True)
+
+        try:
+            remote_url = _git("remote", "get-url", cfg["remote"], timeout=10)
+            legacy_remote = _is_legacy_repo_remote(remote_url)
+            add(
+                "remote",
+                "Git 远端",
+                "error" if legacy_remote else "ok",
+                (
+                    "当前运行服务未指向受控仓库 zhejiang；"
+                    "请把 origin 切换到 jinfenghua1990/zhejiang 后再更新"
+                    if legacy_remote
+                    else f"{cfg['remote']} · {remote_url}"
+                ),
+                blocking=legacy_remote,
+            )
+        except Exception as exc:
+            add("remote", "Git 远端", "error", str(exc), blocking=True)
+
+    python_path = root / "backend" / ".venv" / "bin" / "python"
+    python_ok = python_path.is_file() and os.access(python_path, os.X_OK)
+    add(
+        "python", "Python 虚拟环境",
+        "ok" if python_ok else "error",
+        str(python_path) if python_ok else f"{python_path} 不存在或不可执行",
+        blocking=not python_ok,
+    )
+
+    for command, label in (("git", "Git 命令"), ("make", "make"), ("node", "Node.js"), ("npm", "npm"), ("pg_dump", "pg_dump"), ("pg_restore", "pg_restore"), ("psql", "psql"), ("tar", "tar")):
+        resolved = shutil.which(command)
+        add(
+            command, label,
+            "ok" if resolved else "error",
+            resolved or f"未在 PATH 中找到 {command}",
+            blocking=resolved is None,
+        )
+
+    pip_path = root / "backend" / ".venv" / "bin" / "pip"
+    pip_ok = pip_path.is_file() and os.access(pip_path, os.X_OK)
+    add(
+        "pip", "Python pip",
+        "ok" if pip_ok else "error",
+        str(pip_path) if pip_ok else f"{pip_path} 不存在或不可执行",
+        blocking=not pip_ok,
+    )
+
+    runner_path = root / "scripts" / "system_update_runner.py"
+    add(
+        "update_runner", "更新执行器",
+        "ok" if runner_path.is_file() else "error",
+        str(runner_path),
+        blocking=not runner_path.is_file(),
+    )
+
+    guard_script = root / "scripts" / "update-guard.sh"
+    hook_path = root / ".git" / "ecommerce-hooks" / "reference-transaction"
+    hooks_path = ""
+    try:
+        hooks_path = _git("config", "--get", "core.hooksPath", timeout=10)
+    except Exception:
+        hooks_path = ""
+    guard_ok = (
+        guard_script.is_file()
+        and hook_path.is_file()
+        and os.access(hook_path, os.X_OK)
+        and hooks_path == str(hook_path.parent)
+    )
+    add(
+        "update_guard",
+        "全局更新锁",
+        "ok" if guard_ok else "error",
+        "Git / Alembic / 前端构建 / Make 运维均已接入同一更新锁"
+        if guard_ok
+        else "更新保护 hook 未安装或未启用；请重启服务或执行 make update-guard-install",
+        blocking=not guard_ok,
+    )
+
+    quiesce_path = root / "scripts" / "quiesce-update-workers.sh"
+    add(
+        "quiesce_workers", "后台任务暂停脚本",
+        "ok" if quiesce_path.is_file() else "error",
+        str(quiesce_path),
+        blocking=not quiesce_path.is_file(),
+    )
+
+    backup_path = root / "scripts" / "backup.sh"
+    backup_ok = backup_path.is_file() and os.access(backup_path, os.X_OK)
+    add(
+        "backup_script", "备份脚本",
+        "ok" if backup_ok else "error",
+        str(backup_path) if backup_ok else f"{backup_path} 不存在或不可执行",
+        blocking=not backup_ok,
+    )
+
+    launchctl = shutil.which("launchctl")
+    launch_label = getattr(settings, "SYSTEM_UPDATE_LAUNCH_LABEL", "com.gino.ecommerce-dashboard")
+    if launchctl:
+        service_ref = f"gui/{os.getuid()}/{launch_label}"
+        try:
+            probe = _run([launchctl, "print", service_ref], timeout=10)
+            running_ok = probe.returncode == 0
+            add(
+                "launch_agent", "LaunchAgent",
+                "ok" if running_ok else "error",
+                service_ref if running_ok else f"{service_ref} 未加载，更新后无法自动重启",
+                blocking=not running_ok,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            add("launch_agent", "LaunchAgent", "error", str(exc), blocking=True)
+    else:
+        add("launch_agent", "LaunchAgent", "error", "未找到 launchctl", blocking=True)
+
+    try:
+        state_dir = _state_dir()
+        probe_file = state_dir / ".write-test"
+        probe_file.write_text("ok", encoding="utf-8")
+        probe_file.unlink(missing_ok=True)
+        add("state_dir", "更新状态目录", "ok", str(state_dir))
+    except Exception as exc:
+        add("state_dir", "更新状态目录", "error", str(exc), blocking=True)
+
+    try:
+        disk = shutil.disk_usage(root)
+        free_gb = disk.free / (1024 ** 3)
+        disk_status = "error" if free_gb < 1 else ("warn" if free_gb < 3 else "ok")
+        add(
+            "disk_space", "可用磁盘空间",
+            disk_status,
+            f"{free_gb:.1f} GB 可用",
+            blocking=free_gb < 1,
+        )
+    except Exception as exc:
+        add("disk_space", "可用磁盘空间", "warn", str(exc))
+
+    frontend_index = root / "frontend" / "out" / "index.html"
+    add(
+        "frontend_build", "当前前端产物",
+        "ok" if frontend_index.is_file() else "warn",
+        str(frontend_index) if frontend_index.is_file() else "当前无 frontend/out，更新时会重新构建",
+    )
+
+    try:
+        with urllib.request.urlopen(settings.SYSTEM_UPDATE_HEALTH_URL, timeout=3) as response:
+            health_ok = response.status == 200
+        add(
+            "health", "当前服务健康检查",
+            "ok" if health_ok else "warn",
+            settings.SYSTEM_UPDATE_HEALTH_URL,
+        )
+    except Exception as exc:
+        add("health", "当前服务健康检查", "warn", f"{settings.SYSTEM_UPDATE_HEALTH_URL} · {exc}")
+
+    blockers = [item for item in checks if item["blocking"] and item["status"] == "error"]
+    warnings = [item for item in checks if item["status"] == "warn"]
+    return {
+        "ready": len(blockers) == 0,
+        "checks": checks,
+        "blockingCount": len(blockers),
+        "warningCount": len(warnings),
+        "branch": cfg["branch"],
+        "remote": cfg["remote"],
+        "checkedAt": _now_iso(),
+    }
+
+
+def _cleanup_old_artifacts(keep: int = 30) -> None:
+    state_dir = _state_dir()
+    for pattern in ("update_*.log", "runner_*.py"):
+        rows = sorted(
+            state_dir.glob(pattern),
+            key=lambda path: path.stat().st_mtime,
+            reverse=True,
+        )
+        for path in rows[keep:]:
+            try:
+                path.unlink()
+            except OSError:
+                pass
+
+
+def start_update(*, actor: str = "system") -> dict[str, Any]:
+    with _LOCK:
+        readiness = update_readiness()
+        if not readiness["ready"]:
+            labels = "、".join(item["label"] for item in readiness["checks"] if item["blocking"] and item["status"] == "error")
+            raise ValueError(f"更新环境未就绪：{labels}。请先在更新中心查看环境自检。")
+        runtime = _read_json(_status_path(), {})
+        if _pid_running(runtime.get("pid")) and runtime.get("phase") in _ACTIVE_PHASES:
+            raise ValueError("已有更新任务正在执行")
+
+        checked = check_for_updates(actor=actor, automatic=False)
+        if checked.get("lastCheckError"):
+            raise ValueError(f"无法开始更新：{checked['lastCheckError']}")
+        if checked.get("diverged"):
+            raise ValueError("本地分支与远端已分叉，禁止自动覆盖，请先人工处理 Git 历史")
+        if checked.get("dirty"):
+            raise ValueError("项目存在未提交修改，禁止自动更新，避免覆盖本地代码")
+        if not checked.get("updateAvailable"):
+            return {**status_payload(include_log=False), "started": False, "reason": "already_latest"}
+
+        target_sha = str(checked.get("latestSha") or "")
+        if not _SHA_RE.fullmatch(target_sha):
+            raise ValueError("目标 commit 无效")
+
+        run_id = datetime.now().strftime("%Y%m%d_%H%M%S") + "_" + uuid.uuid4().hex[:8]
+        _acquire_update_lock(run_id=run_id, target_sha=target_sha, actor=actor)
+        try:
+            _cleanup_old_artifacts()
+            state_dir = _state_dir()
+            runner = state_dir / f"runner_{run_id}.py"
+            runner_source = _git("show", f"{target_sha}:scripts/system_update_runner.py", timeout=30)
+            if "class Runner" not in runner_source or "def execute" not in runner_source:
+                raise ValueError("目标版本中的系统更新执行器无效")
+            runner.write_text(runner_source, encoding="utf-8")
+            log_path = state_dir / f"update_{run_id}.log"
+
+            env = os.environ.copy()
+            env["PYTHONUNBUFFERED"] = "1"
+            env["ECOMMERCE_UPDATE_RUN_ID"] = run_id
+            command = [
+                str(_repo_root() / "backend" / ".venv" / "bin" / "python"),
+                str(runner),
+                "--root", str(_repo_root()),
+                "--data-dir", str(Path(settings.DATA_DIR).expanduser()),
+                "--target", target_sha,
+                "--branch", settings.SYSTEM_UPDATE_BRANCH,
+                "--remote", settings.SYSTEM_UPDATE_REMOTE,
+                "--actor", actor,
+                "--run-id", run_id,
+                "--health-url", settings.SYSTEM_UPDATE_HEALTH_URL,
+            ]
+            with log_path.open("a", encoding="utf-8") as log_file:
+                proc = subprocess.Popen(
+                    command,
+                    cwd=str(_repo_root()),
+                    env=env,
+                    stdout=log_file,
+                    stderr=subprocess.STDOUT,
+                    start_new_session=True,
+                )
+            _handoff_update_lock(run_id=run_id, pid=proc.pid)
+        except Exception:
+            _release_update_lock(run_id=run_id)
+            raise
+        _write_status({
+            "runId": run_id,
+            "pid": proc.pid,
+            "phase": "queued",
+            "progress": 1,
+            "message": "更新任务已启动",
+            "targetSha": target_sha,
+            "previousSha": checked.get("currentSha"),
+            "logFile": str(log_path),
+            "startedAt": _now_iso(),
+            "startedBy": actor,
+        })
+        return {**status_payload(include_log=True), "started": True}
+
+
+def status_payload(*, include_log: bool = True) -> dict[str, Any]:
+    runtime = _read_json(_status_path(), {})
+    try:
+        current_sha = _git("rev-parse", "HEAD", timeout=10)
+        current_branch = _git("branch", "--show-current", timeout=10)
+    except Exception:
+        current_sha = str(runtime.get("currentSha") or "")
+        current_branch = str(runtime.get("currentBranch") or "")
+    runtime["currentSha"] = current_sha
+    runtime["currentBranch"] = current_branch
+    try:
+        runtime["dirty"] = bool(_git("status", "--porcelain", timeout=10))
+    except Exception:
+        runtime["dirty"] = bool(runtime.get("dirty"))
+    runtime["currentCommit"] = _commit_info(current_sha) if current_sha else None
+    runtime["settings"] = load_update_settings()
+    runtime["history"] = read_history(20)
+    lock_owner = _read_update_lock_owner() if _repo_update_lock_dir().exists() else {}
+    runtime["updateLock"] = lock_owner if _pid_running(lock_owner.get("pid")) else None
+    runtime["running"] = _pid_running(runtime.get("pid")) and runtime.get("phase") not in {"success", "failed", "rolled_back", "idle"}
+    if include_log:
+        runtime["logs"] = _tail(runtime.get("logFile"), 120)
+    return runtime
+
+
+async def poll_loop() -> None:
+    """API 常驻期间定时检测；auto_update 只在配置窗口内真正部署。"""
+    # 启动后稍等，避免与 seed / 启动健康检查抢资源。
+    await asyncio.sleep(20)
+    while True:
+        cfg = load_update_settings()
+        interval = max(5, int(cfg["checkIntervalMinutes"]))
+        try:
+            runtime = _read_json(_status_path(), {})
+            active_phase = runtime.get("phase") in _ACTIVE_PHASES
+            updater_alive = _pid_running(runtime.get("pid"))
+            # 新版本重启 API 时 updater 仍在外部进程中做健康检查；此时绝不能由新 API
+            # 再 fetch/改写 status.json，否则会覆盖正在执行的进度与回滚状态。
+            if active_phase and updater_alive:
+                await asyncio.sleep(min(interval * 60, 60))
+                continue
+            if active_phase and not updater_alive:
+                _write_status({
+                    "phase": "failed",
+                    "progress": 100,
+                    "message": "更新执行器意外中断，请检查日志后重新操作",
+                    "lastAutoError": "检测到更新阶段状态，但执行器进程已退出",
+                    "lastAutoErrorAt": _now_iso(),
+                })
+            elif cfg["enabled"] and cfg["mode"] in {"auto_download", "auto_update"}:
+                checked = await asyncio.to_thread(check_for_updates, actor="system-scheduler", automatic=True)
+                if (
+                    cfg["mode"] == "auto_update"
+                    and checked.get("updateAvailable")
+                    and not checked.get("dirty")
+                    and not checked.get("diverged")
+                    and checked.get("autoInstallEligible")
+                    and _in_auto_window(cfg)
+                ):
+                    await asyncio.to_thread(start_update, actor="system-scheduler")
+        except Exception as exc:
+            _write_status({"lastAutoError": str(exc), "lastAutoErrorAt": _now_iso()})
+        await asyncio.sleep(interval * 60)
