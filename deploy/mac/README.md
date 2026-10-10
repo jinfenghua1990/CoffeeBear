@@ -54,12 +54,12 @@ make persistence-migrate
 https://github.com/jinfenghua1990/CoffeeBear.git
 ```
 
-旧版更新器可能在联网检查前就拒绝 CoffeeBear 远程地址，因此首次升级需在 Mac 终端手动快进到 CoffeeBear `main`，之后系统更新页面才由新版程序接管。以下命令只更新代码并重启服务，不删除业务数据或文件，也不会自行执行数据库迁移。
+旧版更新器可能在联网检查前就拒绝 CoffeeBear 远程地址，因此首次升级需在 Mac 终端手动快进到 CoffeeBear `main`，之后系统更新页面才由新版程序接管。本次仓库识别修复本身不包含数据库迁移；以下拉取和重启命令不会删除数据库或业务文件。如果目标版本的发布说明要求数据库迁移，应先备份并确认迁移步骤。
 
 先确认仓库路径、远程地址、分支和工作区状态；若工作区有修改、不是 `main`，或远程地址不是 CoffeeBear，请停止，不要继续拉取：
 
 ```bash
-cd /path/to/CoffeeBear
+cd /Users/gino/ecommerce-workspace
 git remote get-url origin
 git status --short --branch
 ```
