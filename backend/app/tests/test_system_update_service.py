@@ -499,7 +499,7 @@ def test_update_classification_promotes_migration_to_feature():
 def test_update_classification_marks_core_deployment_change_major():
     result = service._classify_update(
         [{"subject": "chore: 调整启动配置", "sha": "c" * 40}],
-        ["backend/app/config.py"],
+        ["backend/app/config.py", "scripts/start.sh"],
     )
     assert result["updateLevel"] == "major"
     assert "平台公共底层" in result["impactedModules"]

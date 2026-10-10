@@ -95,16 +95,6 @@ type BusinessStatus = {
   company: string;
   businessScopes: string[];
   domesticSupported: boolean;
-  foreignEntryCount: number;
-  foreignTotalsByCurrency: Array<{
-    currency: string;
-    income: number;
-    expense: number;
-    profit: number;
-    cashIn: number;
-    cashOut: number;
-    netCash: number;
-  }>;
   sync: {
     created: number;
     updated: number;
@@ -1029,7 +1019,6 @@ export default function MonthlySendPage() {
   const sendReady = Boolean(selectedMaterialsReady && emails(toText).length && mailReady);
   const readyCount = [bankTx, bankReceipt, ...(needsUnbilled ? [unbilled, corporatePayment] : [])].filter(Boolean).length;
   const requiredDeliveryCount = needsUnbilled ? 4 : 2;
-  const hasForeignSummary = (businessStatus?.foreignEntryCount ?? 0) > 0;
   const latestPkg = period?.packages.length ? period.packages[period.packages.length - 1] : null;
   const latestSentPkg = [...(period?.packages || [])].reverse().find((pkg) => pkg.status === "SENT") || null;
   const attachmentSize = (bankTx?.size || 0) + (bankReceipt?.size || 0);
@@ -1333,9 +1322,6 @@ export default function MonthlySendPage() {
               ) : (
                 <span className="text-slate-500">当前主体无国内销售月结口径</span>
               )}
-              {(businessStatus?.foreignEntryCount ?? 0) > 0 && (
-                <span className="font-medium text-violet-700">外贸财务事项 {businessStatus?.foreignEntryCount} 条</span>
-              )}
               {domesticSupportedByEntity && (
                 <span className="ml-auto flex gap-3">
                   <Link href="/sales?tab=analytics" className="font-medium text-blue-600 hover:underline">销售中心</Link>
@@ -1357,7 +1343,7 @@ export default function MonthlySendPage() {
           <input ref={fileRef} type="file" accept=".xlsx,.xls,.csv,.pdf" className="hidden" onChange={(e) => { const file = e.target.files?.[0]; if (file) handleUploadSelection(file); }} />
           <div className="flex flex-wrap items-center justify-between gap-3 border-t border-slate-200 bg-slate-50/60 px-4 py-3">
             <div className="flex flex-wrap items-center gap-x-5 gap-y-1 text-xs text-slate-500">
-              <span>已选 {selectedSendableCount} 项 · 预计附件 {includeSel.length + (hasForeignSummary ? 1 : 0)} 个 · 银行原件大小 {formatBytes(attachmentSize)}</span>
+              <span>已选 {selectedSendableCount} 项 · 预计附件 {includeSel.length} 个 · 银行原件大小 {formatBytes(attachmentSize)}</span>
               {mailStatus && !mailStatus.configured && <span className="rounded bg-rose-50 px-1.5 py-0.5 font-medium text-rose-600 ring-1 ring-inset ring-rose-200">SMTP 未配置</span>}
             </div>
             <button type="button" onClick={packageAndSend} disabled={busy || !sel || !sendReady} className="flex min-w-[220px] flex-1 items-center justify-center gap-2 rounded-lg bg-emerald-600 px-4 py-2.5 text-sm font-semibold text-white shadow-sm hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-40 sm:flex-none">➤ 确认并发送给财务</button>

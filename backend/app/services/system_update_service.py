@@ -1272,6 +1272,7 @@ def _classify_update(changes: list[dict[str, Any]], changed_files: list[str]) ->
         "Dockerfile",
         "docker-compose",
         "compose.",
+        "scripts/start",
         "scripts/native-start",
         "backend/app/core/security",
         "backend/app/config.py",

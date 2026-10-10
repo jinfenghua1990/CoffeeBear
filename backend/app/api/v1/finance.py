@@ -18,7 +18,6 @@ from app.services import finance_sales_report_service as sales_report_service
 from app.services import finance_center_service
 from app.services import bank_summary_service
 from app.services import finance_corporate_payment_report_service as corporate_payment_report_service
-from app.services import finance_closing_service
 from app.services import finance_projection_service
 from app.services import finance_service
 from app.services import monthly_intake_service
@@ -151,17 +150,16 @@ def refresh_monthly_business(
     force: bool = False,
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
-    """月结读取业务库：主体隔离 + FinanceEntry 同步，不再接收业务源文件。"""
+    """月结读取国内业务库：主体隔离 + FinanceEntry 同步，不再接收业务源文件。"""
     finance_service.validate_period(year, month)
     entity = finance_center_service.resolve_entity(db, legal_entity_id)
     if company and entity.name != company:
-        matched = finance_closing_service.resolve_entity_by_name(db, company)
+        matched = finance_center_service.resolve_entity_by_name(db, company)
         if matched is None:
             raise HTTPException(status_code=404, detail="公司主体不存在")
         entity = matched
     company_name = entity.name
 
-    # 节流：同主体同账期 TTL 内跳过全量同步（sync 内部自带 commit，跳过无副作用）。
     sync_key = (year, month, entity.id)
     now = time.monotonic()
     throttled = False
@@ -176,21 +174,18 @@ def refresh_monthly_business(
             "ttlSeconds": _BUSINESS_SYNC_TTL_SECONDS,
         }
     else:
-        # 全量同步是幂等的：内销进入当前默认中国主体，外贸按各自订单/Shipment 的主体归属。
         sync_result = dict(
             finance_projection_service.sync_business_period(
                 db,
                 year=year,
                 month=month,
-                business_scope="all",
+                business_scope="domestic",
             )
         )
         with _business_sync_lock:
             _business_sync_at[sync_key] = time.monotonic()
         sync_result["skipped"] = False
 
-    # 现有内销销售主表尚未拆 legal_entity_id，因此只允许默认主体读取国内销售/月结口径；
-    # 其他主体只读取自己的 FinanceEntry，避免把浙江公司的销售复制过去。
     domestic_supported = bool(entity.is_default and "domestic" in (entity.business_scopes or []))
     if domestic_supported:
         template = sales_report_service.get_or_create_template(db, company_name)
@@ -209,12 +204,6 @@ def refresh_monthly_business(
         }
         missing = []
 
-    foreign_summary = finance_closing_service.foreign_trade_summary(
-        db,
-        legal_entity_id=entity.id,
-        year=year,
-        month=month,
-    )
     return {
         "ready": not bool(summary.get("costIncomplete")),
         "source": "business_database",
@@ -232,8 +221,6 @@ def refresh_monthly_business(
         "costIncomplete": bool(summary.get("costIncomplete")),
         "costMissingCount": len(missing),
         "costMissingDetail": missing,
-        "foreignEntryCount": foreign_summary["rowCount"],
-        "foreignTotalsByCurrency": foreign_summary["totalsByCurrency"],
         "sync": sync_result,
     }
 
@@ -315,8 +302,6 @@ async def upload_file(
         "id": row.id, "version": row.version, "sha256": row.sha256,
         "size": row.size, "storedPath": row.stored_path,
     }
-    # 银行交易明细上传即解析入流水表（指纹幂等，重复上传无害）；
-    # 回单详情同为 category=bank，必须用 original_name 区分，避免误解析。
     display_name = original_name.strip() or file.filename or ""
     company_name = company or finance_service.DEFAULT_COMPANY
     can_parse_zjrc = company_name == finance_service.DEFAULT_COMPANY
@@ -349,11 +334,9 @@ async def upload_file(
                     "repaired": payment_result["repaired"],
                 }
             except Exception as exc:
-                # 原件与银行流水已先行提交；匹配失败只作为后续核对提示，不伪装上传失败。
                 db.rollback()
                 result["paymentInvoiceMatchError"] = str(exc)
         except (ValueError, RuntimeError) as exc:
-            # 原件归档已成功，解析失败不让上传整体失败，仅提示
             result["bankImportError"] = str(exc)
     elif category == "bank" and "交易明细" in display_name and not can_parse_zjrc:
         result["bankImportSkipped"] = (
@@ -382,7 +365,6 @@ def corporate_payment_report(
     company: str = "",
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
-    """月度已收票且通过对公账户付款的发票/采购/商品清单（含当前勾选版本信息）。"""
     try:
         report = corporate_payment_report_service.build_report(db, year, month, company=company)
     except ValueError as exc:
@@ -400,7 +382,6 @@ def corporate_payment_report(
             )
             report["selectionError"] = ""
         except ValueError as exc:
-            # 历史版本可能使用 invoice_number。唯一号码自动兼容；歧义号码必须人工重选。
             report["selectedKeys"] = []
             report["selectionError"] = str(exc)
         report["updatedAt"] = adjustment.updated_at.isoformat() if adjustment.updated_at else None
@@ -426,7 +407,6 @@ def update_corporate_payment_adjustment(
     company: str = "",
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
-    """保存本月已收票对公付款清单的发票勾选；新版本保留，历史版本不覆盖。"""
     try:
         return corporate_payment_report_service.save_corporate_payment_adjustment(
             db,
@@ -446,7 +426,6 @@ def payment_invoice_match_pending_invoices(
     limit: int = Query(500, ge=1, le=500),
     db: Session = Depends(get_db),
 ) -> list[dict[str, Any]]:
-    """跨账期返回仍有银行付款待核对余额的有效进项发票。"""
     return payment_match_service.pending_invoices(db, limit=limit)
 
 
@@ -456,7 +435,6 @@ def payment_invoice_match_overview(
     month: int,
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
-    """当月银行付款 ↔ 对方进项发票 匹配清单（推导展示，手工标记才落库）。"""
     try:
         return payment_match_service.overview(db, year, month)
     except ValueError as exc:
@@ -469,7 +447,6 @@ def payment_invoice_match_link(
     request: Request,
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
-    """标记已开票：把银行付款挂到进项发票（tax_invoice_links, target_type=bank_transaction）。"""
     if db.get(BankTransaction, payload.txn_id) is None:
         raise HTTPException(status_code=404, detail="银行流水不存在")
     if db.get(TaxInvoice, payload.invoice_id) is None:
@@ -494,7 +471,6 @@ def payment_invoice_match_auto(
     request: Request = None,
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
-    """按账号/供应商、金额与唯一最近日期规则自动匹配；歧义候选不落库，并纠正明显旧版自动错配。"""
     from app.services.payment_invoice_match_service import auto_match
     result = auto_match(db, year=year, month=month, actor=current_actor(request))
     return result
@@ -506,7 +482,6 @@ def payment_invoice_match_unlink(
     request: Request,
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
-    """解除标记（软删可审计，同一对可再次标记）。"""
     try:
         return payment_match_service.unlink(db, link_id, actor=current_actor(request))
     except ValueError as exc:
@@ -520,7 +495,6 @@ def monthly_intake_status(
     company: str = "",
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
-    """返回当前账期两份业务源文件的上传与真实导入状态。"""
     try:
         return monthly_intake_service.status(
             db,
@@ -542,7 +516,6 @@ async def upload_monthly_intake(
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
-    """归档并导入月度业务源文件：采购入库单或销售单查询。"""
     try:
         content = await read_upload_limited(
             file, max_bytes=finance_service.settings.MAX_UPLOAD_BYTES
@@ -588,7 +561,6 @@ def list_files(year: int, month: int, company: str = "", db: Session = Depends(g
 
 @router.get("/files/{file_id}/download")
 def download_file(file_id: int, db: Session = Depends(get_db)) -> FileResponse:
-    """单文件下载：财务核对原始资料用（归档原文，未改动）。"""
     from app.models.finance import ArchiveFile
 
     row = db.get(ArchiveFile, file_id)
@@ -608,7 +580,6 @@ def download_file(file_id: int, db: Session = Depends(get_db)) -> FileResponse:
 
 @router.delete("/files/{file_id}")
 def remove_archive_file(file_id: int, request: Request, db: Session = Depends(get_db)) -> dict[str, Any]:
-    """删除归档文件（含磁盘文件），页面「归档明细」用。"""
     try:
         return finance_service.delete_archive_file(db, file_id, actor=current_actor(request))
     except ValueError as exc:
@@ -618,7 +589,6 @@ def remove_archive_file(file_id: int, request: Request, db: Session = Depends(ge
 
 @router.delete("/packages/{package_id}")
 def remove_delivery_package(package_id: int, request: Request, db: Session = Depends(get_db)) -> dict[str, Any]:
-    """删除交付包记录与 ZIP 文件，页面「发送记录」用。"""
     try:
         return finance_service.delete_delivery_package(db, package_id, actor=current_actor(request))
     except ValueError as exc:
@@ -635,7 +605,6 @@ def check_period(year: int, month: int, company: str = "", db: Session = Depends
 
 
 class PackageInput(BaseModel):
-    """手动打包时可选交付表子集；不传或为空列表 = 全部月度交付表。"""
     include: list[str] = Field(default_factory=list)
 
 
@@ -681,7 +650,6 @@ class SendBody(BaseModel):
 @router.post("/{year}/{month}/send")
 def send(year: int, month: int, body: SendBody, request: Request,
          db: Session = Depends(get_db)) -> dict[str, Any]:
-    """发送财务交付包：SMTP 未配置如实失败；已发 V1 重发标记 RESENT。"""
     from app.adapters.base import AdapterNotConfigured
 
     try:
@@ -699,7 +667,6 @@ def send(year: int, month: int, body: SendBody, request: Request,
 
 @router.get("/mail-status")
 def mail_status() -> dict[str, Any]:
-    """财务邮件发送方状态（只读，不含密码），供「设置邮箱」展示当前发件邮箱与 SMTP 配置状态。"""
     return {
         "configured": settings.smtp_configured,
         "host": settings.SMTP_HOST,
@@ -714,7 +681,6 @@ def delivery_logs(db: Session = Depends(get_db)) -> list[dict[str, Any]]:
     return finance_service.delivery_logs(db)
 
 
-
 class LegalEntityInput(BaseModel):
     code: str = Field(min_length=1, max_length=64)
     name: str = Field(min_length=1, max_length=256)
@@ -723,13 +689,13 @@ class LegalEntityInput(BaseModel):
     tax_id: str = Field(default="", max_length=128)
     status: str = Field(default="active", max_length=24)
     is_default: bool = False
-    business_scopes: list[str] = Field(default_factory=lambda: ["domestic", "foreign_trade"])
+    business_scopes: list[str] = Field(default_factory=lambda: ["domestic"])
     note: str = ""
 
 
 class FinanceEntryInput(BaseModel):
     legal_entity_id: int
-    business_scope: str = Field(default="domestic", max_length=24)
+    business_scope: str = Field(default="domestic", pattern="^domestic$", max_length=24)
     source_type: str = Field(default="manual", max_length=48)
     source_id: str = Field(default="", max_length=128)
     source_no: str = Field(default="", max_length=128)
@@ -767,7 +733,7 @@ def create_finance_entity(payload: LegalEntityInput, db: Session = Depends(get_d
             tax_id=payload.tax_id,
             status=payload.status,
             is_default=payload.is_default,
-            business_scopes=payload.business_scopes,
+            business_scopes=["domestic"],
             note=payload.note,
         )
     except Exception as exc:
@@ -793,7 +759,7 @@ def update_finance_entity(
             tax_id=payload.tax_id,
             status=payload.status,
             is_default=payload.is_default,
-            business_scopes=payload.business_scopes,
+            business_scopes=["domestic"],
             note=payload.note,
         )
     except ValueError as exc:
@@ -808,7 +774,7 @@ def update_finance_entity(
 @router.get("/center")
 def finance_center(
     legal_entity_id: int | None = None,
-    business_scope: str = Query("all", pattern="^(all|domestic|foreign_trade)$"),
+    business_scope: str = Query("all", pattern="^(all|domestic)$"),
     year: int | None = Query(None, ge=1900, le=2999),
     month: int | None = Query(None, ge=1, le=12),
     db: Session = Depends(get_db),
@@ -828,7 +794,7 @@ def finance_center(
 @router.get("/entries")
 def finance_entries(
     legal_entity_id: int | None = None,
-    business_scope: str = Query("all", pattern="^(all|domestic|foreign_trade)$"),
+    business_scope: str = Query("all", pattern="^(all|domestic)$"),
     year: int | None = Query(None, ge=1900, le=2999),
     month: int | None = Query(None, ge=1, le=12),
     status: str = Query("", max_length=24),
@@ -885,15 +851,13 @@ def update_finance_entry(
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
-
 @router.post("/sync-business")
 def sync_business_finance(
     year: int = Query(..., ge=1900, le=2999),
     month: int = Query(..., ge=1, le=12),
-    business_scope: str = Query("all", pattern="^(all|domestic|foreign_trade)$"),
+    business_scope: str = Query("domestic", pattern="^domestic$"),
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
-    """把指定账期的业务事实幂等投影到统一财务事项池。"""
     try:
         return finance_projection_service.sync_business_period(
             db,

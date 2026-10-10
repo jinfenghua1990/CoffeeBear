@@ -2,6 +2,7 @@ from datetime import datetime
 from decimal import Decimal
 from zoneinfo import ZoneInfo
 
+import pytest
 from sqlalchemy import select
 
 from app.config import settings
@@ -272,19 +273,11 @@ def test_logistics_projection_replaces_estimate_with_actual_bill(db_session):
     assert rows[0].settlement_status == "settled"
 
 
-def test_retired_foreign_scope_does_not_create_finance_entries(db_session):
-    result = projection.sync_business_period(
-        db_session,
-        year=2026,
-        month=9,
-        business_scope="foreign_trade",
-    )
-    assert result["created"] == 0
-    assert result["updated"] == 0
-    assert result["deleted"] == 0
-    assert result["sources"] == {
-        "domesticOrders": 0,
-        "domesticRefunds": 0,
-        "inboundDocuments": 0,
-        "logisticsPeriods": 0,
-    }
+def test_retired_foreign_scope_is_rejected(db_session):
+    with pytest.raises(ValueError, match="仅支持国内财务投影"):
+        projection.sync_business_period(
+            db_session,
+            year=2026,
+            month=9,
+            business_scope="foreign_trade",
+        )

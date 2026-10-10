@@ -30,7 +30,6 @@ export default function WorkspaceTabBar() {
   const barRef = useRef<HTMLDivElement>(null);
   const rootRef = useRef<HTMLDivElement>(null);
 
-  // 内销 / 外贸各自保留独立标签集；切换工作台只切可见组，不销毁另一边现场。
   const tabList = ws.tabsForWorkspace(ws.activeWorkspace);
   const ordered = useMemo(
     () => [...tabList.filter((tab) => tab.pinned), ...tabList.filter((tab) => !tab.pinned)],
@@ -187,7 +186,7 @@ export default function WorkspaceTabBar() {
           }}
           className="flex shrink-0 items-center gap-1 rounded-md border border-slate-200 bg-white px-2 py-1 text-[12px] font-medium text-slate-600 transition hover:bg-slate-50"
         >
-          {ws.activeWorkspace === "foreign" ? "外贸页面" : "内销页面"}
+          内销页面
           <span className="tabular-nums text-slate-400">{tabList.length}</span>
           <svg viewBox="0 0 16 16" className="h-3 w-3 text-slate-400" aria-hidden="true">
             <path d="m4 6 4 4 4-4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" fill="none" />
@@ -225,7 +224,7 @@ export default function WorkspaceTabBar() {
             autoFocus
             value={allKeyword}
             onChange={(event) => setAllKeyword(event.target.value)}
-            placeholder={ws.activeWorkspace === "foreign" ? "搜索外贸已打开页面…" : "搜索内销已打开页面…"}
+            placeholder="搜索内销已打开页面…"
             className="mb-1.5 w-full rounded-lg border border-slate-200 bg-slate-50 px-2.5 py-1.5 text-[12px] text-slate-700 outline-none focus:border-blue-400 focus:bg-white"
           />
           <div className="max-h-[320px] overflow-y-auto">
