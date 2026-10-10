@@ -127,7 +127,7 @@ tar -tzf "$TMP_APP" >/dev/null
 
 echo "==> [3/5] 归档并加密运行配置 ..."
 CONFIG_FILES=()
-for candidate in   ".env"   ".env.production"   "compose.yaml"   "compose.yml"   "docker-compose.override.yml"   "docker-compose.override.yaml"
+for candidate in   ".env"   ".env.production"   "backend/.env"   "compose.yaml"   "compose.yml"   "docker-compose.override.yml"   "docker-compose.override.yaml"
 do
   [[ -f "$ROOT/$candidate" ]] && CONFIG_FILES+=("$candidate")
 done
