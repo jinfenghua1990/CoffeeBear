@@ -30,7 +30,7 @@ _AUTO_INSTALL_LEVELS = {"patch", "feature", "major"}
 _LEVEL_RANK = {"patch": 1, "feature": 2, "major": 3}
 _ACTIVE_PHASES = {"queued", "preflight", "backup", "quiescing", "installing", "migrating", "building", "restarting", "healthcheck", "rollback"}
 _LOCK = threading.RLock()
-_TARGET_REPOSITORY = "jinfenghua1990/zhejiang"
+_TARGET_REPOSITORY = "jinfenghua1990/coffeebear"
 
 
 def _now_iso() -> str:
@@ -177,7 +177,7 @@ def _remote_repository_name(remote_url: str) -> str:
 
 
 def _is_legacy_repo_remote(remote_url: str) -> bool:
-    """Only the new zhejiang repository may be used as the runtime update source."""
+    """Only the CoffeeBear repository may be used as the runtime update source."""
     value = (remote_url or "").strip().rstrip("/")
     # Local bare remotes are used by isolated service tests; they are not a
     # production GitHub source and remain valid for those tests.
@@ -746,7 +746,7 @@ def upload_local_changes(*, actor: str = "system") -> dict[str, Any]:
         _raise_git_result(remote_probe, "无法读取 Git 远端")
         remote_url = remote_probe.stdout.strip()
         if _is_legacy_repo_remote(remote_url):
-            raise ValueError("当前远端不是受控仓库 zhejiang，禁止上传本地修改")
+            raise ValueError("当前远端不是受控仓库 CoffeeBear，禁止上传本地修改")
 
         base_sha = str(payload["baseSha"])
         branch = _next_local_handoff_branch(remote)
@@ -849,7 +849,7 @@ def sync_local_changes(*, actor: str = "system") -> dict[str, Any]:
         _raise_git_result(remote_probe, "无法读取 Git 远端")
         remote_url = remote_probe.stdout.strip()
         if _is_legacy_repo_remote(remote_url):
-            raise ValueError("当前远端不是受控仓库 zhejiang，禁止同步本地修改")
+            raise ValueError("当前远端不是受控仓库 CoffeeBear，禁止同步本地修改")
 
         payload = local_changes_payload(include_diff=False)
         eligible_paths = [str(item["path"]) for item in payload["files"]]
@@ -1391,8 +1391,8 @@ def check_for_updates(*, actor: str = "system", automatic: bool = False) -> dict
             remote_url = remote_probe.stdout.strip()
             if _is_legacy_repo_remote(remote_url):
                 raise RuntimeError(
-                    "当前运行服务未指向受控仓库 zhejiang；"
-                    "请把 origin 切换到 jinfenghua1990/zhejiang 后再检查更新"
+                    "当前运行服务未指向受控仓库 CoffeeBear；"
+                    "请确认 origin 指向 jinfenghua1990/CoffeeBear 后再检查更新"
                 )
             _git("fetch", "--quiet", remote, branch, timeout=120)
             latest_sha = _git("rev-parse", "FETCH_HEAD")
@@ -1619,8 +1619,8 @@ def update_readiness() -> dict[str, Any]:
                 "Git 远端",
                 "error" if legacy_remote else "ok",
                 (
-                    "当前运行服务未指向受控仓库 zhejiang；"
-                    "请把 origin 切换到 jinfenghua1990/zhejiang 后再更新"
+                    "当前运行服务未指向受控仓库 CoffeeBear；"
+                    "请确认 origin 指向 jinfenghua1990/CoffeeBear 后再更新"
                     if legacy_remote
                     else f"{cfg['remote']} · {remote_url}"
                 ),

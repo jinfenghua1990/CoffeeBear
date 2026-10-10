@@ -13,7 +13,9 @@ def test_legacy_repository_remote_detection():
     assert service._is_legacy_repo_remote("https://github.com/jinfenghua1990/ecommerce-dashboard") is True
     assert service._is_legacy_repo_remote("git@github.com:jinfenghua1990/Commerce-OS.git") is True
     assert service._is_legacy_repo_remote("https://github.com/jinfenghua1990/ecommerce-workspace.git") is True
-    assert service._is_legacy_repo_remote("git@github.com:jinfenghua1990/zhejiang.git") is False
+    assert service._is_legacy_repo_remote("git@github.com:jinfenghua1990/CoffeeBear.git") is False
+    assert service._is_legacy_repo_remote("https://github.com/jinfenghua1990/CoffeeBear") is False
+    assert service._is_legacy_repo_remote("git@github.com:jinfenghua1990/zhejiang.git") is True
     assert service._is_legacy_repo_remote("/tmp/test-remote.git") is False
 
 
@@ -145,7 +147,8 @@ def test_check_for_updates_rejects_legacy_repository_remote(monkeypatch, tmp_pat
 
     result = service.check_for_updates(actor="pytest")
     assert result["updateAvailable"] is False
-    assert "受控仓库 zhejiang" in result["lastCheckError"]
+    assert "受控仓库 CoffeeBear" in result["lastCheckError"]
+    assert "jinfenghua1990/CoffeeBear" in result["lastCheckError"]
 
 
 def test_manual_check_still_works_when_background_service_disabled(monkeypatch, tmp_path: Path):
