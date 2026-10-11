@@ -8,45 +8,58 @@ CoffeeBear 是 **卖咖啡的熊中国国内业务** 的唯一长期业务仓库
 
 CoffeeBear 采用 GitHub 作为项目事实来源（Single Source of Truth）。
 
-任何 AI Agent、Review Bot、自动化机器人或开发机器人在修改项目之前，必须阅读：
+任何 AI Agent、Review Bot、自动化机器人或开发机器人在修改项目之前，必须优先阅读：
 
-- `docs/ARCHITECTURE.md`（如存在）
-- `docs/ENVIRONMENT.md`
-- `docs/DECISIONS.md`
-- `docs/AGENT_WORKFLOW.md`
-- 当前 Open Issues / Pull Requests
+1. `README.md`
+2. `.github/AGENTS.md`
+3. `docs/CURRENT_STATE.md`
+4. `docs/ACTIVE_WORK.md`
+5. `docs/DECISIONS.md`
+6. `docs/ENVIRONMENT.md`
+7. `docs/DEPLOYMENT.md`
+8. `docs/DATABASE.md`
+9. 与任务相关的 Open Issues / Pull Requests
 
 重要规则：
 
-- 架构决策必须记录在 GitHub Issue 或 docs 中。
+- 架构决策必须记录在 GitHub Issue 或长期文档中。
 - 不确定的架构、数据模型、部署方式、业务规则禁止自行决定。
-- 必须先提出 Issue，说明方案、影响和待确认事项。
-- 完成修改后必须记录检查内容、修改内容、验证结果和遗留问题。
+- 必须先提出 Issue，说明当前事实、方案、影响和待确认事项。
+- 完成重要修改后必须记录检查内容、修改内容、验证结果、未验证事项和遗留问题。
+- 不得把“静态检查通过”描述成“真实环境运行通过”。
+- 不得把“Test 验证通过”描述成“Production 已验收”。
+- 治理、进度、决策和风险说明默认使用中文，方便维护者直接审阅。
 
-详细规则见：
+### 项目治理文档导航
 
-- `.github/AGENTS.md`
-- `docs/AGENT_WORKFLOW.md`
-- `docs/DECISIONS.md`
+- `.github/AGENTS.md`：机器人强制工作规则
+- `docs/CURRENT_STATE.md`：当前项目真实状态
+- `docs/ACTIVE_WORK.md`：正在进行和待处理的工作
+- `docs/AGENT_WORKFLOW.md`：机器人标准工作与记录流程
+- `docs/DECISIONS.md`：长期已确认决策
+- `docs/ENVIRONMENT.md`：Test + Production 两环境规范
+- `docs/DEPLOYMENT.md`：Docker / Production 部署与回滚规范
+- `docs/DATABASE.md`：PostgreSQL / Alembic 数据库变更规范
 
-## Environment Model
+## Environment Model / 环境模型
 
 CoffeeBear 不采用传统三环境模型（Dev / Staging / Production）。
 
 采用两环境模型：
 
 ```text
-Test Environment
+Test Environment（开发 / 测试合并）
     |
     |  M1 + Docker
-    |  功能验证 / Docker验证 / 数据迁移验证
+    |  功能验证 / Docker 验证 / 数据迁移验证
     |
     v
-Production Environment
+Production Environment（正式环境）
     |
-    |  正式服务器
+    |  唯一正式业务运行环境
     |  正式数据库
     |  正式对象存储
+    |  正式密钥
 ```
 
 规则：
@@ -56,9 +69,7 @@ Production Environment
 - ✅ Test 作为生产发布前验证环境
 - ✅ Production 是唯一正式业务运行环境
 
-完整环境规范见：
-
-- `docs/ENVIRONMENT.md`
+完整环境规范见：`docs/ENVIRONMENT.md`。
 
 ## 仓库边界
 
@@ -113,6 +124,15 @@ FinanceEntry / 税务 / 月结
 ## 财务中心
 
 财务主体默认且仅使用 `domestic` 业务范围。历史数据库中拆分前可能仍存在外贸表、外贸 FinanceEntry 或旧 Alembic revision，这些只用于数据库升级链与历史审计，不属于当前 CoffeeBear 运行时，也不会进入新的财务列表、汇总或月结输出。
+
+当前国内财务能力包括：
+
+- 国内收入 / 成本 / 费用
+- 银行现金事实与发票匹配
+- 应收 / 应付 Open Items
+- 国内渠道结算
+- 进项发票认证与红冲核对
+- 月结资料生成、完整性检查、版本化归档与邮件发送
 
 ## 外部数据源
 
