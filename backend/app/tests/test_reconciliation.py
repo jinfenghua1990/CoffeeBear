@@ -223,3 +223,17 @@ def test_overview_never_returns_negative_pending_for_historical_overpayment(db_s
     data = rc.overview(db_session)
     assert Decimal(data["pending"]) >= 0
     assert Decimal(data["overpaid"]) >= Decimal("20")
+
+
+def test_fingerprint_distinguishes_incoming_and_outgoing_transactions():
+    incoming = build_fingerprint(
+        "ZJRC-001", "2026-09-01", "100.00", "V123", direction="in"
+    )
+    outgoing = build_fingerprint(
+        "ZJRC-001", "2026-09-01", "100.00", "V123", direction="out"
+    )
+
+    assert incoming != outgoing
+    assert incoming == build_fingerprint(
+        "ZJRC-001", "2026-09-01", "100", "V123", direction="in"
+    )
