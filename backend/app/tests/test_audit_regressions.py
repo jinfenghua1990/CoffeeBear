@@ -144,7 +144,14 @@ def test_sales_outbound_partial_amounts_do_not_look_like_complete_totals(monkeyp
                 return FakeQuery(items)
             raise AssertionError(f"unexpected model: {model}")
 
-    monkeypatch.setattr(report_service, "month_bounds", lambda *_args: (None, None))
+    monkeypatch.setattr(
+        report_service,
+        "month_bounds",
+        lambda *_args: (
+            datetime(2026, 9, 1, tzinfo=timezone.utc),
+            datetime(2026, 10, 1, tzinfo=timezone.utc),
+        ),
+    )
     result = report_service.build_report(FakeDb(), 2026, 9)
 
     assert result["hasAmount"] is True
