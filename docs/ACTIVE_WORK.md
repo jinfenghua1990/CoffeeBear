@@ -8,29 +8,53 @@
 
 - `进行中`：已经确认需要做，尚未完成
 - `待确认`：存在问题，但需要维护者确认方案
-- `已完成待关闭`：内容已经落实，Issue 仍可能保持 Open
+- `已完成`：内容已经落实，对应 Issue 已关闭或无需继续执行
 - `阻塞`：需要外部条件、真实环境或人工操作才能继续
 
 ## 当前事项
 
+### Issue #20 — main 分支保护、仓库公开状态与仓库简介
+
+**状态：待维护者确认**
+
+已确认事实：
+
+- main 当前 `protected: false`，GitHub 平台没有强制 PR / required checks
+- 仓库简介仍保留旧的“8000 生产 + 8001 沙盒”描述，与当前架构不一致
+- 仓库当前为 Public（`private: false`）
+
+需要维护者确认：
+
+1. 是否给 main 开启分支保护；
+2. 是否要求关键 CI 通过后才能进入 main；
+3. 是否保留管理员应急绕过能力；
+4. 是否把仓库简介更新为“Test + Production 两环境 + 统一 8000 端口”；
+5. CoffeeBear 是否继续保持 Public，还是改为 Private。
+
+在确认前，AI 不得自行改变仓库可见性或强制提交流程。
+
 ### Issue #18 — Docker 正式发布基线加固
 
-**状态：静态加固已完成 / 等待真实 Docker 环境最终验收**
+**状态：配置 / CI 基线完成；真实 Docker Test 验收阻塞**
 
-本轮已经完成：
+已经完成：
 
 - ✅ `deploy/zspace/production.env.example` 正式镜像改为 `ghcr.io/jinfenghua1990/coffeebear:stable`
+- ✅ `deploy/zspace/test.env.example` 作为两环境模型下的 Test Docker 示例
+- ✅ 删除旧 `deploy/zspace/staging.env.example`
 - ✅ 候选镜像同时构建 `linux/amd64` 与 `linux/arm64`
-- ✅ CI 增加发布配置防回退检查：旧 `zhejiang` 镜像引用或单架构配置会阻塞
-- ✅ `docs/DEPLOYMENT.md`、`docs/DOCKER_DEPLOYMENT.md`、`deploy/zspace/README.md` 已更新
-- ✅ 旧基础设施文档不再把独立 Staging / Render / Supabase / Backblaze B2 描述为当前固定架构
+- ✅ CI 增加发布配置防回退检查
+- ✅ Docker / ZSpace / 基础设施文档统一 Test + Production 语义
+- ✅ 旧 PR #19 已关闭，避免旧分支覆盖当前 main；其原始 CI 曾通过
 
 仍未完成：
 
-- ⏳ 在具备 Docker 的真实环境运行 Compose
-- ⏳ 实际执行数据库迁移链
-- ⏳ `/healthz` 与核心业务 smoke test
-- ⏳ 确认多架构 GHCR manifest 真实生成并可拉取
+- ⏳ 在具备 Docker 的真实 Test 环境运行 Compose
+- ⏳ 实际执行数据库 migration
+- ⏳ `/healthz` 健康检查
+- ⏳ 采购、库存、财务等核心业务 smoke test
+- ⏳ 确认 GHCR 多架构 manifest 真实生成并可拉取
+- ⏳ 将实际镜像 SHA、验证结果和回滚点写回 Issue #18
 
 因此 #18 暂不关闭。
 
@@ -40,9 +64,11 @@
 - 不应为了后台【更新】按钮而直接把 Docker socket 暴露给业务容器
 - 容器化自动更新需要单独设计与确认
 
+## 已完成事项
+
 ### Issue #17 — AI Agent 操作日志与决策记录规则
 
-**状态：已完成，可关闭**
+**状态：已完成并关闭**
 
 已经落地：
 
@@ -60,7 +86,7 @@
 
 ### Issue #16 — 两环境模型（Test + Production）
 
-**状态：已完成，可关闭**
+**状态：已完成并关闭**
 
 已经落地：
 
