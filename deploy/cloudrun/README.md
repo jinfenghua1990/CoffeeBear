@@ -5,8 +5,7 @@
 ## 设计原则
 
 - GitHub：只保存代码、`.env.example`、部署脚本和 Secret 名称映射；绝不保存真实 Secret 值。
-- M1 当前生产：继续使用本机 `.env`，不改变现有运行方式。
-- Cloud Run 未来生产：Secret Manager 把 Secret 注入为与现有应用相同名称的环境变量，因此业务代码无需引入 Google SDK，也无需改读取逻辑。
+- Cloud Run 作为当前 Production：Secret Manager 把 Secret 注入为与现有应用相同名称的环境变量，因此业务代码无需引入 Google SDK，也无需改读取逻辑。
 - 普通参数继续使用 Cloud Run environment variables；密码、Token、API Key、数据库连接串使用 Secret Manager。
 - Secret Manager 与 Q4/R2 备份职责不同：Secret Manager 是“运行时凭据源”，Q4/R2 是“灾难恢复副本”。
 

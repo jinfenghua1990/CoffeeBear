@@ -4,7 +4,7 @@
 
 ## 维护者本轮确认
 
-- 本机 8000 作为开发 / 测试环境。
+- 本机 8000 仅作为部署前验证入口；云端直接使用 Google Cloud Run Production，不创建单独云测试环境。
 - 8001 保持原样，不修改配置、进程或数据库，不迁移其业务数据。
 - 从 GitHub 最新状态推进开发及云环境部署。
 
@@ -19,11 +19,11 @@
 ## 本地 Test 实施与验证
 
 - `.env` 原配置备份到仓库外 `coffeebear-8000-data/config-backups/`，备份权限 0600。
-- `APP_ENV=staging`、`RELEASE_CHANNEL=candidate`；staging 为现有代码兼容值，语义为 Test。
+- 本机验证曾使用 `APP_ENV=staging`、`RELEASE_CHANNEL=candidate`；这些标识不用于 Cloud Run Production。
 - 保留现有 Docker 数据卷和附件目录。数据库名称仍为 `coffeebear_prod`，这是历史命名，不代表现在是正式环境。
 - Docker Compose 配置验证通过。
-- API、worker、beat 已以 Test 标识重建启动；PostgreSQL / Redis 保持原实例。
-- `/healthz` 返回 200，显示 Test 兼容标识。
+- API、worker、beat 已在本机验证；PostgreSQL / Redis 保持原实例。
+- `/healthz` 返回 200，本机验证使用独立标识。
 - `/api/v1/purchase/orders`、`/api/v1/inventory/stocktakes`、`/api/v1/finance/entries`、`/api/v1/dashboard/inventory` 返回 200。
 - `/finance`、`/supply-chain` 静态页面返回 200。
 - 数据库 `SELECT 1` 成功；Alembic current / heads 均为 `domfin20261009`，`alembic check` 无新增升级操作。
