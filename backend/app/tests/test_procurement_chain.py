@@ -1020,8 +1020,9 @@ def test_chain_verification_stage_requires_all_invoices_verified():
     assert "1/2" in verified_stage["detail"]
 
 
-def test_days_apart_preserves_ordered_signed_difference():
+def test_signed_days_apart_preserves_ordered_difference():
     order_time = datetime(2026, 8, 1, tzinfo=timezone.utc)
     invoice_time = datetime(2025, 10, 5, tzinfo=timezone.utc)
 
-    assert service._days_apart(order_time, invoice_time) == -300
+    assert service._signed_days_apart(order_time, invoice_time) == -300
+    assert service._days_apart(order_time, invoice_time) == 300

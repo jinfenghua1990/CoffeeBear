@@ -150,6 +150,18 @@ def order_time(order: Alibaba1688Order) -> datetime | None:
 
 
 def _days_apart(a: datetime | None, b: datetime | None) -> float | None:
+    """两日期的绝对间隔；普通候选排序使用，不表达先后方向。"""
+    if a is None or b is None:
+        return None
+    try:
+        return abs((a - b).total_seconds()) / 86400
+    except TypeError:
+        # 测试或历史导入可能混有 naive/aware 时间；仅比较墙上时间，不推断时区。
+        return abs((a.replace(tzinfo=None) - b.replace(tzinfo=None)).total_seconds()) / 86400
+
+
+def _signed_days_apart(a: datetime | None, b: datetime | None) -> float | None:
+    """相对方向的日期差：b 晚于 a 为正，早于 a 为负。"""
     if a is None or b is None:
         return None
     try:
@@ -643,7 +655,7 @@ class ProcurementChainMatcher:
         candidates: list[tuple[float, Decimal, Alibaba1688Order]] = []
         for order in orders:
             payment = parse_decimal(order.actual_payment)
-            days = _days_apart(order_time(order), target_date)
+            days = _signed_days_apart(order_time(order), target_date)
             if (
                 normalize_name(order.seller_company_name) != supplier
                 or payment is None
