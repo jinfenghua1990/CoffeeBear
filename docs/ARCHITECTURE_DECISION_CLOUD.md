@@ -13,7 +13,7 @@ CoffeeBear 与 ALSVID 属于两个独立业务系统：
 | 业务 | 国内经营系统 | 国际自行车品牌平台 |
 | 软件运行 | Render | Google Cloud Run |
 | 数据库 | Supabase PostgreSQL | Neon PostgreSQL |
-| 对象存储 | Cloudflare R2 | Cloudflare R2 |
+| 对象存储 | Backblaze B2 | Cloudflare R2 |
 | 业务资源 | 独立 | 独立 |
 
 ## CoffeeBear Production 架构
@@ -29,41 +29,48 @@ CoffeeBear Application
   |
   +--> Supabase PostgreSQL
   |
-  +--> Cloudflare R2
+  +--> Backblaze B2
 ```
 
-## Cloudflare R2 资源规则
+## 对象存储资源规则
 
-CoffeeBear 与 ALSVID 可以共同使用 Cloudflare R2 服务平台，但必须使用独立 Bucket。
+CoffeeBear 与 ALSVID 根据业务访问场景选择不同对象存储方案。
 
-推荐结构：
+### CoffeeBear
 
-```text
-Cloudflare Account
-        |
-        +----------------+
-        |                |
-        v                v
-CoffeeBear R2       ALSVID R2
-Bucket              Bucket
+使用：Backblaze B2
 
-coffeebear-prod     alsvid-prod
-```
+用途：
 
-规则：
-
-- 可以共用 Cloudflare 管理账号
-- 必须独立 Bucket
-- 必须独立 Access Key / Secret
-- 不共享文件路径空间
-- 不混用业务文件
+- 发票
+- 合同
+- 采购附件
+- 财务资料
+- 业务文档
+- 内部文件归档
 
 原因：
 
-- 保持业务数据隔离
-- 避免误删除风险
-- 方便权限控制
-- 保留未来独立运营、拆分或迁移能力
+- 主要为业务存储和归档
+- 高频公开访问需求低
+- S3 兼容，方便未来迁移
+- 控制长期存储成本
+
+### ALSVID
+
+使用：Cloudflare R2
+
+用途：
+
+- 产品图片
+- 车辆资料
+- 售后照片
+- 国际访问文件
+
+原因：
+
+- 面向国际访问场景
+- 适合图片和公开资源分发
 
 ## 资源隔离规则
 
@@ -80,7 +87,7 @@ CoffeeBear 与 ALSVID 可以采用相同的工程规范，但生产业务资源�
 
 - 支持 Docker 部署
 - 降低服务器维护成本
-- 适合当前阶段业务规模
+- 适合 CoffeeBear 当前阶段业务规模
 
 ### Supabase PostgreSQL
 
@@ -88,12 +95,17 @@ CoffeeBear 与 ALSVID 可以采用相同的工程规范，但生产业务资源�
 - 提供托管能力
 - 适合 CoffeeBear 业务数据模型
 
+### Backblaze B2
+
+- 用于 CoffeeBear 业务文件存储
+- 支持 S3 API
+- 适合长期低成本文件保存
+
 ### Cloudflare R2
 
-- 保存图片、附件、业务文件
-- 与数据库分离
+- 用于 ALSVID 国际业务文件
+- 适合图片、产品资料等访问场景
 - 保持 S3 兼容迁移能力
-- 两个业务系统共用服务平台，但使用独立 Bucket
 
 ## 后续要求
 
