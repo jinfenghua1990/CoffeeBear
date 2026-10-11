@@ -373,7 +373,19 @@ def _parse_xlsx(content: bytes, *, max_rows: int) -> tuple[
                 continue
             if not detail_headers:
                 detail_headers = current_headers
-            detail_rows.extend(current_rows)
+            detail_mapping = resolve_mapping(current_headers)
+            detail_total_markers = {"合计行", "总计", "合计"}
+            for row in current_rows:
+                invoice_code = row.get(detail_mapping.get("invoice_code", ""), "")
+                invoice_number = row.get(detail_mapping.get("invoice_number", ""), "")
+                row_text = " ".join(row.values())
+                is_total = any(token in row_text for token in detail_total_markers) and (
+                    (not invoice_code and not invoice_number)
+                    or invoice_code in detail_total_markers
+                    or invoice_number in detail_total_markers
+                )
+                if not is_total:
+                    detail_rows.append(row)
             detail_sheet_names.append(worksheet.title)
     finally:
         workbook.close()

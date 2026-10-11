@@ -153,10 +153,10 @@ def _days_apart(a: datetime | None, b: datetime | None) -> float | None:
     if a is None or b is None:
         return None
     try:
-        return abs((a - b).total_seconds()) / 86400
+        return (b - a).total_seconds() / 86400
     except TypeError:
         # 测试或历史导入可能混有 naive/aware 时间；仅比较墙上时间，不推断时区。
-        return abs((a.replace(tzinfo=None) - b.replace(tzinfo=None)).total_seconds()) / 86400
+        return (b.replace(tzinfo=None) - a.replace(tzinfo=None)).total_seconds() / 86400
 
 
 def _document_order_refs(raw: dict | None) -> set[str]:

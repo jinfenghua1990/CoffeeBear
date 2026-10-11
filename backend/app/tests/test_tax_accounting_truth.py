@@ -149,3 +149,38 @@ def test_missing_invoice_detail_never_falls_back_to_business_quantity_or_price(d
     assert item["quantityDifference"] is None
     assert item["businessDataRole"] == "reconciliation_only"
     assert any("禁止用吉客云/手工数据替代" in reason for reason in ledger["blockers"][0]["reasons"])
+
+
+def test_monthly_ledger_excludes_deleted_import_row(db_session):
+    from app.models.tax import TaxInvoice, TaxInvoiceImportRecord
+
+    batch = _batch(db_session)
+    invoice = TaxInvoice(
+        invoice_key=f"pytest-deleted|{uuid4().hex}",
+        invoice_number=f"INV-DELETED-{uuid4().hex[:8]}",
+        direction="output",
+        status="issued",
+        issue_date=datetime(2026, 8, 15, tzinfo=timezone.utc),
+        amount_excl_tax=Decimal("100.00"),
+        tax_amount=Decimal("13.00"),
+        total_amount=Decimal("113.00"),
+        source_system="tax_export",
+        source_import_id=batch.id,
+        source_row_index=1,
+    )
+    db_session.add(invoice)
+    db_session.flush()
+    db_session.add(TaxInvoiceImportRecord(
+        import_id=batch.id,
+        row_index=1,
+        invoice_id=invoice.id,
+        recognition_status="recognized",
+        row_status="deleted",
+    ))
+    db_session.flush()
+
+    ledger = monthly_ledger(db_session, 2026, 8)
+
+    assert ledger["summary"]["invoiceCount"] == 0
+    assert ledger["summary"]["outputTaxAmount"] == "0.00"
+    assert ledger["summary"]["outputTotalAmount"] == "0.00"

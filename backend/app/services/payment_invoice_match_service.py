@@ -459,6 +459,8 @@ def overview(db: Session, year: int, month: int) -> dict[str, Any]:
             BankTransaction.direction == "out",
         )
         .order_by(BankTransaction.txn_date, BankTransaction.id)
+        .execution_options(populate_existing=True)
+        .with_for_update()
         .all()
     )
     txn_ids = [txn.id for txn in txns]
@@ -1186,6 +1188,9 @@ def auto_match(db: Session, year: int, month: int, actor: str = "system") -> dic
     invoices = (
         db.query(TaxInvoice)
         .filter(TaxInvoice.direction == "input")
+        .order_by(TaxInvoice.id)
+        .execution_options(populate_existing=True)
+        .with_for_update()
         .all()
     )
     # 整批共享一次红冲上下文；此前逐票重算会让自动匹配的每张候选票都全表扫一遍。

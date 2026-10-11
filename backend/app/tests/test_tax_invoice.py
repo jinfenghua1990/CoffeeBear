@@ -1514,3 +1514,28 @@ def test_duplicate_1688_alias_history_is_needs_review_in_cache_and_live_view(db_
     assert payload["businessMatchStatus"] == "needs_review"
     assert payload["duplicateLogicalLinkCount"] == 1
     assert "重复业务链接" in payload["businessMatchException"]
+
+
+def test_tax_xlsx_ignores_detail_sheet_total_row():
+    from openpyxl import Workbook
+
+    workbook = Workbook()
+    base = workbook.active
+    base.title = "发票基础信息"
+    base.append(["发票号码", "开票日期", "销售方名称", "购买方名称", "金额", "税额", "价税合计"])
+    base.append(["INV-DETAIL-001", "2026-09-01", "供应商甲", "本公司", 100, 13, 113])
+
+    detail = workbook.create_sheet("发票明细")
+    detail.append(["发票号码", "货物或应税劳务、服务名称", "数量", "单价", "金额", "税额"])
+    detail.append(["INV-DETAIL-001", "咖啡豆", 1, 100, 100, 13])
+    detail.append([None, "合计行", None, None, 100, 13])
+
+    output = BytesIO()
+    workbook.save(output)
+    workbook.close()
+
+    parsed = parse_tax_invoice_export(output.getvalue(), "tax-detail.xlsx", max_rows=100)
+
+    assert len(parsed.rows) == 1
+    assert len(parsed.detail_rows) == 1
+    assert parsed.detail_rows[0]["发票号码"] == "INV-DETAIL-001"
