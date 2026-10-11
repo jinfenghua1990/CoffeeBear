@@ -14,7 +14,7 @@
 - 当前云架构决策：Google Cloud Run（Docker）+ Supabase PostgreSQL；Backblaze B2 暂不启用。其他长期文档仍有旧方案说明，需要随实际部署更新。
 - PR #24 未合并，最新 head：`a5e831326a95bb92e5e8812394d291b589b492cc`。该提交 CI run `38109541276` 和 Release Policy run `38109541245` 均成功。
 - 对最新 main 与 PR head 执行 `git merge-tree --write-tree` 成功，无当前 Git 文本合并冲突；未执行实际合并。
-- 本地已有未跟踪 `docker-compose.override.yml`，用于把 8000 固定为本地 Test 入口；旧 Render 草稿不纳入本次部署方案。
+- 本地已有未跟踪 `docker-compose.override.yml`，用于把 8000 固定为部署前验证入口；旧 Render 草稿不纳入本次部署方案。
 
 ## 本地 Test 实施与验证
 
