@@ -459,8 +459,6 @@ def overview(db: Session, year: int, month: int) -> dict[str, Any]:
             BankTransaction.direction == "out",
         )
         .order_by(BankTransaction.txn_date, BankTransaction.id)
-        .execution_options(populate_existing=True)
-        .with_for_update()
         .all()
     )
     txn_ids = [txn.id for txn in txns]
@@ -1180,6 +1178,8 @@ def auto_match(db: Session, year: int, month: int, actor: str = "system") -> dic
             BankTransaction.direction == "out",
         )
         .order_by(BankTransaction.txn_date, BankTransaction.id)
+        .execution_options(populate_existing=True)
+        .with_for_update()
         .all()
     )
     if not txns:
