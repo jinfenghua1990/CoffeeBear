@@ -15,7 +15,7 @@
 
 ### Issue #20 — main 分支保护、仓库公开状态与仓库简介
 
-**状态：待维护者确认**
+**状态：维护者已确认；平台设置阻塞**
 
 已确认事实：
 
@@ -31,11 +31,11 @@
 4. 是否把仓库简介更新为“Test + Production 两环境 + 统一 8000 端口”；
 5. CoffeeBear 是否继续保持 Public，还是改为 Private。
 
-在确认前，AI 不得自行改变仓库可见性或强制提交流程。
+平台设置仍待具备对应 GitHub 管理接口后执行；在此之前不宣称已启用保护或改为 Private。
 
 ### Issue #21 — sandbox / 旧 hotfix / 历史分支清理
 
-**状态：待维护者确认**
+**状态：维护者已确认；sandbox 删除阻塞**
 
 已完成分支审计：
 
@@ -45,11 +45,11 @@
 - `archive/develop` 与当前 main 无共同祖先，属于历史 / 迁移 lineage；不自动删除
 - 另有多批旧 feature / hotfix / backup 分支，需要按“是否已合入、是否有独有 commit、是否仍承担回滚/归档用途”逐个处理
 
-等待维护者确认：
+维护者已确认，当前执行结果：
 
-1. 是否删除已确认无独有 commit 的 `sandbox`；
-2. 是否按审计结果清理已关闭 / 已被 main 替代的 feature、hotfix；
-3. backup / archive 分支保留周期，以及是否改为 tag 后删除 branch。
+1. `sandbox` 已确认可删除，但当前工具没有删除远程分支接口，尚未执行；
+2. 旧 feature/hotfix 继续逐个审计，不批量删除；
+3. backup/archive 按确认策略保留周期、转 tag 后再决定删 branch。
 
 ### Issue #18 — Docker 正式发布基线加固
 
