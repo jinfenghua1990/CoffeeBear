@@ -4,6 +4,14 @@
 
 CoffeeBear 是 **卖咖啡的熊中国国内业务** 的唯一长期业务仓库。它负责国内采购、库存、销售、物流、银行、税务、财务与月结，不再承载 ALSVID、自行车出口、欧洲经销商或外贸运行时。
 
+## 当前治理状态
+
+- 环境模型：Test + Production 两环境，统一业务端口 8000。
+- Issue #20：维护者已确认 main 分支保护、PR 合并、关键 CI、禁止 force push/删除 main、管理员应急绕过；仓库简介更新为上述两环境与端口；仓库建议改为 Private。
+- Issue #21：维护者已确认 sandbox/历史分支清理策略。
+- 最新核对：仓库仍为 Public、main 未受保护；当前连接缺少仓库设置和远程分支删除写入接口，因此这些平台动作仍未执行。
+- Issue #18：真实 Docker Test 实机验收仍阻塞，保持 Open。
+
 ## AI Agent / Robot 协作规则
 
 CoffeeBear 采用 GitHub 作为项目事实来源（Single Source of Truth）。
