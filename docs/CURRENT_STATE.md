@@ -36,14 +36,18 @@ ALSVID 自行车、欧洲经销商、出口、国际物流与欧盟税费不属�
 机器人进入项目时必须优先阅读：
 
 1. `README.md`
-2. `.github/AGENTS.md`
-3. `docs/CURRENT_STATE.md`
-4. `docs/ACTIVE_WORK.md`
-5. `docs/DECISIONS.md`
-6. `docs/ENVIRONMENT.md`
-7. `docs/DEPLOYMENT.md`
-8. `docs/DATABASE.md`
-9. 与任务相关的 Open Issues / Pull Requests
+2. 根目录 `AGENTS.md`
+3. `.github/AGENTS.md`
+4. `docs/AI-INSTRUCTIONS.md`
+5. `docs/ARCHITECTURE.md`
+6. `docs/CURRENT_STATE.md`
+7. `docs/ACTIVE_WORK.md`
+8. `docs/DECISIONS.md`
+9. `docs/ENVIRONMENT.md`
+10. `docs/DEPLOYMENT.md`
+11. `docs/DATABASE.md`
+12. 与任务相关的 Open Issues / Pull Requests
+13. 最新 main 上的真实代码与配置
 
 ## 3. 环境模型
 
@@ -53,39 +57,70 @@ CoffeeBear 已确认只维护两套环境：
 
 当前目标形态：
 
-- M1 Mac + Docker
+- M1 Mac + Docker / 本地受控验证
 - 功能验证
 - Docker 构建与运行验证
 - 数据库迁移验证
 - 发布前检查
-- 使用非生产数据库与非生产对象存储资源
+- 使用非生产数据库、非生产对象存储 / 备份命名空间与非生产密钥
 
 ### Production（正式环境）
 
 - 唯一正式业务运行环境
-- 使用正式数据库、正式对象存储与正式密钥
+- 使用正式数据库、正式对象存储 / 备份资源与正式密钥
 - 仓库当前包含 `deploy/zspace/` 下的 Production Docker 编排与示例配置
 
-明确禁止默认引入独立 Staging 环境或 Dev / Staging / Production 三环境模型。
+明确禁止默认引入独立长期 Staging 环境或 Dev / Staging / Production 三环境模型。
+
+代码中历史存在的 `APP_ENV=staging/development` 仅作为 Test 内部兼容运行值，不代表第三套长期环境。
 
 完整规则见 `docs/ENVIRONMENT.md`。
 
-## 4. 当前部署状态
+## 4. 当前 Docker / 发布状态
 
-仓库已经具备 Docker / GHCR 正式发布基础，但正式发布基线仍有已知工作正在处理。
+### 已完成：配置与 CI 发布基线
 
-当前 Open Issue #18 已确认至少需要完成：
+Issue #18 的代码 / 配置 / CI 加固已经完成：
 
-- 修正 `deploy/zspace/production.env.example` 中历史镜像名称
-- Production 候选镜像增加 `linux/arm64`，与 `linux/amd64` 一起构建
-- 增加静态回归检查，防止镜像名和平台配置退化
-- 更新 Docker 部署文档并完成真实 Docker 环境最终验收
+- Production 示例镜像已改为 `ghcr.io/jinfenghua1990/coffeebear:stable`
+- Test Docker 示例已统一为 `deploy/zspace/test.env.example`
+- 旧 `deploy/zspace/staging.env.example` 已删除
+- 候选镜像配置同时支持 `linux/amd64` 与 `linux/arm64`
+- CI 已加入旧镜像名、单架构配置和旧 staging 文件的防回退检查
+- ZSpace / Docker / 基础设施文档已统一到 Test + Production 两环境语义
+- 旧 PR #19 已关闭，避免旧分支覆盖当前 main
 
-因此当前状态应理解为：
+GitHub Actions CI run #75（commit `281ba198bcd8ef1bd3fd1792e1b71ce0627a41da`）已经全部通过：
 
-**Docker 正式部署框架已经存在，但 Production 发布基线仍在加固中。**
+- Frontend typecheck + production static build：通过
+- Release configuration policy：通过
+- Docker Compose topology：通过
+- Unified production image build：通过
+- Alembic migration + drift check：通过
+- 备份 / 恢复演练：通过
+- 目标回归测试 + 全量 backend pytest：通过
+- Pyflakes debt budget：通过
 
-不要把 Issue #18 未完成事项描述为已经验收通过。
+### 仍未完成：真实 Docker Test 实机验收
+
+不能因为 CI 全绿就宣称 Production 已真实运行验收。
+
+Issue #18 仍需在具备 Docker 的真实 Test 机器完成：
+
+- 使用 `deploy/zspace/test.env.example` 准备实际 Test `.env`
+- 实机 `docker compose config`
+- 启动 PostgreSQL / Redis
+- 执行 `db-roles`（如需要）
+- 执行真实 Alembic migration
+- 启动 API / worker / beat
+- `/healthz` 健康检查
+- 采购、库存、财务等核心业务 smoke test
+- 确认 GHCR 候选 manifest 可真实拉取 amd64 + arm64
+- 记录镜像 SHA / 版本号 / 验收结果 / 回滚点
+
+因此当前准确表述是：
+
+**Docker 配置与 CI 发布基线已通过；真实 Docker Test 运行验收仍待执行。**
 
 ## 5. 数据库原则
 
@@ -93,13 +128,33 @@ CoffeeBear 使用 PostgreSQL，迁移工具为 Alembic。
 
 数据库变更必须遵循：
 
-代码 / 模型变更 → 生成或编写迁移 → Test 验证 → 备份 / 风险检查 → Production 迁移。
+代码 / 模型变更 → 生成或编写 migration → Test 验证 → 备份 / 风险检查 → Production migration。
 
 禁止把“直接手工修改正式数据库”作为正常开发流程。
 
 详细规则见 `docs/DATABASE.md`。
 
-## 6. 当前工作入口
+## 6. 当前治理待确认事项
+
+### Issue #20
+
+等待维护者确认：
+
+- main 是否开启 GitHub 分支保护
+- 是否要求关键 CI 通过后才能进入 main
+- 是否保留维护者应急绕过权限
+- 仓库简介是否更新掉旧“8000 Production + 8001 sandbox”描述
+- CoffeeBear 仓库继续 Public 还是改为 Private
+
+在确认前，AI 不得自行改变仓库可见性或强制提交流程。
+
+### Issue #21
+
+等待维护者确认历史分支清理策略。
+
+已核实 `sandbox` 没有独有 commit，是 main 的祖先；其他旧 hotfix / running-state / archive / backup 分支需要按是否有独有 commit 和归档价值分别处理，禁止批量盲删。
+
+## 7. 当前工作入口
 
 当前正在处理和待完成事项统一看：
 
@@ -109,7 +164,7 @@ CoffeeBear 使用 PostgreSQL，迁移工具为 Alembic。
 
 如果二者冲突，以 GitHub 当前 Issue / PR 的真实状态为准，并同步修正 `ACTIVE_WORK.md`。
 
-## 7. 本文件维护规则
+## 8. 本文件维护规则
 
 发生以下变化时必须同步更新本文件：
 

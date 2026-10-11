@@ -33,9 +33,27 @@
 
 在确认前，AI 不得自行改变仓库可见性或强制提交流程。
 
+### Issue #21 — sandbox / 旧 hotfix / 历史分支清理
+
+**状态：待维护者确认**
+
+已完成分支审计：
+
+- `sandbox` 是 main 的祖先，main 已比它前进 43 个 commit，`sandbox` 没有独有 commit；从 Git 历史角度可安全删除分支指针
+- `hotfix/docker-release-baseline` 与 main 已 diverged，仍有 1 个独有 commit；不自动删除
+- `running-state-20261009` 与 main diverged，仍有 1 个独有 commit；不自动删除
+- `archive/develop` 与当前 main 无共同祖先，属于历史 / 迁移 lineage；不自动删除
+- 另有多批旧 feature / hotfix / backup 分支，需要按“是否已合入、是否有独有 commit、是否仍承担回滚/归档用途”逐个处理
+
+等待维护者确认：
+
+1. 是否删除已确认无独有 commit 的 `sandbox`；
+2. 是否按审计结果清理已关闭 / 已被 main 替代的 feature、hotfix；
+3. backup / archive 分支保留周期，以及是否改为 tag 后删除 branch。
+
 ### Issue #18 — Docker 正式发布基线加固
 
-**状态：配置 / CI 基线完成；真实 Docker Test 验收阻塞**
+**状态：配置 / CI 基线已完成；真实 Docker Test 验收阻塞**
 
 已经完成：
 
@@ -45,22 +63,23 @@
 - ✅ 候选镜像同时构建 `linux/amd64` 与 `linux/arm64`
 - ✅ CI 增加发布配置防回退检查
 - ✅ Docker / ZSpace / 基础设施文档统一 Test + Production 语义
-- ✅ 旧 PR #19 已关闭，避免旧分支覆盖当前 main；其原始 CI 曾通过
+- ✅ 旧 PR #19 已关闭，避免旧分支覆盖当前 main
+- ✅ GitHub Actions CI run #75 全部通过：Frontend、Deployment image、Compose、Alembic migration、migration drift、备份恢复、目标测试、全量 backend pytest、pyflakes budget 均通过
 
 仍未完成：
 
 - ⏳ 在具备 Docker 的真实 Test 环境运行 Compose
-- ⏳ 实际执行数据库 migration
+- ⏳ 实际执行真实 Test 数据库 migration
 - ⏳ `/healthz` 健康检查
 - ⏳ 采购、库存、财务等核心业务 smoke test
 - ⏳ 确认 GHCR 多架构 manifest 真实生成并可拉取
-- ⏳ 将实际镜像 SHA、验证结果和回滚点写回 Issue #18
+- ⏳ 将实际镜像 SHA、版本、验证结果和回滚点写回 Issue #18
 
 因此 #18 暂不关闭。
 
 注意：
 
-- 当前系统更新器属于 Git / 原生运行模式，不能直接在容器内开启
+- 当前系统更新器属于 Git / 原生运行模式，不能直接在业务容器内开启
 - 不应为了后台【更新】按钮而直接把 Docker socket 暴露给业务容器
 - 容器化自动更新需要单独设计与确认
 

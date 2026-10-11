@@ -11,14 +11,18 @@ CoffeeBear 采用 GitHub 作为项目事实来源（Single Source of Truth）。
 任何 AI Agent、Review Bot、自动化机器人或开发机器人在修改项目之前，必须优先阅读：
 
 1. `README.md`
-2. `.github/AGENTS.md`
-3. `docs/CURRENT_STATE.md`
-4. `docs/ACTIVE_WORK.md`
-5. `docs/DECISIONS.md`
-6. `docs/ENVIRONMENT.md`
-7. `docs/DEPLOYMENT.md`
-8. `docs/DATABASE.md`
-9. 与任务相关的 Open Issues / Pull Requests
+2. 根目录 `AGENTS.md`
+3. `.github/AGENTS.md`
+4. `docs/AI-INSTRUCTIONS.md`
+5. `docs/ARCHITECTURE.md`
+6. `docs/CURRENT_STATE.md`
+7. `docs/ACTIVE_WORK.md`
+8. `docs/DECISIONS.md`
+9. `docs/ENVIRONMENT.md`
+10. `docs/DEPLOYMENT.md`
+11. `docs/DATABASE.md`
+12. 与任务相关的 Open Issues / Pull Requests
+13. 最新 `main` 上的真实代码与配置
 
 重要规则：
 
@@ -32,7 +36,10 @@ CoffeeBear 采用 GitHub 作为项目事实来源（Single Source of Truth）。
 
 ### 项目治理文档导航
 
-- `.github/AGENTS.md`：机器人强制工作规则
+- 根 `AGENTS.md`：全仓库最高优先级 AI / Coding Agent 项目规则之一
+- `.github/AGENTS.md`：GitHub / 自动化机器人协作规则
+- `docs/AI-INSTRUCTIONS.md`：CoffeeBear 运行与开发硬性约束
+- `docs/ARCHITECTURE.md`：系统架构基线
 - `docs/CURRENT_STATE.md`：当前项目真实状态
 - `docs/ACTIVE_WORK.md`：正在进行和待处理的工作
 - `docs/AGENT_WORKFLOW.md`：机器人标准工作与记录流程
