@@ -78,7 +78,7 @@ CoffeeBear 已确认只维护两套环境：
 
 ## 4. 当前 Docker / 发布状态
 
-### 已完成：配置与 CI 发布基线
+### 已完成：配置、CI 与 GHCR 双架构发布基线
 
 Issue #18 的代码 / 配置 / CI 加固已经完成：
 
@@ -101,26 +101,36 @@ GitHub Actions CI run #75（commit `281ba198bcd8ef1bd3fd1792e1b71ce0627a41da`）
 - 目标回归测试 + 全量 backend pytest：通过
 - Pyflakes debt budget：通过
 
-### 仍未完成：真实 Docker Test 实机验收
+GHCR 双架构镜像也已经有真实构建与推送成功证据：
 
-不能因为 CI 全绿就宣称 Production 已真实运行验收。
+- Container Candidate run：`38074782735`
+- 镜像：`ghcr.io/jinfenghua1990/coffeebear:sha-3fc6b09e346791f972ad5ac1be5d0447bbef9537`
+- Manifest digest：`sha256:3e2eba9b5251a24e604127f0eac84dae6e71b5c6229654f9245e45929482e7aa`
+- 构建日志确认包含 `linux/amd64` 与 `linux/arm64`
+
+因此“多架构镜像能否真实构建并推送到 GHCR”已经验证完成。
+
+### 仍未完成：真实 Docker Test 目标主机验收
+
+不能因为 CI 全绿、GHCR 多架构镜像已推送，就宣称 Production 已真实运行验收。
 
 Issue #18 仍需在具备 Docker 的真实 Test 机器完成：
 
 - 使用 `deploy/zspace/test.env.example` 准备实际 Test `.env`
 - 实机 `docker compose config`
+- 在目标 Test 主机从 GHCR 实际拉取候选镜像
 - 启动 PostgreSQL / Redis
 - 执行 `db-roles`（如需要）
 - 执行真实 Alembic migration
 - 启动 API / worker / beat
 - `/healthz` 健康检查
 - 采购、库存、财务等核心业务 smoke test
-- 确认 GHCR 候选 manifest 可真实拉取 amd64 + arm64
+- 确认目标主机能自动选择并运行正确架构镜像
 - 记录镜像 SHA / 版本号 / 验收结果 / 回滚点
 
 因此当前准确表述是：
 
-**Docker 配置与 CI 发布基线已通过；真实 Docker Test 运行验收仍待执行。**
+**Docker 配置、CI 与 GHCR 双架构发布基线已通过；真实 Docker Test 目标主机运行验收仍待执行。**
 
 ## 5. 数据库原则
 

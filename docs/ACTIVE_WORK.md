@@ -53,7 +53,7 @@
 
 ### Issue #18 — Docker 正式发布基线加固
 
-**状态：配置 / CI 基线已完成；真实 Docker Test 验收阻塞**
+**状态：配置 / CI / GHCR 双架构基线已完成；真实 Docker Test 目标主机验收阻塞**
 
 已经完成：
 
@@ -65,14 +65,18 @@
 - ✅ Docker / ZSpace / 基础设施文档统一 Test + Production 语义
 - ✅ 旧 PR #19 已关闭，避免旧分支覆盖当前 main
 - ✅ GitHub Actions CI run #75 全部通过：Frontend、Deployment image、Compose、Alembic migration、migration drift、备份恢复、目标测试、全量 backend pytest、pyflakes budget 均通过
+- ✅ GHCR 双架构镜像真实构建并推送成功：Container Candidate run `38074782735`
+- ✅ 镜像 `ghcr.io/jinfenghua1990/coffeebear:sha-3fc6b09e346791f972ad5ac1be5d0447bbef9537`
+- ✅ Manifest digest：`sha256:3e2eba9b5251a24e604127f0eac84dae6e71b5c6229654f9245e45929482e7aa`
 
 仍未完成：
 
-- ⏳ 在具备 Docker 的真实 Test 环境运行 Compose
+- ⏳ 在具备 Docker 的真实 Test 目标主机运行 Compose
+- ⏳ 从 GHCR 在目标 Test 主机实际拉取候选镜像
 - ⏳ 实际执行真实 Test 数据库 migration
 - ⏳ `/healthz` 健康检查
 - ⏳ 采购、库存、财务等核心业务 smoke test
-- ⏳ 确认 GHCR 多架构 manifest 真实生成并可拉取
+- ⏳ 确认目标主机能自动选择并运行正确架构镜像
 - ⏳ 将实际镜像 SHA、版本、验证结果和回滚点写回 Issue #18
 
 因此 #18 暂不关闭。
