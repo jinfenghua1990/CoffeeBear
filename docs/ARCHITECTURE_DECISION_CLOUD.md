@@ -32,6 +32,39 @@ CoffeeBear Application
   +--> Cloudflare R2
 ```
 
+## Cloudflare R2 资源规则
+
+CoffeeBear 与 ALSVID 可以共同使用 Cloudflare R2 服务平台，但必须使用独立 Bucket。
+
+推荐结构：
+
+```text
+Cloudflare Account
+        |
+        +----------------+
+        |                |
+        v                v
+CoffeeBear R2       ALSVID R2
+Bucket              Bucket
+
+coffeebear-prod     alsvid-prod
+```
+
+规则：
+
+- 可以共用 Cloudflare 管理账号
+- 必须独立 Bucket
+- 必须独立 Access Key / Secret
+- 不共享文件路径空间
+- 不混用业务文件
+
+原因：
+
+- 保持业务数据隔离
+- 避免误删除风险
+- 方便权限控制
+- 保留未来独立运营、拆分或迁移能力
+
 ## 资源隔离规则
 
 CoffeeBear 与 ALSVID 可以采用相同的工程规范，但生产业务资源必须保持独立：
@@ -60,6 +93,7 @@ CoffeeBear 与 ALSVID 可以采用相同的工程规范，但生产业务资源�
 - 保存图片、附件、业务文件
 - 与数据库分离
 - 保持 S3 兼容迁移能力
+- 两个业务系统共用服务平台，但使用独立 Bucket
 
 ## 后续要求
 
