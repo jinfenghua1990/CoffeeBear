@@ -91,3 +91,64 @@ def test_cross_year_logistics_bill_only_counts_current_year_share(monkeypatch):
 
     monkeypatch.setattr(logistics_service, "_shipped_count_range", fake_shipped_count)
     assert _actual_amount_for_year(object(), bill, 2026) == Decimal("300.00")
+
+
+def test_sales_outbound_partial_amounts_do_not_look_like_complete_totals(monkeypatch):
+    from datetime import datetime, timezone
+    from types import SimpleNamespace
+
+    from app.models.jackyun import JackyunGoodsDocument, JackyunGoodsDocumentItem
+    from app.services import sales_outbound_report_service as report_service
+
+    doc = SimpleNamespace(
+        id=7,
+        document_type="outbound",
+        document_at=datetime(2026, 9, 15, tzinfo=timezone.utc),
+        warehouse_name="主仓",
+        warehouse_code="W1",
+        goodsdoc_no="OUT-7",
+        company_name="测试公司",
+    )
+    items = [
+        SimpleNamespace(
+            line_no=1, quantity=Decimal("2"), amount_tax=Decimal("100.00"),
+            goods_no="SKU-1", sku_barcode="", goods_name="咖啡豆", unit_name="袋",
+        ),
+        SimpleNamespace(
+            line_no=2, quantity=Decimal("1"), amount_tax=None,
+            goods_no="SKU-2", sku_barcode="", goods_name="滤纸", unit_name="包",
+        ),
+    ]
+
+    class FakeQuery:
+        def __init__(self, rows):
+            self.rows = rows
+
+        def filter(self, *_args):
+            return self
+
+        def filter_by(self, **_kwargs):
+            return self
+
+        def order_by(self, *_args):
+            return self
+
+        def all(self):
+            return self.rows
+
+    class FakeDb:
+        def query(self, model):
+            if model is JackyunGoodsDocument:
+                return FakeQuery([doc])
+            if model is JackyunGoodsDocumentItem:
+                return FakeQuery(items)
+            raise AssertionError(f"unexpected model: {model}")
+
+    monkeypatch.setattr(report_service, "month_bounds", lambda *_args: (None, None))
+    result = report_service.build_report(FakeDb(), 2026, 9)
+
+    assert result["hasAmount"] is True
+    assert result["amountComplete"] is False
+    assert result["summary"]["totalAmount"] is None
+    assert result["byWarehouse"][0]["amount"] is None
+    assert all(row["amount"] is None for row in result["bySku"])

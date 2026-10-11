@@ -68,6 +68,8 @@ def build_report(db: Session, year: int, month: int) -> dict[str, Any]:
     total_qty = Decimal("0")
     total_amt = Decimal("0")
     has_amount = False
+    amount_row_count = 0
+    item_row_count = 0
 
     for d in docs:
         wh_name = d.warehouse_name or d.warehouse_code or "—"
@@ -86,10 +88,12 @@ def build_report(db: Session, year: int, month: int) -> dict[str, Any]:
             .all()
         )
         for it in items:
+            item_row_count += 1
             qty = it.quantity or Decimal("0")
             amt = it.amount_tax  # Excel 导入补全后才有值；否则 None
             if amt is not None:
                 has_amount = True
+                amount_row_count += 1
             total_qty += qty
             if amt is not None:
                 total_amt += amt
@@ -121,6 +125,7 @@ def build_report(db: Session, year: int, month: int) -> dict[str, Any]:
                 "amountTax": (str(amt) if amt is not None else ""),
             })
 
+    amount_complete = item_row_count > 0 and amount_row_count == item_row_count
     by_sku_list = sorted(by_sku.values(), key=lambda x: x["quantity"], reverse=True)
     by_wh_list = sorted(by_wh.values(), key=lambda x: x["quantity"], reverse=True)
 
@@ -129,10 +134,11 @@ def build_report(db: Session, year: int, month: int) -> dict[str, Any]:
         "month": month,
         "generatedAt": datetime.now(timezone.utc).isoformat(),
         "hasAmount": has_amount,
+        "amountComplete": amount_complete,
         "summary": {
             "docCount": len(docs),
             "totalQuantity": str(total_qty),
-            "totalAmount": (str(total_amt) if has_amount else None),
+            "totalAmount": (str(total_amt) if amount_complete else None),
             "skuCount": len(by_sku),
             "warehouseCount": len(by_wh),
         },
@@ -142,7 +148,7 @@ def build_report(db: Session, year: int, month: int) -> dict[str, Any]:
                 "warehouseCode": w["warehouseCode"],
                 "docCount": w["docCount"],
                 "quantity": str(w["quantity"]),
-                "amount": (str(w["amount"]) if has_amount else None),
+                "amount": (str(w["amount"]) if amount_complete else None),
             }
             for w in by_wh_list
         ],
@@ -152,7 +158,7 @@ def build_report(db: Session, year: int, month: int) -> dict[str, Any]:
                 "goodsName": s["goodsName"],
                 "quantity": str(s["quantity"]),
                 "docCount": s["docCount"],
-                "amount": (str(s["amount"]) if has_amount else None),
+                "amount": (str(s["amount"]) if amount_complete else None),
             }
             for s in by_sku_list
         ],
