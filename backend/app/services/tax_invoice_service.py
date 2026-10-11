@@ -999,7 +999,13 @@ def add_red_settlement(
     note: str = "",
     actor: str = "system",
 ) -> dict:
-    red = db.get(TaxInvoice, red_invoice_id)
+    red = (
+        db.query(TaxInvoice)
+        .filter(TaxInvoice.id == red_invoice_id)
+        .execution_options(populate_existing=True)
+        .with_for_update()
+        .first()
+    )
     if red is None:
         raise LookupError(f"tax_invoices #{red_invoice_id} 不存在")
     if _invoice_color(red) != "red":
@@ -1088,6 +1094,11 @@ def add_red_settlement(
             existing.confirmed = True
             existing.allocated_amount = value
             existing.note = note
+            link = existing
+        elif settlement_type in {RED_PERSONAL_REFUND_TARGET_TYPE, RED_OTHER_SETTLEMENT_TARGET_TYPE}:
+            existing.allocated_amount = Decimal(str(existing.allocated_amount or 0)) + value
+            if note:
+                existing.note = "；".join(part for part in (existing.note, note) if part)
             link = existing
         else:
             raise ValueError("该红冲结算对象已经登记")

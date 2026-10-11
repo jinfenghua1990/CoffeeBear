@@ -1539,3 +1539,43 @@ def test_tax_xlsx_ignores_detail_sheet_total_row():
     assert len(parsed.rows) == 1
     assert len(parsed.detail_rows) == 1
     assert parsed.detail_rows[0]["发票号码"] == "INV-DETAIL-001"
+
+
+def test_red_personal_and_other_settlements_accumulate(db_session):
+    from datetime import datetime, timezone
+    from app.models.tax import TaxInvoice, TaxInvoiceLink
+
+    token = uuid4().hex[:10]
+    red = TaxInvoice(
+        invoice_key=f"settle-accumulate-{token}",
+        invoice_number=f"R-ACC-{token}",
+        direction="input",
+        status="red",
+        issue_date=datetime(2026, 8, 2, tzinfo=timezone.utc),
+        seller_name="累加结算供应商",
+        total_amount=Decimal("-300.00"),
+        raw={"是否正数发票": "否"},
+    )
+    db_session.add(red)
+    db_session.commit()
+
+    for settlement_type in (
+        service.RED_PERSONAL_REFUND_TARGET_TYPE,
+        service.RED_OTHER_SETTLEMENT_TARGET_TYPE,
+    ):
+        first = service.add_red_settlement(
+            db_session, red.id, settlement_type, Decimal("40.00"),
+            note="第一笔", actor="pytest",
+        )
+        second = service.add_red_settlement(
+            db_session, red.id, settlement_type, Decimal("35.00"),
+            note="第二笔", actor="pytest",
+        )
+        link = db_session.query(TaxInvoiceLink).filter_by(
+            invoice_id=red.id, target_type=settlement_type, target_id=red.id,
+            match_method="manual", confirmed=True,
+        ).one()
+        assert Decimal(str(link.allocated_amount)) == Decimal("75.00")
+        assert "第一笔" in link.note and "第二笔" in link.note
+        assert Decimal(second["redSettlementRemainingAmount"]) == Decimal("225.00")
+        service.remove_red_settlement(db_session, red.id, link.id, actor="pytest")
