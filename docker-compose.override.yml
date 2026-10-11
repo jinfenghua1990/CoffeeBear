@@ -1,0 +1,6 @@
+# 本地 Docker 化 override（2026-10-10）
+# 8000 native 实例已删除，Docker 版接管 8000 端口（局域网可访问）。
+services:
+  api:
+    ports: !override
+      - "8000:8000"
