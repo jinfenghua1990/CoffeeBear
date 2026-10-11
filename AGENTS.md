@@ -1,160 +1,222 @@
-# AGENTS.md
+# CoffeeBear AI / Coding Agent 强制规则
 
-## Repository boundary — mandatory
+> 本文件位于仓库根目录，是代码机器人进入 CoffeeBear 时的最高优先级项目规则之一。适用于整个仓库。
 
-CoffeeBear is **DOMESTIC-only** and is the long-term source of truth for 卖咖啡的熊 China operations.
+## 一、仓库边界（强制）
 
-Keep here:
+CoffeeBear 只承载“卖咖啡的熊”中国国内业务，是国内经营系统长期事实来源。
+
+允许进入本仓库：
 
 - 1688
 - 吉客云 / JackYun
-- domestic procurement, inventory, production, sales and logistics
-- domestic banking, reconciliation, tax, finance and monthly delivery
+- 国内采购、库存、生产、销售、物流
+- 国内银行、对账、税务、财务、月结
 - Business Partner / Partner 360
-- domestic AR/AP Open Items
-- domestic marketplace/channel settlement
+- 国内应收 / 应付 Open Items
+- 国内电商平台 / 渠道结算
 
-Do **not** add or restore here:
+禁止新增或恢复：
 
-- ALSVID bicycle product/vehicle/dealer/after-sales runtime
-- Shopify/ALSVID OMS behavior
-- export inventory or Germany/Europe warehouse logic
-- international shipment, export/customs/import-compliance runtime
-- foreign-trade finance, import VAT, anti-dumping/countervailing duty or export-refund runtime
+- ALSVID 自行车产品、车辆、经销商、售后运行时
+- Shopify / ALSVID OMS
+- 出口库存、德国 / 欧洲仓库逻辑
+- 国际运输、出口报关、进口合规
+- 外贸财务、进口 VAT、反倾销 / 反补贴税、出口退税运行时
 
-Those belong to `jinfenghua1990/ALSVID`.
+这些属于 `jinfenghua1990/ALSVID`。
 
-`jinfenghua1990/ChaiBen-OS` is retired and may only be inspected for migration evidence or historical edge cases. Never copy its retired mixed architecture back into CoffeeBear.
+`jinfenghua1990/ChaiBen-OS` 已退休，只可用于迁移证据或历史边界核对，不得把旧的混合架构重新复制回 CoffeeBear。
 
-Historical CoffeeBear Alembic revisions may still mention foreign-trade/ALSVID tables for existing-database migration compatibility. Their existence does not grant runtime ownership. Do not delete or rewrite historical migration chains without an explicit production database baseline/cutover plan.
+历史 Alembic migration 中仍可能出现 ALSVID / 外贸表名，这是数据库升级历史，不代表当前运行时归属。没有明确 Production baseline / cutover 计划时不得删除或重写历史迁移链。
 
-## Scope
+## 二、GitHub 是唯一事实来源
 
-These instructions apply to the entire `CoffeeBear` repository.
+重要项目决策、当前状态和工作过程必须进入 GitHub。
 
-This repository is maintained through frequent, user-directed incremental changes. GitHub Actions minutes are limited, so every coding agent must minimize unnecessary commits, pushes, and CI executions while preserving correctness.
+禁止只依赖：
 
-## Mandatory Git / GitHub efficiency rules
+- 聊天历史
+- AI 记忆
+- 上一次会话总结
+- 没有回写仓库的口头结论
 
-### 1. One user change round = one commit / one push by default
+重要工作必须通过 Issue / PR / Commit / docs 留下可追溯记录。
 
-For one coherent user request or one continuous revision round:
+## 三、每次开工前必须读取
 
-- Inspect all relevant files first.
-- Plan the complete change set before writing.
-- Apply all related file changes together.
-- Create **one commit** for the whole change set.
-- Update/push the branch **once**.
+按顺序：
 
-Do **not** commit or push file-by-file.
+1. `README.md`
+2. 根目录 `AGENTS.md`（本文件）
+3. `.github/AGENTS.md`
+4. `docs/AI-INSTRUCTIONS.md`
+5. `docs/ARCHITECTURE.md`
+6. `docs/CURRENT_STATE.md`
+7. `docs/ACTIVE_WORK.md`
+8. `docs/DECISIONS.md`
+9. `docs/ENVIRONMENT.md`
+10. `docs/DEPLOYMENT.md`
+11. `docs/DATABASE.md`
+12. 与任务有关的其他 docs
+13. 相关 Open Issues / Pull Requests
+14. 最新 main 上的真实代码 / 配置
 
-Bad pattern:
+如果文档之间冲突，不得自行挑一个执行；先核对最新代码和 Issue，仍无法确定则创建 Issue 让维护者裁决。
 
-```text
-edit A -> commit/push
-edit B -> commit/push
-edit C -> commit/push
-```
+## 四、机器人过程记录强制要求
 
-Required pattern:
+除纯拼写等无业务含义的小修正外，重要任务必须记录：
 
-```text
-inspect A/B/C
-edit A/B/C
-validate
-one commit
-one push
-```
+- 检查了什么
+- 读取了哪些关键文件
+- 当前确认的事实
+- 修改了什么
+- 为什么修改
+- 执行了什么验证
+- 验证结果
+- 哪些验证受环境限制没有执行
+- 新发现的问题
+- 遗留风险 / 下一步
 
-### 2. Batch multi-file GitHub API writes
+禁止只有“已完成 / 已修复”而没有验证证据。
 
-When working through GitHub APIs/tools, avoid sequential `create_file` / `update_file` operations when each operation creates its own commit.
+## 五、不确定事项不得自行决定
 
-For multi-file changes, prefer a Git-data batching flow when available:
+以下内容不明确时必须先 Issue + 维护者确认：
 
-1. Read the target branch HEAD/tree.
-2. Create/update all required blobs.
-3. Create one tree containing all changes.
-4. Create one commit.
-5. Move/update the branch ref once.
+- 系统架构
+- 环境数量 / 用途
+- 数据归属 / 数据模型
+- 数据库重大设计
+- 部署策略
+- 权限 / 安全策略
+- 财务 / 税务 / 库存 / 订单核心规则
+- 业务事实来源
 
-The goal is one branch update for the entire change round.
+标准流程：
 
-### 3. Never use remote CI as an editing loop
+1. 写当前事实。
+2. 写方案 A / B（必要时更多）。
+3. 写各方案影响、风险、成本。
+4. 给出推荐方案和理由。
+5. 明确写“需要维护者确认什么”。
+6. 等待确认。
+7. 实施确认方案。
+8. 更新长期文档和工作记录。
 
-Do not make a small change, push, wait for CI, then make another small change repeatedly.
+## 六、环境规则（强制）
 
-Before the push:
+CoffeeBear 对外只维护两套环境：
 
-- inspect affected call sites and dependencies;
-- run or reason through the narrowest relevant checks available;
-- combine fixes found during review into the same pending change set;
-- only then push.
+- **Test**：开发 / 测试合并环境
+- **Production**：唯一正式业务运行环境
 
-If a first push has already happened and another correction is unavoidable, batch all remaining corrections into one follow-up commit rather than multiple micro-commits.
+禁止引入独立长期 Staging，除非先通过架构决策 Issue 并获得维护者明确批准。
 
-### 4. Be aware of duplicate workflow triggers
+代码中历史 `APP_ENV=staging/development` 可以暂时作为 Test 内部兼容运行值，但它们**不是第三套长期环境**。
 
-This repository may trigger workflows from both `push` and `pull_request`. A single branch update can therefore start multiple workflow runs.
+详见 `docs/ENVIRONMENT.md`。
 
-Before writing to a branch, assume that each push may be expensive.
+## 七、端口与系统形态
 
-Especially avoid repeated pushes to `develop` while a `develop -> main` pull request is open.
+- 整个业务系统只有一个公开应用端口：`8000`
+- FastAPI + Next.js 静态导出保持同端口
+- 新业务模块通过路由扩展
+- 不为业务模块新建 8001 / 8002 / 9001 等独立应用
+- 保持模块化单体，不因为“架构先进”擅自拆微服务
 
-### 5. Heavy CI is for validation, not exploration
+详见 `docs/ARCHITECTURE.md` 和 `docs/AI-INSTRUCTIONS.md`。
 
-Do not intentionally trigger full backend tests, frontend production builds, Docker image builds, database migration checks, backup/restore drills, or release workflows just to discover basic editing mistakes.
+## 八、数据库与敏感信息
 
-Use repository inspection and targeted validation first.
+涉及数据库必须遵守 `docs/DATABASE.md`：
 
-### 6. Do not create temporary Actions workflows for one-off code patches
+- Alembic 管理 schema 迁移
+- Test 先验证
+- Production 前确认备份 / 恢复路径
+- 不把手工改 Production schema 当正常流程
+- 不删除历史 migration 掩盖分叉
 
-Do not add disposable `.github/workflows/*.yml` files merely to execute a patch, script, or one-time edit.
+禁止提交真实：密码、Token、Cookie、API Key、数据库密钥、对象存储密钥、Production 管理员凭据。
 
-If a one-off workflow is truly necessary, it must be justified, narrowly scoped, and removed promptly. Prefer direct repository edits and normal code review.
+## 九、验证结论必须分级
 
-### 7. CI-skip policy
+严格区分：
 
-For documentation-only or agent-instruction-only commits that do not affect runtime behavior, tests, builds, deployment, migrations, security, or dependencies, a recognized GitHub Actions skip token such as `[skip ci]` may be used in the commit message to avoid wasting Actions minutes.
+- 已检查
+- 已修改
+- 静态验证通过
+- Test 实际运行验证通过
+- Production 真实验收通过
+- 部分完成
+- 阻塞
+- 待维护者确认
 
-Do **not** use CI skipping for:
+没有 Docker 的执行环境不能宣称 Docker 启动通过；没有进入 Production 就不能宣称 Production 已验收。
 
-- application code changes;
-- backend/frontend logic;
-- database models or migrations;
-- dependency changes;
-- Docker/deployment changes;
-- security-sensitive changes;
-- workflow changes that need validation.
+## 十、Git / GitHub 效率规则
 
-### 8. Preserve release safety
+GitHub Actions 分钟有限。一个连续的用户修改回合默认应：
 
-Reducing Actions usage must not mean bypassing important release checks.
+1. 先检查所有相关文件。
+2. 规划完整修改集合。
+3. 一次性修改相关文件。
+4. 在能力允许时只做一个 Commit / 一次 Push。
 
-The preferred model is:
+不要：
 
-- frequent development edits: batch locally/in one commit;
-- PR/merge/release boundary: run the appropriate complete validation;
-- production release: use the tested/promoted artifact path.
+- 文件改一个就 push 一次
+- 把远程 CI 当编辑器循环使用
+- 为一次小补丁临时创建 workflow
+- 为了触发 CI 反复 merge / rebase
 
-### 9. Avoid unnecessary branch churn
+通过 GitHub API 修改多个文件时，如果 Git-data 批处理能力可用，应优先使用 blob → tree → commit → ref 的单提交方式，而不是每个文件一个 commit。
 
-Do not create extra branches for tiny follow-up edits when the current task branch is appropriate.
+如果工具能力不支持批处理，应在工作记录中如实说明。
 
-Do not repeatedly merge/rebase solely to trigger checks.
+## 十一、CI 使用规则
 
-### 10. Final reporting
+重型 CI 用于验证，不用于探索基本编辑错误。
 
-After repository changes, report:
+Push 前优先做：
 
-- branch changed;
-- commit SHA;
-- whether the change was intentionally CI-skipped;
-- whether a workflow run is expected;
-- any remaining validation that belongs at PR/release time.
+- 调用点 / 依赖检查
+- 有条件时执行最小相关测试
+- 将同一轮发现的问题合并处理
 
-## Repository-specific reason
+文档 / 机器人规则专用提交且不影响运行时、部署、migration、安全、依赖时，可以使用 `[skip ci]`；应用代码、数据库、Docker、部署、依赖、安全相关修改禁止用 skip 绕过应有验证。
 
-On 2026-09-20, the repository had accumulated hundreds of workflow runs in the month, with repeated CI executions caused by high-frequency pushes and overlapping `push` / `pull_request` triggers. The operating rule above exists to prevent a single UI or business-logic revision from expanding into many redundant GitHub Actions runs.
+## 十二、分支和发布安全
 
-The user frequently makes iterative UI and business-logic requests. Preserve that fast interaction style; optimize the implementation process behind it instead of asking the user to bundle requests manually.
+- 开发修改尽量批量完成
+- PR / merge / release 边界执行完整验证
+- Production 使用经过测试 / 晋级的制品路径
+- 不创建无意义临时分支
+- 不为省 Actions 而绕过发布安全检查
+
+## 十三、完成任务前必须收尾
+
+检查是否需要更新：
+
+- 对应 Issue / PR
+- `docs/CURRENT_STATE.md`
+- `docs/ACTIVE_WORK.md`
+- `docs/DECISIONS.md`
+- `docs/ENVIRONMENT.md`
+- `docs/DEPLOYMENT.md`
+- `docs/DATABASE.md`
+
+最终报告至少说明：
+
+- 修改了什么
+- 对应 Commit SHA / 分支
+- 实际验证结果
+- 是否触发 / 预计触发 CI
+- 剩余需要在 PR / Release / Production 完成的验证
+
+## 十四、文档语言
+
+项目治理、进度、决策、风险和面向维护者的说明默认使用中文。
+
+代码、变量名、API、命令、文件路径和标准技术术语可保留英文。

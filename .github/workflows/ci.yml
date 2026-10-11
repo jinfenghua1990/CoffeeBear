@@ -185,10 +185,21 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+      - name: Release configuration policy (blocking)
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -q '^APP_IMAGE=ghcr.io/jinfenghua1990/coffeebear:stable$' deploy/zspace/production.env.example
+          grep -q 'platforms: linux/amd64,linux/arm64' .github/workflows/container-candidate.yml
+          if grep -R -n 'ghcr.io/jinfenghua1990/zhejiang' deploy .github/workflows; then
+            echo 'Legacy zhejiang image reference detected in release configuration'
+            exit 1
+          fi
       - name: Validate compose topology
         run: |
           cp .env.example .env
           docker compose config -q
+          # staging.env.example 是历史兼容文件名；在两环境模型中它代表 Test，不是第三套长期环境。
           cp deploy/zspace/staging.env.example deploy/zspace/.env
           docker compose --env-file deploy/zspace/.env -f deploy/zspace/docker-compose.yml config -q
           rm -f deploy/zspace/.env

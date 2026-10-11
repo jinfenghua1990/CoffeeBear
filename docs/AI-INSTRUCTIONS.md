@@ -1,45 +1,116 @@
-# AI 开发约定（每次会话必读）
+# CoffeeBear AI 开发约定（每次会话必读）
 
-> 把本文件发给任何 AI / Codex，即可避免系统被拆成一堆端口的经典错误。
+> 本文件补充具体开发习惯；更高层强制规则先读根 `AGENTS.md`、`.github/AGENTS.md` 和 `docs/DECISIONS.md`。
 
 ## 一、端口与部署（最高优先级）
 
-**所有功能统一在现有 8000 端口项目内开发，不允许新开独立端口，功能通过路由区分。**
+**所有业务功能继续集成在现有 8000 端口项目内，不允许为新业务模块新开独立应用端口。**
 
-- 当前整个系统统一运行在本地 **8000 端口**：<http://localhost:8000>
-- 后续新增或修改的所有业务模块，都继续集成在这个现有系统内运行。
-- **不要**为不同模块单独新建 8001、8002、9001 等端口，**不要**重新创建独立项目。
-- 所有功能统一挂载在 8000 端口下面，通过不同页面路由进行区分。例如：
-  - `http://localhost:8000/` 系统首页（经营总览）
-  - `http://localhost:8000/supply-chain` 供应链中心
-  - `http://localhost:8000/finance` 财务资料
-  - `http://localhost:8000/products` 货品档案
-  - `http://localhost:8000/purchase/workbench` 采购工作台
-- 如果当前项目已有自己的路由结构，**优先沿用现有结构**，不要强行重建路径。
-- 对 AI 下达部署指令的标准句式：**「端口：8000；页面路径：/xxx」**
+- 当前业务入口：`http://localhost:8000`
+- FastAPI 提供 API 与静态前端托管
+- Next.js 使用静态导出
+- 新业务通过现有路由扩展
 
-## 二、修改前必须先做
+示例：
 
-1. 读取当前项目完整目录结构，确认：前端框架、后端框架、启动入口、实际监听端口、前端路由位置、导航位置、相关业务模块代码位置、数据模型位置、已有接口位置、数据库结构。
-2. **必须基于现有代码继续开发**：优先复用已有组件、数据库和接口，不重复造轮子。
-3. 先分析并给出方案，再动手；不做大规模无关重构。
+- `/` 经营总览
+- `/supply-chain` 供应链中心
+- `/finance` 财务
+- `/products` 货品档案
+- `/purchase/workbench` 采购工作台
 
-## 三、现有系统速查（2026-09-07 核对）
+如果已有路由结构，优先沿用，不为“模块独立”重建项目或新端口。
 
-- **架构**：`backend/`（FastAPI + SQLAlchemy + PostgreSQL，Alembic）+ `frontend/`（Next.js App Router，`output: "export"` 静态导出）。
-- **启动**：`cd backend && .venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8000`（无 --reload，改后端必须 kill 重启）。
-- **前端生效**：改前端后必须 `cd frontend && npm run build`（产物 `frontend/out/` 由 FastAPI 同端口托管）+ 浏览器刷新。
-- **前端入口**：`frontend/src/app/**/page.tsx`；全局侧边栏：`frontend/src/components/sidebar.tsx`（NAV_ITEMS 数组）。
-- **采购工作台**：`/purchase/workbench`，页面内自带二级导航视图系统（`workbench-navigation.ts` + `?view=` 参数）。
-- **后端路由**：`backend/app/api/v1/`（25 个路由模块，统一 `/api/v1` 前缀，JWT 鉴权）。
-- **数据库**：PostgreSQL，81 张表（Alembic 迁移；⚠ 历史存在多 head 分叉，新增迁移前先 `alembic heads` 检查）。
-- **数据源**：1688 订单（浏览器直采/导入）、吉客云（MCP 同步 + 文件导入）、银行流水、税务发票、销售清单导入。
+## 二、环境规则
 
-## 四、硬性禁令
+CoffeeBear 对外只有：
 
-- 不能破坏：现有商品档案、库存、采购数据、1688 同步、吉客云模块、现有数据库。
-- 不写死模拟数据；暂时没有数据来源的字段/接口，预留并明确标注 `TODO`，不伪造数据。
+- Test（开发 / 测试合并）
+- Production（唯一正式环境）
+
+不维护独立长期 Staging。
+
+历史代码 / 配置里的 `development` 或 `staging` 可以作为 Test 内部兼容运行值，但不能被机器人解释成第三套长期环境。
+
+环境长期规则见 `docs/ENVIRONMENT.md`。
+
+## 三、修改前必须做
+
+1. 读取根 `AGENTS.md`。
+2. 读取 `.github/AGENTS.md`。
+3. 读取 `docs/CURRENT_STATE.md` 和 `docs/ACTIVE_WORK.md`。
+4. 读取相关架构、部署、数据库和长期决策文档。
+5. 检查相关 Issue / PR。
+6. 读取最新 main 的真实代码 / 配置。
+7. 确认前端、后端、启动入口、路由、数据模型、接口和数据库影响。
+8. 基于现有代码继续开发，优先复用组件、service、数据库事实源和接口。
+9. 不做与本任务无关的大规模重构。
+
+## 四、当前技术基线
+
+- 后端：FastAPI + SQLAlchemy + PostgreSQL + Alembic
+- 前端：Next.js App Router + React + TypeScript，静态导出
+- API 前缀：`/api/v1`
+- 数据库：PostgreSQL
+- 后台任务：Redis + Celery
+- 公开业务端口：8000
+- 业务时区：Asia/Shanghai
+
+具体版本与当前结构以 `docs/ARCHITECTURE.md` 和最新代码为准，不再把某个历史日期统计的“路由数量 / 表数量”当长期规则。
+
+## 五、核心硬性禁令
+
+- 不破坏现有商品、库存、采购、1688、吉客云和数据库事实。
+- 不写死模拟数据冒充真实连接。
+- 暂无数据来源时明确显示未配置 / TODO。
 - 新增数据库字段必须提供 migration。
-- 新增接口保持 `/api/v1` REST 风格统一。
-- Git：禁止 `git add -A` / `git add .`，逐个文件 add；先备份后删除。
-- **每次 `git pull`（或 fetch+merge）前必须先备份**：① 未提交改动先 commit 或 stash（绝不丢弃）；② 在当前 HEAD 建备份分支 `git branch backup/pre-pull-<YYYYMMDD-HHMM>`；③ 再 pull。合并出问题可 `git reset --hard backup/pre-pull-...` 整体回滚。
+- 新增接口保持现有 `/api/v1` 风格。
+- 金额逻辑保持 Decimal / Numeric 精度原则。
+- 不重复创建平行事实表或第二套同口径计算。
+- 不把 ALSVID / 外贸运行能力重新带回 CoffeeBear。
+- 不提交真实密码、Token、Cookie、API Key。
+
+## 六、Git 安全
+
+本地 Git 操作时：
+
+- 不用 `git add -A` / `git add .` 无脑提交所有文件；按任务范围检查变更。
+- 删除重要文件前确认版本历史 / 备份路径。
+- pull / merge 前保护未提交改动。
+- 不丢弃用户现有改动来方便机器人操作。
+
+通过 GitHub API 工作时，优先按根 `AGENTS.md` 的批量提交规则减少无意义 CI 触发。
+
+## 七、数据库
+
+涉及数据库必须先读 `docs/DATABASE.md`。
+
+至少遵循：
+
+- Alembic migration 可追溯
+- Test 先迁移验证
+- Production 前检查备份 / 恢复
+- 历史 migration 不随意重写
+- 多 head / 冲突先核对真实升级链
+
+## 八、验证与报告
+
+必须区分：
+
+- 静态检查通过
+- 自动化测试通过
+- Test 实际运行通过
+- Docker 实际启动通过
+- Production 真实验收通过
+
+没有对应环境证据时不得升级结论强度。
+
+每次重要任务结束要回写：
+
+- 检查内容
+- 修改内容
+- 验证内容
+- 结果
+- 环境限制
+- 遗留问题
+- 下一步
