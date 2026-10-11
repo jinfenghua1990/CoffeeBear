@@ -1,52 +1,147 @@
-# CoffeeBear AI Agent Rules
+# CoffeeBear AI 机器人强制工作规则
 
-## Source of Truth
+> 本文件是 CoffeeBear 的机器人工作宪法。任何 AI Agent、Review Bot、开发机器人或自动化工具进入本仓库执行重要任务时，都必须遵守。
 
-GitHub is the Single Source of Truth for CoffeeBear project decisions.
+## 1. 唯一事实来源
 
-AI Agent, Review Bot and automation tools must not rely only on chat history.
+GitHub 是 CoffeeBear 项目决策、当前状态和重要实施历史的唯一事实来源（Single Source of Truth）。
 
-Before making changes, read:
+机器人不得只依赖聊天历史、个人记忆或上一次会话总结。
 
-- README.md
-- docs/
-- Open Issues
-- Active Pull Requests
+聊天中形成的重要结论，如果会影响长期项目行为，必须回写 GitHub。
 
-## Decision Rules
+## 2. 开工前强制读取顺序
 
-The following changes require a documented decision:
+开始重要工作前，必须依次检查：
 
-- Architecture changes
-- Environment changes
-- Database model changes
-- Deployment strategy changes
-- Business rule changes
+1. `README.md`
+2. `.github/AGENTS.md`
+3. `docs/CURRENT_STATE.md`
+4. `docs/ACTIVE_WORK.md`
+5. `docs/DECISIONS.md`
+6. `docs/ENVIRONMENT.md`
+7. `docs/DEPLOYMENT.md`
+8. `docs/DATABASE.md`
+9. 与本任务有关的其他 docs
+10. 当前相关 Open Issues
+11. 当前相关 Pull Requests
+12. 最新 main 上与任务有关的代码 / 配置
 
-If uncertain:
+如果某个文档不存在，应如实记录，不得假装已经阅读。
 
-1. Create a GitHub Issue.
-2. Describe options and impact.
-3. Wait for maintainer confirmation.
-4. Update docs after decision.
+## 3. 重要任务必须有 GitHub 记录
 
-Do not introduce new architecture patterns without approval.
+除纯拼写、无业务含义的小修正外，重要任务必须关联 GitHub Issue、PR 或明确的 Commit 记录。
 
-## Work Log Requirements
+机器人执行过程中必须留下可追溯过程，包括：
 
-Important tasks must record:
+- 检查了什么
+- 读取了哪些关键文件
+- 当前确认到的事实
+- 修改了什么
+- 为什么这样修改
+- 执行了什么验证
+- 验证结果是什么
+- 哪些验证因为环境限制无法执行
+- 发现了哪些新问题
+- 还有哪些遗留风险 / 未解决事项
 
-- What was inspected
-- What was changed
-- Validation performed
-- Problems found
-- Remaining risks
+禁止只留下“已完成”“已修复”而没有验证证据。
 
-## Environment Rule
+## 4. 不确定事项禁止自行拍板
 
-CoffeeBear uses two environments only:
+以下内容如果现有文档、代码和 Issue 无法明确回答，机器人不得自己发明规则：
 
-- Test: M1 + Docker validation environment
-- Production: official running environment
+- 系统架构
+- 环境数量和用途
+- 数据归属 / 数据模型
+- 数据库重大设计
+- 部署策略
+- 权限与安全策略
+- 核心业务规则
+- 财务 / 税务 / 库存 / 订单事实来源
 
-Do not introduce Dev/Staging/Production three-environment models unless approved through a GitHub decision record.
+必须执行：
+
+1. 创建或更新 GitHub Issue。
+2. 写清当前事实。
+3. 写清方案 A / B（必要时更多）。
+4. 写清各方案影响、风险和推荐理由。
+5. 明确列出“需要维护者确认的问题”。
+6. 等待维护者确认。
+7. 只实施已经确认的方案。
+8. 完成后更新长期文档和工作记录。
+
+## 5. 环境强制规则
+
+CoffeeBear 只维护两套环境：
+
+- **Test**：开发 / 测试合并环境，主要为 M1 + Docker 验证
+- **Production**：唯一正式业务运行环境
+
+禁止默认引入 Dev / Staging / Production 三环境模型。
+
+如果未来确实需要增加长期环境，必须先创建架构决策 Issue，并获得维护者明确批准。
+
+详见 `docs/ENVIRONMENT.md`。
+
+## 6. 数据库强制规则
+
+涉及数据库结构或数据修复时必须阅读 `docs/DATABASE.md`。
+
+默认要求：
+
+- 使用 Alembic 管理结构迁移
+- Test 先验证
+- Production 前确认备份 / 恢复路径
+- 不把直接手工改 Production schema 作为正常开发流程
+- 不提交真实数据库密码
+
+## 7. 部署强制规则
+
+涉及 Docker、GHCR、Production、更新器、环境变量时必须阅读 `docs/DEPLOYMENT.md` 和相关 Issue。
+
+机器人必须区分：
+
+- 仓库中“存在配置”
+- 配置“通过静态检查”
+- 配置“在真实 Docker 环境成功启动”
+- Production “正式验收通过”
+
+这些状态不能混为一谈。
+
+如果当前执行环境没有 Docker，就必须明确写出验收边界，禁止宣称 Docker 运行测试通过。
+
+## 8. 密钥与敏感信息
+
+禁止提交真实：
+
+- 密码
+- Token
+- Cookie
+- API Key
+- 数据库连接密钥
+- 对象存储密钥
+- Production 管理员凭据
+
+仓库只允许示例变量和 `CHANGE_ME` 等占位值。
+
+## 9. 完成任务时的强制收尾
+
+重要任务完成前必须检查：
+
+- 是否更新对应 Issue / PR
+- 是否记录验证结果
+- 是否存在未验证项
+- 是否需要更新 `docs/CURRENT_STATE.md`
+- 是否需要更新 `docs/ACTIVE_WORK.md`
+- 是否形成新的长期决策，需要更新 `docs/DECISIONS.md`
+- 是否影响环境、部署或数据库专项文档
+
+如果工作没有完整完成，应明确标记为“部分完成 / 阻塞 / 待真实环境验收”，不得用模糊的“完成”掩盖未完成部分。
+
+## 10. 文档语言
+
+项目治理、流程、当前状态、决策和面向维护者的说明默认使用中文，便于维护者直接审阅。
+
+代码、变量名、API 名称和行业固定技术名词可以保留英文。
