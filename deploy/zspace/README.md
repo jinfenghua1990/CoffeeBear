@@ -1,26 +1,28 @@
 # 极空间 ZSpace 部署标准
 
-> CoffeeBear 对外只维护 **Test + Production** 两套环境。本目录中的历史 `staging` 命名仅作为 Test 内部兼容标识，不代表第三套长期环境。
+本目录用于 CoffeeBear 的 **Test / Production 两环境** Docker 部署。
 
-## 1. 目标发布链
+> 重要：CoffeeBear 不维护独立长期 Staging。历史代码里的 `APP_ENV=staging` 仅作为 Test 的兼容运行值，不代表第三套环境。
+
+## 目标结构
 
 ```text
-GitHub develop
-  → CI
-  → ghcr.io/jinfenghua1990/coffeebear:sha-<commit>
-  → Test 验证
+GitHub develop / hotfix
+  -> CI
+  -> ghcr.io/jinfenghua1990/coffeebear:sha-<commit>
+  -> Test 验证
 
-develop → main PR 合并
-  → 不重新构建业务代码
-  → 将已经验证的 SHA 镜像晋级为 vYYYY.MM.DD.HHmmss + stable
-  → Production
+确认通过后
+  -> main / 正式发布
+  -> 将已验证的 sha 镜像晋级为 vYYYY.MM.DD.HHmmss + stable
+  -> Production
 ```
 
-Test 与 Production 使用同一套应用镜像体系，但数据库、Redis、DATA_DIR、端口和密钥必须隔离。
+Test 与 Production 使用同一套应用镜像体系，但数据库、Redis、DATA_DIR、端口和所有密钥必须完全隔离。
 
-## 2. 极空间目录
+## 极空间目录
 
-业务数据不得放在 Git 仓库目录中。建议结构：
+不要把数据放在 Git 仓库目录中。建议创建：
 
 ```text
 ecommerce/
@@ -36,34 +38,27 @@ ecommerce/
     backups/
 ```
 
-历史已有 `staging/` 目录时，可以继续作为 Test 物理目录使用，但文档和项目语义统一称为 Test；不要因此再维护第三套环境。
+实际宿主机绝对路径因极空间存储池而异，本仓库不硬编码。
 
-实际宿主机路径由极空间存储池决定，本仓库不硬编码。
+## 私有镜像登录
 
-## 3. 私有镜像登录
+仓库和 GHCR 镜像保持 Private 时，在极空间 Docker 的镜像仓库凭证中添加：
 
-GHCR 镜像保持受控访问。
+- Registry: `ghcr.io`
+- Username: GitHub 用户名
+- Token: 只授予读取 Packages 所需权限
 
-在极空间 Docker 镜像仓库凭证中配置：
+不要把 Registry 凭证写进应用 `.env`，也不要提交到 Git。
 
-- Registry：`ghcr.io`
-- Username：GitHub 用户名
-- Token：只授予读取 Packages 所需权限
-
-Registry 凭证不得写入应用 `.env`，也不得提交 Git。
-
-## 4. Test
-
-> 当前 `staging.env.example` 文件名属于历史兼容命名，语义上等同本项目 Test；后续如果安全完成配置迁移，可再统一重命名。
-
-Test 部署：
+## Test
 
 1. 创建独立 Compose 项目目录。
 2. 复制本目录 `docker-compose.yml`。
-3. 使用 Test 配置（当前兼容文件：`staging.env.example`）生成实际 `.env`。
-4. 填写 Test 独立数据库、应用密钥、管理员凭据和真实宿主机目录。
-5. `APP_IMAGE` 使用 `candidate` 或具体不可变 SHA 候选。
-6. 首次启用数据库最小权限时，先备份，再初始化 app / migrator 角色。
+3. 将 `test.env.example` 复制为 `.env`。
+4. 填写独立数据库密码、`APP_SECRET_KEY`、管理员密码和极空间真实目录。
+5. `APP_IMAGE` 可先使用 `candidate` 或本次候选的不可变 SHA 标签。
+6. Test 不得复用 Production 数据库、密码、DATA_DIR 或业务密钥。
+7. 首次启用数据库最小权限时，先备份，再初始化 app / migrator 两个角色：
 
 ```bash
 docker compose up -d postgres redis
@@ -72,109 +67,70 @@ docker compose --profile ops run --rm migrate
 docker compose up -d api worker beat
 ```
 
-`db-roles` 是显式运维动作，不跟随 API 自动执行。
+`db-roles` 是显式运维动作，不会跟随 API 自动执行。
 
-Test 需要完成：
-
-- `/healthz`
-- 采购
-- 库存
-- 耗材
-- 财务
-- 数据库 migration
-- 关键业务 smoke test
-
-正式发布前应尽量将 `APP_IMAGE` 固定为本次候选不可变 SHA：
+8. 浏览器访问 `NAS_IP:8100`。
+9. 执行采购、库存、耗材、财务等核心业务回归。
+10. 准备正式发布前，将 `APP_IMAGE` 固定为本次候选的不可变 SHA 标签：
 
 ```text
 ghcr.io/jinfenghua1990/coffeebear:sha-<commit>
 ```
 
-## 5. Production
+## Production
 
-main 只接受符合仓库发布策略的来源分支。
+正式发布必须使用已经通过 Test / CI 验证的镜像，不应在 Production 临时重建代码。
 
-正式发布应把已经 Test 验证的 SHA 镜像原样晋级，例如：
+正式版本示例：
 
 ```text
-ghcr.io/jinfenghua1990/coffeebear:vYYYY.MM.DD.HHmmss
+ghcr.io/jinfenghua1990/coffeebear:v2026.10.11.120000
 ghcr.io/jinfenghua1990/coffeebear:stable
 ```
 
-正式环境建议固定具体版本：
+Production 建议将 `APP_IMAGE` 固定到具体版本标签；`stable` 主要用于发现最新版。
+
+发布顺序：
 
 ```text
-APP_IMAGE=ghcr.io/jinfenghua1990/coffeebear:v2026.10.11.120000
+确认数据库/文件备份
+-> 拉取指定版本镜像
+-> 暂停 worker/beat
+-> （首次拆分账号或轮换密码时）运行 db-roles
+-> 执行 migrate
+-> 更新 api
+-> /healthz 验证
+-> 恢复 worker/beat
+-> 核心业务 smoke test
+-> 将验证结果写回 GitHub Issue / PR
 ```
 
-不要长期只依赖 `stable` 做审计；`stable` 用于发现最新正式版，具体版本用于追踪和回滚。
+## 回滚
 
-## 6. 发布顺序
+应用回滚优先切换 `APP_IMAGE` 到上一已知可用版本，不重新构建。
 
-```text
-确认数据库 / 文件备份
-→ 拉取指定版本镜像
-→ 暂停 worker / beat（按发布需要）
-→ 必要时执行 db-roles
-→ 执行 migrate
-→ 更新 api / worker / beat
-→ /healthz 验证
-→ 核心业务 smoke test
-→ 记录实际版本与验证结果
-```
+如果版本包含数据库迁移，必须先判断 migration 是否向后兼容；需要恢复数据时使用发布前备份。禁止直接删除 PostgreSQL 数据目录。
 
-数据库迁移必须单独执行，不允许靠 API 容器启动隐式完成。
+## 更新中心
 
-## 7. 回滚
-
-应用优先切回上一已验证版本，不重新构建：
-
-```text
-v2026.10.11.120000
-→
-v2026.10.10.220000
-```
-
-如果包含数据库 migration，必须根据迁移兼容性决定 downgrade、向前修复或从发布前备份恢复。
-
-禁止直接删除 PostgreSQL 数据目录作为“回滚”。
-
-## 8. 更新中心
-
-容器模式下：
+极空间容器模式下，应用内 Git 自更新保持关闭：
 
 ```text
 SYSTEM_UPDATE_ENABLED=0
 ```
 
-当前原生 Git 更新器不能直接等价用于 Docker 镜像升级。
+当前版本发布由 GitHub + GHCR + Compose 管理。后台【更新】按钮未来如要接管容器升级，应通过单独受控的 Container Update Agent 设计，不得直接把 Docker socket 暴露给业务容器。
 
-版本发布由 GitHub + GHCR + Compose 管理。未经单独安全设计，不允许为了后台【更新】按钮直接向业务容器暴露 Docker socket。
+## 安全边界
 
-未来容器自动更新需要单独 Issue 设计：
+- PostgreSQL 不映射到 NAS 局域网端口。
+- Redis 不映射到 NAS 局域网端口。
+- API / worker / beat 使用 app 数据库账号；migration 使用 migrator 账号。
+- 只暴露 Web/API 端口。
+- `.env` 不提交 Git。
+- Test 永远不用 Production 数据库密码、DATA_DIR 或业务密钥。
+- Production 数据至少保留本机备份 + 第二份异地/异盘备份。
 
-- 镜像发现
-- 版本固定
-- 拉取
-- migration
-- 健康检查
-- 回滚
-- 宿主权限隔离
+## 当前验收状态
 
-## 9. 安全边界
-
-- PostgreSQL 不对局域网暴露业务不需要的端口
-- API / worker / beat 使用 app 数据库账号
-- migrate 使用 migrator 账号
-- `POSTGRES_USER` 仅用于部署 / 管理兜底
-- Redis 不对局域网暴露业务不需要的端口
-- 只暴露 Web/API 必需端口
-- `.env` 不提交 Git
-- Test 永远不用 Production 数据库密码和 DATA_DIR
-- Production 数据至少保留本机备份 + 第二份异地 / 异盘备份
-
-## 10. 当前未完成验收
-
-当前 Production Docker 基线的活动事项以 GitHub Issue #18 为准。
-
-静态配置修正、Workflow 修改完成，不代表真实 Docker 环境已经验收完成；最终仍需在具备 Docker 的真实环境做启动与业务验证。
+配置与 CI 层面的 Docker 发布基线已加固；真实 Docker 启动、migration、`/healthz` 与核心业务 smoke test 仍必须在具备 Docker 的实际 Test 环境完成，未执行前不得标记为“Production 已真实验收”。
