@@ -1,100 +1,164 @@
-# CoffeeBear Decision Log
+# CoffeeBear 长期决策记录
 
-CoffeeBear uses this file as a durable record of accepted project decisions. GitHub Issues and Pull Requests contain the discussion and implementation history; this file records the decisions that future AI Agents, Review Bots, automation tools, and developers must treat as current project policy.
+本文件保存已经被维护者接受、未来机器人和开发者必须继续遵守的长期项目决策。
 
-## Reading rule
+GitHub Issue / Pull Request 保存讨论和实施过程；本文件保存最终已经确认的“长期规则”。
 
-Before changing architecture, environment strategy, data ownership, deployment strategy, or core business rules, agents must:
+## 阅读规则
 
-1. Read `README.md`.
-2. Read `.github/AGENTS.md`.
-3. Read this decision log and other relevant docs.
-4. Check related open Issues and active Pull Requests.
-5. If a required decision is unclear or conflicts with existing policy, create or update a GitHub Issue and obtain maintainer confirmation before changing the policy.
+在修改以下内容前，机器人必须阅读本文件：
 
-Accepted decisions must not be silently replaced by chat-only conclusions.
+- 系统架构
+- 环境策略
+- 数据归属
+- 数据库重大设计
+- 部署方式
+- 核心业务规则
 
----
+如果现有决策不清楚、互相冲突或已经不适合当前情况：
 
-## DEC-001 — Two-environment model only
+1. 不得自行覆盖旧规则。
+2. 创建或更新 GitHub Issue。
+3. 说明当前事实、方案与影响。
+4. 由维护者确认新方案。
+5. 实施后更新本文件。
 
-**Status:** Accepted  
-**Source:** GitHub Issue #16 — `docs: establish two-environment model (Test + Production)`
-
-### Decision
-
-CoffeeBear uses exactly two operational environments:
-
-- **Test** — development, functional verification, Docker validation, database migration verification, and release-readiness checks.
-- **Production** — the only official business-running environment.
-
-CoffeeBear does **not** maintain a separate long-running Staging environment and does **not** use a Dev / Staging / Production three-environment model.
-
-### Current intended shape
-
-- Test compute: M1 Mac + Docker.
-- Test data resources: dedicated non-production database and object-storage resources where applicable.
-- Production: official server/runtime plus production database, production object storage, and production secrets.
-
-### Guardrail
-
-Any proposal to add another persistent environment requires a GitHub Issue, impact analysis, and explicit maintainer approval before implementation.
+聊天中的新结论不能静默替换本文件中的已接受决策。
 
 ---
 
-## DEC-002 — GitHub is the project source of truth for AI-agent work
+## DEC-001 — 只维护 Test + Production 两套环境
 
-**Status:** Accepted  
-**Source:** GitHub Issue #17 — `docs: establish AI Agent operation log and decision record rules`
+**状态：已接受**  
+**来源：GitHub Issue #16 — `docs: establish two-environment model (Test + Production)`**
 
-### Decision
+### 决策
 
-GitHub is CoffeeBear's Single Source of Truth for project decisions and important implementation history. Chat history alone is not sufficient project memory.
+CoffeeBear 只维护两套运行环境：
 
-All AI Agents, Review Bots, development robots, and automation tools performing important work must leave a trace in GitHub through the appropriate combination of:
+- **Test**：开发 / 测试合并环境，用于功能验证、Docker 验证、数据库迁移验证和发布前检查。
+- **Production**：唯一正式业务运行环境。
+
+CoffeeBear 不长期维护独立 Staging，也不采用 Dev / Staging / Production 三环境模型。
+
+### 当前目标形态
+
+- Test 计算环境：M1 Mac + Docker
+- Test 数据资源：独立非生产数据库与对象存储（适用时）
+- Production：正式 Runtime / Server + 正式数据库 + 正式对象存储 + 正式密钥
+
+### 强制边界
+
+任何新增长期环境的提议必须先：
+
+1. 创建架构决策 Issue。
+2. 说明必要性与成本。
+3. 分析对数据库、对象存储、部署和维护的影响。
+4. 获得维护者明确批准。
+
+批准前禁止实施。
+
+---
+
+## DEC-002 — GitHub 是 AI 协作与项目决策的事实来源
+
+**状态：已接受**  
+**来源：GitHub Issue #17 — `docs: establish AI Agent operation log and decision record rules`**
+
+### 决策
+
+GitHub 是 CoffeeBear 项目决策、当前状态和重要实施历史的事实来源（Single Source of Truth）。
+
+聊天历史不能单独承担长期项目记忆。
+
+所有 AI Agent、Review Bot、开发机器人和自动化工具执行重要工作时，都必须通过合适的 GitHub 载体留下记录，包括：
 
 - Issue
 - Pull Request
 - Commit message
-- Documentation update
+- 长期文档更新
 
-### Required work record
+### 重要工作必须记录
 
-Important work must record, as applicable:
+根据任务性质记录：
 
-- what was inspected;
-- what was changed;
-- why it was changed;
-- validation performed and results;
-- problems discovered;
-- unresolved questions or remaining risks.
+- 检查了什么
+- 读取了哪些关键文件
+- 修改了什么
+- 为什么修改
+- 执行了什么验证
+- 验证结果
+- 因环境限制未完成的验证
+- 发现的问题
+- 遗留风险 / 未解决事项
 
-### Uncertain-decision rule
+禁止只写“已经完成”而没有可核对证据。
 
-Agents must not independently invent or replace policy when uncertain about:
+### 不确定事项规则
 
-- architecture;
-- data ownership or data model;
-- environment strategy;
-- deployment strategy;
-- core business rules.
+机器人在以下内容不确定时，不得独立发明或替换项目政策：
 
-The required flow is:
+- 架构
+- 数据归属 / 数据模型
+- 环境策略
+- 部署策略
+- 权限 / 安全策略
+- 核心业务规则
 
-1. Create or update a GitHub Issue.
-2. Describe the question, options, and impact.
-3. Obtain maintainer confirmation.
-4. Implement the confirmed decision.
-5. Update durable documentation and the work record.
+标准流程：
+
+1. 创建或更新 GitHub Issue。
+2. 描述当前事实。
+3. 描述可选方案、影响和风险。
+4. 给出推荐方案。
+5. 明确列出需要维护者确认的问题。
+6. 获得维护者确认。
+7. 实施已经确认的方案。
+8. 更新长期文档和工作记录。
 
 ---
 
-## Relationship to other governance files
+## DEC-003 — 项目治理文档默认使用中文
 
-- `README.md` — project entry point and high-level rules.
-- `.github/AGENTS.md` — mandatory AI-agent operating rules.
-- `docs/AGENT_WORKFLOW.md` — execution and work-log workflow.
-- `docs/ENVIRONMENT.md` — detailed environment policy.
-- `docs/DECISIONS.md` — accepted durable project decisions (this file).
+**状态：已接受**
 
-When these sources appear inconsistent, agents must not guess. Open or update a GitHub Issue and ask the maintainer to resolve the conflict before changing architecture or policy.
+### 决策
+
+为了让维护者能够直接审阅、确认和纠正机器人工作，以下内容默认使用中文：
+
+- 当前状态
+- 当前工作
+- 环境规则
+- 部署规则
+- 数据库规则
+- 架构 / 重大决策
+- AI Agent 工作规范
+- 风险与验收结论
+- Issue / PR 中面向维护者的说明
+
+代码、变量名、API、命令、文件路径和标准技术名词可以保留英文。
+
+### 原因
+
+项目规则如果只有机器人能快速理解而维护者难以直接审核，就无法形成可靠的人机协作治理。
+
+---
+
+## 治理文件关系
+
+- `README.md`：项目入口、业务边界与高层规则
+- `.github/AGENTS.md`：AI 机器人强制工作规则
+- `docs/CURRENT_STATE.md`：现在做到哪里、当前真实状态
+- `docs/ACTIVE_WORK.md`：当前正在做什么
+- `docs/AGENT_WORKFLOW.md`：机器人执行和记录流程
+- `docs/ENVIRONMENT.md`：两环境规范
+- `docs/DEPLOYMENT.md`：部署与发布规范
+- `docs/DATABASE.md`：数据库变更规范
+- `docs/DECISIONS.md`：已经确认的长期决策（本文件）
+
+如果这些来源出现冲突：
+
+1. 机器人不得自行猜测哪个是对的。
+2. 先核对最新代码、Issue、PR 和 Git 历史。
+3. 仍无法确定时，创建 / 更新 Issue 请求维护者裁决。
+4. 裁决后同步修正文档，避免冲突继续存在。
