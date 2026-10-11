@@ -144,7 +144,33 @@ CoffeeBear 使用 PostgreSQL，迁移工具为 Alembic。
 
 详细规则见 `docs/DATABASE.md`。
 
-## 6. 当前治理待确认事项
+## 6. 当前治理状态
+
+### Issue #20
+
+维护者已确认：
+
+- main 开启分支保护；
+- 正常代码通过 PR 进入 main；
+- 关键 CI 必须通过；
+- 禁止 force push / 删除 main；
+- 维护者保留管理员应急绕过；
+- 仓库简介采用 Test + Production 两环境 + 统一 8000 端口；
+- 仓库建议改为 Private。
+
+最新核对仍显示仓库为 Public、main 未受保护。当前 GitHub 工具没有仓库设置、分支保护或仓库描述/可见性写入接口，因此平台动作仍阻塞，不能宣称已完成。
+
+### Issue #21
+
+维护者已确认：
+
+- 删除无独有 commit 的 sandbox；
+- 旧 feature/hotfix 逐个审计后删除；
+- 有独有 commit 的不直接删除；
+- backup 保留周期后转 tag；
+- archive 优先转不可变 tag 后再决定删 branch。
+
+已核实 sandbox 无独有 commit，但当前 GitHub 工具没有删除远程分支接口，因此尚未实际删除。
 
 ### Issue #20
 
