@@ -15,29 +15,40 @@
 
 ### Issue #18 — Docker 正式发布基线加固
 
-**状态：进行中 / 部分依赖真实 Docker 环境最终验收**
+**状态：静态加固已完成 / 等待真实 Docker 环境最终验收**
 
-已知范围：
+本轮已经完成：
 
-- 修正 Production 示例镜像名称为 CoffeeBear
-- 候选镜像支持 `linux/amd64` 与 `linux/arm64`
-- 增加配置回归检查
-- 完善 Docker 部署说明
-- 真实 Docker 环境完成最终启动验证
+- ✅ `deploy/zspace/production.env.example` 正式镜像改为 `ghcr.io/jinfenghua1990/coffeebear:stable`
+- ✅ 候选镜像同时构建 `linux/amd64` 与 `linux/arm64`
+- ✅ CI 增加发布配置防回退检查：旧 `zhejiang` 镜像引用或单架构配置会阻塞
+- ✅ `docs/DEPLOYMENT.md`、`docs/DOCKER_DEPLOYMENT.md`、`deploy/zspace/README.md` 已更新
+- ✅ 旧基础设施文档不再把独立 Staging / Render / Supabase / Backblaze B2 描述为当前固定架构
+
+仍未完成：
+
+- ⏳ 在具备 Docker 的真实环境运行 Compose
+- ⏳ 实际执行数据库迁移链
+- ⏳ `/healthz` 与核心业务 smoke test
+- ⏳ 确认多架构 GHCR manifest 真实生成并可拉取
+
+因此 #18 暂不关闭。
 
 注意：
 
 - 当前系统更新器属于 Git / 原生运行模式，不能直接在容器内开启
-- 不应为了后台“更新”按钮而直接把 Docker socket 暴露给业务容器
+- 不应为了后台【更新】按钮而直接把 Docker socket 暴露给业务容器
 - 容器化自动更新需要单独设计与确认
 
 ### Issue #17 — AI Agent 操作日志与决策记录规则
 
-**状态：已完成待关闭**
+**状态：已完成，可关闭**
 
 已经落地：
 
+- 根 `AGENTS.md`
 - `.github/AGENTS.md`
+- `docs/AI-INSTRUCTIONS.md`
 - `docs/AGENT_WORKFLOW.md`
 - `docs/DECISIONS.md`
 - `docs/CURRENT_STATE.md`
@@ -49,20 +60,23 @@
 
 ### Issue #16 — 两环境模型（Test + Production）
 
-**状态：已完成待关闭**
+**状态：已完成，可关闭**
 
 已经落地：
 
 - README 环境说明
+- 根 `AGENTS.md` 与 `.github/AGENTS.md` 强制约束
 - `docs/ENVIRONMENT.md`
-- `docs/DECISIONS.md` 中长期决策记录
-- `.github/AGENTS.md` 中强制约束
+- `docs/INFRASTRUCTURE.md`
+- `docs/DECISIONS.md`
+- Docker / ZSpace 文档统一 Test + Production 语义
 
 固定规则：
 
 - Test = 开发 / 测试合并环境
 - Production = 唯一正式运行环境
-- 不新增独立 Staging，除非先创建 Issue 并得到维护者明确批准
+- 不新增独立长期 Staging，除非先创建 Issue 并得到维护者明确批准
+- 历史 `APP_ENV=staging/development` 仅视为 Test 内部兼容运行值，不代表第三套环境
 
 ## 新任务如何进入本列表
 
