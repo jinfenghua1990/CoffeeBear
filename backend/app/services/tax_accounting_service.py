@@ -18,7 +18,7 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.models.sales import SalesOrder, SalesOrderItem
-from app.models.tax import TaxInvoice, TaxInvoiceImport, TaxInvoiceImportRecord, TaxInvoiceLink
+from app.models.tax import TaxInvoice, TaxInvoiceImport, TaxInvoiceLink
 from app.services.monthly_core import month_bounds
 from app.services.tax_invoice_service import is_effective_for_accounting
 from app.utils.money import to_decimal
@@ -135,11 +135,6 @@ def monthly_ledger(db: Session, year: int, month: int) -> dict[str, Any]:
             TaxInvoice.issue_date >= start,
             TaxInvoice.issue_date < end,
         )
-        .filter(~db.query(TaxInvoiceImportRecord.id).filter(
-            TaxInvoiceImportRecord.import_id == TaxInvoice.source_import_id,
-            TaxInvoiceImportRecord.row_index == TaxInvoice.source_row_index,
-            TaxInvoiceImportRecord.row_status == "deleted",
-        ).exists())
         .order_by(TaxInvoice.issue_date, TaxInvoice.id)
         .all()
     )
