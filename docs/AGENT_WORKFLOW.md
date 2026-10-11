@@ -1,45 +1,168 @@
-# AI Agent Workflow
+# CoffeeBear AI 机器人工作流程
 
-## Purpose
+## 1. 目的
 
-Define how AI Agents and automated tools work on CoffeeBear.
+本文件规定 AI Agent、Review Bot、开发机器人和自动化工具在 CoffeeBear 中应该如何工作，以及过程记录必须做到什么程度。
 
-## Before Changes
+目标不是增加形式，而是确保后续任何机器人都能知道：
 
-Agents must:
+- 前一个机器人检查过什么
+- 为什么做出这个决定
+- 改了哪些内容
+- 哪些内容真正验证过
+- 哪些内容还没有验证
+- 下一步该接着做什么
 
-1. Read README.md.
-2. Read relevant docs.
-3. Check related Issues and Pull Requests.
-4. Understand existing decisions.
+## 2. 开工前
 
-## During Work
+开始重要任务前必须：
 
-Record:
+1. 阅读 `README.md`。
+2. 阅读 `.github/AGENTS.md`。
+3. 阅读 `docs/CURRENT_STATE.md`。
+4. 阅读 `docs/ACTIVE_WORK.md`。
+5. 阅读相关长期决策和专项文档。
+6. 检查相关 Open Issues。
+7. 检查相关 Pull Requests。
+8. 读取最新 main 上的实际代码和配置。
 
-- Investigation performed
-- Files reviewed
-- Changes made
-- Validation results
-- Risks or unresolved questions
+如果用户指定“以 GitHub 最新 main 为准”，禁止使用旧聊天内容覆盖仓库事实。
 
-## Uncertain Decisions
+## 3. 建立工作记录
 
-AI Agents must not decide alone on:
+重要任务开始时，需要有对应 Issue、PR 或可追溯 Commit 上下文。
 
-- Architecture
-- Data ownership
-- Environment strategy
-- Business rules
-- Deployment approach
+工作记录至少说明：
 
-Create an Issue first and request confirmation.
+- 任务目标
+- 当前已知事实
+- 验收标准
+- 明确不在本次处理范围内的事项
 
-## Completion
+如果没有 Issue，且任务涉及架构、环境、数据库、部署或核心业务规则，应先创建 Issue。
 
-Every important change should leave a trace through:
+## 4. 侦察 / 检查阶段
+
+机器人必须先检查真实现状，再提出修改。
+
+记录：
+
+- 读取的关键文件
+- 发现的实际配置
+- 与文档是否一致
+- 已存在的测试
+- 已知限制
+- 当前执行环境能力
+
+例如，如果当前环境没有 Docker，必须记录“无法进行真实 Docker 启动验收”，不能用静态检查替代后宣称运行通过。
+
+## 5. 实施阶段
+
+修改过程中需要遵循：
+
+- 只修改本任务需要的范围
+- 不顺手改变未确认的架构
+- 不把猜测写成项目规则
+- 不删除历史迁移来掩盖问题
+- 不提交真实密钥
+- 不制造模拟数据冒充真实外部连接
+
+如果实施过程中出现新的架构问题，应暂停该部分并创建 / 更新 Issue，请维护者确认。
+
+## 6. 验证阶段
+
+验证结果要分层记录，不能混淆：
+
+### 静态验证
+
+例如：
+
+- 配置文件语法
+- 类型检查
+- lint
+- 单元测试
+- 构建检查
+
+### Test 运行验证
+
+例如：
+
+- Docker 能否真实启动
+- 数据库迁移是否实际成功
+- API 是否实际响应
+- 前后端链路是否实际可用
+
+### Production 验证
+
+只有真实正式环境完成验证，才能写“Production 已验收”。
+
+不能把“代码看起来正确”写成“正式环境验证通过”。
+
+## 7. 不确定决策流程
+
+以下事项不明确时，禁止机器人自行决定：
+
+- 架构
+- 数据归属
+- 环境策略
+- 数据库重大模型
+- 部署方式
+- 权限策略
+- 核心业务规则
+
+必须：
+
+1. 建立 GitHub Issue。
+2. 写明当前事实。
+3. 写明至少两个可选方案（如确实只有一个可行方案，应说明原因）。
+4. 写明影响和风险。
+5. 给出推荐方案和理由。
+6. 明确列出需要维护者确认的问题。
+7. 等待确认。
+8. 确认后再实施。
+
+## 8. 完成阶段
+
+重要任务完成时必须留下：
+
+- 检查内容
+- 实际修改
+- 验证命令 / 验证方式
+- 验证结果
+- 无法完成的验证
+- 新发现的问题
+- 遗留风险
+- 下一步
+
+并检查是否需要同步：
 
 - Issue
 - Pull Request
 - Commit message
-- Documentation update when required
+- `docs/CURRENT_STATE.md`
+- `docs/ACTIVE_WORK.md`
+- `docs/DECISIONS.md`
+- `docs/ENVIRONMENT.md`
+- `docs/DEPLOYMENT.md`
+- `docs/DATABASE.md`
+
+## 9. 状态用语规范
+
+建议严格区分：
+
+- `已检查`：读取或核对过
+- `已修改`：代码 / 配置已经改动
+- `静态验证通过`：未代表真实运行
+- `Test 验证通过`：在测试环境实际运行验证
+- `Production 验证通过`：正式环境真实验收
+- `部分完成`：仍有未完成项
+- `阻塞`：需要外部条件
+- `待维护者确认`：不能继续自行决定
+
+禁止为了让结果显得完整而使用比证据更强的结论。
+
+## 10. 文档语言
+
+治理、决策、进度、风险和给维护者看的说明默认使用中文。
+
+代码标识符、API、命令、文件路径和标准技术名词可保留英文。
