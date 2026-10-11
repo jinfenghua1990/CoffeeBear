@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "@/components/workspace/workspace-link";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { authenticatedFetch } from "@/lib/api";
 import { useTabTitle } from "@/lib/workspace/tab-store";
 
@@ -131,6 +131,7 @@ export default function FinanceCenterPage() {
   const [period, setPeriod] = useState(currentMonth());
   const [data, setData] = useState<CenterData | null>(null);
   const [loading, setLoading] = useState(true);
+  const centerRequestId = useRef(0);
   const [error, setError] = useState("");
 
   const [entryOpen, setEntryOpen] = useState(false);
@@ -181,6 +182,7 @@ export default function FinanceCenterPage() {
 
   const loadCenter = useCallback(async () => {
     if (!entityId || !periodParts.year || !periodParts.month) return;
+    const requestId = ++centerRequestId.current;
     setLoading(true);
     try {
       const params = new URLSearchParams({
@@ -191,13 +193,16 @@ export default function FinanceCenterPage() {
       });
       const res = await authenticatedFetch("/api/v1/finance/center?" + params.toString(), { cache: "no-store" });
       const body = await res.json();
+      if (requestId !== centerRequestId.current) return;
       if (!res.ok) throw new Error(body.detail || "财务中心加载失败");
       setData(body);
       setError("");
     } catch (e) {
-      setError(e instanceof Error ? e.message : "财务中心加载失败");
+      if (requestId === centerRequestId.current) {
+        setError(e instanceof Error ? e.message : "财务中心加载失败");
+      }
     } finally {
-      setLoading(false);
+      if (requestId === centerRequestId.current) setLoading(false);
     }
   }, [entityId, periodParts.month, periodParts.year]);
 
@@ -207,6 +212,9 @@ export default function FinanceCenterPage() {
 
   useEffect(() => {
     void loadCenter();
+    return () => {
+      centerRequestId.current += 1;
+    };
   }, [loadCenter]);
 
   async function syncBusiness() {
