@@ -100,8 +100,7 @@ async def security_headers(_request, call_next):
 app.include_router(api_router, dependencies=[Depends(require_auth)])
 
 
-@app.get("/healthz")
-def healthz() -> dict:
+def _health_payload() -> dict:
     return {
         "ok": True,
         "accessMode": settings.ACCESS_MODE,
@@ -110,6 +109,26 @@ def healthz() -> dict:
         "deploymentMode": settings.DEPLOYMENT_MODE,
         "gitSha": settings.GIT_SHA[:12] if settings.GIT_SHA else "",
     }
+
+
+@app.get("/healthz")
+def healthz() -> dict:
+    """容器内 / 本机 loopback 健康检查（Compose healthcheck、bootstrap-update、自更新轮询）。
+
+    注意：Cloud Run 的 Google Frontend 会拦截公网路径 /healthz 并直接返回它自己的 404，
+    请求永远不会到达容器。公网探活请使用 /health。
+    """
+    return _health_payload()
+
+
+@app.get("/health")
+def health() -> dict:
+    """Cloud Run 公网健康检查入口。
+
+    Cloud Run 保留 /healthz 这一精确路径，故对外探活必须走 /health；
+    /healthz 继续保留给不经过 Google Frontend 的容器内探针使用。
+    """
+    return _health_payload()
 
 
 # ---------- 前端静态托管（next export 产物，单口 8000 同服 API + 前端） ----------

@@ -98,3 +98,20 @@ Cloud Run 可以直接使用公开 GHCR 镜像；私有 GHCR 镜像需要通过 
 Secret Manager 按“有效 Secret version”计费。新版本验证完成后，应按你的保留策略销毁不再需要的旧版本；仅 Disabled 的版本仍属于有效版本。
 
 不要在代码、Issue、PR、GitHub Actions 日志或截图里粘贴 Secret 值。
+
+## Cloud Run 健康检查路径约定（重要）
+
+Cloud Run 的 Google Frontend 会拦截**精确路径** `/healthz`，在请求进入容器之前直接返回它自己的
+`404 Not Found`（页面带 Google 标识、没有应用响应头、也不会出现在 Cloud Run 请求日志里）。
+只要多一个斜杠，`/healthz/` 反而能正常到达容器——这正是该问题最容易被误判成“路由写错”的地方。
+
+因此本项目约定：
+
+- **公网探活、外部监控、负载均衡健康检查一律使用 `/health`。**
+- `/healthz` 继续保留，仅服务容器内部探针（`docker-compose.yml` / `deploy/zspace/docker-compose.yml` 的
+  healthcheck、`scripts/bootstrap-update.sh`、`SYSTEM_UPDATE_HEALTH_URL` 的 loopback 地址）。
+  这些调用不经过 Google Frontend，不受影响。
+- 排查技巧：如果探活返回的 404 长得像 Google 的错误页而不是应用的 JSON，说明请求被 Frontend 拦下了，
+  而不是应用路由配错。
+
+这个坑不会报错：构建成功、CI 全绿、Cloud Run 显示 Ready、日志里甚至没有记录。只能靠实际去戳端点发现。
