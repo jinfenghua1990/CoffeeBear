@@ -107,28 +107,32 @@ printf '    secrets: %s 个映射\n' "${#SECRET_BINDINGS[@]}"
 gcloud "${ARGS[@]}"
 
 # 部署后核对（Issue #30：不能只看退出码 0）。
-# 1) 新 revision 的 spec.image 必须与 IMAGE_REF 完全一致；
-# 2) 回读 revision 实际解析到的 digest 作为证据记录（多架构 index 与运行时子镜像 digest
-#    不同属正常现象，因此这里只记录、不做等值判断）；
+# 1) 服务当前配置的镜像必须与 IMAGE_REF 一致——校验用「服务级 spec」：
+#    Cloud Run 会把 revision 级 spec/imageDigest 改写成 Artifact Registry 远端缓存路径
+#    （cache.<region>-docker.pkg.dev/ghcr.io/...），与 GHCR 原始 digest 必然不同
+#    （2026-10-13 实测：revision coffeebear-00008-cl8 的 spec.image 即缓存路径，
+#    直接比较 revision 级会误报失败）；服务级 spec 保留部署时请求的原始引用。
+# 2) 回读 revision 实际解析到的 digest 作为证据记录（与 GHCR digest 不同属正常现象，
+#    只记录、不做等值判断）。
 # 3) 设置 EXPECTED_GIT_SHA 时直接请求 /health 做端到端校验——这是唯一能证明
 #    「线上真的跑的是这一版代码」的证据，发现不一致立即判为失败。
 LATEST_REVISION="$(gcloud run services describe "$CLOUD_RUN_SERVICE" \
   --project "$GCP_PROJECT" --region "$GCP_REGION" \
   --format='value(status.latestCreatedRevisionName)' 2>/dev/null || true)"
 if [[ -n "$LATEST_REVISION" ]]; then
-  DEPLOYED_IMAGE="$(gcloud run revisions describe "$LATEST_REVISION" \
+  REQUESTED_IMAGE="$(gcloud run services describe "$CLOUD_RUN_SERVICE" \
     --project "$GCP_PROJECT" --region "$GCP_REGION" \
-    --format='value(spec.containers[0].image)' 2>/dev/null || true)"
+    --format='value(spec.template.spec.containers[0].image)' 2>/dev/null || true)"
   RESOLVED_DIGEST="$(gcloud run revisions describe "$LATEST_REVISION" \
     --project "$GCP_PROJECT" --region "$GCP_REGION" \
     --format='value(status.imageDigest)' 2>/dev/null || true)"
   printf '    revision: %s\n' "$LATEST_REVISION"
-  printf '    deployed image: %s\n' "$DEPLOYED_IMAGE"
+  printf '    requested image: %s\n' "$REQUESTED_IMAGE"
   printf '    resolved digest: %s\n' "$RESOLVED_DIGEST"
-  if [[ -n "$DEPLOYED_IMAGE" && "$DEPLOYED_IMAGE" != "$IMAGE_REF" ]]; then
-    echo "!! 新 revision 的镜像与期望不一致，判为失败（Issue #30）" >&2
+  if [[ -n "$REQUESTED_IMAGE" && "$REQUESTED_IMAGE" != "$IMAGE_REF" ]]; then
+    echo "!! 服务配置的镜像与期望不一致，判为失败（Issue #30）" >&2
     echo "   expected: $IMAGE_REF" >&2
-    echo "   actual:   $DEPLOYED_IMAGE" >&2
+    echo "   actual:   $REQUESTED_IMAGE" >&2
     exit 1
   fi
 fi
