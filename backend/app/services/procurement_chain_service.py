@@ -149,19 +149,8 @@ def order_time(order: Alibaba1688Order) -> datetime | None:
     return order.order_time
 
 
-def _days_apart(a: datetime | None, b: datetime | None) -> float | None:
-    """两日期的绝对间隔；普通候选排序使用，不表达先后方向。"""
-    if a is None or b is None:
-        return None
-    try:
-        return abs((a - b).total_seconds()) / 86400
-    except TypeError:
-        # 测试或历史导入可能混有 naive/aware 时间；仅比较墙上时间，不推断时区。
-        return abs((a.replace(tzinfo=None) - b.replace(tzinfo=None)).total_seconds()) / 86400
-
-
 def _signed_days_apart(a: datetime | None, b: datetime | None) -> float | None:
-    """相对方向的日期差：b 晚于 a 为正，早于 a 为负。"""
+    """带符号日期差：b 晚于 a 为正，早于 a 为负。窗口判定必须使用本函数。"""
     if a is None or b is None:
         return None
     try:
@@ -169,6 +158,21 @@ def _signed_days_apart(a: datetime | None, b: datetime | None) -> float | None:
     except TypeError:
         # 测试或历史导入可能混有 naive/aware 时间；仅比较墙上时间，不推断时区。
         return (b.replace(tzinfo=None) - a.replace(tzinfo=None)).total_seconds() / 86400
+
+
+def _days_apart(a: datetime | None, b: datetime | None) -> float | None:
+    """日期差（带符号，等价于 _signed_days_apart）。
+
+    历史实现返回绝对值，导致 ``days < -PREPAY_GRACE_DAYS`` 恒为假、预付倒挂守卫
+    形同虚设；现统一为带符号语义。需要“距离最近”排序时显式取 abs()。
+    """
+    return _signed_days_apart(a, b)
+
+
+def _day_distance(a: datetime | None, b: datetime | None) -> float | None:
+    """两者距离（绝对值），仅用于“时间最近”候选排序。"""
+    days = _signed_days_apart(a, b)
+    return None if days is None else abs(days)
 
 
 def _document_order_refs(raw: dict | None) -> set[str]:
@@ -655,22 +659,22 @@ class ProcurementChainMatcher:
         candidates: list[tuple[float, Decimal, Alibaba1688Order]] = []
         for order in orders:
             payment = parse_decimal(order.actual_payment)
-            days = _signed_days_apart(order_time(order), target_date)
+            signed = _signed_days_apart(order_time(order), target_date)
             if (
                 normalize_name(order.seller_company_name) != supplier
                 or payment is None
                 or not (amount_exact(payment, target_amount) if exact else amount_close(payment, target_amount))
-                or days is None
-                or days > window
-                or days < -PREPAY_GRACE_DAYS
+                or signed is None
+                or signed > window
+                or signed < -PREPAY_GRACE_DAYS
             ):
                 continue
-            candidates.append((days, abs(payment - target_amount), order))
+            candidates.append((abs(signed), abs(payment - target_amount), order))
         if not candidates:
             return None
         candidates.sort(key=lambda item: (item[0], item[1], item[2].id))
-        days, _, order = candidates[0]
-        return order, HIGH_CONFIDENCE, f"供应商+金额一致，时间相距 {days:.0f} 天"
+        distance, _, order = candidates[0]
+        return order, HIGH_CONFIDENCE, f"供应商+金额一致，时间相距 {distance:.0f} 天"
 
     @staticmethod
     def _best_external_order(
@@ -688,21 +692,23 @@ class ProcurementChainMatcher:
             payment = parse_decimal(order.paid_amount)
             if payment is None:
                 payment = parse_decimal(order.order_amount)
-            days = _days_apart(order.ordered_at, target_date)
+            signed = _signed_days_apart(order.ordered_at, target_date)
             if (
                 normalize_name(order.supplier_name) != supplier
                 or payment is None
                 or not (amount_exact(payment, target_amount) if exact else amount_close(payment, target_amount))
-                or days is None
-                or days > window
+                or signed is None
+                or signed > window
+                # 与 _best_order 对齐：发票/单据早于下单超过宽限天数（预付倒挂）不认。
+                or signed < -PREPAY_GRACE_DAYS
             ):
                 continue
-            candidates.append((days, abs(payment - target_amount), order))
+            candidates.append((abs(signed), abs(payment - target_amount), order))
         if not candidates:
             return None
         candidates.sort(key=lambda item: (item[0], item[1], item[2].id))
-        days, _, order = candidates[0]
-        return order, HIGH_CONFIDENCE, f"供应商+金额一致，时间相距 {days:.0f} 天"
+        distance, _, order = candidates[0]
+        return order, HIGH_CONFIDENCE, f"供应商+金额一致，时间相距 {distance:.0f} 天"
 
     def _existing_link(self, order_id: int, target_type: str, target_id: int) -> bool:
         return self.db.query(ProcurementChainLink).filter_by(
@@ -753,10 +759,10 @@ class ProcurementChainMatcher:
                 continue
             if normalize_name(settle.supplier_name or settle.company_name) != supplier:
                 continue
-            days = _days_apart(order_time(order), settle.settlement_date)
-            if days is None or days > MATCH_WINDOW_DAYS:
+            signed = _signed_days_apart(order_time(order), settle.settlement_date)
+            if signed is None or signed > MATCH_WINDOW_DAYS or signed < -PREPAY_GRACE_DAYS:
                 continue
-            candidates.append((days, abs(payment - amount), settle))
+            candidates.append((abs(signed), abs(payment - amount), settle))
         if not candidates:
             return {"linked": False, "reason": "没有供应商+金额+时间都吻合的结算单，请手工选择"}
         candidates.sort(key=lambda item: (item[0], item[1], item[2].id))
@@ -1486,7 +1492,8 @@ def list_link_candidates(
 
         target_amount = parse_decimal(fields["targetAmount"])
         target_date = target.document_at if target_type == "inbound" else target.settlement_date
-        days = _days_apart(ordered_at, target_date)
+        signed_days = _signed_days_apart(ordered_at, target_date)
+        days = None if signed_days is None else abs(signed_days)
         supplier_match = bool(order_supplier and normalize_name(supplier) == order_supplier)
         amount_match = bool(order_amount is not None and target_amount is not None and amount_close(order_amount, target_amount))
         explicit_match = bool(
@@ -1500,11 +1507,8 @@ def list_link_candidates(
         elif target_type == "inbound" and required_skus:
             if match_skus:
                 # 多因子打分：SKU 重合为主导，供应商与时间辅助，金额仅弱加分
-                if target_date is not None and ordered_at is not None:
-                    delta_days = (target_date.replace(tzinfo=None) - ordered_at.replace(tzinfo=None)).total_seconds() / 86400
-                else:
-                    delta_days = None
-                in_window = delta_days is not None and -7 <= delta_days <= 120
+                delta_days = signed_days
+                in_window = delta_days is not None and -PREPAY_GRACE_DAYS <= delta_days <= 120
                 if in_window:
                     time_score = min(1.0, 10 / max((days or 0), 0.1)) if (days or 0) > 0 else 1.0
                     time_part = "时间相近" if time_score >= 0.5 else f"时间相距 {days:.0f} 天"

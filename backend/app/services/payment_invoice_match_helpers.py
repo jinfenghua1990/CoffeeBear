@@ -74,6 +74,24 @@ def _invoice_target_amount(db: Session, invoice: TaxInvoice) -> Decimal:
     return _dec(tax_invoice_service.effective_invoice_amount_after_red(db, invoice))
 
 
+def _invoice_target_amount_cached(
+    db: Session,
+    invoice: TaxInvoice,
+    red_context: dict[int, dict] | None = None,
+) -> Decimal:
+    """批量匹配专用：复用整批已建好的红冲上下文，避免逐票全表扫描。
+
+    此前 auto_match 已建好 auto_match_red_context，但内部仍逐票调用
+    _invoice_target_amount → red_accounting_context → 全表扫 TaxInvoice，
+    候选票几百张时是 O(N^2)，接口超时又放大了并发窗口。
+    """
+    return _dec(
+        tax_invoice_service.effective_invoice_amount_after_red(
+            db, invoice, red_context=red_context
+        )
+    )
+
+
 def _link_amount(link: TaxInvoiceLink, invoice: TaxInvoice | None) -> Decimal:
     if link.allocated_amount is not None:
         return _dec(link.allocated_amount)

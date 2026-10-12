@@ -93,6 +93,16 @@ function currentMonth() {
   return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
 }
 
+// 保持用户本地墙钟时间：后端按 Asia/Shanghai 解读账期，toISOString() 会先转 UTC
+// 导致凌晨记账落到前一天/上一个月。
+function localWallClock(date = new Date()) {
+  const pad = (value: number) => String(value).padStart(2, "0");
+  return (
+    `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}` +
+    `T${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`
+  );
+}
+
 function parseMonth(value: string) {
   const [year, month] = value.split("-").map(Number);
   return { year, month };
@@ -257,7 +267,9 @@ export default function FinanceCenterPage() {
           business_scope: "domestic",
           accounting_year: periodParts.year,
           accounting_month: periodParts.month,
-          occurred_at: new Date().toISOString(),
+          // 后端 _period() 先转 Asia/Shanghai 再取年月，账期以本地墙钟为准。
+          // 用 toISOString() 会先转 UTC：00:00–07:59 记账会被算到前一天/上个月。
+          occurred_at: localWallClock(),
         }),
       });
       const body = await res.json();

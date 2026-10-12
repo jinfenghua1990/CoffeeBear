@@ -25,7 +25,11 @@ function parseOrderedAt(value: string) {
   if (date.getFullYear() !== year || date.getMonth() !== month - 1 || date.getDate() !== day || date.getHours() !== hour || date.getMinutes() !== minute || date.getSeconds() !== second) {
     throw new Error("采购时间无效，请检查年月日和时分");
   }
-  return date.toISOString();
+  // 后端按业务时区（Asia/Shanghai）解读时间。用 toISOString() 会先转成 UTC，
+  // 用户填 00:00–07:59 时会被写成前一天，采购单直接落在错误账期。
+  // 这里保留用户填写的墙上时间，不做时区换算。
+  const pad = (value: number) => String(value).padStart(2, "0");
+  return `${year}-${pad(month)}-${pad(day)}T${pad(hour)}:${pad(minute)}:${pad(second)}`;
 }
 
 export function NewPurchaseModal({ onClose, onCreated, createdOrderId, renderCreated }: {

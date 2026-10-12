@@ -78,9 +78,16 @@ INVOICE_FLOW = {"unverified", "none", "applied", "partial", "full"}
 
 
 def validate_transition(current: str, nxt: str) -> bool:
+    """只允许沿 PURCHASE_FLOW 向前推进：允许跳步、禁止回退。
+
+    原实现要求严格 +1，导致「采购单已被自动化提前确认入库」的订单无法从
+    jackyun_linked 直接推进到 producing：producing 被 _has_actual_inbound 拦截，
+    而 shipped/arrived/inbound 又不满足 +1，状态机永久卡死、无法收尾。
+    允许跳步后，入库事实改由 _has_actual_inbound 负责「不得回退」，向前推进不再受限。
+    """
     if current not in PURCHASE_FLOW or nxt not in PURCHASE_FLOW:
         return False
-    return PURCHASE_FLOW.index(nxt) == PURCHASE_FLOW.index(current) + 1
+    return PURCHASE_FLOW.index(nxt) > PURCHASE_FLOW.index(current)
 
 
 def derive_invoice_status(paid, linked_total, manual_status: str) -> str:
@@ -475,7 +482,10 @@ def advance_status(db: Session, po: ExternalPurchaseOrder, nxt: str,
             detail = "；".join(snapshot["issues"][:6]) or "采购链路尚未闭环"
             raise ValueError(f"不能标记完成：{detail}")
     if nxt == "producing" and _has_actual_inbound(db, po):
-        raise ValueError("该订单已有实际入库关联，不能回到生产中；请按开票、付款和核验继续收尾")
+        # 已有确认入库事实时只禁止「回退」到生产中；订单若被自动化提前确认入库，
+        # 允许继续向前跳到 shipped/arrived/inbound，避免状态机死锁。
+        if PURCHASE_FLOW.index("producing") <= PURCHASE_FLOW.index(po.purchase_status):
+            raise ValueError("该订单已有实际入库关联，不能回到生产中；请继续向前推进到入库阶段")
     if nxt == "confirmed":
         mark_refined(db, po, actor=actor)
         return

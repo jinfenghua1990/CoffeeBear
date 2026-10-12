@@ -2601,6 +2601,12 @@ def list_invoices(
             (TaxInvoice.match_status == "needs_review", "needs_review"),
             else_="unmatched",
         )
+        # 这里用「原票金额」判 matched/partial，只是 SQL 层的超集预筛：红冲净额需要
+        # 跨行配对（号码归一 + 歧义拒绝 + 人工关系 + 重复逻辑链接），SQL 内无法表达。
+        # 若把它当最终口径，一张 1000 元已全额红冲的蓝票会永远停在 partial（可分摊
+        # 额为 0 却与 1000 比较，用户看到填不满的差额），红冲超额的票又会被误标
+        # matched。权威口径是 context 里的 businessMatchStatus（已按红冲净额计算），
+        # 本过滤器只负责挡掉不可能的候选，减少 python 侧开销。
         business_status = case(
             (invoice_total <= 0, TaxInvoice.match_status),
             (invalid_count > 0, "needs_review"),
@@ -2626,6 +2632,16 @@ def list_invoices(
     # 整批只算一次红冲上下文；此前逐票重算 500+ 次，是发票列表 24 秒卡顿的主因。
     red_context = red_accounting_context(db, rows)
     context = _invoice_business_context(db, rows, red_context=red_context)
+    if match_status:
+        # SQL 预筛按原票额、businessMatchStatus 按红冲净额，两者在「全额红冲的蓝票、
+        # 红冲超额、重复逻辑链接」等场景会不一致。以净额口径为准重筛，保证列表筛选
+        # 与银行核对、采购匹配看到同一份真值。
+        rows = [
+            row
+            for row in rows
+            if (context.get(row.id, {}).get("businessMatchStatus") or "unmatched")
+            == match_status
+        ]
     line_context = invoice_line_summaries(db, rows)
     bank_payment_context = _invoice_bank_payment_context(db, rows, red_context=red_context)
     settlement_context = _red_settlement_context(db, rows)
