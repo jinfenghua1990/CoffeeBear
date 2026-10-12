@@ -11,7 +11,7 @@
 ## GitHub 和本地事实
 
 - 最新 `origin/main` / 本地 HEAD：`b1b150c850c6075d14c97feafb5a05ffe228d5c0`。
-- 当前云架构决策：Google Cloud Run（Docker）+ Supabase PostgreSQL；Backblaze B2 暂不启用。其他长期文档仍有旧方案说明，需要随实际部署更新。
+- 当前云架构决策：Google Cloud Run（Docker）+ Neon PostgreSQL；Backblaze B2 暂不启用。其他长期文档仍有旧方案说明，需要随实际部署更新。
 - Google Cloud Production 项目已选定为 `project-2a0763fd-e296-437d-833`（My First Project，账单已启用）；不使用 `alsvid-dev` / `alsvid-prod`。
 - Cloud Run 所需 API、Artifact Registry `asia-east1/coffeebear`、部署 Service Account 和 GitHub OIDC 已创建；Cloud Run 服务尚未发布。
 - PR #24 未合并，最新 head：`a5e831326a95bb92e5e8812394d291b589b492cc`。该提交 CI run `38109541276` 和 Release Policy run `38109541245` 均成功。
@@ -40,6 +40,7 @@
 
 - Google Cloud CLI 已安装并以 `jinfenghua1990@gmail.com` 认证；当前项目为 `project-2a0763fd-e296-437d-833`，账单已启用。当前没有等待中的 verification code。
 - Supabase 项目 `coffeebear-prod`（ref `ialycmcpotovfbyzqtnj`）已创建并通过 CLI 绑定；运行 / migration 连接、管理员凭据仍未写入云 Secret Manager。不得使用本机 8001 数据库代替云正式数据库。
+- 注：2026-10-12 云端架构决策已更新为 Neon PostgreSQL（见 Issue #26）；上述 Supabase 项目运行 / migration 连接与管理员凭据从未写入云 Secret Manager，其去留待维护者确认。
 - Cloud Run Production 仍待写入正式 Secret Manager 值（至少 `DATABASE_URL`、`MIGRATION_DATABASE_URL`、`APP_SECRET_KEY` 和管理员凭据）；这些值不得提交 GitHub 或粘贴到聊天中。
 - Cloud Run 运行脚本目前以 `IMAGE_REF` 为输入，正式部署前必须确认镜像已构建并推送到可供 Cloud Run 拉取的 Artifact Registry 或公开 GHCR，并记录不可变 digest。
 - 当前业务附件实际写入 `DATA_DIR`，代码没有 B2 上传实现。Backblaze B2 暂不启用；Cloud Run 的临时文件系统不能作为正式附件持久化方案。
@@ -47,4 +48,11 @@
 - 云入口必须采用 RBAC 与独立正式密钥；本地 open 模式不得直接沿用到公网。
 - 正式部署前记录已验收代码 / 镜像、备份恢复路径、迁移版本、健康检查、认证检查和核心业务 smoke；之后才能报告上线成功。
 
-当前尚未创建 Cloud Run 服务、触发生产部署或修改 Supabase 正式数据库；已创建的 Google Cloud 基础资源仅用于后续正式发布。
+当前尚未创建 Cloud Run 服务、触发生产部署或修改正式数据库；已创建的 Google Cloud 基础资源仅用于后续正式发布。
+
+## 2026-10-12 更新：云端架构口径统一
+
+- CoffeeBear 正式数据库确定为 **Neon PostgreSQL**，对象存储 **Cloudflare R2**，密钥 **Google Secret Manager**，运行平台 **Google Cloud Run**。依据：`docs/ENVIRONMENT.md`（2026-10-12 01:59 提交 483315041）。
+- 已同步修订 `docs/ARCHITECTURE_DECISION_CLOUD.md` 与 `docs/STORAGE_ARCHITECTURE.md` 中的旧口径（Supabase / Render）。
+- 待维护者确认：Supabase 项目 `coffeebear-prod`（ref `ialycmcpotovfbyzqtnj`）保留或注销；Issue #25 标题是否由 Render 更新为 Cloud Run。
+- 关联 Issue：#26
