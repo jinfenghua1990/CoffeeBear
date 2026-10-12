@@ -19,6 +19,34 @@ from app.services.reconciliation import settled_amounts_by_settlement
 from app.services.sales_scope import deal_orders_condition
 from app.utils.money import quantize, to_decimal
 
+# 售后/退款单的「事实无效」状态前缀。注意：不能直接复用销售订单的
+# NOT_DEAL_PREFIXES —— 那份清单含「退货」「退款」等描述售后类型本身的词，
+# 套到售后单状态上会把正常退款全部误排除，导致退款率恒为 0。
+VOID_REFUND_PREFIXES: tuple[str, ...] = (
+    "已取消",
+    "取消",
+    "作废",
+    "已关闭",
+    "关闭",
+    "已驳回",
+    "驳回",
+    "已拒绝",
+    "拒绝",
+    "已撤销",
+    "撤销",
+    "失败",
+    "无效",
+    "客服取消",
+)
+
+
+def _refund_is_effective(status: str | None) -> bool:
+    """退款单状态是否构成有效退款事实；状态为空按有效处理（与导入通道原行为一致）。"""
+    text = str(status or "").strip()
+    if not text:
+        return True
+    return not text.startswith(VOID_REFUND_PREFIXES)
+
 
 def _money(value: Decimal | None) -> str | None:
     if value is None:
@@ -40,7 +68,13 @@ def month_bounds(year: int, month: int) -> tuple[datetime, datetime]:
 
 
 def refund_total(db: Session, start: datetime, end: datetime) -> Decimal:
-    """统一退款事实：按售后退款记录发生月统计。"""
+    """统一退款事实：按售后退款记录发生月统计。
+
+    销售侧用 ``deal_orders_condition()`` 排除了取消/无效订单，退款侧若把被作废、
+    被驳回的售后单也算进来，就会凭空冲减 net_sales 并推高 refundRate，且该结果
+    会写回月结快照固化。这里按售后单状态排除无效事实（注意见 VOID_REFUND_PREFIXES
+    注释：不能用销售订单口径，那会把正常退款误伤）。
+    """
     refunds = (
         db.query(AftersalesOrder)
         .filter(
@@ -50,7 +84,10 @@ def refund_total(db: Session, start: datetime, end: datetime) -> Decimal:
         )
         .all()
     )
-    return sum((to_decimal(row.refund_amount) for row in refunds), Decimal("0"))
+    return sum(
+        (to_decimal(row.refund_amount) for row in refunds if _refund_is_effective(row.status)),
+        Decimal("0"),
+    )
 
 
 def sales_overview(db: Session, year: int, month: int) -> dict[str, Any]:

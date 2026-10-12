@@ -14,11 +14,16 @@ from collections import defaultdict
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
-from sqlalchemy import func
-from sqlalchemy.orm import Session
+from sqlalchemy import and_, func, or_
+from sqlalchemy.orm import Session, aliased
 
 from app.models.sales import SalesOrder, SalesOrderItem
-from app.models.tax import TaxInvoice, TaxInvoiceImport, TaxInvoiceLink
+from app.models.tax import (
+    TaxInvoice,
+    TaxInvoiceImport,
+    TaxInvoiceImportRecord,
+    TaxInvoiceLink,
+)
 from app.services.monthly_core import month_bounds
 from app.services.tax_invoice_service import is_effective_for_accounting
 from app.utils.money import to_decimal
@@ -125,15 +130,30 @@ def monthly_ledger(db: Session, year: int, month: int) -> dict[str, Any]:
 
     start, end = month_bounds(year, month)
 
-    # 只把已确认(active)的官方税务导入作为做账真值来源。
+    # 只把已确认(active)的官方税务导入作为做账真值来源；同时必须排除用户在
+    # 明细核对页删除过的导入行（row_status="deleted"），否则被删掉的错误/重复
+    # 发票仍会全额计入销项/进项税额，与发票台账、财务汇总口径互相矛盾。
+    #
+    # 关联键说明：TaxInvoice.source_row_index 对应 TaxInvoiceImportRecord.row_index，
+    # 二者同为该次导入内的行号。outerjoin + (record 为空 or 未删除) 使历史数据
+    # （无明细行快照）保持原有可见性，不会因新增过滤而漏计。
+    import_record = aliased(TaxInvoiceImportRecord)
     rows = (
         db.query(TaxInvoice)
         .join(TaxInvoiceImport, TaxInvoiceImport.id == TaxInvoice.source_import_id)
+        .outerjoin(
+            import_record,
+            and_(
+                import_record.import_id == TaxInvoice.source_import_id,
+                import_record.row_index == TaxInvoice.source_row_index,
+            ),
+        )
         .filter(
             TaxInvoiceImport.lifecycle == "active",
             TaxInvoice.source_system == "tax_export",
             TaxInvoice.issue_date >= start,
             TaxInvoice.issue_date < end,
+            or_(import_record.id.is_(None), import_record.row_status != "deleted"),
         )
         .order_by(TaxInvoice.issue_date, TaxInvoice.id)
         .all()
