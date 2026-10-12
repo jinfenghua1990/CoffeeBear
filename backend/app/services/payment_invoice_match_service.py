@@ -145,7 +145,9 @@ def _supplier_accounts_by_name(db: Session) -> dict[str, set[str]]:
 
     # 将“税号 → 账号”画像映射回当前发票销方名称，继续复用既有安全匹配流程：
     # 金额一致 + 唯一最佳日期仍然必须满足。
-    for invoice in db.query(TaxInvoice).filter(TaxInvoice.direction == "input").all():
+    for invoice in tax_invoice_service.filter_visible_invoices(
+        db.query(TaxInvoice)
+    ).filter(TaxInvoice.direction == "input").all():
         name = _normalize_name(invoice.seller_name)
         tax_no = _normalize_tax_no(invoice.seller_tax_id)
         if not name or not tax_no:
