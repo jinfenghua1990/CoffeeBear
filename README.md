@@ -83,7 +83,14 @@ Production Environment（正式环境）
 - ❌ 不维护三套长期环境
 - ✅ Test 作为生产发布前验证环境
 - ✅ Production 是唯一正式业务运行环境
+程序：
+Render
 
+数据库：
+Supabase PostgreSQL
+
+对象存储：
+Cloudflare R2
 完整环境规范见：`docs/ENVIRONMENT.md`。
 
 ## 仓库边界
