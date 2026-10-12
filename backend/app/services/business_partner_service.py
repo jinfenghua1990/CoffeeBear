@@ -885,8 +885,11 @@ def _is_own_entity(name: str, tax_no: str, own_names: set[str], own_taxes: set[s
 
 
 def _sync_invoice_sources(ctx: SyncContext) -> None:
+    from app.services import tax_invoice_service
+
     own_names, own_taxes = _own_entity_keys(ctx.db)
-    rows = ctx.db.query(TaxInvoice).all()
+    # 被用户删除的导入行不应再生成/刷新往来主体关系，与发票台账口径一致。
+    rows = tax_invoice_service.filter_visible_invoices(ctx.db.query(TaxInvoice)).all()
     for invoice in rows:
         seller_own = _is_own_entity(invoice.seller_name, invoice.seller_tax_id, own_names, own_taxes)
         buyer_own = _is_own_entity(invoice.buyer_name, invoice.buyer_tax_id, own_names, own_taxes)
