@@ -9,7 +9,9 @@ from app.config import settings
 from app.models import Base  # noqa: F401  导入全部当前模型确保 metadata 完整
 
 config = context.config
-config.set_main_option("sqlalchemy.url", settings.DATABASE_URL)
+# configparser 会对 % 做插值：数据库密码若含 URL 编码字符（例如 %40 代表 @），
+# 不转义会让 alembic 直接抛 ValueError: invalid interpolation syntax。
+config.set_main_option("sqlalchemy.url", settings.DATABASE_URL.replace("%", "%%"))
 
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
