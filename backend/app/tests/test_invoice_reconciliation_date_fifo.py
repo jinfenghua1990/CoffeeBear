@@ -25,7 +25,7 @@ def _po(db, no: str, ordered_at: datetime, amount: str):
     return row
 
 
-def _invoice(db, key: str, issue_date: datetime, amount: str):
+def _invoice(db, key: str, issue_date: datetime | None, amount: str):
     row = TaxInvoice(
         invoice_key=key,
         direction="input",
@@ -335,3 +335,25 @@ def test_fifo_groups_different_raw_names_by_canonical_partner_id(db_session):
     assert invoice_row["coveredTotal"] == 3080.0
     assert [row["orderNo"] for row in invoice_row["covered"]] == [order.external_order_id]
 
+
+
+def test_fifo_does_not_guess_when_invoice_or_order_date_is_missing(db_session):
+    _po(db_session, "DATE-MISSING-ORDER", None, "40")
+    _po(db_session, "DATE-MISSING-INVOICE-ORDER", datetime(2026, 8, 1, 10, 0), "60")
+    invoice = _invoice(db_session, "DATE-MISSING-INVOICE", None, "100")
+
+    result = reconcile(db_session, supplier=SUPPLIER)
+    entry = result["suppliers"][0]
+    invoice_row = next(
+        item for month in entry["months"] for item in month["invoices"]
+        if item["invoiceId"] == invoice.id
+    )
+
+    assert invoice_row["status"] == "short"
+    assert invoice_row["shortReason"] == "missing_invoice_date"
+    assert invoice_row["coveredTotal"] == 0.0
+    assert invoice_row["covered"] == []
+    assert {row["orderNo"] for row in entry["pendingOrders"]} == {
+        "DATE-MISSING-ORDER",
+        "DATE-MISSING-INVOICE-ORDER",
+    }

@@ -35,16 +35,16 @@ DEFAULT_RULES = [
 
 def build_fingerprint(account_no: str, txn_date: str, amount, voucher_no: str,
                       counterparty_name: str = "", summary: str = "",
-                      serial_no: str = "") -> str:
-    """真实账户+日期+金额+银行流水号/凭证号；无编号时使用稳定回退值。"""
+                      serial_no: str = "", direction: str = "") -> str:
+    """按真实账户、日期、金额和方向去重，再使用流水号/凭证号或稳定回退值。"""
     amt = f"{quantize(to_decimal(amount), Decimal('0.01')):f}"
+    direction_part = f"|{direction}" if direction else ""
     if serial_no:
-        raw = f"{account_no}|{txn_date}|{amt}|{serial_no}|{voucher_no}"
+        raw = f"{account_no}|{txn_date}|{amt}{direction_part}|{serial_no}|{voucher_no}"
     elif voucher_no:
-        # 保持旧版人工录入/历史导入的指纹兼容，避免升级后同一笔重新生成。
-        raw = f"{account_no}|{txn_date}|{amt}|{voucher_no}"
+        raw = f"{account_no}|{txn_date}|{amt}{direction_part}|{voucher_no}"
     else:
-        raw = f"{account_no}|{txn_date}|{amt}|{counterparty_name}|{summary}"
+        raw = f"{account_no}|{txn_date}|{amt}{direction_part}|{counterparty_name}|{summary}"
     return hashlib.sha256(raw.encode()).hexdigest()
 
 
@@ -321,8 +321,10 @@ def add_transaction(db: Session, *, account_no: str, txn_date: date, direction: 
         db, account_no, account_name=account_name, internal_code=internal_code,
     )
     amount_value = quantize(to_decimal(amount), Decimal("0.01"))
-    fp = build_fingerprint(account_no, txn_date.isoformat(), amount, voucher_no,
-                           counterparty_name, summary, serial_no=serial_no)
+    fp = build_fingerprint(
+        account_no, txn_date.isoformat(), amount, voucher_no,
+        counterparty_name, summary, serial_no=serial_no, direction=direction,
+    )
     existing = db.query(BankTransaction).filter_by(fingerprint=fp).first()
     if existing is None:
         existing = _legacy_candidate(

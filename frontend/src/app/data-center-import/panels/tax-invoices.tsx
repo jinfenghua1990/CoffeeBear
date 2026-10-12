@@ -137,7 +137,10 @@ function TaxInvoiceVerifyCard() {
   const [filter, setFilter] = useState<VerifyFilter>("unverified");
   const [rows, setRows] = useState<TaxInvoiceRow[]>([]);
   const [selected, setSelected] = useState<Set<number>>(new Set());
-  const [month, setMonth] = useState(() => new Date().toISOString().slice(0, 7));
+  const [month, setMonth] = useState(() => {
+    const now = new Date();
+    return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
+  });
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<string>("");
 

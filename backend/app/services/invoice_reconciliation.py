@@ -414,10 +414,11 @@ def reconcile(
                         ordered_at = candidate.get("_orderedAt")
                         if candidate["remaining"] <= TOLERANCE:
                             continue
-                        if inv.issue_date is None:
-                            eligible_index = idx
-                            break
-                        if ordered_at is not None and ordered_at.date() <= inv.issue_date.date():
+                        # 自动 FIFO 必须有双方日期才能证明订单发生在开票日当天或之前。
+                        # 缺少发票日期时不做自动猜配；缺少采购日期的单据永不进入 FIFO。
+                        if inv.issue_date is None or ordered_at is None:
+                            continue
+                        if ordered_at.date() <= inv.issue_date.date():
                             eligible_index = idx
                             break
                     if eligible_index is None:
@@ -474,6 +475,8 @@ def reconcile(
                 "shortReason": (
                     "explicit_link_issue"
                     if explicit_issues
+                    else "missing_invoice_date"
+                    if diff < -TOLERANCE and inv.issue_date is None and not explicit_links
                     else "date_cutoff"
                     if diff < -TOLERANCE and future_order_count > 0
                     else "insufficient_orders"
