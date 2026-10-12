@@ -7,7 +7,7 @@ CoffeeBear 采用：
 ```text
 GitHub
   |
-Render
+Google Cloud Run
   |
 Neon PostgreSQL
   |

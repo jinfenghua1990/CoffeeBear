@@ -4,6 +4,10 @@
 
 已确认。
 
+## 最近更新
+
+- 2026-10-12：CoffeeBear 正式数据库由 Supabase PostgreSQL 调整为 **Neon PostgreSQL**，对象存储确定为 **Cloudflare R2**，与 `docs/ENVIRONMENT.md`、`docs/STORAGE_ARCHITECTURE.md` 保持一致。
+
 ## CoffeeBear 与 ALSVID 架构边界
 
 CoffeeBear 与 ALSVID 属于两个独立业务系统：
@@ -12,8 +16,8 @@ CoffeeBear 与 ALSVID 属于两个独立业务系统：
 | --- | --- | --- |
 | 业务 | 国内经营系统 | 国际自行车品牌平台 |
 | 软件运行 | Google Cloud Run | Google Cloud Run |
-| 数据库 | Supabase PostgreSQL | Neon PostgreSQL |
-| 对象存储 | Supabase Storage（待代码接入） | Cloudflare R2 |
+| 数据库 | Neon PostgreSQL（独立项目） | Neon PostgreSQL（独立项目） |
+| 对象存储 | Cloudflare R2（独立 Bucket） | Cloudflare R2（独立 Bucket） |
 | 业务资源 | 独立 | 独立 |
 
 ## CoffeeBear Production 架构
@@ -27,18 +31,20 @@ Google Cloud Run
   v
 CoffeeBear Application
   |
-  +--> Supabase PostgreSQL
+  +--> Neon PostgreSQL
   |
-  +--> Supabase Storage（待接入）
+  +--> Cloudflare R2
+  |
+  +--> Google Secret Manager
 ```
 
 ## 对象存储资源规则
 
-CoffeeBear 与 ALSVID 根据业务访问场景选择不同对象存储方案。
+CoffeeBear 与 ALSVID 可以采用相同的对象存储技术方案，但必须使用独立 Bucket。
 
 ### CoffeeBear
 
-计划使用：Supabase Storage（当前代码尚未接入）
+使用：Cloudflare R2（Bucket `coffeebear-prod`）
 
 用途：
 
@@ -51,10 +57,10 @@ CoffeeBear 与 ALSVID 根据业务访问场景选择不同对象存储方案。
 
 当前状态：
 
-- Backblaze B2 无法注册，本方案不再依赖 B2
-- 当前业务附件仍写入 `DATA_DIR`
+- 代码尚未接入 R2 上传实现，业务附件仍写入 `DATA_DIR`
 - Cloud Run 临时文件系统不能作为正式附件持久化方案
-- 接入 Supabase Storage 前，附件功能必须明确报告为未配置
+- 接入 Cloudflare R2 前，附件功能必须明确报告为未配置
+- Supabase Storage 方案已作废，Backblaze B2 无法注册，均不再依赖
 
 ### ALSVID
 
@@ -89,19 +95,19 @@ CoffeeBear 与 ALSVID 可以采用相同的工程规范，但生产业务资源�
 - 降低服务器维护成本
 - 适合 CoffeeBear 当前阶段业务规模
 
-### Supabase PostgreSQL
+### Neon PostgreSQL
 
 - PostgreSQL 标准数据库
-- 提供托管能力
+- 提供托管能力与分支能力，便于迁移与验证
 - 适合 CoffeeBear 业务数据模型
 
-### Supabase Storage
+### Cloudflare R2（CoffeeBear）
 
-- 作为 CoffeeBear 业务文件存储的计划方案
-- 与 Supabase PostgreSQL 使用同一项目边界
+- 作为 CoffeeBear 业务文件存储的正式方案
+- 与 ALSVID 使用同一技术方案但独立 Bucket
 - 在代码完成适配并通过上传、下载、权限测试前不得宣称已启用
 
-### Cloudflare R2
+### Cloudflare R2（ALSVID）
 
 - 用于 ALSVID 国际业务文件
 - 适合图片、产品资料等访问场景
