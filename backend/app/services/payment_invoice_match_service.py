@@ -30,6 +30,7 @@ from app.services.payment_invoice_match_helpers import (
     _invoice_brief,
     _invoice_issue_date,
     _invoice_target_amount,
+    _invoice_target_amount_cached,
     _link_amount,
     _month_range,
     _offset_month,
@@ -144,7 +145,9 @@ def _supplier_accounts_by_name(db: Session) -> dict[str, set[str]]:
 
     # 将“税号 → 账号”画像映射回当前发票销方名称，继续复用既有安全匹配流程：
     # 金额一致 + 唯一最佳日期仍然必须满足。
-    for invoice in db.query(TaxInvoice).filter(TaxInvoice.direction == "input").all():
+    for invoice in tax_invoice_service.filter_visible_invoices(
+        db.query(TaxInvoice)
+    ).filter(TaxInvoice.direction == "input").all():
         name = _normalize_name(invoice.seller_name)
         tax_no = _normalize_tax_no(invoice.seller_tax_id)
         if not name or not tax_no:
@@ -885,7 +888,7 @@ def _split_match_invoice_to_txns(
     例：发票 ¥60288，被流水 ¥3306 + ¥5402 + ... 分次付完。
     返回 (匹配流水数, 已分配金额)。
     """
-    target = _invoice_target_amount(db, invoice)
+    target = _invoice_target_amount_cached(db, invoice, red_context)
     allocated = (
         allocated_by_invoice.get(invoice.id, Decimal("0.0000"))
         if allocated_by_invoice is not None
@@ -966,7 +969,7 @@ def _split_match_txn_to_invoices(
             invoice, db=db, red_context=red_context
         ):
             continue
-        inv_amount = _invoice_target_amount(db, invoice)
+        inv_amount = _invoice_target_amount_cached(db, invoice, red_context)
         inv_used = (
             allocated_by_invoice.get(invoice.id, Decimal("0.0000"))
             if allocated_by_invoice is not None
@@ -1274,7 +1277,7 @@ def auto_match(db: Session, year: int, month: int, actor: str = "system") -> dic
         for invoice in invoices:
             if (invoice.id, txn.id) in existing_invoice_txn:
                 continue
-            invoice_total = _invoice_target_amount(db, invoice)
+            invoice_total = _invoice_target_amount_cached(db, invoice, auto_match_red_context)
             invoice_remaining = invoice_total - allocated_by_invoice.get(invoice.id, Decimal("0"))
             if invoice_remaining <= TOLERANCE or abs(invoice_remaining - txn_remaining) > TOLERANCE:
                 continue
@@ -1308,7 +1311,7 @@ def auto_match(db: Session, year: int, month: int, actor: str = "system") -> dic
                 })
             continue
 
-        invoice_total = _invoice_target_amount(db, invoice)
+        invoice_total = _invoice_target_amount_cached(db, invoice, auto_match_red_context)
         invoice_remaining = invoice_total - allocated_by_invoice.get(invoice.id, Decimal("0"))
         portion = min(invoice_remaining, txn_remaining)
         account_match = bool(evidence.get("accountMatch"))
@@ -1358,7 +1361,8 @@ def auto_match(db: Session, year: int, month: int, actor: str = "system") -> dic
     # 银行付款维度按“剩余未分摊金额”判断，不依赖跨业务共用的 match_status。
     leftover_invoices = [
         inv for inv in invoices
-        if _invoice_target_amount(db, inv) - allocated_by_invoice.get(inv.id, Decimal("0")) > TOLERANCE
+        if _invoice_target_amount_cached(db, inv, auto_match_red_context)
+        - allocated_by_invoice.get(inv.id, Decimal("0")) > TOLERANCE
     ]
     # 仍未配的流水
     leftover_txns = [t for t in txns if t.id not in existing_txn_ids]
@@ -1378,7 +1382,7 @@ def auto_match(db: Session, year: int, month: int, actor: str = "system") -> dic
             continue
         txn_list = sorted(txn_groups[norm], key=lambda x: x.txn_date)
         for inv in inv_list:
-            inv_total = _invoice_target_amount(db, inv)
+            inv_total = _invoice_target_amount_cached(db, inv, auto_match_red_context)
             inv_remaining = inv_total - allocated_by_invoice.get(inv.id, Decimal("0"))
             if inv_remaining <= TOLERANCE:
                 continue
@@ -1398,7 +1402,10 @@ def auto_match(db: Session, year: int, month: int, actor: str = "system") -> dic
                 1
                 for other in inv_list
                 if abs(
-                    (_invoice_target_amount(db, other) - allocated_by_invoice.get(other.id, Decimal("0")))
+                    (
+                        _invoice_target_amount_cached(db, other, auto_match_red_context)
+                        - allocated_by_invoice.get(other.id, Decimal("0"))
+                    )
                     - inv_remaining
                 ) <= TOLERANCE
             )
@@ -1435,7 +1442,8 @@ def auto_match(db: Session, year: int, month: int, actor: str = "system") -> dic
             continue
         candidates = [
             inv for inv in inv_groups[norm]
-            if _invoice_target_amount(db, inv) - allocated_by_invoice.get(inv.id, Decimal("0")) > TOLERANCE
+            if _invoice_target_amount_cached(db, inv, auto_match_red_context)
+            - allocated_by_invoice.get(inv.id, Decimal("0")) > TOLERANCE
         ]
         candidates.sort(
             key=lambda inv: (
@@ -1446,7 +1454,8 @@ def auto_match(db: Session, year: int, month: int, actor: str = "system") -> dic
         txn_remaining = _dec(txn.amount) - allocated_by_txn.get(txn.id, Decimal("0"))
         selected_total = sum(
             (
-                _invoice_target_amount(db, inv) - allocated_by_invoice.get(inv.id, Decimal("0"))
+                _invoice_target_amount_cached(db, inv, auto_match_red_context)
+                - allocated_by_invoice.get(inv.id, Decimal("0"))
                 for inv in candidates
             ),
             Decimal("0.0000"),
@@ -1492,7 +1501,10 @@ def auto_match(db: Session, year: int, month: int, actor: str = "system") -> dic
             )
             if not evidence["accountMatch"]:
                 continue
-            inv_remaining = _invoice_target_amount(db, inv) - allocated_by_invoice.get(inv.id, Decimal("0"))
+            inv_remaining = (
+                _invoice_target_amount_cached(db, inv, auto_match_red_context)
+                - allocated_by_invoice.get(inv.id, Decimal("0"))
+            )
             if inv_remaining > TOLERANCE and abs(inv_remaining - txn_remaining) <= TOLERANCE:
                 candidates.append(inv)
         inv, evidence = _choose_unique_best_candidate(
@@ -1553,7 +1565,8 @@ def auto_match(db: Session, year: int, month: int, actor: str = "system") -> dic
     still_open_txns = [t for t in leftover_txns if t.id not in existing_txn_ids]
     open_invoices = [
         inv for inv in invoices
-        if _invoice_target_amount(db, inv) - allocated_by_invoice.get(inv.id, Decimal("0")) > TOLERANCE
+        if _invoice_target_amount_cached(db, inv, auto_match_red_context)
+        - allocated_by_invoice.get(inv.id, Decimal("0")) > TOLERANCE
     ]
     open_groups: dict[str, list[TaxInvoice]] = {}
     for inv in open_invoices:
@@ -1572,7 +1585,10 @@ def auto_match(db: Session, year: int, month: int, actor: str = "system") -> dic
         if len(candidates) != 1:
             continue
         inv = candidates[0]
-        inv_remaining = _invoice_target_amount(db, inv) - allocated_by_invoice.get(inv.id, Decimal("0"))
+        inv_remaining = (
+            _invoice_target_amount_cached(db, inv, auto_match_red_context)
+            - allocated_by_invoice.get(inv.id, Decimal("0"))
+        )
         if inv_remaining <= TOLERANCE:
             continue
         portion = min(txn_remaining, inv_remaining)

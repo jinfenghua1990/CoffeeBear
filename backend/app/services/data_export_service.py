@@ -555,7 +555,10 @@ def _sales_export(db: Session, *, q: str, status: str, start_date: date | None, 
 
 
 def _tax_export(db: Session, *, q: str, status: str, template: bool = False) -> tuple[bytes, int]:
-    query = db.query(TaxInvoice)
+    from app.services import tax_invoice_service
+
+    # 与发票台账列表同口径：已被用户删除的导入行不出现在导出里。
+    query = tax_invoice_service.filter_visible_invoices(db.query(TaxInvoice))
     if q.strip():
         like = f"%{q.strip()}%"
         query = query.filter(or_(TaxInvoice.invoice_number.ilike(like), TaxInvoice.seller_name.ilike(like), TaxInvoice.buyer_name.ilike(like)))

@@ -85,6 +85,38 @@ def _resolve_sku_id(
     return None
 
 
+def _is_newer(candidate: datetime | None, current: datetime | None) -> bool:
+    """比较两个可能为 None 的快照时点；None 视为最旧。"""
+    if candidate is None:
+        return current is None
+    if current is None:
+        return True
+    try:
+        return candidate > current
+    except TypeError:
+        return candidate.replace(tzinfo=None) > current.replace(tzinfo=None)
+
+
+def _ledger_sum_before(
+    movements: list[tuple[datetime | None, Decimal]],
+    moment: datetime,
+) -> Decimal:
+    """已按时间升序排好的单据增量列表中，``moment`` 之前的净合计。
+
+    仅比较墙上时间，不做时区推断；无日期的单据视为发生在所有时点之前。
+    """
+    naive_moment = moment.replace(tzinfo=None)
+    total = Decimal("0")
+    for occurred_at, delta in movements:
+        if occurred_at is None:
+            total += delta
+            continue
+        if occurred_at.replace(tzinfo=None) >= naive_moment:
+            break
+        total += delta
+    return total
+
+
 def current_positions(db: Session) -> dict[str, Any]:
     """独立运算当前正品库存：Σ采购入库 − Σ销售出库，仓库按本系统仓库档案归属。
 
@@ -97,6 +129,8 @@ def current_positions(db: Session) -> dict[str, Any]:
     by_sku_warehouse: dict[int, dict[int | None, Decimal]] = defaultdict(dict)
     by_sku: dict[int, Decimal] = defaultdict(lambda: Decimal("0"))
     seen_skus: set[int] = set()
+    # 逐 (SKU, 仓库) 记录单据增量与时点，供盘点基准重置使用（见下方 stocktake 段落）。
+    ledger: dict[tuple[int, int | None], list[tuple[datetime | None, Decimal]]] = defaultdict(list)
 
     applied_documents = 0
     applied_items = 0
@@ -133,6 +167,7 @@ def current_positions(db: Session) -> dict[str, Any]:
         bucket = by_sku_warehouse[sku_id]
         bucket[warehouse_id] = bucket.get(warehouse_id, Decimal("0")) + sign * quantity
         by_sku[sku_id] += sign * quantity
+        ledger[(sku_id, warehouse_id)].append((document.document_at, sign * quantity))
         seen_skus.add(sku_id)
         applied_items += 1
         seen_documents.add(document.id)
@@ -141,6 +176,8 @@ def current_positions(db: Session) -> dict[str, Any]:
         else:
             applied_outbound += quantity
     applied_documents = len(seen_documents)
+    for movements in ledger.values():
+        movements.sort(key=lambda pair: (pair[0] is None, pair[0]))
 
     # 已完成盘点的正品差异是本地库存调整事实；只在确认后进入运算库存。
     stocktake_rows = (
@@ -154,18 +191,39 @@ def current_positions(db: Session) -> dict[str, Any]:
         .order_by(InventoryStocktakeTask.confirmed_at, InventoryStocktakeTask.id, InventoryStocktakeItem.id)
         .all()
     )
-    stocktake_adjustment_count = 0
+    # 盘点差异是「确认时点账面 vs 实盘」的一次性快照，不是可以永远叠加的增量：
+    # 确认后再导入 document_at 早于快照的补录单据时，若继续把旧差异加上去，同一批
+    # 数量会被算两次、库存永久漂移。这里按 (SKU, 仓库) 取最近一次已确认盘点，
+    # 把该时点之前的单据合计重置为实盘数，之后的单据增量照常累加。
+    latest_by_cell: dict[tuple[int, int | None], tuple[datetime | None, Decimal]] = {}
     for item, task in stocktake_rows:
         diff = to_decimal(item.difference_qty)
         if diff == 0:
             continue
-        bucket = by_sku_warehouse[item.ref_id]
-        bucket[item.warehouse_id] = bucket.get(item.warehouse_id, Decimal("0")) + diff
-        by_sku[item.ref_id] += diff
-        seen_skus.add(item.ref_id)
+        cell = (item.ref_id, item.warehouse_id)
+        current = latest_by_cell.get(cell)
+        if current is None or _is_newer(task.confirmed_at, current[0]):
+            latest_by_cell[cell] = (task.confirmed_at, diff)
+
+    stocktake_adjustment_count = 0
+    stocktake_reset_count = 0
+    for (sku_id, warehouse_id), (confirmed_at, diff) in latest_by_cell.items():
+        seen_skus.add(sku_id)
         stocktake_adjustment_count += 1
-        if task.confirmed_at is not None and (last_at is None or task.confirmed_at > last_at):
-            last_at = task.confirmed_at
+        bucket = by_sku_warehouse[sku_id]
+        current_bucket = bucket.get(warehouse_id, Decimal("0"))
+        if confirmed_at is None:
+            # 无确认时间戳时无法定位快照时点，退化为原增量口径（保持历史行为）。
+            delta = diff
+        else:
+            before = _ledger_sum_before(ledger.get((sku_id, warehouse_id), []), confirmed_at)
+            # 重置基准：快照时点之前的单据合计被实盘数取代，之后的增量保持累加。
+            delta = diff - before
+            stocktake_reset_count += 1
+        bucket[warehouse_id] = current_bucket + delta
+        by_sku[sku_id] += delta
+        if confirmed_at is not None and (last_at is None or confirmed_at > last_at):
+            last_at = confirmed_at
 
     return {
         "by_sku": dict(by_sku),

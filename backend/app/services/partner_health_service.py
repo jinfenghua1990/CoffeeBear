@@ -18,6 +18,11 @@ from app.models.bank import BankTransaction
 
 def partner_health_report(db: Session) -> dict[str, Any]:
     """返回统一往来单位覆盖情况。"""
+    from app.services import tax_invoice_service
+
+    def _visible_invoices():
+        """发票台账可见口径：排除已被用户删除的导入行，与列表页一致。"""
+        return tax_invoice_service.filter_visible_invoices(db.query(TaxInvoice))
 
     checks = {
         "suppliers": {
@@ -37,8 +42,8 @@ def partner_health_report(db: Session) -> dict[str, Any]:
             .count(),
         },
         "taxInvoices": {
-            "total": db.query(TaxInvoice).count(),
-            "unlinked": db.query(TaxInvoice)
+            "total": _visible_invoices().count(),
+            "unlinked": _visible_invoices()
             .filter(TaxInvoice.seller_partner_id.is_(None))
             .count(),
         },

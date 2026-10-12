@@ -11,6 +11,7 @@ from typing import Any
 from uuid import uuid4
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.models.finance import FinanceEntry, FinanceLegalEntity
@@ -51,8 +52,20 @@ def ensure_default_entity(db: Session) -> FinanceLegalEntity:
         business_scopes=["domestic"],
         note="系统初始化默认主体",
     )
-    db.add(row)
-    db.flush()
+    # 两个并发首屏请求会同时插入同一 code，撞 uq_finance_legal_entities_code
+    # 直接 500。用 SAVEPOINT 包住插入，冲突时回滚到保存点并回读已提交行。
+    try:
+        with db.begin_nested():
+            db.add(row)
+            db.flush()
+    except IntegrityError:
+        db.expunge(row)
+        existing = db.scalar(
+            select(FinanceLegalEntity).where(FinanceLegalEntity.code == DEFAULT_ENTITY_CODE)
+        )
+        if existing is None:
+            raise
+        return existing
     db.refresh(row)
     return row
 

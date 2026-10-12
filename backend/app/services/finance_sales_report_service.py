@@ -373,9 +373,10 @@ def _output_invoiced_by_group(db: Session, start, nxt) -> tuple[dict[tuple[str, 
     - 订单内再按明细行成本占比把订单实付金额落到 (税务编号, 产品) 组。
     """
     from app.models.tax import TaxInvoice, TaxInvoiceLink
+    from app.services import tax_invoice_service
 
     invoices = (
-        db.query(TaxInvoice)
+        tax_invoice_service.filter_visible_invoices(db.query(TaxInvoice))
         .filter(
             TaxInvoice.source_system == "tax_export",
             TaxInvoice.direction == "output",
@@ -388,7 +389,6 @@ def _output_invoiced_by_group(db: Session, start, nxt) -> tuple[dict[tuple[str, 
     invoice_ids = [row.id for row in invoices]
     if not invoice_ids:
         return {}, {}
-    from app.services import tax_invoice_service
     red_context = tax_invoice_service.red_accounting_context(db, invoices)
     related_blue_ids = {
         int(ctx["redRelatedInvoiceId"])
