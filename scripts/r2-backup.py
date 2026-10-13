@@ -67,7 +67,7 @@ def env_runtime_config() -> dict[str, Any] | None:
         "bucket": os.environ[names["bucket"]].strip(),
         "access_key": os.environ[names["access_key"]].strip(),
         "secret_key": os.environ[names["secret_key"]].strip(),
-        "prefix": (os.getenv("R2_BACKUP_PREFIX") or "ecommerce-workspace/backup").strip().strip("/"),
+        "prefix": (os.getenv("R2_BACKUP_PREFIX") or "coffeebear/backup").strip().strip("/"),
         "fullIntervalDays": int(os.getenv("R2_FULL_INTERVAL_DAYS") or "10"),
         "source": "environment",
     }
@@ -301,7 +301,7 @@ def run_daily(config: dict[str, Any], directory: Path, state: dict[str, Any]) ->
     timestamp = values.get("timestamp", "")
     if not timestamp:
         raise RuntimeError("完整容灾 manifest 缺少 timestamp")
-    prefix = str(config.get("prefix") or "ecommerce-workspace/backup").strip().strip("/")
+    prefix = str(config.get("prefix") or "coffeebear/backup").strip().strip("/")
     modules_state = state.setdefault("modules", {})
     refs: dict[str, Any] = {}
 
@@ -371,7 +371,7 @@ def run_full(config: dict[str, Any], directory: Path, state: dict[str, Any]) -> 
     timestamp = values.get("timestamp", "")
     if not timestamp:
         raise RuntimeError("完整容灾 manifest 缺少 timestamp")
-    prefix = str(config.get("prefix") or "ecommerce-workspace/backup").strip().strip("/")
+    prefix = str(config.get("prefix") or "coffeebear/backup").strip().strip("/")
     root_key = f"{prefix}/full/{date_path(timestamp)}/{timestamp}"
     refs: dict[str, Any] = {}
 

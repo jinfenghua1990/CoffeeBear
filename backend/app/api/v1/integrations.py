@@ -142,7 +142,7 @@ class R2BackupConfigIn(BaseModel):
 
     endpoint_url: str = Field(alias="endpointUrl")
     bucket: str
-    prefix: str = "ecommerce-workspace/backup"
+    prefix: str = "coffeebear/backup"
     access_key: str = Field(default="", alias="accessKey")
     secret_key: str = Field(default="", alias="secretKey")
     enabled: bool = True

@@ -83,6 +83,21 @@ coffeebear-prod
 - 代码仓库 GitHub 不存放业务文件。
 - 应用通过配置读取对象存储地址，避免绑定具体供应商。
 
+## 存储空间隔离（硬约束）
+
+CoffeeBear 的 R2 存储空间**必须独占**，不得与其他项目共用桶或命名空间。
+
+| 归属 | 存储空间 | 说明 |
+|---|---|---|
+| CoffeeBear | `coffeebear-prod` | 本项目唯一允许写入的桶 |
+| 其他项目 | `ecommerce-workspace-backup` / `ecommerce-workspace-cold` / `alsvid-development` / `alsvid-production` | **严禁读写** |
+
+约定：
+
+- 对象前缀固定为 `coffeebear/backup`，不得使用 `ecommerce-workspace/` 或 `alsvid/` 前缀。
+- R2 凭据必须是**仅授权 `coffeebear-prod` 桶**的令牌，不得复用其他项目的账号级令牌。
+- 该约束在服务层强制（`r2_backup_service.save_config` 拒绝其他项目的桶与命名空间），不是仅靠约定。
+
 ## 未来扩展
 
 如文件规模增长，可保持 Neon PostgreSQL 不变，仅替换对象存储层。

@@ -1,3 +1,5 @@
+import pytest
+
 from app.config import settings
 from app.models.integration import IntegrationCredential
 from app.services import r2_backup_service
@@ -10,7 +12,7 @@ def test_r2_config_encrypts_secrets_and_never_exposes_them(db_session, monkeypat
         db_session,
         endpoint_url="https://account-id.r2.cloudflarestorage.com",
         bucket="ecommerce-backup",
-        prefix="ecommerce-workspace/backup",
+        prefix="coffeebear/backup",
         access_key="R2_AK_TEST_12345678",
         secret_key="R2_SK_TEST_SUPER_SECRET",
         enabled=True,
@@ -49,7 +51,7 @@ def test_r2_config_update_keeps_existing_secret_when_fields_are_blank(db_session
         db_session,
         endpoint_url="https://account-id.r2.cloudflarestorage.com",
         bucket="ecommerce-backup",
-        prefix="ecommerce-workspace/backup",
+        prefix="coffeebear/backup",
         access_key="R2_AK_TEST_12345678",
         secret_key="R2_SK_TEST_SUPER_SECRET",
         enabled=True,
@@ -60,7 +62,7 @@ def test_r2_config_update_keeps_existing_secret_when_fields_are_blank(db_session
         db_session,
         endpoint_url="https://account-id.r2.cloudflarestorage.com",
         bucket="ecommerce-backup-v2",
-        prefix="ecommerce-workspace/backup-v2",
+        prefix="coffeebear/backup-v2",
         access_key="",
         secret_key="",
         enabled=False,
@@ -85,7 +87,7 @@ def test_r2_config_api_never_returns_secret(client):
         json={
             "endpointUrl": "https://account-id.r2.cloudflarestorage.com",
             "bucket": "ecommerce-backup-api",
-            "prefix": "ecommerce-workspace/backup",
+            "prefix": "coffeebear/backup",
             "accessKey": "R2_AK_API_87654321",
             "secretKey": "R2_SK_API_SUPER_SECRET",
             "enabled": True,
@@ -115,7 +117,7 @@ def test_r2_connection_test_uses_head_and_never_mutates_bucket(db_session, monke
         db_session,
         endpoint_url="https://account-id.r2.cloudflarestorage.com",
         bucket="ecommerce-backup",
-        prefix="ecommerce-workspace/backup",
+        prefix="coffeebear/backup",
         access_key="R2_AK_TEST_12345678",
         secret_key="R2_SK_TEST_SUPER_SECRET",
         enabled=True,
@@ -157,7 +159,7 @@ def test_r2_connection_test_maps_auth_failure_without_leaking_secret(db_session,
         db_session,
         endpoint_url="https://account-id.r2.cloudflarestorage.com",
         bucket="ecommerce-backup",
-        prefix="ecommerce-workspace/backup",
+        prefix="coffeebear/backup",
         access_key="R2_AK_TEST_12345678",
         secret_key="R2_SK_TEST_SUPER_SECRET",
         enabled=True,
@@ -187,12 +189,10 @@ def test_r2_connection_test_maps_auth_failure_without_leaking_secret(db_session,
 
 
 def test_r2_restore_prepare_rejects_snapshot_outside_configured_prefix():
-    import pytest
-
     with pytest.raises(ValueError, match="恢复点路径无效"):
         r2_backup_service.start_restore_prepare(
             "other-prefix/full/2026/09/20/snapshot.json",
-            prefix="ecommerce-workspace/backup",
+            prefix="coffeebear/backup",
         )
 
 
@@ -210,13 +210,50 @@ def test_r2_restore_prepare_passes_selected_snapshot_to_runner(tmp_path, monkeyp
 
     monkeypatch.setattr(r2_backup_service.subprocess, "Popen", fake_popen)
 
-    snapshot_key = "ecommerce-workspace/backup/full/2026/09/20/20260920_120000/snapshot.json"
+    snapshot_key = "coffeebear/backup/full/2026/09/20/20260920_120000/snapshot.json"
     result = r2_backup_service.start_restore_prepare(
         snapshot_key,
-        prefix="ecommerce-workspace/backup",
+        prefix="coffeebear/backup",
     )
 
     assert result["started"] is True
     assert result["snapshotObjectKey"] == snapshot_key
     assert "--snapshot-key" in captured["command"]
     assert snapshot_key in captured["command"]
+
+
+def test_r2_config_rejects_other_projects_storage_space(db_session, monkeypatch):
+    """护栏：CoffeeBear 严禁把备份写进其他项目的 R2 桶或命名空间。"""
+    monkeypatch.setattr(settings, "APP_SECRET_KEY", "pytest-r2-secret-for-fernet")
+
+    with pytest.raises(ValueError, match="属于其他项目"):
+        r2_backup_service.save_config(
+            db_session,
+            endpoint_url="https://account-id.r2.cloudflarestorage.com",
+            bucket="ecommerce-workspace-backup",
+            prefix="coffeebear/backup",
+            access_key="R2_AK_TEST_12345678",
+            secret_key="R2_SK_TEST_SUPER_SECRET",
+            enabled=True,
+            full_interval_days=10,
+            actor="pytest",
+        )
+
+    with pytest.raises(ValueError, match="其他项目的命名空间"):
+        r2_backup_service.save_config(
+            db_session,
+            endpoint_url="https://account-id.r2.cloudflarestorage.com",
+            bucket="coffeebear-prod",
+            prefix="ecommerce-workspace/backup",
+            access_key="R2_AK_TEST_12345678",
+            secret_key="R2_SK_TEST_SUPER_SECRET",
+            enabled=True,
+            full_interval_days=10,
+            actor="pytest",
+        )
+
+
+def test_r2_defaults_target_coffeebear_namespace():
+    assert r2_backup_service.DEFAULT_BUCKET == "coffeebear-prod"
+    assert r2_backup_service.DEFAULT_PREFIX == "coffeebear/backup"
+    assert "ecommerce-workspace-backup" in r2_backup_service.FOREIGN_BUCKETS

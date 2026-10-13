@@ -65,7 +65,7 @@ def env_runtime_config() -> dict[str, Any] | None:
         "bucket": os.environ[names["bucket"]].strip(),
         "access_key": os.environ[names["access_key"]].strip(),
         "secret_key": os.environ[names["secret_key"]].strip(),
-        "prefix": (os.getenv("R2_BACKUP_PREFIX") or "ecommerce-workspace/backup").strip().strip("/"),
+        "prefix": (os.getenv("R2_BACKUP_PREFIX") or "coffeebear/backup").strip().strip("/"),
     }
 
 
@@ -206,7 +206,7 @@ def main() -> int:
         print("R2 尚未配置或当前未启用。", file=sys.stderr)
         return 2
 
-    prefix = str(config.get("prefix") or "ecommerce-workspace/backup").strip().strip("/")
+    prefix = str(config.get("prefix") or "coffeebear/backup").strip().strip("/")
     snapshot_key = str(args.snapshot_key or "").strip()
     if snapshot_key:
         expected_root = f"{prefix}/full/"

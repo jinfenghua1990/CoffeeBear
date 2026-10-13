@@ -22,7 +22,19 @@ from app.services.backup_schedule_service import get_schedule_status
 
 PROVIDER = "cloudflare_r2"
 MODE = "backup"
-DEFAULT_PREFIX = "ecommerce-workspace/backup"
+# CoffeeBear 专属命名空间；Bucket 固定 coffeebear-prod，禁止写入其他项目（如 ecommerce-workspace-backup）。
+DEFAULT_PREFIX = "coffeebear/backup"
+DEFAULT_BUCKET = "coffeebear-prod"
+# 其他项目已占用的 R2 存储空间与命名空间，CoffeeBear 严禁读写。
+FOREIGN_BUCKETS = frozenset(
+    {
+        "ecommerce-workspace-backup",
+        "ecommerce-workspace-cold",
+        "alsvid-development",
+        "alsvid-production",
+    }
+)
+FOREIGN_PREFIX_ROOTS = frozenset({"ecommerce-workspace", "alsvid"})
 
 
 def _connection(db: Session) -> IntegrationConnection | None:
@@ -83,6 +95,14 @@ def save_config(
         raise ValueError("R2 Endpoint 必须使用 https://")
     if not bucket:
         raise ValueError("R2 Bucket 不能为空")
+    if bucket in FOREIGN_BUCKETS:
+        raise ValueError(
+            f"R2 Bucket「{bucket}」属于其他项目，CoffeeBear 只允许写入自己的存储空间（推荐 {DEFAULT_BUCKET}）。"
+        )
+    if prefix.split("/", 1)[0] in FOREIGN_PREFIX_ROOTS:
+        raise ValueError(
+            f"对象前缀「{prefix}」占用其他项目的命名空间，请改用 {DEFAULT_PREFIX}。"
+        )
     if ".." in prefix.split("/"):
         raise ValueError("对象前缀不能包含 ..")
     if full_interval_days < 1 or full_interval_days > 365:
