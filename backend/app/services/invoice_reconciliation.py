@@ -23,6 +23,7 @@ import re
 from decimal import Decimal
 from typing import Any
 
+from sqlalchemy import event
 from sqlalchemy.orm import Session
 
 from app.models.alibaba1688_import import Alibaba1688Order
@@ -31,6 +32,98 @@ from app.models.purchase import ExternalPurchaseOrder, JackyunPurchaseOrderLink
 from app.models.tax import TaxInvoice, TaxInvoiceLink
 
 TOLERANCE = Decimal("0.05")
+
+_PO_CACHE_KEY = "invoice_reconciliation.po_rows"
+_INV_CACHE_KEY = "invoice_reconciliation.visible_input_invoices"
+_EFFECTIVE_CACHE_KEY = "invoice_reconciliation.red_effective_candidates"
+
+
+def _cached_po_rows(db: Session) -> list:
+    """对账用采购订单行，按会话缓存。
+
+    对公付款报告会**逐个供应商**调用 reconcile，而本次加载与 supplier 无关；
+    此前 N 家供应商 = N 次全表外部采购单加载。结果只依赖库状态，请求内复用不改语义。
+    """
+    cached = db.info.get(_PO_CACHE_KEY)
+    if cached is None:
+        cached = (
+            db.query(
+                ExternalPurchaseOrder.id,
+                ExternalPurchaseOrder.external_order_id,
+                ExternalPurchaseOrder.platform,
+                ExternalPurchaseOrder.supplier_name,
+                ExternalPurchaseOrder.supplier_partner_id,
+                ExternalPurchaseOrder.ordered_at,
+                ExternalPurchaseOrder.order_amount,
+                ExternalPurchaseOrder.paid_amount,
+                ExternalPurchaseOrder.adjustment_amount,
+            )
+            .order_by(ExternalPurchaseOrder.ordered_at.nulls_last(), ExternalPurchaseOrder.id)
+            .all()
+        )
+        db.info[_PO_CACHE_KEY] = cached
+    return cached
+
+
+def _cached_visible_input_invoices(db: Session) -> list[TaxInvoice]:
+    """对账候选发票（可见 + 进项 + issued/red），按会话缓存；理由同上。"""
+    cached = db.info.get(_INV_CACHE_KEY)
+    if cached is None:
+        from app.services import tax_invoice_service
+
+        cached = (
+            tax_invoice_service.filter_visible_invoices(
+                db.query(TaxInvoice).filter(
+                    TaxInvoice.direction == "input",
+                    TaxInvoice.status.in_(("issued", "red")),
+                )
+            )
+            .order_by(TaxInvoice.issue_date.nulls_last(), TaxInvoice.id)
+            .all()
+        )
+        db.info[_INV_CACHE_KEY] = cached
+    return cached
+
+
+def _cached_red_effective_candidates(
+    db: Session,
+) -> tuple[list[TaxInvoice], dict[int, Decimal], dict[int, dict]]:
+    """红冲后仍有效的蓝字候选发票 + 有效金额 + 红冲上下文，按会话缓存。
+
+    该筛选（蓝票、未全额/超额红冲、余额 > 容差）与 supplier 无关，但每次
+    ``reconcile`` 都要重算一遍。对公付款报告按供应商逐个调用时，等于把「全量发票 ×
+    逐票红冲上下文」重复 N 次——这是该页面真正的主瓶颈（此前还叠加了全表重载）。
+    """
+    cached = db.info.get(_EFFECTIVE_CACHE_KEY)
+    if cached is None:
+        from app.services import tax_invoice_service
+
+        inv_candidates = _cached_visible_input_invoices(db)
+        red_context = tax_invoice_service.red_accounting_context(db, inv_candidates)
+        effective_amount_by_invoice: dict[int, Decimal] = {}
+        inv_rows: list[TaxInvoice] = []
+        for invoice in inv_candidates:
+            context = red_context.get(invoice.id, {})
+            if context.get("invoiceColor") != "blue":
+                continue
+            if context.get("redStatus") in {"fully_red_offset", "blue_red_pending", "over_red_offset"}:
+                continue
+            amount = _dec(context.get("remainingAfterRedAmount"))
+            if amount <= TOLERANCE:
+                continue
+            effective_amount_by_invoice[invoice.id] = amount
+            inv_rows.append(invoice)
+        cached = (inv_rows, effective_amount_by_invoice, red_context)
+        db.info[_EFFECTIVE_CACHE_KEY] = cached
+    return cached
+
+
+@event.listens_for(Session, "after_flush")
+def _invalidate_reconciliation_cache_on_flush(session: Session, flush_context) -> None:
+    session.info.pop(_PO_CACHE_KEY, None)
+    session.info.pop(_INV_CACHE_KEY, None)
+    session.info.pop(_EFFECTIVE_CACHE_KEY, None)
+
 
 _TRANS = str.maketrans({"（": "(", "）": ")", "　": "", "：": ":", "，": ","})
 
@@ -196,47 +289,8 @@ def reconcile(
         resolution = business_partner_service.SyncContext(db).index.resolve(name=supplier)
         if resolution.partner is not None:
             target_partner_id = int(resolution.partner.id)
-    po_rows = (
-        db.query(
-            ExternalPurchaseOrder.id,
-            ExternalPurchaseOrder.external_order_id,
-            ExternalPurchaseOrder.platform,
-            ExternalPurchaseOrder.supplier_name,
-            ExternalPurchaseOrder.supplier_partner_id,
-            ExternalPurchaseOrder.ordered_at,
-            ExternalPurchaseOrder.order_amount,
-            ExternalPurchaseOrder.paid_amount,
-            ExternalPurchaseOrder.adjustment_amount,
-        )
-        .order_by(ExternalPurchaseOrder.ordered_at.nulls_last(), ExternalPurchaseOrder.id)
-        .all()
-    )
-    from app.services import tax_invoice_service
-
-    inv_candidates = (
-        tax_invoice_service.filter_visible_invoices(
-            db.query(TaxInvoice).filter(
-                TaxInvoice.direction == "input",
-                TaxInvoice.status.in_(("issued", "red")),
-            )
-        )
-        .order_by(TaxInvoice.issue_date.nulls_last(), TaxInvoice.id)
-        .all()
-    )
-    red_context = tax_invoice_service.red_accounting_context(db, inv_candidates)
-    effective_amount_by_invoice: dict[int, Decimal] = {}
-    inv_rows: list[TaxInvoice] = []
-    for invoice in inv_candidates:
-        context = red_context.get(invoice.id, {})
-        if context.get("invoiceColor") != "blue":
-            continue
-        if context.get("redStatus") in {"fully_red_offset", "blue_red_pending", "over_red_offset"}:
-            continue
-        amount = _dec(context.get("remainingAfterRedAmount"))
-        if amount <= TOLERANCE:
-            continue
-        effective_amount_by_invoice[invoice.id] = amount
-        inv_rows.append(invoice)
+    po_rows = _cached_po_rows(db)
+    inv_rows, effective_amount_by_invoice, red_context = _cached_red_effective_candidates(db)
     if target_partner_id is not None:
         partner = db.get(BusinessPartner, target_partner_id)
         partner_norm = normalize_supplier(partner.name) if partner is not None else ""
