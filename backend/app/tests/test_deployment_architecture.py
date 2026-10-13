@@ -57,3 +57,5 @@ def test_cloudrun_deploy_requires_immutable_image_reference():
     assert "run revisions describe" in deploy
     assert "EXPECTED_GIT_SHA" in deploy
     assert "/health" in deploy
+    # 镜像强校验必须用服务级 spec：revision 级 spec 会被改写成远端缓存路径（实测）。
+    assert "spec.template.spec.containers[0].image" in deploy
