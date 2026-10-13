@@ -19,6 +19,25 @@ set +a
 : "${CLOUD_RUN_SERVICE:?runtime.env 必须设置 CLOUD_RUN_SERVICE}"
 : "${IMAGE_REF:?runtime.env 必须设置 IMAGE_REF}"
 
+# Issue #30：Cloud Run 会通过 Artifact Registry 远端缓存解析 GHCR 镜像，
+# 该缓存对「tag -> digest」映射有缓存语义：把 :stable/:latest 重新推送后，
+# 再次部署仍可能解析到旧 digest，静默上线旧代码（exit 0、Ready，但代码是旧的）。
+# 因此默认只允许 digest 固定（@sha256:...）或 Promote 输出的不可变版本标签。
+case "$IMAGE_REF" in
+  *@sha256:[0-9a-f]*) : ;;
+  *:v[0-9][0-9][0-9][0-9].[0-9][0-9].[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]) : ;;
+  *)
+    if [[ "${ALLOW_MUTABLE_IMAGE_REF:-0}" != "1" ]]; then
+      echo "拒绝使用可变镜像标签部署: $IMAGE_REF" >&2
+      echo "原因：Cloud Run 远端缓存可能把该标签解析到旧 digest，导致部署旧代码（见 Issue #30）。" >&2
+      echo "请改用 GHCR digest：IMAGE_REF=ghcr.io/<owner>/<repo>@sha256:<digest>" >&2
+      echo "或使用 Promote workflow 输出的不可变版本标签：vYYYY.MM.DD.HHmmss。" >&2
+      echo "紧急情况可设置 ALLOW_MUTABLE_IMAGE_REF=1 强制跳过本检查（自行承担旧代码上线风险）。" >&2
+      exit 2
+    fi
+    ;;
+esac
+
 RUNTIME_SERVICE_ACCOUNT="${RUNTIME_SERVICE_ACCOUNT:-coffeebear-runtime@${GCP_PROJECT}.iam.gserviceaccount.com}"
 ALLOW_UNAUTHENTICATED="${ALLOW_UNAUTHENTICATED:-0}"
 
@@ -85,5 +104,19 @@ printf '    image:   %s\n' "$IMAGE_REF"
 printf '    secrets: %s 个映射\n' "${#SECRET_BINDINGS[@]}"
 
 gcloud "${ARGS[@]}"
+
+# 部署后回读 revision 实际运行的 digest 作为证据；digest 部署时与期望值强校验。
+DEPLOYED_DIGEST="$(gcloud run services describe "$CLOUD_RUN_SERVICE" \
+  --project "$GCP_PROJECT" --region "$GCP_REGION" \
+  --format='value(status.imageDigest)' 2>/dev/null || true)"
+if [[ -n "$DEPLOYED_DIGEST" ]]; then
+  printf '    running digest: %s\n' "$DEPLOYED_DIGEST"
+  if [[ "$IMAGE_REF" == *@sha256:* && "$DEPLOYED_DIGEST" != "${IMAGE_REF##*@}" ]]; then
+    echo "!! 部署 digest 与期望不一致，判为失败（Issue #30 防旧代码静默上线）" >&2
+    echo "   expected: ${IMAGE_REF##*@}" >&2
+    echo "   actual:   $DEPLOYED_DIGEST" >&2
+    exit 1
+  fi
+fi
 
 echo "==> 部署完成。Secret 值由 Secret Manager 注入，GitHub 与部署脚本不保存真实值。"
