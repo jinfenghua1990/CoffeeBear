@@ -84,10 +84,12 @@ Production Environment（正式环境）
 - ✅ Test 作为生产发布前验证环境
 - ✅ Production 是唯一正式业务运行环境
 程序：
-Render
+主要：Cloud Run
+备选：Render
 
 数据库：
-Supabase PostgreSQL
+主要用：Neon PostgreSQL”
+备选用：Supabase PostgreSQL
 
 对象存储：
 Cloudflare R2
