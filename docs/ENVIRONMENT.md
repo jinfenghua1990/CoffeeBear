@@ -2,47 +2,78 @@
 
 ## 1. 总体原则
 
-CoffeeBear 采用**两环境模型**，不采用传统的 Dev / Staging / Production 三环境模型。
+CoffeeBear 采用轻量化云原生部署模型。
 
-固定为：
+长期固定环境：
 
-1. **Test（开发 / 测试验证环境）**
-2. **Production（正式业务环境）**
+1. Test（开发 / 测试验证环境）
+2. Production（正式业务环境）
 
-这是项目长期环境决策。
+不长期维护 Dev / Staging / Production 三套环境。
 
-## 2. Test 环境
+## 2. 程序运行环境
 
-### 用途
+### Primary
 
-Test 用于：
+Google Cloud Run
 
-- 新功能开发验证
-- 功能测试
-- Docker 构建验证
-- Docker 启动验证
-- 数据库迁移验证
-- 发布前检查
+用于正式业务运行：
 
-### 当前目标形态
+- 自动扩缩容
+- 容器化部署
+- GitHub 持续交付
 
-- M1 Mac + Docker
-- 非生产数据库
-- 非生产对象存储
-- 非生产密钥
+### Alternative
 
-### 规则
+Render
 
-- 不连接 Production 真实业务数据
-- 不使用 Production 正式对象存储
-- 不使用 Production 正式密钥
-- Test 不是长期独立业务环境
+作为备用部署方案，用于：
 
-## 3. Production 正式环境
+- 快速验证
+- 备用生产迁移
+- 降低云厂商绑定风险
 
-Production 是 CoffeeBear **唯一正式业务运行环境**。
+## 3. 数据库规范
 
-正式架构：
+### Primary
+
+Neon PostgreSQL
+
+用途：
+
+- 正式业务数据库
+- 用户数据
+- 订单数据
+- 商品数据
+- 业务核心数据
+
+### Alternative
+
+Supabase PostgreSQL
+
+作为备用 PostgreSQL 托管方案。
+
+## 4. 对象存储规范
+
+Primary：
+
+Cloudflare R2
+
+用途：
+
+- 商品图片
+- 营销素材
+- 用户上传文件
+- 附件资源
+
+规则：
+
+- 图片、视频、大文件不进入 GitHub
+- 大文件不直接存数据库
+- 文件资源进入 R2
+- 业务数据进入 PostgreSQL
+
+## 5. Production 架构
 
 ```text
 GitHub
@@ -54,116 +85,47 @@ Google Cloud Run
   |       正式业务数据库
   |
   |---- Cloudflare R2
-  |       正式对象存储
+  |       对象存储
   |
-  |---- Google Secret Manager
-          正式密钥管理
+  |---- Secret Manager
+          密钥管理
 ```
 
-### Production 资源
+## 6. Test 环境
 
-运行服务：
+用途：
 
-- Google Cloud Run
-
-数据库：
-
-- Neon PostgreSQL
-
-存储：
-
-- Cloudflare R2
-- Bucket：`coffeebear-prod`
-
-密钥管理：
-
-- Google Secret Manager
-
-用于保存：
-
-- 数据库连接信息
-- R2 Access Key
-- R2 Secret Key
-- JWT Secret
-- SMTP 密码
-- 第三方 API Token
-
-## 4. 对象存储规范
-
-CoffeeBear 正式对象存储：
-
-```text
-coffeebear-prod
-
-├── products
-├── stores
-├── marketing
-├── documents
-└── users
-```
+- 新功能开发验证
+- 功能测试
+- Docker 构建验证
+- 数据库迁移验证
+- 发布前检查
 
 规则：
 
-- 图片、视频、附件不进入 GitHub
-- 大文件不进入数据库
-- 业务数据进入 Neon PostgreSQL
-- 文件资源进入 Cloudflare R2
+- 不连接 Production 数据
+- 不使用 Production 密钥
+- 不使用 Production 对象存储
 
-## 5. 明确不采用的模式
+## 7. 密钥管理
 
-默认禁止：
-
-- 单独维护 Staging 环境
-- 长期维护 Dev / Staging / Production 三套云环境
-- 把正式密钥提交到 GitHub
-- 把正式业务文件存放在代码仓库
-
-## 6. 环境资源隔离
-
-Test 与 Production 必须隔离：
-
-- 数据库
-- 对象存储
-- 密钥
-- 管理员凭据
-- 外部服务配置
-
-不得为了方便让测试代码直接连接正式资源。
-
-## 7. 环境变量与密钥规则
-
-仓库可以提交：
-
-- `.env.example`
-- 示例变量名
-- 占位配置
-
-仓库不得提交真实：
+禁止提交：
 
 - 数据库密码
 - API Token
-- 对象存储密钥
-- 管理员密码
-- Session / Cookie Secret
+- R2 Secret
+- JWT Secret
+- SMTP 密码
 
-正式密钥统一由 Google Secret Manager 管理。
+生产环境密钥统一使用云端 Secret 管理。
 
-## 8. 修改环境模型流程
+## 8. 完整环境规范
 
-任何新增长期环境必须：
+相关文档：
 
-1. 创建 GitHub 架构决策 Issue。
-2. 说明必要性。
-3. 说明成本和维护责任。
-4. 明确数据库、对象存储、密钥方案。
-5. 确认后更新相关文档。
-
-## 9. 相关文档
-
-- `README.md`
-- `.github/AGENTS.md`
-- `docs/CURRENT_STATE.md`
-- `docs/ACTIVE_WORK.md`
-- `docs/DECISIONS.md`
-- `docs/DEPLOYMENT.md`
-- `docs/DATABASE.md`
+- README.md
+- docs/CURRENT_STATE.md
+- docs/ACTIVE_WORK.md
+- docs/DECISIONS.md
+- docs/DEPLOYMENT.md
+- docs/DATABASE.md
