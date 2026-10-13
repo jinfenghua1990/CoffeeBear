@@ -115,3 +115,22 @@ Cloud Run 的 Google Frontend 会拦截**精确路径** `/healthz`，在请求�
   而不是应用路由配错。
 
 这个坑不会报错：构建成功、CI 全绿、Cloud Run 显示 Ready、日志里甚至没有记录。只能靠实际去戳端点发现。
+
+## 镜像引用必须钉死（Issue #30）
+
+Cloud Run 通过 Artifact Registry 的远端缓存拉取 GHCR 镜像，`tag -> digest` 的解析存在缓存语义：
+把 `:stable` 重新推送后再次用 `:stable` 部署，仍可能解析到旧 digest —— 部署退出码 0、Cloud Run 显示
+Ready，但线上跑的是旧代码（已实测复现，见 Issue #30）。
+
+因此 `runtime.env` 的 `IMAGE_REF` 只允许两种形式，`deploy.sh` 会强制校验：
+
+1. digest：`ghcr.io/jinfenghua1990/coffeebear@sha256:<digest>`（推荐，Promote workflow 的输出里直接给出）；
+2. Promote 输出的不可变版本标签：`ghcr.io/jinfenghua1990/coffeebear:vYYYY.MM.DD.HHmmss`。
+
+裸 `:stable` / `:latest` 会被拒绝；紧急情况下可设置 `ALLOW_MUTABLE_IMAGE_REF=1` 强制跳过（自行承担旧代码上线风险）。
+
+可选设置 `EXPECTED_GIT_SHA=<release 的 source SHA>`：部署后 `deploy.sh` 会请求 `/health` 核对 `gitSha`，
+不一致立即判为失败。这是唯一能端到端证明「线上跑的是这一版代码」的检查，建议始终设置。
+
+说明：多架构 index digest 与 revision 实际解析到的运行镜像 digest 不同属正常现象，
+脚本只记录后者作为部署证据，不做等值比较。

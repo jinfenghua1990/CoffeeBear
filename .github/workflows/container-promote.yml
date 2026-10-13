@@ -51,12 +51,25 @@ jobs:
         run: |
           docker buildx imagetools create             --tag "${{ steps.release.outputs.image }}:stable"             --tag "${{ steps.release.outputs.image }}:${{ steps.release.outputs.version }}"             "${{ steps.release.outputs.image }}:sha-${{ steps.release.outputs.source_sha }}"
 
+      - name: Resolve promoted digest
+        id: digest
+        shell: bash
+        run: |
+          DIGEST="$(docker buildx imagetools inspect             "${{ steps.release.outputs.image }}:${{ steps.release.outputs.version }}"             --format '{{json .Manifest.Digest}}' | tr -d '"')"
+          echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
+
       - name: Create GitHub Release
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release create "${{ steps.release.outputs.version }}"             --repo "${{ github.repository }}"             --target "${{ steps.release.outputs.merge_sha }}"             --title "${{ steps.release.outputs.version }}"             --notes "Promoted tested image \`${{ steps.release.outputs.image }}:sha-${{ steps.release.outputs.source_sha }}\` to \`stable\`. Production must deploy this promoted image; do not rebuild it on the NAS."
+          gh release create "${{ steps.release.outputs.version }}"             --repo "${{ github.repository }}"             --target "${{ steps.release.outputs.merge_sha }}"             --title "${{ steps.release.outputs.version }}"             --notes "Promoted tested image \`${{ steps.release.outputs.image }}:sha-${{ steps.release.outputs.source_sha }}\` to \`stable\`. Production must deploy this promoted image; do not rebuild it on the NAS.
+
+          **Deploy with digest (Issue #30):**
+          \`\`\`
+          IMAGE_REF=${{ steps.release.outputs.image }}@${{ steps.digest.outputs.digest }}
+          \`\`\`
+          Do not deploy the mutable \`:stable\` tag — Cloud Run's remote cache may resolve it to a stale digest."
 
       - name: Summary
         shell: bash
@@ -67,6 +80,10 @@ jobs:
             echo "Version: \`${{ steps.release.outputs.version }}\`"
             echo
             echo "Image: \`${{ steps.release.outputs.image }}:${{ steps.release.outputs.version }}\`"
+            echo
+            echo "Digest: \`${{ steps.digest.outputs.digest }}\`"
+            echo
+            echo "IMAGE_REF for deploy.sh: \`${{ steps.release.outputs.image }}@${{ steps.digest.outputs.digest }}\`"
             echo
             echo "Source SHA: \`${{ steps.release.outputs.source_sha }}\`"
             echo

@@ -47,3 +47,13 @@ def test_production_env_documents_distinct_app_and_migrator_connections():
     assert "MIGRATOR_DB_USER=ecommerce_migrator" in env
     assert "DATABASE_URL=postgresql+psycopg://ecommerce_app:" in env
     assert "MIGRATION_DATABASE_URL=postgresql+psycopg://ecommerce_migrator:" in env
+
+
+def test_cloudrun_deploy_requires_immutable_image_reference():
+    """Issue #30：Cloud Run 部署必须钉死镜像引用，并在部署后回读验证。"""
+    deploy = _text("deploy/cloudrun/deploy.sh")
+    assert "ALLOW_MUTABLE_IMAGE_REF" in deploy
+    assert "@sha256:" in deploy
+    assert "run revisions describe" in deploy
+    assert "EXPECTED_GIT_SHA" in deploy
+    assert "/health" in deploy
