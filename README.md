@@ -1,4 +1,4 @@
-# CoffeeBear — 卖咖啡的熊国内经营平台
+# CoffeeBear — 卖咖啡的熊 国内经营平台
 
 > GitHub 仓库：`jinfenghua1990/CoffeeBear`
 
