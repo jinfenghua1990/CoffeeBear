@@ -65,7 +65,11 @@ ENV_BINDINGS=(
 )
 
 # 可选的普通（非 Secret）运行参数。只有 runtime.env 中存在时才注入。
+# ADMIN_USERNAME 也走这条可选通道，**不能写死在脚本里**：本仓库是公开仓库，
+# 把管理员登录名写进代码等于公开告知登录名。它只是 seed 的建号依据，
+# Cloud Run 不跑 seed，所以默认不注入也不影响线上登录。
 for name in \
+  ADMIN_USERNAME \
   SMTP_HOST SMTP_PORT SMTP_USERNAME SMTP_FROM \
   R2_BACKUP_ENABLED R2_BACKUP_ENDPOINT R2_BACKUP_BUCKET R2_BACKUP_PREFIX R2_FULL_INTERVAL_DAYS \
   KODO_COLD_ENABLED KODO_COLD_BUCKET KODO_COLD_UPLOAD_URL KODO_COLD_PREFIX \

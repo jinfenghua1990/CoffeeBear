@@ -38,6 +38,11 @@ IMAGE_REF=ghcr.io/jinfenghua1990/coffeebear:stable
 # 可选；不填时脚本会使用 coffeebear-runtime@<project>.iam.gserviceaccount.com
 RUNTIME_SERVICE_ACCOUNT=
 
+# 管理员的登录名。必须与数据库 users.username 里的实际值一致，否则一旦将来在
+# 云端跑 seed，会按这里的值再建一个管理员账号。
+# 刻意不写进 deploy.sh：本仓库是公开仓库，登录名写进代码等于公开告知登录名。
+ADMIN_USERNAME=
+
 # 下面放需要迁入 Secret Manager 的真实值；只在本机存在。
 APP_SECRET_KEY=
 ADMIN_PASSWORD=
