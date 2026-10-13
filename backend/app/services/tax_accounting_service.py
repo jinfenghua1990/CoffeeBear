@@ -25,7 +25,10 @@ from app.models.tax import (
     TaxInvoiceLink,
 )
 from app.services.monthly_core import month_bounds
-from app.services.tax_invoice_service import is_effective_for_accounting
+from app.services.tax_invoice_service import (
+    is_effective_for_accounting,
+    red_accounting_context,
+)
 from app.utils.money import to_decimal
 
 
@@ -159,6 +162,16 @@ def monthly_ledger(db: Session, year: int, month: int) -> dict[str, Any]:
         .all()
     )
 
+    # 红蓝上下文（#22 P1 红冲口径统一）：蓝票官方状态显示已红冲但红字票尚未入库
+    # （blue_red_pending）时，不得继续按票面金额计入做账净额；已配对红字票以负数
+    # 入账、蓝票以正数入账，汇总自然形成净额。
+    red_context = red_accounting_context(db, rows)
+
+    def _effective_for_ledger(inv: TaxInvoice) -> bool:
+        return is_effective_for_accounting(inv) and bool(
+            red_context.get(inv.id, {}).get("accountingNetIncluded", True)
+        )
+
     invoice_ids = [row.id for row in rows]
     links = (
         db.query(TaxInvoiceLink)
@@ -200,7 +213,7 @@ def monthly_ledger(db: Session, year: int, month: int) -> dict[str, Any]:
 
     for invoice in rows:
         direction = invoice.direction if invoice.direction in {"input", "output"} else "unknown"
-        is_effective = is_effective_for_accounting(invoice)
+        is_effective = _effective_for_ledger(invoice)
         if direction in totals and is_effective:
             totals[direction]["amountExclTax"] += to_decimal(invoice.amount_excl_tax)
             totals[direction]["taxAmount"] += to_decimal(invoice.tax_amount)
@@ -246,6 +259,11 @@ def monthly_ledger(db: Session, year: int, month: int) -> dict[str, Any]:
             reasons.append("发票方向未确认")
         if invoice.status == "unknown":
             reasons.append("发票状态未确认")
+        if is_effective_for_accounting(invoice) and not is_effective:
+            reasons.append(
+                red_context.get(invoice.id, {}).get("accountingException")
+                or "红冲上下文待补（蓝/红抵消未确认），暂不计入做账净额"
+            )
         if invoice.total_amount is None:
             reasons.append("官方发票缺少价税合计")
         if direction == "output" and is_effective and not line["detailComplete"]:
@@ -295,8 +313,8 @@ def monthly_ledger(db: Session, year: int, month: int) -> dict[str, Any]:
         },
         "summary": {
             "invoiceCount": len(rows),
-            "outputInvoiceCount": sum(1 for row in rows if row.direction == "output" and is_effective_for_accounting(row)),
-            "inputInvoiceCount": sum(1 for row in rows if row.direction == "input" and is_effective_for_accounting(row)),
+            "outputInvoiceCount": sum(1 for row in rows if row.direction == "output" and _effective_for_ledger(row)),
+            "inputInvoiceCount": sum(1 for row in rows if row.direction == "input" and _effective_for_ledger(row)),
             "outputAmountExclTax": _money(totals["output"]["amountExclTax"]),
             "outputTaxAmount": _money(output_tax),
             "outputTotalAmount": _money(totals["output"]["totalAmount"]),

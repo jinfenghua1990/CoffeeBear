@@ -1,11 +1,13 @@
 """Issue #22（P0/P1 修复）回归测试。
 
-这些修复已随 PR #24 / #34 合入 main，本文件用于锁定行为、防止回退：
+#24 / #34 已合入的修复用于防回退；红冲净额口径为本文件所在 PR 的新修复（Closes #35）：
 
 - P0-1 月度做账台账：用户删除的来源明细行不再计入。
+- P1 红冲净额口径：蓝票已红冲、红字票未入库（blue_red_pending）时不计入做账净额，
+  并在该发票的 blocker 中提示原因。
 - P0-3 「发票明细」Sheet 合计行不进入入库。
 - P0-4 采购链路日期守卫：发票早于订单超过预付宽限期一律拒绝（防止历史发票串单）。
-- P1 银行流水指纹：无流水号/凭证号的回退分支必须区分收/支方向。
+- P1 银行流水指纹：回退分支 / 凭证号分支 / 流水号分支均区分收/支方向。
 """
 import io
 from datetime import datetime, timezone
@@ -171,8 +173,28 @@ def test_monthly_ledger_excludes_deleted_source_rows(db_session):
     db_session.flush()
 
     ledger = monthly_ledger(db_session, 2026, 8)
+    assert ledger["summary"]["invoiceCount"] == 1
     assert ledger["summary"]["outputTotalAmount"] == "100.00"
     assert [item["invoiceId"] for item in ledger["items"]] == [kept.id]
+
+
+def test_monthly_ledger_excludes_pending_red_blue_from_totals(db_session):
+    """P1 红冲净额口径：蓝票官方状态显示已红冲但红字票未入库时，不按票面金额计入净额。"""
+    batch = _batch(db_session)
+    normal = _output_invoice(batch.id, total="100.00")
+    pending_red = _output_invoice(batch.id, total="500.00", number="PENDING-RED-001")
+    pending_red.raw = {"发票状态": "全额红冲"}
+    db_session.add_all([normal, pending_red])
+    db_session.flush()
+
+    ledger = monthly_ledger(db_session, 2026, 8)
+    assert ledger["summary"]["outputInvoiceCount"] == 1
+    assert ledger["summary"]["outputTotalAmount"] == "100.00"
+    # items 仍保留票面事实金额；原因写在该发票的 blocker 中
+    pending_item = next(item for item in ledger["items"] if item["invoiceNumber"] == "PENDING-RED-001")
+    assert pending_item["totalAmount"] == "500.00"
+    blocker = next(b for b in ledger["blockers"] if b["invoiceNumber"] == "PENDING-RED-001")
+    assert any("红" in reason for reason in blocker["reasons"])
 
 
 # ---------- P1 银行流水指纹方向 ----------
@@ -194,3 +216,11 @@ def test_fingerprint_with_voucher_also_distinguishes_direction():
     income = build_fingerprint(*base, direction="in")
     expense = build_fingerprint(*base, direction="out")
     assert income != expense
+
+
+def test_fingerprint_with_serial_distinguishes_direction():
+    """含流水号的分支同样区分方向（主库现行口径）。"""
+    a = build_fingerprint("ZJRC-001", "2026-09-01", "100", "", "", "", serial_no="S1", direction="in")
+    b = build_fingerprint("ZJRC-001", "2026-09-01", "100", "", "", "", serial_no="S1", direction="out")
+    assert a != b
+    assert build_fingerprint("ZJRC-001", "2026-09-01", "100", "", "", "", serial_no="S1", direction="in") == a
