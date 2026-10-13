@@ -34,7 +34,7 @@ from app.services.import_lifecycle import (
 )
 from app.services.sales_scope import deal_orders_condition, is_deal_status
 from app.utils.money import quantize, to_decimal
-from sqlalchemy import and_, case, cast, exists, func, or_, String
+from sqlalchemy import and_, case, cast, event, exists, func, or_, String
 from sqlalchemy.orm import aliased
 
 
@@ -462,37 +462,73 @@ def is_effective_for_accounting(invoice: TaxInvoice) -> bool:
     return invoice.status not in {"void", "unknown"} and _invoice_color(invoice) in {"blue", "red"}
 
 
-def red_accounting_context(db: Session, rows: list[TaxInvoice]) -> dict[int, dict]:
-    """按税务凭证口径建立红蓝发票关系，并给出可审计的净额元数据。
+_POOL_CACHE_KEY = "tax_invoice_service.visible_invoice_pool"
+_MANUAL_LINKS_CACHE_KEY = "tax_invoice_service.confirmed_manual_red_links"
 
-    原则：
-    - 蓝字原票与红字冲销票都永久保留；
-    - 仅按红字票明确记录的蓝字号码建立关系，不按名称/金额猜配；
-    - 蓝票可被多张红票部分冲销；
-    - 红字合计超过蓝字原额时标记异常，不静默截断事实金额；
-    - 蓝票显示已红冲但系统尚未取得对应红字票时，先标异常待补，不把该蓝票继续当正常有效金额。
+
+def invalidate_red_accounting_cache(db: Session) -> None:
+    """显式失效红蓝上下文缓存；本请求内发生了发票/链接写入时调用。"""
+    db.info.pop(_POOL_CACHE_KEY, None)
+    db.info.pop(_MANUAL_LINKS_CACHE_KEY, None)
+    db.info.pop(_RED_INDEX_CACHE_KEY, None)
+
+
+def _visible_invoice_pool(db: Session) -> list[TaxInvoice]:
+    """可见发票全池，按数据库会话缓存。
+
+    红蓝配对必须跨筛选、跨月份、跨分页查找，因此每次都要全池。此前每次调用都整表
+    重载（单票序列化一次请求 3 次全表），是发票列表/详情/汇总随票数变慢的主因。
     """
-    if not rows:
-        return {}
+    cached = db.info.get(_POOL_CACHE_KEY)
+    if cached is None:
+        try:
+            cached = filter_visible_invoices(db.query(TaxInvoice)).all()
+        except Exception:
+            cached = db.query(TaxInvoice).all()
+        db.info[_POOL_CACHE_KEY] = cached
+    return cached
 
-    # 配对必须跨筛选、跨月份、跨分页查找，因此使用整个可见发票池，而不是只看当前 rows。
-    try:
-        pool = filter_visible_invoices(db.query(TaxInvoice)).all()
-    except Exception:
-        pool = db.query(TaxInvoice).all()
+
+def _confirmed_manual_red_links(db: Session) -> list[TaxInvoiceLink]:
+    """已确认的人工红蓝关系，按数据库会话缓存（同上，避免逐票重扫全表链接）。"""
+    cached = db.info.get(_MANUAL_LINKS_CACHE_KEY)
+    if cached is None:
+        cached = (
+            db.query(TaxInvoiceLink)
+            .filter(
+                TaxInvoiceLink.target_type == MANUAL_RED_BLUE_TARGET_TYPE,
+                TaxInvoiceLink.match_method != "rejected",
+                TaxInvoiceLink.confirmed.is_(True),
+            )
+            .order_by(TaxInvoiceLink.id.desc())
+            .all()
+        )
+        db.info[_MANUAL_LINKS_CACHE_KEY] = cached
+    return cached
+
+
+@event.listens_for(Session, "after_flush")
+def _invalidate_red_accounting_cache_on_flush(session: Session, flush_context) -> None:
+    """任何 flush 都可能改变红蓝关系或链接集合，保守失效本请求缓存。"""
+    session.info.pop(_POOL_CACHE_KEY, None)
+    session.info.pop(_MANUAL_LINKS_CACHE_KEY, None)
+    session.info.pop(_RED_INDEX_CACHE_KEY, None)
+
+
+_RED_INDEX_CACHE_KEY = "tax_invoice_service.red_pairing_index"
+
+
+def _build_red_pairing_index(db: Session) -> dict[str, Any]:
+    """建立红蓝配对索引。只依赖「可见发票池 + 已确认人工关系」，与传入 rows 无关。
+
+    全池配对是纯 CPU 重活（每行要对 30+ 原始字段跑正则），此前每次
+    red_accounting_context 调用都重跑一遍；对公付款报告按供应商逐次调用时被放大数十倍。
+    """
+    pool = _visible_invoice_pool(db)
 
     color_by_id = {row.id: _invoice_color(row) for row in pool}
     pool_by_id = {row.id: row for row in pool}
-    manual_red_links = (
-        db.query(TaxInvoiceLink)
-        .filter(
-            TaxInvoiceLink.target_type == MANUAL_RED_BLUE_TARGET_TYPE,
-            TaxInvoiceLink.match_method != "rejected",
-            TaxInvoiceLink.confirmed.is_(True),
-        )
-        .order_by(TaxInvoiceLink.id.desc())
-        .all()
-    )
+    manual_red_links = _confirmed_manual_red_links(db)
     manual_blue_by_red: dict[int, TaxInvoice] = {}
     for link in manual_red_links:
         red = pool_by_id.get(link.invoice_id)
@@ -554,6 +590,42 @@ def red_accounting_context(db: Session, rows: list[TaxInvoice]) -> dict[int, dic
             reds_by_blue.setdefault(blue.id, []).append(red)
         else:
             red_pair_state[red.id] = "ambiguous" if candidates else "unpaired"
+
+    return {
+        "redToBlue": red_to_blue,
+        "redPairState": red_pair_state,
+        "redsByBlue": reds_by_blue,
+    }
+
+
+def _red_pairing_index(db: Session) -> dict[str, Any]:
+    """红蓝配对索引，按数据库会话缓存；写入（flush）时失效。"""
+    cached = db.info.get(_RED_INDEX_CACHE_KEY)
+    if cached is None:
+        cached = _build_red_pairing_index(db)
+        db.info[_RED_INDEX_CACHE_KEY] = cached
+    return cached
+
+
+def red_accounting_context(db: Session, rows: list[TaxInvoice]) -> dict[int, dict]:
+    """按税务凭证口径建立红蓝发票关系，并给出可审计的净额元数据。
+
+    原则：
+    - 蓝字原票与红字冲销票都永久保留；
+    - 仅按红字票明确记录的蓝字号码建立关系，不按名称/金额猜配；
+    - 蓝票可被多张红票部分冲销；
+    - 红字合计超过蓝字原额时标记异常，不静默截断事实金额；
+    - 蓝票显示已红冲但系统尚未取得对应红字票时，先标异常待补，不把该蓝票继续当正常有效金额。
+    """
+    if not rows:
+        return {}
+
+    # 配对必须跨筛选、跨月份、跨分页查找，因此使用整个可见发票池，而不是只看当前 rows。
+    # 索引（池 + 人工关系）按会话缓存，与传入 rows 无关，故多次调用只跑一次全池配对。
+    index = _red_pairing_index(db)
+    red_to_blue: dict[int, TaxInvoice] = index["redToBlue"]
+    red_pair_state: dict[int, str] = index["redPairState"]
+    reds_by_blue: dict[int, list[TaxInvoice]] = index["redsByBlue"]
 
     result: dict[int, dict] = {}
     for row in rows:
@@ -2672,7 +2744,7 @@ def list_invoices(
 
 
 def summary(db: Session) -> dict:
-    rows = filter_visible_invoices(db.query(TaxInvoice)).all()
+    rows = _visible_invoice_pool(db)
     red_context = _red_trace_context(rows, db=db)
     business_context = _invoice_business_context(db, rows, red_context=red_context)
     active_import_ids = [
