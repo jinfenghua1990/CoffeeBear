@@ -1,0 +1,15 @@
+# 可选 overlay：Cloudflare Tunnel 公网访问（不开路由器端口、隐藏 NAS IP、自带 HTTPS）。
+# 用法（与主 compose 同目录执行）：
+#   docker compose -f docker-compose.yml -f docker-compose.tunnel.yml --profile public up -d tunnel
+# .env 需配置 CLOUDFLARED_TOKEN（取得方式见 README「公网访问」）。
+services:
+  tunnel:
+    image: cloudflare/cloudflared:latest
+    profiles: ["public"]
+    restart: unless-stopped
+    command: tunnel --no-autoupdate --config /etc/cloudflared/config.yml run --token ${CLOUDFLARED_TOKEN:?set CLOUDFLARED_TOKEN}
+    volumes:
+      - ./cloudflared.yml:/etc/cloudflared/config.yml:ro
+    depends_on:
+      api:
+        condition: service_healthy

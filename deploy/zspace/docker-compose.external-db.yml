@@ -1,0 +1,41 @@
+# 外接公网数据库（Supabase）变体：与 docker-compose.yml 组合使用，替换内置 postgres。
+# 用法：
+#   docker compose -f docker-compose.yml -f docker-compose.external-db.yml config  # 预检
+#   docker compose -f docker-compose.yml -f docker-compose.external-db.yml up -d
+# .env 要求：
+#   DATABASE_URL / MIGRATION_DATABASE_URL 指向公网 Postgres（如 Supabase pooler）。
+#   POSTGRES_* 本地管理员变量不再需要（保留不影响）。
+# Redis 仍为本地容器：Celery worker/beat 必需。
+#
+# 兼容性：!override 需要 docker compose >= 2.24。
+# 若 NAS 上版本过旧，改用：docker compose -f ... up -d --scale postgres=0
+services:
+  # 内置 postgres 挂到 disabled profile：正常 up 不会启动它
+  postgres:
+    profiles: ["disabled"]
+    depends_on: !override {}
+
+  # 外接数据库时 db-roles 无意义，同样禁用
+  db-roles:
+    profiles: ["disabled"]
+    depends_on: !override {}
+
+  migrate:
+    depends_on: !override
+      redis:
+        condition: service_healthy
+
+  api:
+    depends_on: !override
+      redis:
+        condition: service_healthy
+
+  worker:
+    depends_on: !override
+      redis:
+        condition: service_healthy
+
+  beat:
+    depends_on: !override
+      redis:
+        condition: service_healthy

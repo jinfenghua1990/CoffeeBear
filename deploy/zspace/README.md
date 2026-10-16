@@ -121,6 +121,30 @@ SYSTEM_UPDATE_ENABLED=0
 
 当前版本发布由 GitHub + GHCR + Compose 管理。后台【更新】按钮未来如要接管容器升级，应通过单独受控的 Container Update Agent 设计，不得直接把 Docker socket 暴露给业务容器。
 
+## 公网访问（可选）：Cloudflare Tunnel
+
+`docker-compose.tunnel.yml` 为可选 overlay，无需在路由器开端口、不暴露 NAS IP、自带 HTTPS。
+
+前置：一个托管在 Cloudflare 的域名（免费套餐即可）。
+
+1. 本机取得 token：
+
+```bash
+cloudflared tunnel login
+cloudflared tunnel create coffeebear
+cloudflared tunnel route dns coffeebear coffee.yourdomain.com
+cloudflared tunnel token coffeebear   # 长串 token
+```
+
+2. token 填入 `.env` 的 `CLOUDFLARED_TOKEN=`。
+3. 启动（tunnel 不映射任何宿主机端口）：
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.tunnel.yml --profile public up -d tunnel
+```
+
+4. Cloudflare Zero Trust → Networks → Tunnels 显示 Healthy 后，`https://coffee.yourdomain.com` 即公网入口。建议叠加 Cloudflare Access 保护登录页；公网后 ADMIN_PASSWORD 必须强密码。
+
 ## 安全边界
 
 - PostgreSQL 不映射到 NAS 局域网端口。

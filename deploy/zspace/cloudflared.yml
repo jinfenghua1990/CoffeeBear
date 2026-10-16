@@ -1,0 +1,7 @@
+# Cloudflare Tunnel 入口配置（随 docker-compose.tunnel.yml 挂载到容器）。
+# 说明：tunnel 身份由 --token 提供，这里只定义「把哪个公网域名转到哪个后端」。
+# 后端用 compose 服务名 api（与 tunnel 同属一个 compose 网络），端口 8000 为 FastAPI。
+ingress:
+  - hostname: coffee.chaibenn.com
+    service: http://api:8000
+  - service: http_status:404
