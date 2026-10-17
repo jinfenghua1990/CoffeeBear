@@ -96,6 +96,17 @@ def managed_data_file(path: str | Path, *, label: str) -> Path:
     raise RuntimeError(f"{label}缺失（存储被移动或删除）")
 
 
+def archive_file_present(path: str | None) -> bool:
+    """归档文件本体是否真实存在且可读取（managed_data_file 的非抛错版，供列表标注）。"""
+    if not path:
+        return False
+    try:
+        managed_data_file(path, label="归档文件")
+    except RuntimeError:
+        return False
+    return True
+
+
 def _write_new_file(target: Path, content: bytes) -> None:
     """用 O_EXCL 语义创建文件，两个并发上传绝不会覆盖彼此。"""
     with target.open("xb") as output:

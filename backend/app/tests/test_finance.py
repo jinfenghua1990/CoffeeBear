@@ -88,6 +88,33 @@ def test_managed_data_file_rejects_external_symlink(tmp_path, monkeypatch):
         finance_service.managed_data_file(linked, label="归档文件")
 
 
+def test_archive_file_present_true_for_real_file(tmp_path, monkeypatch):
+    data_dir = tmp_path / "data"
+    inside = data_dir / "finance" / "a.xlsx"
+    inside.parent.mkdir(parents=True)
+    inside.write_bytes(b"x")
+    monkeypatch.setattr(finance_service.settings, "DATA_DIR", str(data_dir))
+    assert finance_service.archive_file_present(str(inside)) is True
+
+
+def test_archive_file_present_false_for_missing_or_empty(tmp_path, monkeypatch):
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    monkeypatch.setattr(finance_service.settings, "DATA_DIR", str(data_dir))
+    assert finance_service.archive_file_present(str(data_dir / "finance" / "gone.xlsx")) is False
+    assert finance_service.archive_file_present("") is False
+    assert finance_service.archive_file_present(None) is False
+
+
+def test_archive_file_present_false_for_path_outside_data_dir(tmp_path, monkeypatch):
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    outside = tmp_path / "outside.xlsx"
+    outside.write_bytes(b"x")
+    monkeypatch.setattr(finance_service.settings, "DATA_DIR", str(data_dir))
+    assert finance_service.archive_file_present(str(outside)) is False
+
+
 def test_exclusive_archive_write_never_overwrites_existing_file(tmp_path):
     target = tmp_path / "original.xlsx"
     finance_service._write_new_file(target, b"first")
