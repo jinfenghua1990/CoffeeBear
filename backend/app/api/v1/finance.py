@@ -553,6 +553,7 @@ def list_files(year: int, month: int, company: str = "", db: Session = Depends(g
             "id": r.id, "category": r.category, "originalName": r.original_name,
             "size": r.size, "sha256": r.sha256[:16], "version": r.version,
             "uploader": r.uploader,
+            "filePresent": finance_service.archive_file_present(r.stored_path),
             "uploadedAt": r.uploaded_at.isoformat() if r.uploaded_at else None,
         }
         for r in q.order_by(ArchiveFile.category, ArchiveFile.original_name, ArchiveFile.version).all()
