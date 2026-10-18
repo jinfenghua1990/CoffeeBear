@@ -1,11 +1,17 @@
 name: Container Candidate
 
 on:
-  # develop 变更频繁；只有需要 Test / Release 候选时才显式构建。
-  # hotfix 分支继续自动构建。
+  # 单分支治理：没有长期集成分支，工作分支推送即产出不可变候选镜像，
+  # 并把可变 candidate 指向它，供 Test 环境验证未合并代码。
   push:
     branches:
+      - "fix/**"
+      - "feat/**"
+      - "feature/**"
       - "hotfix/**"
+      - "chore/**"
+      - "docs/**"
+      - "codex/**"
   workflow_dispatch:
 
 concurrency:
@@ -55,8 +61,8 @@ jobs:
             org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
 
-      - name: Point candidate tag at develop image
-        if: github.ref == 'refs/heads/develop'
+      - name: Point candidate tag at this work-branch image
+        if: github.event_name == 'push'
         shell: bash
         run: |
           docker buildx imagetools create \
@@ -72,7 +78,7 @@ jobs:
             echo "\`${{ steps.meta.outputs.image }}:${{ steps.meta.outputs.sha_tag }}\`"
             echo
             echo "Platforms: \`linux/amd64\`, \`linux/arm64\`"
-            if [ "${GITHUB_REF}" = "refs/heads/develop" ]; then
+            if [ "${{ github.event_name }}" = "push" ]; then
               echo
               echo "The mutable \`candidate\` tag now points at this immutable SHA image."
             fi

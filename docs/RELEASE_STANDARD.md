@@ -1,35 +1,30 @@
 # 平台发布标准
 
-## 1. 一个代码源，多个环境
+## 1. 一个代码源，两套环境
 
-本项目只维护一套代码仓库，不为测试版和正式版复制两套代码。
+本项目只维护一套代码仓库，不为测试版和正式版复制两套代码。对外只有 Test 与 Production 两套环境（见 `docs/DECISIONS.md` DEC-001），不维护独立 Staging，也不维护长期集成分支。
 
-标准发布链路：
+标准发布链路（单分支治理，`main` 是唯一长期分支）：
 
 ```text
-feature/* 或 fix/*
-        ↓
-      develop
-        ↓
-   STAGING 测试环境
-        ↓
-   Release Candidate
-        ↓
+工作分支 fix/* feat/* feature/* hotfix/* chore/* docs/* codex/*
+        ↓  推送即构建不可变镜像 sha-<commit>，并把 candidate 指向它
+   Test 环境验证（candidate）
+        ↓  向 main 直接提 PR
        main
-        ↓
- PRODUCTION 正式环境
+        ↓  合并时把已验证的同一不可变镜像晋升为 stable
+ Production 正式环境
 ```
 
-- `develop`：集成分支，测试环境只跟踪该分支。
-- `main`：生产分支，只有通过测试的版本可以进入。
-- `feature/*`：功能开发。
-- `fix/*`：普通缺陷修复。
-- `hotfix/*`：生产紧急修复，可直接向 main 提 PR，但修复后必须同步回 develop。
-- `codex/*`：AI/Codex 工作分支，完成后必须通过 PR 进入 develop，不能直接作为长期生产分支。
+- `main`：唯一长期分支、生产分支，只有通过验证的版本可以进入。
+- `fix/*` `feat/*` `feature/*`：普通缺陷修复与功能开发。
+- `hotfix/*`：生产紧急修复，同样直接向 main 提 PR。
+- `chore/*` `docs/*` `codex/*`：维护、文档与 AI 工作分支，完成后直接向 main 提 PR，不作为长期分支。
+- 推送工作分支即产出不可变镜像 `sha-<commit>` 并让可变 `candidate` 指向它；PR 合并进 main 时**不重建镜像**，只把已验证镜像原样晋升为 `stable` 并生成版本号。
 
 ## 2. 测试版与正式版不是两套代码
 
-正常情况下，同一提交先在 STAGING 验证，再晋级到 PRODUCTION。
+正常情况下，同一提交先在 Test（`candidate`）验证，再晋级到 Production（`stable`）。
 
 版本测试通过后，不重新修改代码再发布正式版；如果测试中发现问题，应产生新的提交和新的候选版本重新测试。
 
@@ -94,7 +89,7 @@ make release-check
 
 ## 6. 环境隔离
 
-STAGING 与 PRODUCTION 必须使用不同的：
+Test 与 Production 必须使用不同的：
 
 - DATABASE_URL / 数据库；
 - Redis；
@@ -105,11 +100,12 @@ STAGING 与 PRODUCTION 必须使用不同的：
 
 严禁测试环境连接生产数据库做写入测试。
 
-## 7. 系统更新通道
+## 7. 更新通道
 
-- 正式实例：`SYSTEM_UPDATE_BRANCH=main`
-- 测试实例：`SYSTEM_UPDATE_BRANCH=develop`
+镜像通道由工作流与 CI 门禁强制，不依赖运行时的分支切换：
 
-后台“系统更新”只允许跟踪预先配置的分支，不允许从 UI 临时切换任意 commit。
+- 测试实例：`APP_IMAGE` 使用 `candidate`，指向最近一次工作分支构建；
+- 正式实例：`APP_IMAGE` 使用 `stable` 或晋升发布产生的 `vYYYY.MM.DD.HHmmss`；
+- `deploy/zspace/test.env.example` 必须为 `candidate`、`deploy/zspace/production.env.example` 必须为 `stable`，由 CI 的 Release configuration policy 门禁校验。
 
-长期目标是进一步升级为“构建一次、同一不可变构建产物从 staging 晋级到 production”；在本机原生部署阶段，先用同一 Git commit + SHA 校验实现等价控制。
+发布采用“构建一次、同一不可变构建产物晋级”：工作分支构建 `sha-<commit>`，合并进 main 后原样 re-tag 为 `stable`，不在部署端重建镜像。

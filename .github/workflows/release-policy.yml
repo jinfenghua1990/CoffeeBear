@@ -11,15 +11,17 @@ jobs:
     if: github.event.pull_request.draft == false
     runs-on: ubuntu-latest
     steps:
-      - name: Require develop or hotfix branch
+      - name: Require a work branch as production source
         shell: bash
         run: |
+          # 单分支治理：main 是唯一长期分支，PR 直接进 main。
+          # 只校验来源是工作分支，拦住 archive/*、backup/*、running-state-* 等长期/归档分支。
           case "$GITHUB_HEAD_REF" in
-            develop|hotfix/*)
+            fix/*|feat/*|feature/*|hotfix/*|chore/*|docs/*|codex/*)
               echo "Allowed production source: $GITHUB_HEAD_REF"
               ;;
             *)
-              echo "Production PRs must come from develop or hotfix/*."
+              echo "Production PRs must come from a work branch: fix/* feat/* feature/* hotfix/* chore/* docs/* codex/*."
               echo "Current source: $GITHUB_HEAD_REF"
               exit 1
               ;;

@@ -12,10 +12,9 @@ permissions:
 jobs:
   promote:
     name: Promote tested image without rebuilding
-    if: >
-      github.event.pull_request.merged == true &&
-      (github.event.pull_request.head.ref == 'develop' ||
-       startsWith(github.event.pull_request.head.ref, 'hotfix/'))
+    # 单分支治理：任何合并进 main 的 PR 都晋升；镜像必须已由工作分支推送构建过，
+    # 这里只做“校验存在 + 原样 re-tag”，绝不重建。
+    if: github.event.pull_request.merged == true
     runs-on: ubuntu-latest
     steps:
       - uses: docker/setup-buildx-action@v3
@@ -44,18 +43,24 @@ jobs:
       - name: Verify tested source image exists
         shell: bash
         run: |
-          docker buildx imagetools inspect             "${{ steps.release.outputs.image }}:sha-${{ steps.release.outputs.source_sha }}"
+          docker buildx imagetools inspect \
+            "${{ steps.release.outputs.image }}:sha-${{ steps.release.outputs.source_sha }}"
 
       - name: Promote exact tested image
         shell: bash
         run: |
-          docker buildx imagetools create             --tag "${{ steps.release.outputs.image }}:stable"             --tag "${{ steps.release.outputs.image }}:${{ steps.release.outputs.version }}"             "${{ steps.release.outputs.image }}:sha-${{ steps.release.outputs.source_sha }}"
+          docker buildx imagetools create \
+            --tag "${{ steps.release.outputs.image }}:stable" \
+            --tag "${{ steps.release.outputs.image }}:${{ steps.release.outputs.version }}" \
+            "${{ steps.release.outputs.image }}:sha-${{ steps.release.outputs.source_sha }}"
 
       - name: Resolve promoted digest
         id: digest
         shell: bash
         run: |
-          DIGEST="$(docker buildx imagetools inspect             "${{ steps.release.outputs.image }}:${{ steps.release.outputs.version }}"             --format '{{json .Manifest.Digest}}' | tr -d '"')"
+          DIGEST="$(docker buildx imagetools inspect \
+            "${{ steps.release.outputs.image }}:${{ steps.release.outputs.version }}" \
+            --format '{{json .Manifest.Digest}}' | tr -d '"')"
           echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
 
       - name: Create GitHub Release
@@ -63,13 +68,17 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release create "${{ steps.release.outputs.version }}"             --repo "${{ github.repository }}"             --target "${{ steps.release.outputs.merge_sha }}"             --title "${{ steps.release.outputs.version }}"             --notes "Promoted tested image \`${{ steps.release.outputs.image }}:sha-${{ steps.release.outputs.source_sha }}\` to \`stable\`. Production must deploy this promoted image; do not rebuild it on the NAS.
+          gh release create "${{ steps.release.outputs.version }}" \
+            --repo "${{ github.repository }}" \
+            --target "${{ steps.release.outputs.merge_sha }}" \
+            --title "${{ steps.release.outputs.version }}" \
+            --notes "Promoted tested image \`${{ steps.release.outputs.image }}:sha-${{ steps.release.outputs.source_sha }}\` to \`stable\`. Production must deploy this promoted image; do not rebuild it on the NAS.
 
           **Deploy with digest (Issue #30):**
           \`\`\`
           IMAGE_REF=${{ steps.release.outputs.image }}@${{ steps.digest.outputs.digest }}
           \`\`\`
-          Do not deploy the mutable \`:stable\` tag — Cloud Run's remote cache may resolve it to a stale digest."
+          Do not deploy the mutable \`:stable\` tag — a registry remote cache may resolve it to a stale digest."
 
       - name: Summary
         shell: bash
