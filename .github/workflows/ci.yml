@@ -1,11 +1,11 @@
 name: CI
 
 on:
-  # 直提模式：push 到 develop 或 main 都触发 CI；PR 保留为可选防护。
+  # 单分支治理：push 到 main 触发 CI；PR 保留为可选防护。
   push:
-    branches: [develop, main]
+    branches: [main]
   pull_request:
-    branches: [develop, main]
+    branches: [main]
     types: [opened, synchronize, reopened, ready_for_review]
   workflow_dispatch:
 
