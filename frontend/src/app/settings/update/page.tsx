@@ -99,7 +99,7 @@ function blockerReason(
   busy: string,
   isContainer: boolean,
 ) {
-  if (isContainer) return "当前为容器托管模式，版本通过 GitHub / GHCR 发布。";
+  if (isContainer && status.updateAgentAvailable === false) return status.updateAgentError || "NAS 更新器尚未安装或启动，需要先启用一次更新器服务。";
   if (busy) return "正在执行其他更新操作。";
   if (status.running) return "更新正在执行。";
   if (status.dirty) return "本地存在未提交修改，为避免覆盖，已禁止自动更新。";
@@ -221,7 +221,7 @@ export default function SystemUpdatePage() {
   }, [isContainer, loadLocalChanges, status?.currentSha]);
 
   useEffect(() => {
-    if (!status || isContainer || firstCheckRef.current) return;
+    if (!status || firstCheckRef.current) return;
     firstCheckRef.current = true;
     if (status.lastCheckAt && status.moduleVersions?.length) return;
 
@@ -276,7 +276,9 @@ export default function SystemUpdatePage() {
         next.lastCheckError
           ? ""
           : next.updateAvailable
-            ? `发现 ${next.changes?.length || 1} 项更新，可以直接点击“从云端同步到本地”。`
+            ? isContainer
+              ? `发现正式版本 ${next.latestReleaseTag || next.latestCommit?.version || ""}，可以点击“安装正式版本”。`
+              : `发现 ${next.changes?.length || 1} 项更新，可以直接点击“从云端同步到本地”。`
             : "检查完成，当前已经是最新版本。",
       );
       await loadReadiness();
@@ -504,7 +506,7 @@ export default function SystemUpdatePage() {
           ["strategy", "更新策略"],
           ["logs", "更新日志"],
           ["history", "历史记录"],
-        ] as const).map(([key, label]) => (
+        ] as const).filter(([key]) => !isContainer || key !== "strategy").map(([key, label]) => (
           <button
             type="button"
             key={key}
@@ -700,7 +702,7 @@ export default function SystemUpdatePage() {
                       kind="latest"
                       updateLevel={updateLevel}
                       hasUpdate={Boolean(status.updateAvailable)}
-                      actions={!isContainer ? (
+                      actions={(
                         <div className="flex flex-wrap items-center justify-end gap-1.5">
                           <button
                             type="button"
@@ -720,7 +722,7 @@ export default function SystemUpdatePage() {
                                 : "h-8 cursor-default rounded-lg border border-emerald-200 bg-emerald-50 px-3 text-[10px] font-semibold text-emerald-700 dark:border-emerald-500/30 dark:bg-emerald-500/10 dark:text-emerald-300"
                             }
                           >
-                            {status.running ? "同步进行中…" : status.updateAvailable ? "从云端同步到本地" : "当前已是最新版本"}
+                            {status.running ? (isContainer ? "更新进行中…" : "同步进行中…") : status.updateAvailable ? (isContainer ? "安装正式版本" : "从云端同步到本地") : "当前已是最新版本"}
                           </button>
                           <button
                             type="button"
@@ -731,7 +733,7 @@ export default function SystemUpdatePage() {
                             {busy === "refresh" ? "刷新中…" : "刷新状态"}
                           </button>
                         </div>
-                      ) : undefined}
+                      )}
                     />
                   </div>
 
@@ -919,7 +921,7 @@ export default function SystemUpdatePage() {
         </div>
       )}
 
-      {activeTab === "strategy" && (
+      {activeTab === "strategy" && !isContainer && (
         <section className="app-card rounded-2xl p-5">
           <div className="mb-4">
             <h2 className="text-[15px] font-semibold text-slate-900 dark:text-slate-100">更新策略</h2>
