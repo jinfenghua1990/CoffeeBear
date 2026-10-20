@@ -188,6 +188,7 @@ services:
       DEPLOYMENT_MODE: container
       APP_IMAGE_REF: ${APP_IMAGE:?set APP_IMAGE}
       SYSTEM_UPDATE_ENABLED: "0"
+      CONTAINER_UPDATE_AGENT_URL: http://updater:8765
       HOME: /tmp
     volumes:
       - ${DATA_DIR_HOST:?set DATA_DIR_HOST}:/data
