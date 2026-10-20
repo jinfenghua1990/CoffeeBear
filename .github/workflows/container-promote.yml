@@ -36,7 +36,7 @@ jobs:
           IMAGE="ghcr.io/${GITHUB_REPOSITORY,,}"
           VERSION="v$(TZ=Asia/Shanghai date +'%Y.%m.%d.%H%M%S')"
           echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
-          echo "updater_image=${IMAGE}-updater" >> "$GITHUB_OUTPUT"
+          echo "updater_image=$IMAGE" >> "$GITHUB_OUTPUT"
           echo "source_sha=$SOURCE_SHA" >> "$GITHUB_OUTPUT"
           echo "merge_sha=$MERGE_SHA" >> "$GITHUB_OUTPUT"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
@@ -51,7 +51,7 @@ jobs:
         shell: bash
         run: |
           docker buildx imagetools inspect \
-            "${{ steps.release.outputs.updater_image }}:sha-${{ steps.release.outputs.source_sha }}"
+            "${{ steps.release.outputs.updater_image }}:updater-sha-${{ steps.release.outputs.source_sha }}"
 
       - name: Promote exact tested app and updater images
         shell: bash
@@ -79,7 +79,7 @@ jobs:
         shell: bash
         run: |
           DIGEST="$(docker buildx imagetools inspect \
-            "${{ steps.release.outputs.updater_image }}:${{ steps.release.outputs.version }}" \
+            "${{ steps.release.outputs.updater_image }}:updater-${{ steps.release.outputs.version }}" \
             --format '{{json .Manifest.Digest}}' | tr -d '"')"
           echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
 
