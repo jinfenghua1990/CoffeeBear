@@ -236,12 +236,12 @@ services:
         required: false
     environment:
       DATA_DIR: /data
-      COFFEEBEAR_DEPLOY_DIR: /workspace
-      COFFEEBEAR_COMPOSE_FILE: /workspace/docker-compose.yml
-      COFFEEBEAR_ENV_FILE: /workspace/.env
+      COFFEEBEAR_DEPLOY_DIR: ${COFFEEBEAR_DEPLOY_DIR_HOST:?set COFFEEBEAR_DEPLOY_DIR_HOST}
+      COFFEEBEAR_COMPOSE_FILE: ${COFFEEBEAR_DEPLOY_DIR_HOST:?set COFFEEBEAR_DEPLOY_DIR_HOST}/docker-compose.yml
+      COFFEEBEAR_ENV_FILE: ${COFFEEBEAR_DEPLOY_DIR_HOST:?set COFFEEBEAR_DEPLOY_DIR_HOST}/.env
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
-      - ./:/workspace
+      - "${COFFEEBEAR_DEPLOY_DIR_HOST:?set COFFEEBEAR_DEPLOY_DIR_HOST}:${COFFEEBEAR_DEPLOY_DIR_HOST:?set COFFEEBEAR_DEPLOY_DIR_HOST}"
       - ${DATA_DIR_HOST:?set DATA_DIR_HOST}:/data
       - ${DATA_DIR_HOST:?set DATA_DIR_HOST}/../backups:/backups
     expose:
@@ -264,13 +264,13 @@ services:
     command: ["/app/update-job.sh"]
     environment:
       DATA_DIR: /data
-      COFFEEBEAR_DEPLOY_DIR: /workspace
-      COFFEEBEAR_COMPOSE_FILE: /workspace/docker-compose.yml
-      COFFEEBEAR_ENV_FILE: /workspace/.env
+      COFFEEBEAR_DEPLOY_DIR: ${COFFEEBEAR_DEPLOY_DIR_HOST:?set COFFEEBEAR_DEPLOY_DIR_HOST}
+      COFFEEBEAR_COMPOSE_FILE: ${COFFEEBEAR_DEPLOY_DIR_HOST:?set COFFEEBEAR_DEPLOY_DIR_HOST}/docker-compose.yml
+      COFFEEBEAR_ENV_FILE: ${COFFEEBEAR_DEPLOY_DIR_HOST:?set COFFEEBEAR_DEPLOY_DIR_HOST}/.env
       COFFEEBEAR_DATA_DIR_CONTAINER: /data
       COFFEEBEAR_BACKUP_DIR: /backups
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
-      - ./:/workspace
+      - "${COFFEEBEAR_DEPLOY_DIR_HOST:?set COFFEEBEAR_DEPLOY_DIR_HOST}:${COFFEEBEAR_DEPLOY_DIR_HOST:?set COFFEEBEAR_DEPLOY_DIR_HOST}"
       - ${DATA_DIR_HOST:?set DATA_DIR_HOST}:/data
       - ${DATA_DIR_HOST:?set DATA_DIR_HOST}/../backups:/backups
