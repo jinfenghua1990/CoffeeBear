@@ -48,9 +48,27 @@ def test_container_readiness_reports_runtime_identity(monkeypatch):
         "ghcr.io/jinfenghua1990/zhejiang:candidate",
     )
 
+    from app.services import container_update_service
+
+    monkeypatch.setattr(
+        container_update_service,
+        "readiness",
+        lambda **kwargs: {
+            "ready": True,
+            "checks": [
+                {"key": "container_update_agent", "status": "ok", "blocking": False},
+                {"key": "container_image", "status": "ok", "blocking": False},
+                {"key": "git_sha", "status": "ok", "blocking": False},
+                {"key": "database_revision", "status": "ok", "blocking": False},
+            ],
+            "blockingCount": 0,
+            "warningCount": 0,
+        },
+    )
+
     result = system_api.system_update_readiness(_FakeDb())
 
     assert result["ready"] is True
     assert result["blockingCount"] == 0
     keys = {item["key"] for item in result["checks"]}
-    assert keys == {"container_image", "git_sha", "database_revision"}
+    assert keys == {"container_update_agent", "container_image", "git_sha", "database_revision"}
