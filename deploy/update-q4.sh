@@ -169,7 +169,7 @@ fi
 [ -s "$DATA_BACKUP" ] || { echo "DATA_DIR 备份文件为空，已停止更新。" >&2; exit 1; }
 
 echo "[3/7] 固定目标镜像并拉取..."
-if [ -n "$GHCR_USERNAME" ] && [ -n "$GHCR_TOKEN" ]; then
+if [ -n "${GHCR_USERNAME:-}" ] && [ -n "${GHCR_TOKEN:-}" ]; then
   if ! printf '%s' "$GHCR_TOKEN" | docker login ghcr.io --username "$GHCR_USERNAME" --password-stdin >/dev/null; then
     echo "GHCR 登录失败，未更改运行镜像。" >&2
     exit 1
