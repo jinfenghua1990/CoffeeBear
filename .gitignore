@@ -61,3 +61,4 @@ backend/backup_*.json
 
 # 部署运行时凭证
 deploy/**/runtime.env
+deploy/zspace/updater.env

@@ -36,6 +36,7 @@ jobs:
           IMAGE="ghcr.io/${GITHUB_REPOSITORY,,}"
           VERSION="v$(TZ=Asia/Shanghai date +'%Y.%m.%d.%H%M%S')"
           echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
+          echo "updater_image=$IMAGE" >> "$GITHUB_OUTPUT"
           echo "source_sha=$SOURCE_SHA" >> "$GITHUB_OUTPUT"
           echo "merge_sha=$MERGE_SHA" >> "$GITHUB_OUTPUT"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
@@ -46,13 +47,23 @@ jobs:
           docker buildx imagetools inspect \
             "${{ steps.release.outputs.image }}:sha-${{ steps.release.outputs.source_sha }}"
 
-      - name: Promote exact tested image
+      - name: Verify tested updater image exists
+        shell: bash
+        run: |
+          docker buildx imagetools inspect \
+            "${{ steps.release.outputs.updater_image }}:updater-sha-${{ steps.release.outputs.source_sha }}"
+
+      - name: Promote exact tested app and updater images
         shell: bash
         run: |
           docker buildx imagetools create \
             --tag "${{ steps.release.outputs.image }}:stable" \
             --tag "${{ steps.release.outputs.image }}:${{ steps.release.outputs.version }}" \
             "${{ steps.release.outputs.image }}:sha-${{ steps.release.outputs.source_sha }}"
+          docker buildx imagetools create \
+            --tag "${{ steps.release.outputs.updater_image }}:updater-stable" \
+            --tag "${{ steps.release.outputs.updater_image }}:updater-${{ steps.release.outputs.version }}" \
+            "${{ steps.release.outputs.updater_image }}:updater-sha-${{ steps.release.outputs.source_sha }}"
 
       - name: Resolve promoted digest
         id: digest
@@ -60,6 +71,15 @@ jobs:
         run: |
           DIGEST="$(docker buildx imagetools inspect \
             "${{ steps.release.outputs.image }}:${{ steps.release.outputs.version }}" \
+            --format '{{json .Manifest.Digest}}' | tr -d '"')"
+          echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
+
+      - name: Resolve promoted updater digest
+        id: updater_digest
+        shell: bash
+        run: |
+          DIGEST="$(docker buildx imagetools inspect \
+            "${{ steps.release.outputs.updater_image }}:updater-${{ steps.release.outputs.version }}" \
             --format '{{json .Manifest.Digest}}' | tr -d '"')"
           echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
 
@@ -77,6 +97,8 @@ jobs:
           **Deploy with digest (Issue #30):**
           \`\`\`
           IMAGE_REF=${{ steps.release.outputs.image }}@${{ steps.digest.outputs.digest }}
+          UPDATE_AGENT_IMAGE_REF=${{ steps.release.outputs.updater_image }}@${{ steps.updater_digest.outputs.digest }}
+          Source SHA: \`${{ steps.release.outputs.source_sha }}\`
           \`\`\`
           Do not deploy the mutable \`:stable\` tag — a registry remote cache may resolve it to a stale digest."
 
@@ -93,6 +115,12 @@ jobs:
             echo "Digest: \`${{ steps.digest.outputs.digest }}\`"
             echo
             echo "IMAGE_REF for deploy.sh: \`${{ steps.release.outputs.image }}@${{ steps.digest.outputs.digest }}\`"
+            echo
+            echo "Updater image: \`${{ steps.release.outputs.updater_image }}:updater-${{ steps.release.outputs.version }}\`"
+            echo
+            echo "Updater digest: \`sha256:${{ steps.updater_digest.outputs.digest }}\`"
+            echo
+            echo "UPDATE_AGENT_IMAGE_REF: \`${{ steps.release.outputs.updater_image }}@${{ steps.updater_digest.outputs.digest }}\`"
             echo
             echo "Source SHA: \`${{ steps.release.outputs.source_sha }}\`"
             echo

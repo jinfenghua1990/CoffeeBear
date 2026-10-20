@@ -99,7 +99,7 @@ function blockerReason(
   busy: string,
   isContainer: boolean,
 ) {
-  if (isContainer) return "当前为容器托管模式，版本通过 GitHub / GHCR 发布。";
+  if (isContainer && status.updateAgentAvailable === false) return status.updateAgentError || "NAS 更新器尚未安装或启动，需要先启用一次更新器服务。";
   if (busy) return "正在执行其他更新操作。";
   if (status.running) return "更新正在执行。";
   if (status.dirty) return "本地存在未提交修改，为避免覆盖，已禁止自动更新。";
@@ -221,7 +221,7 @@ export default function SystemUpdatePage() {
   }, [isContainer, loadLocalChanges, status?.currentSha]);
 
   useEffect(() => {
-    if (!status || isContainer || firstCheckRef.current) return;
+    if (!status || firstCheckRef.current) return;
     firstCheckRef.current = true;
     if (status.lastCheckAt && status.moduleVersions?.length) return;
 
@@ -276,7 +276,9 @@ export default function SystemUpdatePage() {
         next.lastCheckError
           ? ""
           : next.updateAvailable
-            ? `发现 ${next.changes?.length || 1} 项更新，可以直接点击“从云端同步到本地”。`
+            ? isContainer
+              ? `发现正式版本 ${next.latestReleaseTag || next.latestCommit?.version || ""}，可以点击“安装正式版本”。`
+              : `发现 ${next.changes?.length || 1} 项更新，可以直接点击“从云端同步到本地”。`
             : "检查完成，当前已经是最新版本。",
       );
       await loadReadiness();
@@ -504,7 +506,7 @@ export default function SystemUpdatePage() {
           ["strategy", "更新策略"],
           ["logs", "更新日志"],
           ["history", "历史记录"],
-        ] as const).map(([key, label]) => (
+        ] as const).filter(([key]) => !isContainer || key !== "strategy").map(([key, label]) => (
           <button
             type="button"
             key={key}
@@ -700,7 +702,7 @@ export default function SystemUpdatePage() {
                       kind="latest"
                       updateLevel={updateLevel}
                       hasUpdate={Boolean(status.updateAvailable)}
-                      actions={!isContainer ? (
+                      actions={(
                         <div className="flex flex-wrap items-center justify-end gap-1.5">
                           <button
                             type="button"
@@ -720,7 +722,7 @@ export default function SystemUpdatePage() {
                                 : "h-8 cursor-default rounded-lg border border-emerald-200 bg-emerald-50 px-3 text-[10px] font-semibold text-emerald-700 dark:border-emerald-500/30 dark:bg-emerald-500/10 dark:text-emerald-300"
                             }
                           >
-                            {status.running ? "同步进行中…" : status.updateAvailable ? "从云端同步到本地" : "当前已是最新版本"}
+                            {status.running ? (isContainer ? "更新进行中…" : "同步进行中…") : status.updateAvailable ? (isContainer ? "安装正式版本" : "从云端同步到本地") : "当前已是最新版本"}
                           </button>
                           <button
                             type="button"
@@ -731,7 +733,7 @@ export default function SystemUpdatePage() {
                             {busy === "refresh" ? "刷新中…" : "刷新状态"}
                           </button>
                         </div>
-                      ) : undefined}
+                      )}
                     />
                   </div>
 
@@ -919,7 +921,7 @@ export default function SystemUpdatePage() {
         </div>
       )}
 
-      {activeTab === "strategy" && (
+      {activeTab === "strategy" && !isContainer && (
         <section className="app-card rounded-2xl p-5">
           <div className="mb-4">
             <h2 className="text-[15px] font-semibold text-slate-900 dark:text-slate-100">更新策略</h2>
@@ -1047,7 +1049,7 @@ export default function SystemUpdatePage() {
           </section>
         </section>
       )}
-      {updateDialogOpen && !isContainer && (
+      {updateDialogOpen && (
         <div className="fixed inset-0 z-[100] flex items-center justify-center bg-slate-950/45 p-5 backdrop-blur-sm">
           <div
             role="dialog"
@@ -1081,7 +1083,7 @@ export default function SystemUpdatePage() {
                     </h2>
                     <p className="mt-1 text-[11px] text-slate-400 dark:text-slate-400">
                       {updateDialogResult === "confirm"
-                        ? "开始后系统会依次备份、安装、迁移并验证新版本。"
+                        ? (isContainer ? "开始后系统会备份数据库与业务数据，安装已验证的正式镜像，执行迁移并检查服务健康。" : "开始后系统会依次备份、安装、迁移并验证新版本。")
                         : status.message || "系统正在执行安全更新流程。"}
                     </p>
                   </div>
@@ -1117,12 +1119,12 @@ export default function SystemUpdatePage() {
                   <div className="rounded-2xl border border-slate-100 bg-slate-50/70 p-5 dark:border-slate-700 dark:bg-slate-800/50">
                     <div className="text-[13px] font-semibold text-slate-800 dark:text-slate-100">更新前确认</div>
                     <div className="mt-3 grid gap-3 text-[11px] text-slate-500 sm:grid-cols-3 dark:text-slate-300">
-                      <div><span className="block text-slate-400">变更级别</span><strong className="mt-1 block font-semibold text-slate-700 dark:text-slate-100">{levelMeta.label}</strong></div>
-                      <div><span className="block text-slate-400">变更文件</span><strong className="mt-1 block font-semibold text-slate-700 dark:text-slate-100">{status.changedFileCount || 0} 个</strong></div>
-                      <div><span className="block text-slate-400">影响模块</span><strong className="mt-1 block truncate font-semibold text-slate-700 dark:text-slate-100">{status.impactedModules?.join("、") || "公共代码"}</strong></div>
+                      <div><span className="block text-slate-400">{isContainer ? "更新来源" : "变更级别"}</span><strong className="mt-1 block font-semibold text-slate-700 dark:text-slate-100">{isContainer ? "GitHub 正式发布" : levelMeta.label}</strong></div>
+                      <div><span className="block text-slate-400">{isContainer ? "部署方式" : "变更文件"}</span><strong className="mt-1 block font-semibold text-slate-700 dark:text-slate-100">{isContainer ? "固定镜像摘要" : `${status.changedFileCount || 0} 个`}</strong></div>
+                      <div><span className="block text-slate-400">{isContainer ? "更新保护" : "影响模块"}</span><strong className="mt-1 block truncate font-semibold text-slate-700 dark:text-slate-100">{isContainer ? "备份 / 健康检查" : status.impactedModules?.join("、") || "公共代码"}</strong></div>
                     </div>
                     <p className="mt-4 text-[11px] leading-5 text-slate-400">
-                      系统会先备份数据库和业务文件，再更新代码、执行数据库迁移、重建前端并进行健康检查；失败时自动尝试回滚。
+                      {isContainer ? "系统先备份 PostgreSQL 与业务数据，再拉取已验证的正式镜像、执行数据库迁移并检查服务；失败时会停止更新并保留原镜像配置。" : "系统会先备份数据库和业务文件，再更新代码、执行数据库迁移、重建前端并进行健康检查；失败时自动尝试回滚。"}
                     </p>
                   </div>
 
@@ -1166,10 +1168,10 @@ export default function SystemUpdatePage() {
                   </div>
 
                   <div className="mt-7 grid overflow-hidden rounded-2xl border border-slate-100 md:grid-cols-4 dark:border-slate-700">
-                    <UpdateStep index={1} title="环境检查" desc="环境、依赖、版本" status={stageStatus(0)} time={stageStatus(0) === "done" ? "已通过" : ""} />
+                    <UpdateStep index={1} title={isContainer ? "正式版本校验" : "环境检查"} desc={isContainer ? "发布信息与镜像摘要" : "环境、依赖、版本"} status={stageStatus(0)} time={stageStatus(0) === "done" ? "已通过" : ""} />
                     <UpdateStep index={2} title="自动备份" desc="数据库与业务文件" status={stageStatus(1)} time={status.backupDb ? "备份已生成" : ""} />
-                    <UpdateStep index={3} title="安装升级" desc="代码、依赖、数据库" status={stageStatus(2)} time={status.running && activeStep === 2 ? status.message : ""} />
-                    <UpdateStep index={4} title="验证 / 回滚" desc="健康检查与服务重启" status={stageStatus(3)} time={status.running && activeStep === 3 ? status.message : ""} last />
+                    <UpdateStep index={3} title={isContainer ? "部署镜像" : "安装升级"} desc={isContainer ? "API、Worker 与数据库迁移" : "代码、依赖、数据库"} status={stageStatus(2)} time={status.running && activeStep === 2 ? status.message : ""} />
+                    <UpdateStep index={4} title="健康检查" desc={isContainer ? "服务验证与后台任务恢复" : "健康检查与服务重启"} status={stageStatus(3)} time={status.running && activeStep === 3 ? status.message : ""} last />
                   </div>
 
                   <div className="mt-5 flex flex-wrap items-center justify-between gap-3">

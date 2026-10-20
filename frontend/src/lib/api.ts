@@ -330,6 +330,13 @@ export type SystemUpdateStatus = {
   changedFiles?: string[];
   changedFileCount?: number;
   hasMigration?: boolean;
+  updateAgentAvailable?: boolean;
+  updateAgentError?: string;
+  latestReleaseTag?: string;
+  latestReleaseUrl?: string;
+  latestImageRef?: string;
+  latestUpdaterImageRef?: string;
+  currentImageRef?: string;
   classificationReasons?: string[];
   autoInstallEligible?: boolean;
   autoInstallBlockedReason?: string;
