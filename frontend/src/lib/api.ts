@@ -3092,6 +3092,7 @@ export type WorkbenchOrder = {
   fileOrderId: number | null;
   externalPoId: number | null;
   orderNo: string;
+  inboundReferenceNo?: string;
   /** 采购渠道：1688 / pdd（拼多多）/ taobao（淘宝）。后端暂未下发时兜底为 1688。 */
   platform?: string;
   /** 订单类型：goods=正常货品 / consumable=耗材（包材）采购 */
@@ -3277,6 +3278,7 @@ export const procurementWorkbenchApi = {
       paid_amount: string;
       platform: string;
       warehouse_id: number | null;
+      inbound_no_reference: string;
     }>
   ) =>
     jsonFetch<{ ok: boolean; mode: "file" | "external"; orderNo: string }>(

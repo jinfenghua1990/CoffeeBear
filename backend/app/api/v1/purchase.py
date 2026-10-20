@@ -56,6 +56,19 @@ class CreatePOBody(BaseModel):
     order_kind: str = Field("", pattern="^(|goods|consumable)$")
 
 
+class CompletePurchaseItemBody(BaseModel):
+    item_id: int = Field(gt=0)
+    quantity: str
+    amount: str
+
+
+class CompletePurchaseBody(CreatePOBody):
+    """新建采购一体化：商品、入库参考和采购主档一次提交，不伪造真实入库。"""
+    inbound_no: str = Field(default="", max_length=128)
+    invoice_reference_no: str = Field(default="", max_length=128)
+    items: list[CompletePurchaseItemBody] = Field(default_factory=list, max_length=100)
+
+
 class UpdatePOBody(BaseModel):
     platform: str | None = None
     supplier_name: str | None = None
@@ -158,6 +171,21 @@ def list_orders(
             "sourceImportId": (po.raw or {}).get("sourceImportId"),
         })
     return out
+
+
+@router.post("/orders/complete")
+def create_complete_order(body: CompletePurchaseBody, request: Request,
+                          db: Session = Depends(get_db)) -> dict[str, Any]:
+    from app.services.purchase_full_create_service import create_complete_purchase
+
+    try:
+        return create_complete_purchase(db, body.model_dump(), actor=current_actor(request))
+    except ValueError as exc:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception:
+        db.rollback()
+        raise
 
 
 @router.post("/orders")

@@ -190,6 +190,7 @@ def edit_order_main_fields(
     platform: str | None = None,
     external_order_id: str | None = None,
     warehouse_id: int | None | object = _UNSET,
+    inbound_no_reference: str | None = None,
 ) -> dict:
     """网页交互编辑订单主档（供应商/标题/金额等），全部留审计。
 
@@ -223,6 +224,13 @@ def edit_order_main_fields(
             platform=platform, supplier_name=supplier_name, title=title, ordered_at=ordered_at,
             order_amount=order_amount, paid_amount=paid_amount, warehouse_id=warehouse_id, actor=actor,
         )
+        if inbound_no_reference is not None:
+            raw = dict(external.raw or {})
+            raw["manualInboundNo"] = inbound_no_reference.strip()
+            raw["inboundReferenceStatus"] = "pending_import" if inbound_no_reference.strip() else "none"
+            external.raw = raw
+            audit(db, actor, "procurement.workbench.inbound_ref_edit", "external_purchase_orders", external.id,
+                  {"inboundNo": raw["manualInboundNo"]})
         return {"ok": True, "mode": "external", "orderNo": external.external_order_id}  # type: ignore[union-attr]
 
     if external_order_id is not None and external_order_id.strip() != (order.external_order_id or "").strip():
@@ -292,6 +300,14 @@ def edit_order_main_fields(
             after["copyPaidAmount"] = str(external.paid_amount)
         if "supplier" in after:
             external.supplier_name = order.seller_company_name
+    if inbound_no_reference is not None:
+        target = external if external is not None else order
+        raw = dict(target.raw or {})
+        raw["manualInboundNo"] = inbound_no_reference.strip()
+        raw["inboundReferenceStatus"] = "pending_import" if inbound_no_reference.strip() else "none"
+        target.raw = raw
+        before["inboundNo"] = "(ref edited)"
+        after["inboundNo"] = raw["manualInboundNo"]
     audit(db, actor, "procurement.workbench.order_edit_main", "alibaba1688_orders", order.id,
           {"orderNo": order.external_order_id, "before": before, "after": after})
     return {"ok": True, "mode": "file", "orderNo": order.external_order_id}
@@ -999,6 +1015,7 @@ def workbench(db: Session, order_id: int) -> dict | None:
             "fileOrderId": row.get("fileOrderId"),
             "externalPoId": row.get("externalPoId"),
             "orderNo": row["orderNo"],
+            "inboundReferenceNo": str((external.raw if external is not None and isinstance(external.raw, dict) else (order.raw if order is not None and isinstance(order.raw, dict) else {})).get("manualInboundNo") or ""),
             "platform": row.get("platform") or "other",
             "orderKind": _order_kind(row.get("orderNo"), row.get("supplier"), consumable_nos, row.get("orderKindOverride", ""), bool(row.get("consumable"))),
             "orderKindOverride": row.get("orderKindOverride", ""),

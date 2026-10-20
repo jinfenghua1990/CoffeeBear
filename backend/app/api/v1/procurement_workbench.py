@@ -199,6 +199,7 @@ class OrderMainEditBody(BaseModel):
     paid_amount: str | None = None
     platform: str | None = None
     warehouse_id: int | None = None
+    inbound_no_reference: str | None = Field(default=None, max_length=128)
 
 
 @router.patch("/orders/{order_id}/main-fields")
