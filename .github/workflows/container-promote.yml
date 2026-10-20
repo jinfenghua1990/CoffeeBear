@@ -116,7 +116,7 @@ jobs:
             echo
             echo "IMAGE_REF for deploy.sh: \`${{ steps.release.outputs.image }}@${{ steps.digest.outputs.digest }}\`"
             echo
-            echo "Updater image: \`${{ steps.release.outputs.updater_image }}:${{ steps.release.outputs.version }}\`"
+            echo "Updater image: \`${{ steps.release.outputs.updater_image }}:updater-${{ steps.release.outputs.version }}\`"
             echo
             echo "Updater digest: \`sha256:${{ steps.updater_digest.outputs.digest }}\`"
             echo
