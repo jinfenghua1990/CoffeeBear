@@ -72,3 +72,41 @@ def test_container_readiness_reports_runtime_identity(monkeypatch):
     assert result["blockingCount"] == 0
     keys = {item["key"] for item in result["checks"]}
     assert keys == {"container_update_agent", "container_image", "git_sha", "database_revision"}
+
+
+
+def test_container_update_check_delegates_to_agent(monkeypatch):
+    from app.services import container_update_service
+
+    monkeypatch.setattr(system_api.settings, "DEPLOYMENT_MODE", "container")
+    monkeypatch.setattr(system_api.settings, "GIT_SHA", "1" * 40)
+    monkeypatch.setattr(system_api.settings, "APP_IMAGE_REF", "ghcr.io/jinfenghua1990/coffeebear@sha256:" + "a" * 64)
+    monkeypatch.setattr(
+        container_update_service,
+        "check",
+        lambda **kwargs: {"updateAvailable": True, "latestReleaseTag": "v2026.10.20.180000"},
+    )
+
+    result = system_api.system_update_check(object(), _FakeDb())
+
+    assert result["updateAvailable"] is True
+    assert result["latestReleaseTag"] == "v2026.10.20.180000"
+
+
+def test_container_update_apply_delegates_to_agent(monkeypatch):
+    from app.services import container_update_service
+
+    monkeypatch.setattr(system_api.settings, "DEPLOYMENT_MODE", "container")
+    monkeypatch.setattr(system_api.settings, "GIT_SHA", "1" * 40)
+    monkeypatch.setattr(system_api.settings, "APP_IMAGE_REF", "ghcr.io/jinfenghua1990/coffeebear@sha256:" + "a" * 64)
+    monkeypatch.setattr(system_api, "current_actor", lambda _request: "admin-user")
+    monkeypatch.setattr(
+        container_update_service,
+        "apply",
+        lambda **kwargs: {"started": True, "phase": "queued"},
+    )
+
+    result = system_api.system_update_apply(object(), _FakeDb())
+
+    assert result["started"] is True
+    assert result["phase"] == "queued"
