@@ -178,7 +178,7 @@ fi
 if ! set_image "$TARGET_IMAGE"; then exit 1; fi
 if [ -n "$TARGET_UPDATER_IMAGE" ] && ! set_updater_image "$TARGET_UPDATER_IMAGE"; then restore_config; exit 1; fi
 if [ -n "$TARGET_UPDATER_IMAGE" ]; then
-  if ! dc --profile ops pull api worker beat migrate updater update-job; then
+  if ! dc --profile ops --profile updater pull api worker beat migrate updater update-job; then
     restore_config
     echo "镜像拉取失败，已恢复原镜像配置；现有容器未切换。" >&2
     exit 1
