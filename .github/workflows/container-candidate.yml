@@ -45,7 +45,7 @@ jobs:
         shell: bash
         run: |
           echo "image=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
-          echo "updater_image=ghcr.io/${GITHUB_REPOSITORY,,}-updater" >> "$GITHUB_OUTPUT"
+          echo "updater_image=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
           echo "sha_tag=sha-${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
 
       - name: Build and push immutable multi-arch candidate
@@ -69,7 +69,7 @@ jobs:
           file: ./deploy/updater/Dockerfile
           platforms: linux/amd64,linux/arm64
           push: true
-          tags: ${{ steps.meta.outputs.updater_image }}:${{ steps.meta.outputs.sha_tag }}
+          tags: ${{ steps.meta.outputs.updater_image }}:updater-${{ steps.meta.outputs.sha_tag }}
           labels: |
             org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
@@ -82,8 +82,8 @@ jobs:
             --tag "${{ steps.meta.outputs.image }}:candidate" \
             "${{ steps.meta.outputs.image }}:${{ steps.meta.outputs.sha_tag }}"
           docker buildx imagetools create \
-            --tag "${{ steps.meta.outputs.updater_image }}:candidate" \
-            "${{ steps.meta.outputs.updater_image }}:${{ steps.meta.outputs.sha_tag }}"
+            --tag "${{ steps.meta.outputs.updater_image }}:updater-candidate" \
+            "${{ steps.meta.outputs.updater_image }}:updater-${{ steps.meta.outputs.sha_tag }}"
 
       - name: Summary
         shell: bash
