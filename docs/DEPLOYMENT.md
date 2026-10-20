@@ -94,18 +94,25 @@ Production 是唯一正式运行环境。
 - 明确失败时恢复方案
 - 必要时采用分阶段迁移
 
-## 6. 当前已知发布问题
+## 6. 当前发布验收状态
 
-以 GitHub Issue #18 为当前事实来源。
+以 GitHub Issue #18 为 Docker / Production 基线验收事实来源。
 
-已确认需要继续处理：
+已完成配置与 CI 基线：
 
-- `deploy/zspace/production.env.example` 仍存在历史镜像名称，需要改为 CoffeeBear 正式镜像
-- 候选镜像当前需要补齐 `linux/arm64`，与 `linux/amd64` 一并构建
-- 需要增加配置回归测试
-- 最终仍需要在真实 Docker 环境完成启动验收
+- Production 镜像名统一为 `ghcr.io/jinfenghua1990/coffeebear`
+- 候选镜像支持 `linux/amd64` 与 `linux/arm64`
+- Compose、Alembic、备份恢复和发布配置检查已纳入 CI
 
-在 #18 验收完成前，不得把这些事项描述为“已经正式验证通过”。
+仍未完成的真实环境验收：
+
+- 在极空间 / NAS 的 Test 环境实际拉取并启动候选镜像
+- 执行真实数据库迁移、`/healthz` 与采购 / 库存 / 财务 smoke test
+- 记录目标设备架构、镜像摘要、验收结果和回滚点
+
+Issue #48 同时修正了 Q4 更新脚本：Production 应部署已经发布的不可变镜像标签或 digest，不能在 NAS 上重建应用源码。新脚本与 Compose 逻辑仍需在真实 NAS 上演练后，才能视为 Production 更新流程验收通过。
+
+在真实设备完成上述检查前，不得把静态检查或 GitHub CI 描述成 NAS / Production 实机验收通过。
 
 ## 7. 后台更新功能边界
 

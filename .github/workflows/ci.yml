@@ -75,6 +75,13 @@ jobs:
           POSTGRES_PASSWORD: ecommerce
         run: |
           bash -n scripts/*.sh
+          sh -n deploy/update-q4.sh
+          grep -q "pull api worker beat migrate" deploy/update-q4.sh
+          grep -q "healthz" deploy/update-q4.sh
+          if grep -q "git pull origin main" deploy/update-q4.sh; then
+            echo "Q4 image update script must not pull source code as a substitute for image deployment"
+            exit 1
+          fi
           bash scripts/orphan-audit.sh
       - name: Backup and restore drill (PostgreSQL 17 tools)
         run: |
