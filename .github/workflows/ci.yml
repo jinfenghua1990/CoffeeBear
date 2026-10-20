@@ -79,7 +79,8 @@ jobs:
           sh -n deploy/update-q4.sh
           python -m py_compile deploy/updater/agent.py
           grep -q "pull api worker beat migrate" deploy/update-q4.sh
-          grep -q "updater-sha-" .github/workflows/container-candidate.yml
+          grep -q 'updater-${{ steps.meta.outputs.sha_tag }}' .github/workflows/container-candidate.yml
+          grep -q 'sha_tag=sha-${GITHUB_SHA}' .github/workflows/container-candidate.yml
           grep -q "UPDATE_AGENT_IMAGE_REF" .github/workflows/container-promote.yml
           grep -q "healthz" deploy/update-q4.sh
           if grep -q "git pull origin main" deploy/update-q4.sh; then
