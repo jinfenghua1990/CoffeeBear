@@ -9,9 +9,9 @@ from typing import Any
 
 REPOSITORY = "jinfenghua1990/CoffeeBear"
 APP_PREFIX = "ghcr.io/jinfenghua1990/coffeebear@sha256:"
-UPDATER_PREFIX = "ghcr.io/jinfenghua1990/coffeebear-updater@sha256:"
+UPDATER_PREFIX = "ghcr.io/jinfenghua1990/coffeebear@sha256:"
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
-DIGEST_RE = re.compile(r"^ghcr\.io/jinfenghua1990/coffeebear(?:-updater)?@sha256:[0-9a-f]{64}$")
+DIGEST_RE = re.compile(r"^ghcr\.io/jinfenghua1990/coffeebear@sha256:[0-9a-f]{64}$")
 VERSION_RE = re.compile(r"^v\d{4}\.\d{2}\.\d{2}\.\d{6}$")
 ACTIVE = {"queued", "preflight", "backup", "installing", "migrating", "restarting", "healthcheck"}
 DATA_DIR = Path(os.environ.get("DATA_DIR", "/data")).resolve()
@@ -78,7 +78,7 @@ def latest_release() -> dict[str, Any]:
     tick = r"[\x60]"
     source = re.search(r"Source SHA:\s*" + tick + r"([0-9a-f]{40})" + tick, body)
     app = re.search(r"IMAGE_REF=(ghcr\.io/jinfenghua1990/coffeebear@sha256:[0-9a-f]{64})", body)
-    updater = re.search(r"UPDATE_AGENT_IMAGE_REF=(ghcr\.io/jinfenghua1990/coffeebear-updater@sha256:[0-9a-f]{64})", body)
+    updater = re.search(r"UPDATE_AGENT_IMAGE_REF=(ghcr\.io/jinfenghua1990/coffeebear@sha256:[0-9a-f]{64})", body)
     if not VERSION_RE.fullmatch(tag) or not source or not app or not updater:
         raise RuntimeError("最新正式发布缺少合规版本号、源代码 SHA 或不可变镜像摘要，拒绝自动部署")
     if not SHA_RE.fullmatch(source.group(1)) or not DIGEST_RE.fullmatch(app.group(1)) or not DIGEST_RE.fullmatch(updater.group(1)):
