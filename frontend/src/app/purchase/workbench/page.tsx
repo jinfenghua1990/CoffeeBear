@@ -1562,11 +1562,14 @@ function OrderDetailPanel({ detail, loading, onOrderChanged, onOrderDeleted, onO
   // 1688 源单已关闭：整单只读，不允许再确认采购内容或修改分配。
   const closed = isOrderClosed(order.orderStatus);
   const editable = !closed && (!order.purchaseStatus || order.purchaseStatus === "pending_refine");
+  // 主档信息与 SKU 明细采用不同权限：未关闭订单可保存主档；SKU 明细仍受采购状态限制。
+  const mainEditable = !closed;
   const detailStatusLabel = statusLabel({ orderStatus: order.orderStatus, stepStates, closeoutStage: order.closeoutStage });
   // 详情页状态必须跟工作台步骤状态一致；旧 purchaseStatus 可能仍停在 jackyun_linked，不能再渲染过时的流转按钮。
   const operationalComplete = stepStates.closeout?.done === true || order.purchaseStatus === "done";
   // 有真实入库事实后，状态机进入收尾阶段；不能再显示“回到生产中”的旧状态按钮。
   const hasActualInbound = inbound.length > 0;
+  const canCreateInbound = !closed && !hasActualInbound && !operationalComplete;
   const nextStatus = !operationalComplete && !hasActualInbound && order.purchaseStatus
     ? NEXT_STATUS[order.purchaseStatus]
     : undefined;
@@ -2057,17 +2060,45 @@ function OrderDetailPanel({ detail, loading, onOrderChanged, onOrderDeleted, onO
 
   async function saveMainEdit(event?: React.FormEvent) {
     if (event) event.preventDefault();
-    if (mainSaving) return;
+    if (mainSaving || !mainEditable) return;
     const warehouseId = mainForm.warehouseId.trim() ? Number(mainForm.warehouseId) : null;
+    let mainFieldsSaved = false;
+    let inboundStepRequired = false;
     setMainSaving(true);
     setMainError("");
     try {
       if (!mainForm.supplier.trim()) throw new Error("供应商不能为空");
-      if (warehouseId == null || !Number.isInteger(warehouseId)) throw new Error("请选择采购入库仓库");
+      if (!hasActualInbound && (warehouseId == null || !Number.isInteger(warehouseId))) {
+        throw new Error("请选择采购入库仓库");
+      }
       const purchaseAmount = Number(mainForm.orderAmount);
       if (!mainForm.orderAmount.trim() || !Number.isFinite(purchaseAmount) || purchaseAmount < 0) {
         throw new Error("请输入有效的采购金额");
       }
+
+      const requestedInboundNo = inboundNoEntry.trim();
+      const alreadyLinkedInbound = requestedInboundNo
+        ? inbound.some((row) => (row.goodsdocNo || "").trim().toLowerCase() === requestedInboundNo.toLowerCase())
+        : false;
+      const needsInboundAction = canCreateInbound && Boolean(
+        (requestedInboundNo && !alreadyLinkedInbound) || (!requestedInboundNo && inbound.length === 0)
+      );
+      let exactInboundTargetId: number | null = null;
+      const inboundItems = allocations.filter((row) => row.id != null && row.skuId != null && Number(row.quantity) > 0);
+
+      // 在写入主档之前先完成本地校验和候选查询，尽量避免“主档已保存但入库失败”的半成功状态。
+      if (needsInboundAction) {
+        if (allocations.length === 0) throw new Error("请先添加商品明细，系统才能生成入库单");
+        if (inboundItems.length !== allocations.length) throw new Error("存在未绑定 SKU 的明细，请先完成商品匹配");
+        if (requestedInboundNo) {
+          const result = await procurementChainApi.candidates(order.orderId, "inbound", requestedInboundNo, 30);
+          const exact = result.items.find((row) => row.targetNo.trim().toLowerCase() === requestedInboundNo.toLowerCase());
+          exactInboundTargetId = exact?.targetId ?? null;
+        }
+        inboundStepRequired = true;
+      }
+
+      const warehousePatch = hasActualInbound ? {} : { warehouse_id: warehouseId };
       await procurementWorkbenchApi.editOrderMain(order.orderId, isFile ? {
         supplier_name: mainForm.supplier,
         title: mainForm.title,
@@ -2075,7 +2106,7 @@ function OrderDetailPanel({ detail, loading, onOrderChanged, onOrderDeleted, onO
         freight: mainForm.freight.trim() || undefined,
         discount: mainForm.discount.trim() || undefined,
         actual_payment: mainForm.orderAmount,
-        warehouse_id: warehouseId,
+        ...warehousePatch,
       } : {
         external_order_id: mainForm.orderNo.trim(),
         supplier_name: mainForm.supplier,
@@ -2084,42 +2115,53 @@ function OrderDetailPanel({ detail, loading, onOrderChanged, onOrderDeleted, onO
         order_amount: mainForm.orderAmount,
         paid_amount: mainForm.paid,
         platform: mainForm.platform,
-        warehouse_id: warehouseId,
+        ...warehousePatch,
       });
+      mainFieldsSaved = true;
 
-      const requestedInboundNo = inboundNoEntry.trim();
-      const createInboundFromAllocations = (inboundNo?: string) => {
-        if (allocations.length === 0) throw new Error("请先添加商品明细，系统才能生成入库单");
-        const items = allocations.filter((row) => row.id != null && row.skuId != null && Number(row.quantity) > 0);
-        if (items.length !== allocations.length) throw new Error("存在未绑定 SKU 的明细，请先完成商品匹配");
-        return procurementChainApi.createLocalInbound({
-          order_id: order.orderId,
-          inbound_no: inboundNo,
-          inbound_at: mainForm.date ? `${mainForm.date}T00:00:00` : null,
-          warehouse_id: warehouseId,
-          note: inboundNo ? "按采购订单填写的入库单号创建" : "采购订单保存时自动生成入库单",
-          items: items.map((row) => ({ allocation_id: row.id!, quantity: String(row.quantity), unit_price: row.unitPrice == null ? null : String(row.unitPrice) })),
-        });
-      };
-      if (requestedInboundNo && !inbound.some((row) => row.goodsdocNo === requestedInboundNo)) {
-        const result = await procurementChainApi.candidates(order.orderId, "inbound", requestedInboundNo, 30);
-        const exact = result.items.find((row) => row.targetNo.trim().toLowerCase() === requestedInboundNo.toLowerCase());
-        if (inbound.length > 0) throw new Error(`一张采购订单只能关联一个入库单，当前已有 ${inbound[0].goodsdocNo || "入库单"}`);
-        if (exact) {
-          setSelectedInboundId(exact.targetId);
-          await saveInboundLink(exact.targetId);
+      if (needsInboundAction) {
+        if (exactInboundTargetId != null) {
+          setSelectedInboundId(exactInboundTargetId);
+          await saveInboundLink(exactInboundTargetId, true, false);
+          setInboundMessage(`采购参数已保存，已关联入库单：${requestedInboundNo}`);
         } else {
-          const created = await createInboundFromAllocations(requestedInboundNo);
+          const created = await procurementChainApi.createLocalInbound({
+            order_id: order.orderId,
+            inbound_no: requestedInboundNo || undefined,
+            inbound_at: mainForm.date ? `${mainForm.date}T00:00:00` : null,
+            warehouse_id: warehouseId,
+            note: requestedInboundNo ? "按采购订单填写的入库单号创建" : "采购订单保存时自动生成入库单",
+            items: inboundItems.map((row) => ({
+              allocation_id: row.id!,
+              quantity: String(row.quantity),
+              unit_price: row.unitPrice == null ? null : String(row.unitPrice),
+            })),
+          });
           setInboundNoEntry(created.inboundNo);
-          setInboundMessage(`未找到旧入库单，已按填写的编号创建：${created.inboundNo}`);
+          setInboundMessage(`采购参数已保存，已创建入库单：${created.inboundNo}`);
         }
-      } else if (!requestedInboundNo && inbound.length === 0) {
-        const created = await createInboundFromAllocations();
-        setInboundNoEntry(created.inboundNo);
+        inboundStepRequired = false;
+      } else if (requestedInboundNo && inbound.length === 0 && !canCreateInbound) {
+        setInboundMessage("采购参数已保存；当前订单状态不允许自动创建入库单");
+      } else {
+        setInboundMessage("采购参数已保存");
       }
+
       await onOrderChanged();
     } catch (caught) {
-      setMainError(caught instanceof Error ? caught.message : "订单主档保存失败");
+      const reason = caught instanceof Error ? caught.message : "订单主档保存失败";
+      if (mainFieldsSaved && inboundStepRequired) {
+        setMainError(`采购参数已保存，但入库单处理失败：${reason}`);
+        try {
+          await onOrderChanged();
+        } catch {
+          // 主档已写入；保留明确的部分成功提示，不覆盖为普通“保存失败”。
+        }
+      } else if (mainFieldsSaved) {
+        setMainError(`采购参数已保存，但刷新详情失败：${reason}`);
+      } else {
+        setMainError(reason);
+      }
     } finally {
       setMainSaving(false);
     }
@@ -2298,7 +2340,7 @@ function OrderDetailPanel({ detail, loading, onOrderChanged, onOrderDeleted, onO
     void saveInboundLink(candidate.targetId);
   }
 
-  async function saveInboundLink(targetId: number | null = selectedInboundId) {
+  async function saveInboundLink(targetId: number | null = selectedInboundId, throwOnError = false, refresh = true) {
     setEditorBusy(true);
     setInboundMessage("");
     try {
@@ -2316,10 +2358,11 @@ function OrderDetailPanel({ detail, loading, onOrderChanged, onOrderDeleted, onO
       setInboundEditorOpen(false);
       setSelectedInboundId(null);
       setReplaceInboundLinkId(null);
-      await onOrderChanged();
+      if (refresh) await onOrderChanged();
     } catch (caught) {
       setInboundMessage(caught instanceof Error ? caught.message : "入库单关联失败");
       setInboundEditorOpen(Boolean(inboundQuery.trim()));
+      if (throwOnError) throw caught;
     } finally {
       setEditorBusy(false);
     }
@@ -2481,14 +2524,13 @@ async function saveInboundAmount(documentId: number, value: string, note: string
               <PlatformBadge value={order.platform} />
               {cancelled && <span className="rounded bg-slate-700 px-2 py-0.5 text-[11px] font-medium text-white">已关闭</span>}
             </div>
-            <p className="mt-1 text-[11px] text-slate-400">一张采购订单对应一个供应商、一个仓库、一个入库单号和多条商品明细</p>
+            <p className="mt-1 text-[11px] text-slate-400">主档可独立保存；SKU 明细修改受采购状态限制，已有入库记录后锁定仓库</p>
           </div>
           <div className="flex shrink-0 items-center gap-1.5">
             <span className={cx("rounded-md px-2 py-1 text-[11px] font-medium", isPaid ? "bg-emerald-50 text-emerald-600" : "bg-amber-50 text-amber-700")}>{isPaid ? "已付款" : "待付款"}</span>
             <span className={cx("rounded-md px-2 py-1 text-[11px] font-medium", topInvoiceStatusClass)}>{topInvoiceStatusText}</span>
-            {!closed && !editable && order.externalPoId && <button type="button" onClick={() => void reopenPurchase()} disabled={editorBusy} className="inline-flex items-center gap-1 rounded-md border border-indigo-200 bg-indigo-50 px-2.5 py-1.5 text-[11px] font-medium text-indigo-600 hover:border-indigo-300 hover:bg-indigo-100 disabled:cursor-not-allowed disabled:opacity-50"><Icon name="edit" size={12} />{editorBusy ? "打开中…" : "编辑"}</button>}
-            <button type="button" disabled title="当前后端没有独立草稿接口，保存会直接写入采购单" className="rounded-md border border-slate-200 bg-white px-2.5 py-1.5 text-[11px] text-slate-400">保存草稿</button>
-            <button type="button" onClick={() => void saveMainEdit()} disabled={!editable || mainSaving} className="rounded-md bg-blue-600 px-3 py-1.5 text-[11px] font-medium text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50">{mainSaving ? "保存中…" : "保存"}</button>
+            {!closed && !editable && order.externalPoId && <button type="button" onClick={() => void reopenPurchase()} disabled={editorBusy} title="重新打开 SKU、数量和单价等采购内容编辑" className="inline-flex items-center gap-1 rounded-md border border-indigo-200 bg-indigo-50 px-2.5 py-1.5 text-[11px] font-medium text-indigo-600 hover:border-indigo-300 hover:bg-indigo-100 disabled:cursor-not-allowed disabled:opacity-50"><Icon name="edit" size={12} />{editorBusy ? "打开中…" : "编辑采购内容"}</button>}
+            <button type="button" onClick={() => void saveMainEdit()} disabled={!mainEditable || mainSaving} title={closed ? "已关闭订单只读" : "保存采购主档；填写入库单号时会尝试关联或创建入库单"} className="rounded-md bg-blue-600 px-3 py-1.5 text-[11px] font-medium text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50">{mainSaving ? "保存中…" : "保存"}</button>
             <button type="button" onClick={onClose} aria-label="关闭" className="flex items-center justify-center rounded-md border border-slate-200 px-2.5 py-1.5 text-slate-600 hover:border-indigo-200 hover:text-indigo-600"><Icon name="x" size={15} /></button>
           </div>
         </header>
@@ -2511,7 +2553,7 @@ async function saveInboundAmount(documentId: number, value: string, note: string
             <div className="flex items-center justify-between border-b border-slate-100 px-4 py-2">
               <div>
                 <h3 className="text-[13px] font-semibold text-slate-800">采购参数</h3>
-                <p className="mt-0.5 text-[10px] text-slate-400">订单级信息只维护一次，商品明细不再重复填写仓库和入库单号</p>
+                <p className="mt-0.5 text-[10px] text-slate-400">订单主档独立保存；入库后不可更换仓库，SKU 明细按采购状态编辑</p>
               </div>
               <span className="rounded-full bg-indigo-50 px-2 py-0.5 text-[10px] text-indigo-600">一单一仓</span>
             </div>
@@ -2519,14 +2561,14 @@ async function saveInboundAmount(documentId: number, value: string, note: string
               <div className="grid grid-cols-1 gap-2.5 md:grid-cols-4">
                 <div className="flex min-w-0 items-center gap-2">
                   <label className="w-[4.5em] shrink-0 text-[11px] text-slate-500">供应商<span className="ml-1 text-rose-500">*</span></label>
-                  <input list={"purchase-supplier-" + order.orderId} value={mainForm.supplier} disabled={!editable} onChange={(event) => setMainForm({ ...mainForm, supplier: event.target.value })} className="h-8 min-w-0 flex-1 rounded-md border border-slate-200 bg-white px-2 text-[12px] font-medium text-slate-700 outline-none focus:border-indigo-400 disabled:bg-slate-50" />
+                  <input list={"purchase-supplier-" + order.orderId} value={mainForm.supplier} disabled={!mainEditable} onChange={(event) => setMainForm({ ...mainForm, supplier: event.target.value })} className="h-8 min-w-0 flex-1 rounded-md border border-slate-200 bg-white px-2 text-[12px] font-medium text-slate-700 outline-none focus:border-indigo-400 disabled:bg-slate-50" />
                   <datalist id={"purchase-supplier-" + order.orderId}>
                     {detail.supplierHistory?.recentOrders.map((item) => <option key={item.orderId} value={item.supplier || ""} />)}
                   </datalist>
                 </div>
                 <div className="flex min-w-0 items-center gap-2">
                   <label className="w-[4.5em] shrink-0 text-[11px] text-slate-500">仓库<span className="ml-1 text-rose-500">*</span></label>
-                  <select value={mainForm.warehouseId} disabled={!editable} onChange={(event) => setMainForm({ ...mainForm, warehouseId: event.target.value })} className="h-8 min-w-0 flex-1 rounded-md border border-slate-200 bg-white px-2 text-[12px] font-medium text-slate-700 outline-none focus:border-indigo-400 disabled:bg-slate-50">
+                  <select value={mainForm.warehouseId} disabled={!mainEditable || hasActualInbound} title={hasActualInbound ? "已有实际入库记录，不能更换采购仓库" : "选择本单入库仓库"} onChange={(event) => setMainForm({ ...mainForm, warehouseId: event.target.value })} className="h-8 min-w-0 flex-1 rounded-md border border-slate-200 bg-white px-2 text-[12px] font-medium text-slate-700 outline-none focus:border-indigo-400 disabled:bg-slate-50">
                     <option value="">请选择仓库</option>
                     {mainForm.warehouseId && !warehouses.some((item) => String(item.id) === mainForm.warehouseId) && <option value={mainForm.warehouseId}>{currentWarehouseName || "当前仓库"}</option>}
                     {warehouses.map((warehouse) => <option key={warehouse.id} value={String(warehouse.id)}>{warehouse.name}{warehouse.code ? " · " + warehouse.code : ""}</option>)}
@@ -2540,7 +2582,7 @@ async function saveInboundAmount(documentId: number, value: string, note: string
                     step="0.01"
                     inputMode="decimal"
                     value={mainForm.orderAmount}
-                    disabled={!editable}
+                    disabled={!mainEditable}
                     onChange={(event) => setMainForm({ ...mainForm, orderAmount: event.target.value })}
                     placeholder="请输入采购金额"
                     title="修改后将按新采购金额重新计算发票差额"
@@ -2549,13 +2591,13 @@ async function saveInboundAmount(documentId: number, value: string, note: string
                 </div>
                 <div className="flex min-w-0 items-center gap-2">
                   <label className="w-[4.5em] shrink-0 text-[11px] text-slate-500">采购时间<span className="ml-1 text-rose-500">*</span></label>
-                  <input type="date" value={mainForm.date} disabled={!editable} onChange={(event) => setMainForm({ ...mainForm, date: event.target.value })} className="h-8 min-w-0 flex-1 rounded-md border border-slate-200 bg-white px-2 text-[12px] text-slate-700 outline-none focus:border-indigo-400 disabled:bg-slate-50" />
+                  <input type="date" value={mainForm.date} disabled={!mainEditable} onChange={(event) => setMainForm({ ...mainForm, date: event.target.value })} className="h-8 min-w-0 flex-1 rounded-md border border-slate-200 bg-white px-2 text-[12px] text-slate-700 outline-none focus:border-indigo-400 disabled:bg-slate-50" />
                 </div>
               </div>
 
               <div className="grid grid-cols-1 gap-2.5 md:grid-cols-3">
-                <div className="flex min-w-0 items-center gap-2"><label className="w-[4.5em] shrink-0 whitespace-nowrap text-[11px] text-slate-500">采购渠道</label><select value={mainForm.platform} disabled={!editable} onChange={(event) => setMainForm({ ...mainForm, platform: event.target.value })} className="h-8 min-w-0 flex-1 rounded-md border border-slate-200 bg-white px-2 text-[12px] text-slate-700 outline-none focus:border-indigo-400 disabled:bg-slate-50"><option value="1688">1688</option><option value="pdd">拼多多</option><option value="taobao">淘宝 / 天猫</option><option value="other">其他</option></select></div>
-                <div className="flex min-w-0 items-center gap-2"><label className="w-[4.5em] shrink-0 whitespace-nowrap text-[11px] text-slate-500">{isFile ? "订单号" : "采购单号"}</label><input value={mainForm.orderNo} readOnly={isFile} disabled={!editable} onChange={(event) => setMainForm({ ...mainForm, orderNo: event.target.value })} placeholder="请输入本系统采购单号" title={isFile ? "1688 原始订单号不可修改" : "本地新建采购单以此单号作为系统主单号"} className="h-8 min-w-0 flex-1 rounded-md border border-slate-200 bg-white px-2 font-mono text-[11px] text-slate-600 outline-none focus:border-indigo-400 read-only:cursor-not-allowed read-only:bg-slate-50 disabled:bg-slate-50" /></div>
+                <div className="flex min-w-0 items-center gap-2"><label className="w-[4.5em] shrink-0 whitespace-nowrap text-[11px] text-slate-500">采购渠道</label><select value={mainForm.platform} disabled={!mainEditable} onChange={(event) => setMainForm({ ...mainForm, platform: event.target.value })} className="h-8 min-w-0 flex-1 rounded-md border border-slate-200 bg-white px-2 text-[12px] text-slate-700 outline-none focus:border-indigo-400 disabled:bg-slate-50"><option value="1688">1688</option><option value="pdd">拼多多</option><option value="taobao">淘宝 / 天猫</option><option value="other">其他</option></select></div>
+                <div className="flex min-w-0 items-center gap-2"><label className="w-[4.5em] shrink-0 whitespace-nowrap text-[11px] text-slate-500">{isFile ? "订单号" : "采购单号"}</label><input value={mainForm.orderNo} readOnly={isFile} disabled={!mainEditable} onChange={(event) => setMainForm({ ...mainForm, orderNo: event.target.value })} placeholder="请输入本系统采购单号" title={isFile ? "1688 原始订单号不可修改" : "本地新建采购单以此单号作为系统主单号"} className="h-8 min-w-0 flex-1 rounded-md border border-slate-200 bg-white px-2 font-mono text-[11px] text-slate-600 outline-none focus:border-indigo-400 read-only:cursor-not-allowed read-only:bg-slate-50 disabled:bg-slate-50" /></div>
                 <div className="flex min-w-0 items-center gap-2"><label className="w-[4.5em] shrink-0 whitespace-nowrap text-[11px] text-slate-500">付款状态</label><div className={cx("flex h-8 min-w-0 flex-1 items-center rounded-md border px-2 text-[12px] font-medium", isPaid ? "border-emerald-100 bg-emerald-50 text-emerald-700" : "border-amber-100 bg-amber-50 text-amber-700")}>{isPaid ? "已付款" : "待核对"}</div></div>
               </div>
 
@@ -2582,7 +2624,7 @@ async function saveInboundAmount(documentId: number, value: string, note: string
                 </div>
                 <div className="flex min-w-0 items-center gap-2">
                   <label className="w-[3.5em] shrink-0 whitespace-nowrap text-[11px] text-slate-500">备注</label>
-                  <textarea value={mainForm.title} disabled={!editable} onChange={(event) => setMainForm({ ...mainForm, title: event.target.value })} rows={1} placeholder="可填写采购备注" className="h-8 min-w-0 flex-1 resize-none rounded-md border border-slate-200 bg-white px-2 py-1.5 text-[12px] text-slate-700 outline-none focus:border-indigo-400 disabled:bg-slate-50" />
+                  <textarea value={mainForm.title} disabled={!mainEditable} onChange={(event) => setMainForm({ ...mainForm, title: event.target.value })} rows={1} placeholder="可填写采购备注" className="h-8 min-w-0 flex-1 resize-none rounded-md border border-slate-200 bg-white px-2 py-1.5 text-[12px] text-slate-700 outline-none focus:border-indigo-400 disabled:bg-slate-50" />
                 </div>
               </div>
             </div>
@@ -2596,8 +2638,13 @@ async function saveInboundAmount(documentId: number, value: string, note: string
               </div>
               <div className="relative flex min-w-[280px] flex-[1_1_360px] items-center gap-2">
                 <label className="shrink-0 whitespace-nowrap text-slate-500">入库单号</label>
-                <input value={inboundNoEntry} disabled={!editable} onFocus={() => {
-                  if (editable && inboundQuery.trim()) setInboundEditorOpen(true);
+                <input value={inboundNoEntry} disabled={!mainEditable || hasActualInbound || operationalComplete} title={hasActualInbound ? "已有实际入库记录，入库单号不可更换" : operationalComplete ? "已完成订单不自动创建入库单" : "可关联已有入库单；找不到时会按此编号创建本系统入库单"} onFocus={() => {
+                  if (mainEditable && canCreateInbound && inboundQuery.trim()) setInboundEditorOpen(true);
+                }} onBlur={(event) => {
+                  const next = event.relatedTarget as Node | null;
+                  if (!next || !event.currentTarget.parentElement?.contains(next)) setInboundEditorOpen(false);
+                }} onKeyDown={(event) => {
+                  if (event.key === "Escape") setInboundEditorOpen(false);
                 }} onChange={(event) => {
                   const value = event.target.value;
                   setInboundNoEntry(value);
@@ -2614,7 +2661,7 @@ async function saveInboundAmount(documentId: number, value: string, note: string
                         <span className="min-w-0"><span className="block truncate font-mono text-[11px] text-slate-700">{candidate.targetNo}</span><span className="block truncate text-[10px] text-slate-400">{candidate.targetSupplier || "未注供应商"} · {candidate.warehouseName || "未注仓库"}</span></span>
                         <span className="shrink-0 text-[10px] text-slate-500">{fmtMoney(candidate.targetAmount)}</span>
                       </button>
-                    )) : <div className="px-2 py-2 text-center text-[11px] text-amber-600">未找到旧入库单，保存时将按此编号新建</div>}
+                    )) : <div className="px-2 py-2 text-center text-[11px] text-amber-600">未找到可关联的入库单；保存将按此编号新建，已被其他订单占用的编号不能重复使用</div>}
                   </div>
                 )}
               </div>

@@ -85,10 +85,10 @@ ghcr.io/jinfenghua1990/coffeebear:sha-<commit>
 
 ```text
 ghcr.io/jinfenghua1990/coffeebear:v2026.10.11.120000
-ghcr.io/jinfenghua1990/coffeebear:stable
+ghcr.io/jinfenghua1990/coffeebear@sha256:<64位镜像摘要>
 ```
 
-Production 建议将 `APP_IMAGE` 固定到具体版本标签；`stable` 主要用于发现最新版。
+Production 的 `APP_IMAGE` 必须固定到已发布版本标签或 digest；`stable` 仅用于发现最新版，不作为正式部署目标。
 
 发布顺序：
 
@@ -111,6 +111,29 @@ Production 建议将 `APP_IMAGE` 固定到具体版本标签；`stable` 主要�
 
 如果版本包含数据库迁移，必须先判断 migration 是否向后兼容；需要恢复数据时使用发布前备份。禁止直接删除 PostgreSQL 数据目录。
 
+## 极空间 Q4 更新脚本
+
+正式容器通过 GHCR 镜像更新，不在 NAS 上构建源码。`deploy/update-q4.sh` 仅接受已发布的不可变版本标签或镜像摘要，执行前会备份 PostgreSQL 与 `DATA_DIR`，拉取目标镜像、暂停 worker/beat、执行 Alembic 迁移、更新 API、检查 `/healthz`，最后恢复后台任务。
+
+合并到 `main` 后，`container-promote.yml` 会生成 GitHub Release 版本（如 `v2026.10.20.153000`）。在 NAS 终端进入 CoffeeBear 仓库目录，首次使用新脚本前先更新仓库中的运维脚本：
+
+```bash
+git pull origin main
+./deploy/update-q4.sh ghcr.io/jinfenghua1990/coffeebear:v2026.10.20.153000
+```
+
+将示例版本替换为 GitHub Releases 中实际生成的版本；也可以传入 Release 提供的完整 `ghcr.io/jinfenghua1990/coffeebear@sha256:...` 摘要。不要传 `stable`、`candidate` 或 `latest`。
+
+如果正式 Compose 项目目录不是仓库中的 `deploy/zspace`，请指定 NAS 上实际目录：
+
+```bash
+COFFEEBEAR_DEPLOY_DIR=/你的/正式Compose目录 ./deploy/update-q4.sh ghcr.io/jinfenghua1990/coffeebear:v2026.10.20.153000
+```
+
+默认要求 `.env` 与 `docker-compose.yml` 位于同一正式 Compose 目录。若路径不同，可分别通过 `COFFEEBEAR_COMPOSE_FILE`、`COFFEEBEAR_ENV_FILE` 指定。私有 GHCR 镜像需要先在 NAS 上登录 `ghcr.io`，并确保备份目录有足够剩余空间。
+
+如果迁移失败，脚本会恢复原 `APP_IMAGE` 并尝试恢复 worker/beat；如果迁移后 API 健康检查失败，脚本不会擅自回滚数据库，worker/beat 会保持停止，必须检查日志和迁移兼容性后再处理。
+
 ## 更新中心
 
 极空间容器模式下，应用内 Git 自更新保持关闭：
@@ -119,7 +142,7 @@ Production 建议将 `APP_IMAGE` 固定到具体版本标签；`stable` 主要�
 SYSTEM_UPDATE_ENABLED=0
 ```
 
-当前版本发布由 GitHub + GHCR + Compose 管理。后台【更新】按钮未来如要接管容器升级，应通过单独受控的 Container Update Agent 设计，不得直接把 Docker socket 暴露给业务容器。
+不要使用应用内【更新】按钮更新 NAS 容器，也不要用旧的 `git pull + docker compose up --build` 脚本代替镜像发布流程。
 
 ## 公网访问（可选）：Cloudflare Tunnel
 
