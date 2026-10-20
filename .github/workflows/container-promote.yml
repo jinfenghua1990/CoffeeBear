@@ -98,6 +98,7 @@ jobs:
           \`\`\`
           IMAGE_REF=${{ steps.release.outputs.image }}@${{ steps.digest.outputs.digest }}
           UPDATE_AGENT_IMAGE_REF=${{ steps.release.outputs.updater_image }}@${{ steps.updater_digest.outputs.digest }}
+          Source SHA: \`${{ steps.release.outputs.source_sha }}\`
           \`\`\`
           Do not deploy the mutable \`:stable\` tag — a registry remote cache may resolve it to a stale digest."
 
