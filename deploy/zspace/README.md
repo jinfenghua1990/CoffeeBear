@@ -105,6 +105,21 @@ Production 的 `APP_IMAGE` 必须固定到已发布版本标签或 digest；`sta
 -> 将验证结果写回 GitHub Issue / PR
 ```
 
+## 系统内一键更新（首次启用一次）
+
+CoffeeBear 容器模式的【系统更新】页通过独立 updater 服务执行 NAS 镜像更新。业务 API 不挂载 Docker socket；只有 updater 与一次性 update-job 服务能调用 Docker，并且只接受 GitHub Release 中校验过的 CoffeeBear 应用镜像与更新器镜像摘要。
+
+首次启用需要先把 NAS 项目的 Compose 配置更新到本仓库版本（这一步无法由旧版应用容器自己完成）：
+
+1. 将本目录最新的 `docker-compose.yml` 更新到 NAS 正式 Compose 项目目录。
+2. 在正式 `.env` 中加入 `COMPOSE_PROFILES=updater` 与 `UPDATE_AGENT_IMAGE=ghcr.io/jinfenghua1990/coffeebear:updater-stable`。
+3. 若 GHCR 包为私有，将 `updater.env.example` 复制为 `updater.env`，只在该文件填写有 Packages 读取权限的 `GHCR_USERNAME` / `GHCR_TOKEN`。不要把 GHCR 凭证放入应用 `.env`。
+4. 在 NAS 容器项目中拉取并启动 `updater` 服务。首次将 CoffeeBear 应用升级到包含此功能的正式版本后，系统更新页即可检查和安装后续正式版本。
+
+之后点击【系统更新 → 检查更新 → 安装正式版本】，更新器会从 GitHub Release 读取应用和更新器的不可变摘要，先备份 PostgreSQL 与 DATA_DIR，再执行迁移、健康检查、恢复 worker/beat，并记录更新结果。安装期间不要手动重启相关容器。
+
+如果更新器缺失或不可达，页面会明确显示原因，不会假装更新成功。Docker socket 只挂载给隔离的 updater/update-job 服务，不能挂载给 API、worker 或 beat。
+
 ## 回滚
 
 应用回滚优先切换 `APP_IMAGE` 到上一已知可用版本，不重新构建。
