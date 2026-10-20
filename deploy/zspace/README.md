@@ -111,10 +111,11 @@ CoffeeBear 容器模式的【系统更新】页通过独立 updater 服务执行
 
 首次启用需要先把 NAS 项目的 Compose 配置更新到本仓库版本（这一步无法由旧版应用容器自己完成）：
 
-1. 将本目录最新的 `docker-compose.yml` 更新到 NAS 正式 Compose 项目目录。
-2. 在正式 `.env` 中加入 `COMPOSE_PROFILES=updater` 与 `UPDATE_AGENT_IMAGE=ghcr.io/jinfenghua1990/coffeebear:updater-stable`。
-3. 若 GHCR 包为私有，将 `updater.env.example` 复制为 `updater.env`，只在该文件填写有 Packages 读取权限的 `GHCR_USERNAME` / `GHCR_TOKEN`。不要把 GHCR 凭证放入应用 `.env`。
-4. 在 NAS 容器项目中拉取并启动 `updater` 服务。首次将 CoffeeBear 应用升级到包含此功能的正式版本后，系统更新页即可检查和安装后续正式版本。
+1. 将本目录最新的 `docker-compose.yml` 更新到 NAS 正式 Compose 项目目录，并确保 `.env` 也在同一目录。
+2. 在正式 `.env` 中设置 `COFFEEBEAR_DEPLOY_DIR_HOST` 为该目录的**宿主机绝对路径**（例如 `/volume1/docker/ecommerce/production`）；必须填写真实路径，不能照抄示例。更新器会把这个目录挂载到容器内相同的绝对路径，确保它通过 Docker socket 调用 Compose 时，宿主机 bind mount 路径仍然有效。
+3. 设置 `COMPOSE_PROFILES=updater` 与 `UPDATE_AGENT_IMAGE=ghcr.io/jinfenghua1990/coffeebear:updater-stable`，然后在 NAS 容器项目中重新创建/启动配置，并明确启动 `updater` 服务（如支持命令行，使用 `docker compose --profile updater up -d updater`）。
+4. 若 GHCR 包为私有，将 `updater.env.example` 复制为 `updater.env`，只在该文件填写有 Packages 读取权限的 `GHCR_USERNAME` / `GHCR_TOKEN`。不要把 GHCR 凭证放入应用 `.env`。
+5. 首次将 CoffeeBear 应用升级到包含此功能的正式版本后，系统更新页即可检查和安装后续正式版本。
 
 之后点击【系统更新 → 检查更新 → 安装正式版本】，更新器会从 GitHub Release 读取应用和更新器的不可变摘要，先备份 PostgreSQL 与 DATA_DIR，再执行迁移、健康检查、恢复 worker/beat，并记录更新结果。安装期间不要手动重启相关容器。
 
