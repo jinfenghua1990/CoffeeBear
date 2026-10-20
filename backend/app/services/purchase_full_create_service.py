@@ -239,10 +239,19 @@ def create_complete_purchase(db: Session, data: dict, *, actor: str = "system") 
             "inboundStatus": inbound_status, "consumablePurchaseId": consumable_purchase_id,
         }, commit=False,
     )
+    # 若 1688 原始导入单已存在，工作台用原始源单 ID 展示合并后的单行。
+    # 统一在提交前解析，避免数据库已落库但响应查不到订单的半成功体验。
+    from app.services.procurement_chain_service import _source_pairs
+    db.flush()
+    workbench_id = next(
+        (source.id for source, external in _source_pairs(db)
+         if source is not None and external is not None and external.id == po.id),
+        -po.id,
+    )
     db.commit()
     return {
         "id": po.id,
-        "workbenchOrderId": -po.id,
+        "workbenchOrderId": workbench_id,
         "externalOrderId": order_no,
         "purchaseStatus": po.purchase_status,
         "inboundNo": inbound_no,

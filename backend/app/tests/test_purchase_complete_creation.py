@@ -161,3 +161,17 @@ def test_confirmed_inbound_owned_by_another_purchase_is_not_silently_taken(db_se
     assert db_session.query(ProcurementChainLink).filter_by(
         external_po_id=result["id"], target_type="inbound"
     ).count() == 0
+
+def test_editing_created_purchase_keeps_manual_inbound_reference(db_session):
+    from app.services.procurement_workbench_service import edit_order_main_fields
+
+    original = _data(inbound_no="RK-BEFORE")
+    result = create_complete_purchase(db_session, original, actor="pytest")
+    edit_order_main_fields(
+        db_session, order_id=result["workbenchOrderId"],
+        actor="pytest", inbound_no_reference="RK-UPDATED",
+    )
+    po = db_session.get(ExternalPurchaseOrder, result["id"])
+    db_session.refresh(po)
+    assert po.raw["manualInboundNo"] == "RK-UPDATED"
+    assert po.raw["inboundReferenceStatus"] == "pending_import"
