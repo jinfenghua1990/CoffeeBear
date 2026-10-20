@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from uuid import uuid4
 
-from sqlalchemy import or_
+from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from app.models.catalog import Product, ProductSku, Warehouse
@@ -307,8 +307,18 @@ def task_detail(db: Session, task_id: int) -> dict:
     return serialize_task(db, task, include_items=True)
 
 
+def _locked_task(db: Session, task_id: int) -> InventoryStocktakeTask | None:
+    """锁住任务状态，确保保存、取消、确认不能并发覆盖或重复结算。"""
+    return db.scalar(
+        select(InventoryStocktakeTask)
+        .where(InventoryStocktakeTask.id == task_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+
+
 def save_counts(db: Session, task_id: int, items: list[dict]) -> InventoryStocktakeTask:
-    task = db.get(InventoryStocktakeTask, task_id)
+    task = _locked_task(db, task_id)
     if task is None:
         raise ValueError("盘点任务不存在")
     if task.status not in OPEN_STATUSES:
@@ -361,7 +371,7 @@ def _current_book_map(db: Session, task: InventoryStocktakeTask) -> dict[tuple[s
 
 
 def confirm_task(db: Session, task_id: int, *, actor: str = "system") -> InventoryStocktakeTask:
-    task = db.get(InventoryStocktakeTask, task_id)
+    task = _locked_task(db, task_id)
     if task is None:
         raise ValueError("盘点任务不存在")
     if task.status == "completed":
@@ -379,6 +389,24 @@ def confirm_task(db: Session, task_id: int, *, actor: str = "system") -> Invento
     if missing_reason:
         raise ValueError(f"存在差异的项目必须填写原因：{'、'.join(missing_reason[:8])}")
 
+    # 同仓的两张盘点单串行确认，避免分别根据同一旧库存重复记差异。
+    warehouse = db.scalar(
+        select(Warehouse).where(Warehouse.id == task.warehouse_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    if warehouse is None or warehouse.status != "active":
+        raise ValueError("所选仓库不存在或已停用")
+    # 耗材其他出入库入口也锁 Consumable；先按 ID 加锁再重读账面库存。
+    consumable_ids = sorted({row.ref_id for row in rows if row.item_kind == "consumable"})
+    if consumable_ids:
+        db.scalars(
+            select(Consumable).where(Consumable.id.in_(consumable_ids))
+            .order_by(Consumable.id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        ).all()
+
     current = _current_book_map(db, task)
     changed = []
     for row in rows:
@@ -391,7 +419,6 @@ def confirm_task(db: Session, task_id: int, *, actor: str = "system") -> Invento
             + "、".join(changed[:8])
         )
 
-    warehouse = _warehouse(db, task.warehouse_id)
     for row in rows:
         diff = to_decimal(row.difference_qty)
         if row.item_kind != "consumable" or diff == 0:
@@ -417,7 +444,7 @@ def confirm_task(db: Session, task_id: int, *, actor: str = "system") -> Invento
 
 
 def cancel_task(db: Session, task_id: int) -> InventoryStocktakeTask:
-    task = db.get(InventoryStocktakeTask, task_id)
+    task = _locked_task(db, task_id)
     if task is None:
         raise ValueError("盘点任务不存在")
     if task.status == "completed":

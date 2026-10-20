@@ -1,3 +1,4 @@
+from datetime import datetime, timezone
 from decimal import Decimal
 from uuid import uuid4
 
@@ -6,6 +7,7 @@ import pytest
 from app.models.catalog import ProductSku
 from app.models.consumable import Consumable, ConsumableTransaction
 from app.models.inventory_stocktake import InventoryStocktakeItem
+from app.models.jackyun import JackyunGoodsDocument, JackyunGoodsDocumentItem
 from app.services import inventory_position_service
 from app.services import inventory_stocktake_service as stocktake
 from app.services import warehouse_service
@@ -232,3 +234,75 @@ def test_cancelled_stocktake_never_affects_goods_inventory(db_session):
 
     positions = inventory_position_service.current_positions(db_session)
     assert positions["by_sku"].get(sku.id, Decimal("0")) == Decimal("0")
+
+
+def test_second_stocktake_resets_to_actual_not_last_difference(db_session):
+    warehouse = warehouse_service.create_warehouse(
+        db_session, code=f"STK-{uuid4().hex[:8].upper()}",
+        name="二次盘点仓", warehouse_type="b2c", purpose="goods", is_sellable=True,
+    )
+    sku = _goods_sku(db_session)
+    for actual in ("5", "7"):
+        task = stocktake.create_task(
+            db_session, scope="partial", warehouse_id=warehouse.id,
+            item_kinds=["goods"], selected_items=[{"kind": "goods", "id": sku.id}],
+            actor="pytest",
+        )
+        item = stocktake.task_detail(db_session, task.id)["items"][0]
+        stocktake.save_counts(
+            db_session, task.id,
+            [{"id": item["id"], "actual_qty": actual, "reason": "重复盘点校正"}],
+        )
+        stocktake.confirm_task(db_session, task.id, actor="pytest")
+        positions = inventory_position_service.current_positions(db_session)
+        assert positions["by_sku_warehouse"][sku.id][warehouse.id] == Decimal(actual)
+
+    # 同一任务重复确认不能再次生成库存调整。
+    stocktake.confirm_task(db_session, task.id, actor="pytest")
+    positions = inventory_position_service.current_positions(db_session)
+    assert positions["by_sku_warehouse"][sku.id][warehouse.id] == Decimal("7")
+    with pytest.raises(ValueError, match="已结束"):
+        stocktake.save_counts(
+            db_session, task.id,
+            [{"id": item["id"], "actual_qty": "99", "reason": "不应生效"}],
+        )
+
+
+def test_zero_difference_stocktake_still_protects_against_backdated_import(db_session):
+    warehouse = warehouse_service.create_warehouse(
+        db_session, code=f"STK-{uuid4().hex[:8].upper()}",
+        name="零差异基准仓", warehouse_type="b2c", purpose="goods", is_sellable=True,
+    )
+    sku = _goods_sku(db_session)
+    for index in range(2):
+        task = stocktake.create_task(
+            db_session, scope="partial", warehouse_id=warehouse.id,
+            item_kinds=["goods"], selected_items=[{"kind": "goods", "id": sku.id}],
+            actor="pytest",
+        )
+        item = stocktake.task_detail(db_session, task.id)["items"][0]
+        assert item["bookQty"] == ("0.0000" if index == 0 else "5.0000")
+        stocktake.save_counts(
+            db_session, task.id,
+            [{"id": item["id"], "actual_qty": "5", "reason": "首次盘点" if index == 0 else ""}],
+        )
+        stocktake.confirm_task(db_session, task.id, actor="pytest")
+        task.confirmed_at = datetime(2026, 1 if index == 0 else 9, 1, tzinfo=timezone.utc)
+        db_session.commit()
+
+    # 晚同步的旧入库单：时间在两次盘点之间。第二次零差异盘点也必须重置基准。
+    inbound = JackyunGoodsDocument(
+        document_type="inbound", goodsdoc_no=f"LATE-{uuid4().hex[:10]}",
+        document_at=datetime(2026, 6, 1, tzinfo=timezone.utc),
+        warehouse_code=warehouse.code, raw={},
+    )
+    db_session.add(inbound)
+    db_session.flush()
+    db_session.add(JackyunGoodsDocumentItem(
+        document_id=inbound.id, line_no=1, sku_barcode=sku.barcode,
+        matched_sku_id=sku.id, goods_no=sku.sku_code,
+        quantity=Decimal("3"), raw={},
+    ))
+    db_session.commit()
+    positions = inventory_position_service.current_positions(db_session)
+    assert positions["by_sku_warehouse"][sku.id][warehouse.id] == Decimal("5")
