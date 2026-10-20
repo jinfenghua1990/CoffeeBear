@@ -3278,6 +3278,7 @@ export const procurementWorkbenchApi = {
       paid_amount: string;
       platform: string;
       warehouse_id: number | null;
+      inbound_no_reference: string;
     }>
   ) =>
     jsonFetch<{ ok: boolean; mode: "file" | "external"; orderNo: string }>(
