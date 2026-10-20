@@ -199,6 +199,11 @@ class Handler(BaseHTTPRequestHandler):
         query=urllib.parse.parse_qs(parsed.query); current_sha=(query.get("currentSha") or [""])[0]
         current_version=(query.get("currentVersion") or [""])[0]; current_image=(query.get("currentImageRef") or [""])[0]
         status=read_status()
+        try:
+            history_lines = HISTORY_FILE.read_text(encoding="utf-8").splitlines()[-50:]
+            status["history"] = [json.loads(line) for line in history_lines if line.strip()]
+        except Exception:
+            status.setdefault("history", [])
         status.setdefault("phase","idle"); status.setdefault("progress",0); status.setdefault("running",False)
         status.setdefault("message","更新器已就绪，请检查正式版本"); status.setdefault("logs",[]); status.setdefault("history",[])
         status.setdefault("settings",{"enabled":False,"mode":"manual","checkIntervalMinutes":60,"autoUpdateHour":3,
