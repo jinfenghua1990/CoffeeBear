@@ -75,59 +75,49 @@ _PROVIDER_LABELS = {
 
 @router.get("/update/status", dependencies=[Depends(require_roles("admin"))])
 def system_update_status(db: Session = Depends(get_db)) -> dict[str, Any]:
+    runtime = _runtime_release_info(db)
+    if settings.DEPLOYMENT_MODE == "container":
+        from app.services import container_update_service
+        return container_update_service.status_payload(
+            current_sha=settings.GIT_SHA,
+            current_version=runtime["version"],
+            image_ref=runtime["imageRef"],
+            runtime=runtime,
+        )
     from app.services import system_update_service
     payload = system_update_service.status_payload(include_log=True)
-    payload["runtime"] = _runtime_release_info(db)
-    if settings.DEPLOYMENT_MODE == "container" and settings.GIT_SHA:
-        payload["currentSha"] = settings.GIT_SHA
+    payload["runtime"] = runtime
     return payload
 
 
 @router.get("/update/readiness", dependencies=[Depends(require_roles("admin"))])
 def system_update_readiness(db: Session = Depends(get_db)) -> dict[str, Any]:
     if settings.DEPLOYMENT_MODE == "container":
+        from app.services import container_update_service
         runtime = _runtime_release_info(db)
-        checks = [
-            {
-                "key": "container_image",
-                "label": "运行镜像",
-                "status": "ok" if runtime["imageRef"] else "warn",
-                "detail": runtime["imageRef"] or "未注入 APP_IMAGE_REF",
-                "blocking": False,
-            },
-            {
-                "key": "git_sha",
-                "label": "Git Revision",
-                "status": "ok" if runtime["gitSha"] else "warn",
-                "detail": runtime["gitSha"] or "镜像未写入 GIT_SHA",
-                "blocking": False,
-            },
-            {
-                "key": "database_revision",
-                "label": "数据库版本",
-                "status": "ok" if runtime["alembicRevision"] else "warn",
-                "detail": runtime["alembicRevision"] or "无法读取 alembic_version",
-                "blocking": False,
-            },
-        ]
-        return {
-            "ready": True,
-            "checks": checks,
-            "blockingCount": 0,
-            "warningCount": sum(1 for item in checks if item["status"] == "warn"),
-            "branch": "",
-            "remote": "",
-            "checkedAt": datetime.now(ZoneInfo(settings.TZ)).isoformat(),
-        }
+        return container_update_service.readiness(
+            current_sha=settings.GIT_SHA,
+            current_version=runtime["version"],
+            image_ref=runtime["imageRef"],
+            runtime=runtime,
+        )
     from app.services import system_update_service
     return system_update_service.update_readiness()
 
-
 @router.post("/update/check", dependencies=[Depends(require_roles("admin"))])
-def system_update_check(request: Request) -> dict[str, Any]:
+def system_update_check(request: Request, db: Session = Depends(get_db)) -> dict[str, Any]:
     if settings.DEPLOYMENT_MODE == "container":
         from fastapi import HTTPException
-        raise HTTPException(status_code=409, detail="容器模式由 GitHub / GHCR 管理版本，请通过发布流程检查候选版本。")
+        from app.services import container_update_service
+        runtime = _runtime_release_info(db)
+        try:
+            return container_update_service.check(
+                current_sha=settings.GIT_SHA,
+                current_version=runtime["version"],
+                image_ref=runtime["imageRef"],
+            )
+        except RuntimeError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
     from app.services import system_update_service
     return system_update_service.check_for_updates(actor=current_actor(request), automatic=False)
 
@@ -173,6 +163,9 @@ def system_update_sync_local_changes(request: Request) -> dict[str, Any]:
 
 @router.patch("/update/settings", dependencies=[Depends(require_roles("admin"))])
 def system_update_settings(body: SystemUpdateSettingsBody) -> dict[str, Any]:
+    if settings.DEPLOYMENT_MODE == "container":
+        from fastapi import HTTPException
+        raise HTTPException(status_code=409, detail="NAS 容器模式暂只支持人工确认更新，更新策略不可在此处修改。")
     from app.services import system_update_service
     try:
         saved = system_update_service.save_update_settings(body.model_dump(exclude_none=True))
@@ -183,10 +176,20 @@ def system_update_settings(body: SystemUpdateSettingsBody) -> dict[str, Any]:
 
 
 @router.post("/update/apply", dependencies=[Depends(require_roles("admin"))])
-def system_update_apply(request: Request) -> dict[str, Any]:
+def system_update_apply(request: Request, db: Session = Depends(get_db)) -> dict[str, Any]:
     if settings.DEPLOYMENT_MODE == "container":
         from fastapi import HTTPException
-        raise HTTPException(status_code=409, detail="容器模式禁止应用内更新；请发布已验证的 GHCR 镜像。")
+        from app.services import container_update_service
+        runtime = _runtime_release_info(db)
+        try:
+            return container_update_service.apply(
+                current_sha=settings.GIT_SHA,
+                current_version=runtime["version"],
+                image_ref=runtime["imageRef"],
+                actor=current_actor(request),
+            )
+        except RuntimeError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
     from app.services import system_update_service
     try:
         return system_update_service.start_update(actor=current_actor(request))
