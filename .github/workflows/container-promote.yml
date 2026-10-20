@@ -61,9 +61,9 @@ jobs:
             --tag "${{ steps.release.outputs.image }}:${{ steps.release.outputs.version }}" \
             "${{ steps.release.outputs.image }}:sha-${{ steps.release.outputs.source_sha }}"
           docker buildx imagetools create \
-            --tag "${{ steps.release.outputs.updater_image }}:stable" \
-            --tag "${{ steps.release.outputs.updater_image }}:${{ steps.release.outputs.version }}" \
-            "${{ steps.release.outputs.updater_image }}:sha-${{ steps.release.outputs.source_sha }}"
+            --tag "${{ steps.release.outputs.updater_image }}:updater-stable" \
+            --tag "${{ steps.release.outputs.updater_image }}:updater-${{ steps.release.outputs.version }}" \
+            "${{ steps.release.outputs.updater_image }}:updater-sha-${{ steps.release.outputs.source_sha }}"
 
       - name: Resolve promoted digest
         id: digest
