@@ -55,7 +55,6 @@ read_env_value() {
 }
 OLD_IMAGE=$(read_env_value APP_IMAGE)
 DATA_DIR_HOST=$(read_env_value DATA_DIR_HOST)
-WEB_PORT=$(read_env_value WEB_PORT)
 [ -n "$OLD_IMAGE" ] || { echo ".env 中缺少 APP_IMAGE。" >&2; exit 2; }
 [ -n "$DATA_DIR_HOST" ] || { echo ".env 中缺少 DATA_DIR_HOST。" >&2; exit 2; }
 case "$DATA_DIR_HOST" in
@@ -128,23 +127,24 @@ if ! dc --profile ops pull api worker beat migrate; then
   exit 1
 fi
 
-echo "[4/6] 暂停后台任务并执行数据库迁移..."
-if ! dc stop worker beat; then
+echo "[4/6] 停止应用服务并执行数据库迁移..."
+if ! dc stop api worker beat; then
   set_image "$OLD_IMAGE" || true
-  dc up -d --no-deps worker beat || true
-  echo "暂停 worker/beat 失败，已尝试恢复原配置。" >&2
+  dc up -d --no-deps api worker beat || true
+  echo "停止应用服务失败，未执行迁移；已恢复原配置并尝试恢复服务。" >&2
   exit 1
 fi
 if ! dc --profile ops run --rm migrate; then
   set_image "$OLD_IMAGE" || true
-  dc up -d --no-deps worker beat || true
-  echo "数据库迁移失败：API 尚未切换；已恢复原 APP_IMAGE 并尝试恢复 worker/beat。请检查迁移日志后再重试。" >&2
+  echo "数据库迁移失败：已恢复原 APP_IMAGE，但 API/worker/beat 保持停止。请检查迁移日志、数据库版本与备份后再决定恢复或重试。" >&2
   exit 1
 fi
 
 echo "[5/6] 更新 API 并等待健康检查..."
 if ! dc up -d --no-deps api; then
-  echo "新 API 未能启动。数据库迁移已经执行，worker/beat 保持停止；请查看日志，勿在未评估迁移兼容性前直接回滚数据库。" >&2
+  dc stop api || true
+  dc logs --tail=80 api || true
+  echo "新 API 未能启动。数据库迁移已经执行，应用服务保持停止；请查看日志，勿在未评估迁移兼容性前直接回滚数据库。" >&2
   exit 1
 fi
 healthy=0
@@ -158,7 +158,8 @@ while [ "$attempt" -le 30 ]; do
   attempt=$((attempt + 1))
 done
 if [ "$healthy" -ne 1 ]; then
-  echo "API 健康检查未通过。worker/beat 保持停止，当前 APP_IMAGE 保留为目标版本；请先检查 API 日志与迁移兼容性，再决定回滚。" >&2
+  dc stop api || true
+  echo "API 健康检查未通过。应用服务保持停止，当前 APP_IMAGE 保留为目标版本；请先检查 API 日志与迁移兼容性，再决定回滚。" >&2
   dc logs --tail=80 api || true
   exit 1
 fi

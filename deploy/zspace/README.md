@@ -113,7 +113,7 @@ Production 的 `APP_IMAGE` 必须固定到已发布版本标签或 digest；`sta
 
 ## 极空间 Q4 更新脚本
 
-正式容器通过 GHCR 镜像更新，不在 NAS 上构建源码。`deploy/update-q4.sh` 仅接受已发布的不可变版本标签或镜像摘要，执行前会备份 PostgreSQL 与 `DATA_DIR`，拉取目标镜像、暂停 worker/beat、执行 Alembic 迁移、更新 API、检查 `/healthz`，最后恢复后台任务。
+正式容器通过 GHCR 镜像更新，不在 NAS 上构建源码。`deploy/update-q4.sh` 仅接受已发布的不可变版本标签或镜像摘要，执行前会备份 PostgreSQL 与 `DATA_DIR`，拉取目标镜像、停止 api/worker/beat、执行 Alembic 迁移、更新 API、检查 `/healthz`，最后恢复 worker/beat。
 
 合并到 `main` 后，`container-promote.yml` 会生成 GitHub Release 版本（如 `v2026.10.20.153000`）。在 NAS 终端进入 CoffeeBear 仓库目录，首次使用新脚本前先更新仓库中的运维脚本：
 
@@ -132,7 +132,7 @@ COFFEEBEAR_DEPLOY_DIR=/你的/正式Compose目录 ./deploy/update-q4.sh ghcr.io/
 
 默认要求 `.env` 与 `docker-compose.yml` 位于同一正式 Compose 目录。若路径不同，可分别通过 `COFFEEBEAR_COMPOSE_FILE`、`COFFEEBEAR_ENV_FILE` 指定。私有 GHCR 镜像需要先在 NAS 上登录 `ghcr.io`，并确保备份目录有足够剩余空间。
 
-如果迁移失败，脚本会恢复原 `APP_IMAGE` 并尝试恢复 worker/beat；如果迁移后 API 健康检查失败，脚本不会擅自回滚数据库，worker/beat 会保持停止，必须检查日志和迁移兼容性后再处理。
+如果迁移失败，脚本会恢复原 `APP_IMAGE`，但 API/worker/beat 会保持停止，避免在数据库状态不确定时继续处理业务。请检查迁移日志、Alembic 当前版本和备份后，再决定恢复或重试。如果迁移后 API 健康检查失败，脚本也会停止 API；不会擅自回滚数据库。
 
 ## 更新中心
 
