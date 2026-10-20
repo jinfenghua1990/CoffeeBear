@@ -153,6 +153,7 @@ services:
       DEPLOYMENT_MODE: container
       APP_IMAGE_REF: ${APP_IMAGE:?set APP_IMAGE}
       SYSTEM_UPDATE_ENABLED: "0"
+      CONTAINER_UPDATE_AGENT_URL: http://updater:8765
       HOME: /tmp
     ports:
       - "${WEB_PORT:?set WEB_PORT}:8000"
@@ -223,3 +224,51 @@ services:
       redis:
         condition: service_healthy
     command: ["celery", "-A", "app.celery_app", "beat", "-l", "info", "--schedule", "/tmp/celerybeat-schedule"]
+
+
+  # Only this isolated service can access the Docker socket. The business API never mounts it.
+  updater:
+    image: ${UPDATE_AGENT_IMAGE:-ghcr.io/jinfenghua1990/coffeebear-updater:stable}
+    profiles: ["updater"]
+    restart: unless-stopped
+    environment:
+      DATA_DIR: /data
+      COFFEEBEAR_DEPLOY_DIR: /workspace
+      COFFEEBEAR_COMPOSE_FILE: /workspace/docker-compose.yml
+      COFFEEBEAR_ENV_FILE: /workspace/.env
+      GHCR_USERNAME: ${GHCR_USERNAME:-}
+      GHCR_TOKEN: ${GHCR_TOKEN:-}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./:/workspace
+      - ${DATA_DIR_HOST:?set DATA_DIR_HOST}:/data
+      - ${DATA_DIR_HOST:?set DATA_DIR_HOST}/../backups:/backups
+    expose:
+      - "8765"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8765/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+
+  # A one-shot job is separate from the persistent updater so it can finish even when the updater is restarted.
+  update-job:
+    image: ${UPDATE_AGENT_IMAGE:-ghcr.io/jinfenghua1990/coffeebear-updater:stable}
+    profiles: ["ops"]
+    restart: "no"
+    entrypoint: ["/bin/bash"]
+    command: ["/app/update-job.sh"]
+    environment:
+      DATA_DIR: /data
+      COFFEEBEAR_DEPLOY_DIR: /workspace
+      COFFEEBEAR_COMPOSE_FILE: /workspace/docker-compose.yml
+      COFFEEBEAR_ENV_FILE: /workspace/.env
+      COFFEEBEAR_DATA_DIR_CONTAINER: /data
+      COFFEEBEAR_BACKUP_DIR: /backups
+      GHCR_USERNAME: ${GHCR_USERNAME:-}
+      GHCR_TOKEN: ${GHCR_TOKEN:-}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./:/workspace
+      - ${DATA_DIR_HOST:?set DATA_DIR_HOST}:/data
+      - ${DATA_DIR_HOST:?set DATA_DIR_HOST}/../backups:/backups
