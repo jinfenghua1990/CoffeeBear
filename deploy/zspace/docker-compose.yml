@@ -228,7 +228,7 @@ services:
 
   # Only this isolated service can access the Docker socket. The business API never mounts it.
   updater:
-    image: ${UPDATE_AGENT_IMAGE:-ghcr.io/jinfenghua1990/coffeebear-updater:stable}
+    image: ${UPDATE_AGENT_IMAGE:-ghcr.io/jinfenghua1990/coffeebear:updater-stable}
     profiles: ["updater"]
     restart: unless-stopped
     environment:
@@ -253,7 +253,7 @@ services:
 
   # A one-shot job is separate from the persistent updater so it can finish even when the updater is restarted.
   update-job:
-    image: ${UPDATE_AGENT_IMAGE:-ghcr.io/jinfenghua1990/coffeebear-updater:stable}
+    image: ${UPDATE_AGENT_IMAGE:-ghcr.io/jinfenghua1990/coffeebear:updater-stable}
     profiles: ["ops"]
     restart: "no"
     entrypoint: ["/bin/bash"]
