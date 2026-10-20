@@ -15,7 +15,7 @@ ENV_FILE=${COFFEEBEAR_ENV_FILE:-"$DEPLOY_DIR/.env"}
 usage() {
   echo "用法：$0 ghcr.io/jinfenghua1990/coffeebear:vYYYY.MM.DD.HHmmss [更新器镜像]" >&2
   echo "或：$0 ghcr.io/jinfenghua1990/coffeebear@sha256:<64位镜像摘要> [更新器镜像摘要]" >&2
-  echo "更新器镜像可用 ghcr.io/jinfenghua1990/coffeebear-updater@sha256:<64位摘要>。" >&2
+  echo "更新器镜像可用 ghcr.io/jinfenghua1990/coffeebear:updater-vYYYY.MM.DD.HHmmss 或不可变摘要。" >&2
   echo "可通过 COFFEEBEAR_DEPLOY_DIR 指定 NAS 上实际的 Compose 项目目录。" >&2
 }
 
@@ -49,15 +49,15 @@ esac
 
 if [ -n "$TARGET_UPDATER_IMAGE" ]; then
   case "$TARGET_UPDATER_IMAGE" in
-    ghcr.io/jinfenghua1990/coffeebear-updater:v*)
-      printf '%s\n' "$TARGET_UPDATER_IMAGE" | grep -Eq '^ghcr\.io/jinfenghua1990/coffeebear-updater:v[0-9]{4}\.[0-9]{2}\.[0-9]{2}\.[0-9]{6}$' || {
+    ghcr.io/jinfenghua1990/coffeebear:updater-v*)
+      printf '%s\n' "$TARGET_UPDATER_IMAGE" | grep -Eq '^ghcr\.io/jinfenghua1990/coffeebear:updater-v[0-9]{4}\.[0-9]{2}\.[0-9]{2}\.[0-9]{6}$' || {
         echo "更新器版本标签无效。" >&2
         usage
         exit 2
       }
       ;;
-    ghcr.io/jinfenghua1990/coffeebear-updater@sha256:*)
-      printf '%s\n' "$TARGET_UPDATER_IMAGE" | grep -Eq '^ghcr\.io/jinfenghua1990/coffeebear-updater@sha256:[0-9a-f]{64}$' || {
+    ghcr.io/jinfenghua1990/coffeebear@sha256:*)
+      printf '%s\n' "$TARGET_UPDATER_IMAGE" | grep -Eq '^ghcr\.io/jinfenghua1990/coffeebear@sha256:[0-9a-f]{64}$' || {
         echo "更新器摘要无效。" >&2
         usage
         exit 2
