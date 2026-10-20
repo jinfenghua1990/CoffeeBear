@@ -61,6 +61,7 @@ CoffeeBear 只承载“卖咖啡的熊”中国国内业务，是国内经营系
 12. 与任务有关的其他 docs
 13. 相关 Open Issues / Pull Requests
 14. 最新 main 上的真实代码 / 配置
+15. 需要访问 NAS / 生产环境时：`docs/NAS_AI_ACCESS.md`（仅记录访问方式，不含凭据）
 
 如果文档之间冲突，不得自行挑一个执行；先核对最新代码和 Issue，仍无法确定则创建 Issue 让维护者裁决。
 
