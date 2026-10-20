@@ -76,8 +76,8 @@ def latest_release() -> dict[str, Any]:
     tag, body = str(item.get("tag_name") or ""), str(item.get("body") or "")
     tick = r"[\x60]"
     source = re.search(r"Source SHA:\s*" + tick + r"([0-9a-f]{40})" + tick, body)
-    app = re.search(r"IMAGE_REF=(ghcr\.io/jinfenghua1990/coffeebear@sha256:[0-9a-f]{64})", body)
-    updater = re.search(r"UPDATE_AGENT_IMAGE_REF=(ghcr\.io/jinfenghua1990/coffeebear@sha256:[0-9a-f]{64})", body)
+    app = re.search(r"(?m)^IMAGE_REF=(ghcr\.io/jinfenghua1990/coffeebear@sha256:[0-9a-f]{64})", body)
+    updater = re.search(r"(?m)^UPDATE_AGENT_IMAGE_REF=(ghcr\.io/jinfenghua1990/coffeebear@sha256:[0-9a-f]{64})", body)
     if not VERSION_RE.fullmatch(tag) or not source or not app or not updater:
         raise RuntimeError("最新正式发布缺少合规版本号、源代码 SHA 或不可变镜像摘要，拒绝自动部署")
     if not SHA_RE.fullmatch(source.group(1)) or not DIGEST_RE.fullmatch(app.group(1)) or not DIGEST_RE.fullmatch(updater.group(1)):
