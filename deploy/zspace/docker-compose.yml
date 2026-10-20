@@ -231,13 +231,14 @@ services:
     image: ${UPDATE_AGENT_IMAGE:-ghcr.io/jinfenghua1990/coffeebear:updater-stable}
     profiles: ["updater"]
     restart: unless-stopped
+    env_file:
+      - path: ./updater.env
+        required: false
     environment:
       DATA_DIR: /data
       COFFEEBEAR_DEPLOY_DIR: /workspace
       COFFEEBEAR_COMPOSE_FILE: /workspace/docker-compose.yml
       COFFEEBEAR_ENV_FILE: /workspace/.env
-      GHCR_USERNAME: ${GHCR_USERNAME:-}
-      GHCR_TOKEN: ${GHCR_TOKEN:-}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - ./:/workspace
@@ -256,6 +257,9 @@ services:
     image: ${UPDATE_AGENT_IMAGE:-ghcr.io/jinfenghua1990/coffeebear:updater-stable}
     profiles: ["ops"]
     restart: "no"
+    env_file:
+      - path: ./updater.env
+        required: false
     entrypoint: ["/bin/bash"]
     command: ["/app/update-job.sh"]
     environment:
@@ -265,8 +269,6 @@ services:
       COFFEEBEAR_ENV_FILE: /workspace/.env
       COFFEEBEAR_DATA_DIR_CONTAINER: /data
       COFFEEBEAR_BACKUP_DIR: /backups
-      GHCR_USERNAME: ${GHCR_USERNAME:-}
-      GHCR_TOKEN: ${GHCR_TOKEN:-}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - ./:/workspace
