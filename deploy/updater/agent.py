@@ -9,7 +9,7 @@ from typing import Any
 
 REPOSITORY = "jinfenghua1990/CoffeeBear"
 APP_PREFIX = "ghcr.io/jinfenghua1990/coffeebear@sha256:"
-UPDATER_PREFIX = "ghcr.io/jinfenghua1990/coffeebear@sha256:"
+UPDATER_TAG_RE = re.compile(r"^ghcr\.io/jinfenghua1990/coffeebear:updater-v\d{4}\.\d{2}\.\d{2}\.\d{6}$")
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 DIGEST_RE = re.compile(r"^ghcr\.io/jinfenghua1990/coffeebear@sha256:[0-9a-f]{64}$")
 VERSION_RE = re.compile(r"^v\d{4}\.\d{2}\.\d{2}\.\d{6}$")
@@ -78,12 +78,12 @@ def latest_release() -> dict[str, Any]:
     tick = r"[\x60]"
     source = re.search(r"Source SHA:\s*" + tick + r"([0-9a-f]{40})" + tick, body)
     app = re.search(r"IMAGE_REF=(ghcr\.io/jinfenghua1990/coffeebear@sha256:[0-9a-f]{64})", body)
-    updater = re.search(r"UPDATE_AGENT_IMAGE_REF=(ghcr\.io/jinfenghua1990/coffeebear@sha256:[0-9a-f]{64})", body)
+    updater = re.search(r"UPDATE_AGENT_IMAGE_REF=(ghcr\.io/jinfenghua1990/coffeebear:updater-v\d{4}\.\d{2}\.\d{2}\.\d{6})", body)
     if not VERSION_RE.fullmatch(tag) or not source or not app or not updater:
         raise RuntimeError("最新正式发布缺少合规版本号、源代码 SHA 或不可变镜像摘要，拒绝自动部署")
-    if not SHA_RE.fullmatch(source.group(1)) or not DIGEST_RE.fullmatch(app.group(1)) or not DIGEST_RE.fullmatch(updater.group(1)):
+    if not SHA_RE.fullmatch(source.group(1)) or not DIGEST_RE.fullmatch(app.group(1)) or not UPDATER_TAG_RE.fullmatch(updater.group(1)):
         raise RuntimeError("正式发布的 SHA 或镜像摘要校验失败")
-    if not app.group(1).startswith(APP_PREFIX) or not updater.group(1).startswith(UPDATER_PREFIX):
+    if not app.group(1).startswith(APP_PREFIX):
         raise RuntimeError("正式发布镜像不属于受控 CoffeeBear 仓库")
     return {"tag":tag,"sourceSha":source.group(1),"appImageRef":app.group(1),"updaterImageRef":updater.group(1),
             "url":str(item.get("html_url") or ""),"name":str(item.get("name") or tag),"publishedAt":str(item.get("published_at") or "")}
