@@ -152,13 +152,15 @@ COFFEEBEAR_DEPLOY_DIR=/你的/正式Compose目录 ./deploy/update-q4.sh ghcr.io/
 
 ## 更新中心
 
-极空间容器模式下，应用内 Git 自更新保持关闭：
+极空间容器模式下，旧的应用内 Git 工作区更新机制保持关闭：
 
 ```text
 SYSTEM_UPDATE_ENABLED=0
 ```
 
-不要使用应用内【更新】按钮更新 NAS 容器，也不要用旧的 `git pull + docker compose up --build` 脚本代替镜像发布流程。
+完成上方“一键更新”首次初始化后，可以在 CoffeeBear 后台使用【系统更新 → 检查更新 → 安装正式版本】更新正式容器镜像。此按钮通过独立 updater 服务调用 Docker Compose，不会在 NAS 上拉取源码或重新构建应用。
+
+首次初始化前，后台会提示更新器不可用；此时必须先按上方步骤更新 Compose 配置并启动 updater。不要用旧的 `git pull + docker compose up --build` 脚本代替正式镜像发布流程。
 
 ## 公网访问（可选）：Cloudflare Tunnel
 
