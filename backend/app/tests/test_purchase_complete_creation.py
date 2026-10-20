@@ -175,3 +175,38 @@ def test_editing_created_purchase_keeps_manual_inbound_reference(db_session):
     db_session.refresh(po)
     assert po.raw["manualInboundNo"] == "RK-UPDATED"
     assert po.raw["inboundReferenceStatus"] == "pending_import"
+
+def test_existing_inbound_with_repeated_sku_lines_preserves_each_source_line(db_session):
+    sku = _sku(db_session)
+    no = f"RK-DUP-SKU-{uuid4().hex[:8]}"
+    doc = JackyunGoodsDocument(
+        document_type="inbound", goodsdoc_no=no,
+        raw={"source": "jackyun"},
+    )
+    db_session.add(doc)
+    db_session.flush()
+    items = [
+        JackyunGoodsDocumentItem(
+            document_id=doc.id, line_no=1, matched_sku_id=sku.id,
+            goods_no=sku.sku_code, sku_barcode=sku.barcode,
+            quantity=Decimal("2"), unit_price_tax=Decimal("10"),
+            amount_tax=Decimal("20"), raw={},
+        ),
+        JackyunGoodsDocumentItem(
+            document_id=doc.id, line_no=2, matched_sku_id=sku.id,
+            goods_no=sku.sku_code, sku_barcode=sku.barcode,
+            quantity=Decimal("5"), unit_price_tax=Decimal("10"),
+            amount_tax=Decimal("50"), raw={},
+        ),
+    ]
+    db_session.add_all(items)
+    db_session.flush()
+
+    result = create_complete_purchase(db_session, _data(inbound_no=no), actor="pytest")
+    allocations = db_session.query(PurchaseAllocationItem).filter_by(po_id=result["id"]).all()
+
+    assert len(allocations) == 2
+    assert {row.source_item_id for row in allocations} == {row.id for row in items}
+    assert sum((row.quantity for row in allocations), Decimal("0")) == Decimal("7")
+    assert sum((row.amount for row in allocations), Decimal("0")) == Decimal("70")
+

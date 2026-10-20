@@ -209,9 +209,8 @@ def create_complete_purchase(db: Session, data: dict, *, actor: str = "system") 
                 row.source_item_id for row in db.query(PurchaseAllocationItem)
                 .filter(PurchaseAllocationItem.source_item_id.isnot(None)).all()
             }
-            seen = set()
             for it in items:
-                if it.matched_sku_id is None or it.id in existing_used or it.matched_sku_id in seen:
+                if it.matched_sku_id is None or it.id in existing_used:
                     continue
                 marker = str((it.raw or {}).get("_1688采购订单") or "").strip()
                 if marker and marker != order_no:
@@ -229,7 +228,6 @@ def create_complete_purchase(db: Session, data: dict, *, actor: str = "system") 
                     amount=total, source="inbound_auto", source_item_id=it.id,
                     note=f"由入库单 #{inbound_doc.id} 明细自动反填",
                 ))
-                seen.add(sku.id)
 
     audit(
         db, actor, "purchase.order.create_complete", "external_purchase_orders", po.id,
