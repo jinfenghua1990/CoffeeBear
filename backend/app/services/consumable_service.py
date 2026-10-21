@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 from io import BytesIO
 
 from app.models.catalog import ProductSku, Warehouse
-from app.models.consumable import Consumable, ConsumableSkuMapping, ConsumableTransaction, InboundConsumableUsage
+from app.models.consumable import Consumable, ConsumableSkuMapping, ConsumableTransaction, InboundConsumableUsage, PurchaseOrderConsumableUsageEvent
 from app.models.jackyun import JackyunGoodsDocument, JackyunGoodsDocumentItem
 from app.models.production import ProductionOrder, ProductionOrderItem
 from app.models.procurement_chain import ProcurementChainLink
@@ -385,6 +385,45 @@ def auto_apply_inbound_usage(
     if link is None or link.target_type != "inbound":
         return {"status": "skipped", "reason": "入库关联不存在", "items": []}
 
+    # 如果采购单 SKU 数量已经触发耗材扣减，入库关联只能作为追溯信息，
+    # 不能再按入库单数量重复扣减。也会把旧的自动入库扣减冲销，切换到采购单口径。
+    from app.services.purchase_consumable_usage_service import (
+        has_purchase_order_usage_events,
+        reconcile_purchase_order_consumable_usage,
+    )
+    po_id = link.external_po_id
+    if not po_id:
+        try:
+            from app.services.inbound_allocation_seed import _po_from_link
+            linked_po = _po_from_link(db, link)
+            po_id = linked_po.id if linked_po is not None else None
+        except Exception:
+            po_id = None
+    if po_id:
+        usage_result = reconcile_purchase_order_consumable_usage(
+            db, po_id, note="入库关联检查：按采购 SKU 数量核算耗材", commit=False
+        )
+        if usage_result.get("status") == "manual_inbound_preserved":
+            return {"status": "manual_preserved", "reason": "保留人工明确的入库耗材登记", "items": []}
+        if has_purchase_order_usage_events(db, po_id):
+            if db.query(InboundConsumableUsage.id).filter_by(link_id=link_id).first() is not None:
+                _reverse_inbound_usage(db, link_id)
+            link = db.get(ProcurementChainLink, link_id)
+            if link is not None:
+                link.consumable_usage_decided = False
+                link.consumable_usage_enabled = None
+                if "采购单耗材已按采购数量扣减" not in (link.note or ""):
+                    link.note = f"{link.note}；采购单耗材已按采购数量扣减，入库关联不重复扣减" if link.note else "采购单耗材已按采购数量扣减，入库关联不重复扣减"
+            if commit:
+                db.commit()
+            else:
+                db.flush()
+            return {
+                "status": "purchase_order_usage_preserved",
+                "reason": "耗材已按采购 SKU 数量核算，入库关联不重复扣减",
+                "items": [],
+            }
+
     automatic_link = (
         link.match_method in {"auto", "file_import"}
         or "自动确认" in (link.note or "")
@@ -441,12 +480,32 @@ def auto_apply_confirmed_inbound_usage(
     唯一数量来源，因此同一入库单拆给多个采购单时不会重复扣减。明确人工登记
     的结果不会被回溯覆盖。
     """
+    stats = {"applied": 0, "pending": 0, "noMapping": 0, "preserved": 0, "skipped": 0, "purchaseOrdersApplied": 0}
+    # 映射可能在采购单保存后才补齐。即使采购单尚无入库单，也要按已保存的 SKU
+    # 数量补扣；有入库链的订单随后会被 auto_apply_inbound_usage 识别并跳过重复扣减。
+    from app.services.purchase_consumable_usage_service import reconcile_purchase_order_consumable_usage
+    po_query = db.query(PurchaseAllocationItem.po_id).distinct()
+    if sku_ids is not None:
+        if not sku_ids:
+            po_query = po_query.filter(PurchaseAllocationItem.sku_id == -1)
+        else:
+            po_query = po_query.filter(PurchaseAllocationItem.sku_id.in_(sku_ids))
+    for (po_id,) in po_query.all():
+        try:
+            result = reconcile_purchase_order_consumable_usage(
+                db, po_id, note=note or "耗材映射更新后重新核算采购单", commit=True
+            )
+            if result.get("changed") or result.get("status") in {"applied", "pending_mapping"}:
+                stats["purchaseOrdersApplied"] += 1
+        except Exception:
+            db.rollback()
+            stats["skipped"] += 1
+
     link_ids = [link_id for (link_id,) in db.query(ProcurementChainLink.id).filter(
         ProcurementChainLink.target_type == "inbound",
         ProcurementChainLink.confirmed.is_(True),
         ProcurementChainLink.match_method != "rejected",
     ).all()]
-    stats = {"applied": 0, "pending": 0, "noMapping": 0, "preserved": 0, "skipped": 0}
     for link_id in link_ids:
         try:
             suggestion = suggest_inbound_usage(db, link_id)
