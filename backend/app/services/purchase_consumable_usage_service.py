@@ -16,7 +16,6 @@ from app.models.catalog import Warehouse
 from app.models.consumable import (
     Consumable,
     ConsumableSkuMapping,
-    ConsumableTransaction,
     InboundConsumableUsage,
     PurchaseOrderConsumableUsageEvent,
 )
