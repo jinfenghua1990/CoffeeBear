@@ -280,6 +280,12 @@ def soft_delete_order(order_id: int, request: Request, db: Session = Depends(get
     else:
         # 工作流独有订单：删除记录本体及其直接子项。
         removed_po_ids.append(external.id)  # type: ignore[union-attr]
+        # 永久删除工作流独有采购单前，先以冲销流水恢复其采购单口径耗材扣减。
+        from app.services.purchase_consumable_usage_service import reconcile_purchase_order_consumable_usage
+        reconcile_purchase_order_consumable_usage(
+            db, external.id, note="采购单删除：冲销采购单触发的耗材使用",
+            commit=False, force_zero=True,
+        )
         # 本系统采购入库不是外部吉客云事实，订单永久删除时必须连同入库
         # 和自动耗材扣减一起撤销，否则会留下无法追溯的库存脏数据。
         from app.models.jackyun import JackyunGoodsDocument
