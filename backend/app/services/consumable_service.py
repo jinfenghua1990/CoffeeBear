@@ -372,7 +372,9 @@ def suggest_inbound_usage(db: Session, link_id: int) -> dict:
     }
 
 
-def auto_apply_inbound_usage(db: Session, link_id: int, note: str = "") -> dict:
+def auto_apply_inbound_usage(
+    db: Session, link_id: int, note: str = "", *, commit: bool = True
+) -> dict:
     """把可确定的 SKU→耗材建议自动写入入库关联并扣减库存。
 
     正常采购入库不需要人工选择是否使用耗材：数量来自真实入库明细，耗材来自
@@ -401,11 +403,16 @@ def auto_apply_inbound_usage(db: Session, link_id: int, note: str = "") -> dict:
     items = suggestion["items"]
     if items:
         usage_note = note.strip() or "按入库明细和 SKU 耗材映射自动关联"
-        usage = set_inbound_usage(db, link_id=link_id, enabled=True, items=items, note=usage_note)
+        usage = set_inbound_usage(
+            db, link_id=link_id, enabled=True, items=items, note=usage_note, commit=commit
+        )
         link = db.get(ProcurementChainLink, link_id)
         if link is not None and "按 SKU 耗材映射自动关联" not in (link.note or ""):
             link.note = f"{link.note}；按 SKU 耗材映射自动关联" if link.note else "按 SKU 耗材映射自动关联"
-            db.commit()
+            if commit:
+                db.commit()
+            else:
+                db.flush()
         return {"status": "applied", "basis": suggestion.get("basis"), "items": usage}
 
     if automatic_link or not link.consumable_usage_decided:
@@ -415,7 +422,10 @@ def auto_apply_inbound_usage(db: Session, link_id: int, note: str = "") -> dict:
         link.consumable_usage_enabled = None
         if "待维护耗材映射" not in (link.note or ""):
             link.note = f"{link.note}；待维护耗材映射" if link.note else "待维护耗材映射"
-        db.commit()
+        if commit:
+            db.commit()
+        else:
+            db.flush()
     return {"status": "pending_mapping", "basis": suggestion.get("basis"), "items": []}
 
 
@@ -544,6 +554,7 @@ def set_inbound_usage(
     enabled: bool,
     items: list[dict] | None = None,
     note: str = "",
+    commit: bool = True,
 ) -> list[dict]:
     """写入一条入库关联的耗材流水，并按明细扣减库存。
 
@@ -647,7 +658,10 @@ def set_inbound_usage(
             )
     link.consumable_usage_decided = True
     link.consumable_usage_enabled = enabled
-    db.commit()
+    if commit:
+        db.commit()
+    else:
+        db.flush()
     return inbound_usage_rows(db, link_id)
 
 

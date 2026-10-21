@@ -17,7 +17,7 @@ function localDateTime() {
 
 export function NewPurchaseModal({ onClose, onCreated, createdOrderId, renderCreated }: {
   onClose: () => void;
-  onCreated: (orderId: number) => void;
+  onCreated: (orderId: number, notice?: string) => void;
   createdOrderId?: number | null;
   renderCreated?: (orderId: number) => ReactNode;
 }) {
@@ -130,6 +130,7 @@ export function NewPurchaseModal({ onClose, onCreated, createdOrderId, renderCre
       const body = await response.json().catch(() => ({})) as {
         detail?: string | Array<{ msg?: string }>;
         workbenchOrderId?: number; id?: number; inboundWarning?: string;
+        consumableUsageStatus?: string; consumableUsageWarning?: string;
       };
       if (!response.ok) {
         const message = typeof body.detail === "string"
@@ -139,7 +140,8 @@ export function NewPurchaseModal({ onClose, onCreated, createdOrderId, renderCre
       }
       const created = body.workbenchOrderId ?? (body.id ? -body.id : null);
       if (created == null) throw new Error("订单已提交但服务器未返回订单ID，请刷新列表核对，勿重复提交");
-      onCreated(created);
+      const notice = body.consumableUsageWarning || body.inboundWarning || undefined;
+      onCreated(created, notice);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "整单保存失败");
     } finally {
