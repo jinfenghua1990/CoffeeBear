@@ -96,6 +96,7 @@ def reconcile_purchase_order_consumable_usage(
     *,
     note: str = "",
     commit: bool = True,
+    force_zero: bool = False,
 ) -> dict:
     """Idempotently reconcile usage to Σ(purchased SKU qty × usage-per-unit).
 
@@ -134,7 +135,7 @@ def reconcile_purchase_order_consumable_usage(
     missing_sku_ids = sorted(sku_id for sku_id in sku_ids if not mappings_by_sku.get(sku_id))
     manual_override = _manual_inbound_override(db, po.id)
     desired: dict[int, Decimal] = defaultdict(lambda: _ZERO)
-    if not manual_override:
+    if not manual_override and not force_zero:
         for allocation in allocations:
             sku_id = int(allocation.sku_id)
             quantity = to_decimal(allocation.quantity)
@@ -222,6 +223,8 @@ def reconcile_purchase_order_consumable_usage(
 
     if manual_override:
         status = "manual_inbound_preserved"
+    elif force_zero:
+        status = "reversed"
     elif not allocation_count:
         status = "awaiting_sku"
     elif missing_sku_ids:
