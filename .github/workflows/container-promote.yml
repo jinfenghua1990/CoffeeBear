@@ -41,17 +41,31 @@ jobs:
           echo "merge_sha=$MERGE_SHA" >> "$GITHUB_OUTPUT"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
-      - name: Verify tested source image exists
+      - name: Wait for tested app and updater images
         shell: bash
+        env:
+          IMAGE: ${{ steps.release.outputs.image }}
+          UPDATER_IMAGE: ${{ steps.release.outputs.updater_image }}
+          SOURCE_SHA: ${{ steps.release.outputs.source_sha }}
         run: |
-          docker buildx imagetools inspect \
-            "${{ steps.release.outputs.image }}:sha-${{ steps.release.outputs.source_sha }}"
-
-      - name: Verify tested updater image exists
-        shell: bash
-        run: |
-          docker buildx imagetools inspect \
-            "${{ steps.release.outputs.updater_image }}:updater-sha-${{ steps.release.outputs.source_sha }}"
+          set -euo pipefail
+          # The image build runs asynchronously on the PR branch. The PR can be
+          # merged before the multi-arch push finishes, so wait for both immutable
+          # tags instead of failing the release on a normal build/push race.
+          for attempt in $(seq 1 60); do
+            app_ok=0
+            updater_ok=0
+            docker buildx imagetools inspect "${IMAGE}:sha-${SOURCE_SHA}" >/dev/null 2>&1 && app_ok=1 || true
+            docker buildx imagetools inspect "${UPDATER_IMAGE}:updater-sha-${SOURCE_SHA}" >/dev/null 2>&1 && updater_ok=1 || true
+            if [ "$app_ok" -eq 1 ] && [ "$updater_ok" -eq 1 ]; then
+              echo "Both immutable tested images are available."
+              exit 0
+            fi
+            echo "Waiting for candidate image publication (attempt $attempt/60; app=$app_ok updater=$updater_ok)..."
+            sleep 10
+          done
+          echo "::error::Candidate app/updater image was not published within 10 minutes."
+          exit 1
 
       - name: Promote exact tested app and updater images
         shell: bash
