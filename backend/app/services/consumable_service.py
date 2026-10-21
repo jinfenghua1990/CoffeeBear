@@ -733,6 +733,20 @@ def list_transactions(db: Session, consumable_id: int, limit: int = 100) -> list
     ).limit(limit).all()
     receipt_ids = [row.source_id for row in rows if row.source_type == "consumable_receipt"]
     receipts = {r.id: r for r in db.query(ConsumableReceipt).filter(ConsumableReceipt.id.in_(receipt_ids)).all()} if receipt_ids else {}
+    purchase_usage_event_ids = [row.source_id for row in rows if row.source_type == "purchase_order_usage"]
+    purchase_usage_events = {
+        event.id: event
+        for event in db.query(PurchaseOrderConsumableUsageEvent).filter(
+            PurchaseOrderConsumableUsageEvent.id.in_(purchase_usage_event_ids)
+        ).all()
+    } if purchase_usage_event_ids else {}
+    purchase_order_ids = sorted({event.po_id for event in purchase_usage_events.values()})
+    from app.models.purchase import ExternalPurchaseOrder
+    purchase_orders = {
+        po.id: po for po in db.query(ExternalPurchaseOrder).filter(
+            ExternalPurchaseOrder.id.in_(purchase_order_ids)
+        ).all()
+    } if purchase_order_ids else {}
     legacy_link_ids = [row.source_id for row in rows if row.source_type == "inbound_link"]
     usage_ids = [row.source_id for row in rows if row.source_type == "inbound_usage"]
     usages = {
@@ -783,6 +797,14 @@ def list_transactions(db: Session, consumable_id: int, limit: int = 100) -> list
             "occurredAt": row.occurred_at.isoformat() if row.occurred_at else None,
             "purchaseId": receipts[row.source_id].purchase_id if row.source_type == "consumable_receipt" and row.source_id in receipts else None,
             "orderId": _source_link(row).workbench_order_id if _source_link(row) is not None else None,
+            "purchaseOrderId": purchase_usage_events[row.source_id].po_id if row.source_type == "purchase_order_usage" and row.source_id in purchase_usage_events else None,
+            "purchaseOrderNo": (
+                purchase_orders[purchase_usage_events[row.source_id].po_id].external_order_id
+                if row.source_type == "purchase_order_usage"
+                and row.source_id in purchase_usage_events
+                and purchase_usage_events[row.source_id].po_id in purchase_orders
+                else ""
+            ),
             "inboundDocumentId": (
                 inbound_documents[_source_link(row).target_id].id
                 if _source_link(row) is not None
