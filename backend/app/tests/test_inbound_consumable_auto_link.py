@@ -2,7 +2,7 @@ from decimal import Decimal
 from uuid import uuid4
 
 from app.models.catalog import ProductSku
-from app.models.consumable import Consumable, ConsumableSkuMapping, ConsumableTransaction, InboundConsumableUsage
+from app.models.consumable import Consumable, ConsumableSkuMapping, ConsumableTransaction, InboundConsumableUsage, PurchaseOrderConsumableUsageEvent
 from app.models.jackyun import JackyunGoodsDocument, JackyunGoodsDocumentItem
 from app.models.procurement_chain import ProcurementChainLink
 from app.models.purchase import ExternalPurchaseOrder, PurchaseAllocationItem
@@ -107,9 +107,12 @@ def test_mapping_save_backfills_existing_confirmed_inbound(db_session):
 
     db_session.refresh(link)
     db_session.refresh(material)
-    usage = db_session.query(InboundConsumableUsage).filter_by(link_id=link.id).one()
-    assert usage.quantity == Decimal("14.0000")
-    assert link.consumable_usage_enabled is True
+    event = db_session.query(PurchaseOrderConsumableUsageEvent).filter_by(
+        po_id=link.external_po_id, consumable_id=material.id,
+    ).one()
+    assert event.quantity == Decimal("14.0000")
+    assert db_session.query(InboundConsumableUsage).filter_by(link_id=link.id).count() == 0
+    assert link.consumable_usage_enabled is None
     assert material.stock_qty == Decimal("986.0000")
     assert material.used_qty == Decimal("14.0000")
 
@@ -186,10 +189,18 @@ def test_shared_inbound_document_uses_each_purchase_allocation_once(db_session):
         {"consumable_id": material_b.id, "quantity": "12.0000"}
     ]
 
-    assert auto_apply_inbound_usage(db_session, link_a.id)["status"] == "applied"
-    assert auto_apply_inbound_usage(db_session, link_b.id)["status"] == "applied"
-    assert db_session.query(InboundConsumableUsage).filter_by(link_id=link_a.id).one().quantity == Decimal("10.0000")
-    assert db_session.query(InboundConsumableUsage).filter_by(link_id=link_b.id).one().quantity == Decimal("12.0000")
+    assert auto_apply_inbound_usage(db_session, link_a.id)["status"] == "purchase_order_usage_preserved"
+    assert auto_apply_inbound_usage(db_session, link_b.id)["status"] == "purchase_order_usage_preserved"
+    assert db_session.query(InboundConsumableUsage).filter_by(link_id=link_a.id).count() == 0
+    assert db_session.query(InboundConsumableUsage).filter_by(link_id=link_b.id).count() == 0
+    event_a = db_session.query(PurchaseOrderConsumableUsageEvent).filter_by(
+        po_id=po_a.id, consumable_id=material_a.id,
+    ).one()
+    event_b = db_session.query(PurchaseOrderConsumableUsageEvent).filter_by(
+        po_id=po_b.id, consumable_id=material_b.id,
+    ).one()
+    assert event_a.quantity == Decimal("10.0000")
+    assert event_b.quantity == Decimal("12.0000")
     db_session.refresh(material_a)
     db_session.refresh(material_b)
     assert material_a.used_qty == Decimal("10.0000")
