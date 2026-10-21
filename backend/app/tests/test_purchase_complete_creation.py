@@ -7,7 +7,12 @@ from uuid import uuid4
 import pytest
 
 from app.models.catalog import ProductSku
-from app.models.consumable import Consumable
+from app.models.consumable import (
+    Consumable,
+    ConsumableSkuMapping,
+    ConsumableTransaction,
+    InboundConsumableUsage,
+)
 from app.models.consumable_purchase import ConsumablePurchase, ConsumablePurchaseItem
 from app.models.jackyun import JackyunGoodsDocument, JackyunGoodsDocumentItem
 from app.models.procurement_chain import ProcurementChainLink
@@ -96,6 +101,61 @@ def test_exact_existing_inbound_is_linked_without_duplicate_document(db_session)
     allocation = db_session.query(PurchaseAllocationItem).filter_by(po_id=result["id"]).one()
     assert allocation.source_item_id == item.id
     assert allocation.quantity == Decimal("3")
+
+
+def test_existing_inbound_link_auto_deducts_mapped_consumables_in_same_purchase_transaction(db_session):
+    sku = _sku(db_session)
+    material = Consumable(
+        code=f"HC-FULL-{uuid4().hex[:10]}", name="测试包装耗材",
+        unit="个", status="active", stock_qty=Decimal("20"),
+        factory_qty=Decimal("0"), transit_qty=Decimal("0"),
+        purchased_qty=Decimal("20"), used_qty=Decimal("0"),
+        min_stock_qty=Decimal("0"), raw={},
+    )
+    db_session.add(material)
+    db_session.flush()
+    db_session.add(ConsumableSkuMapping(
+        sku_id=sku.id, consumable_id=material.id, usage_per_unit=Decimal("2"),
+    ))
+    no = f"RK-CONSUME-{uuid4().hex[:8]}"
+    doc = JackyunGoodsDocument(
+        document_type="inbound", goodsdoc_no=no,
+        raw={"source": "jackyun"},
+    )
+    db_session.add(doc)
+    db_session.flush()
+    db_session.add(JackyunGoodsDocumentItem(
+        document_id=doc.id, line_no=1, matched_sku_id=sku.id,
+        goods_no=sku.sku_code, sku_barcode=sku.barcode,
+        quantity=Decimal("3"), unit_price_tax=Decimal("50"),
+        amount_tax=Decimal("150"), raw={},
+    ))
+    db_session.flush()
+
+    result = create_complete_purchase(
+        db_session,
+        _data(
+            inbound_no=no,
+            order_amount="150",
+            items=[{"item_id": sku.id, "quantity": "3", "amount": "150"}],
+        ),
+        actor="pytest",
+    )
+
+    assert result["consumableUsageStatus"] == "applied"
+    assert result["consumableUsageWarning"] == ""
+    db_session.refresh(material)
+    assert material.stock_qty == Decimal("14.0000")
+    assert material.used_qty == Decimal("6.0000")
+    usage = db_session.query(InboundConsumableUsage).filter_by(
+        inbound_document_id=doc.id, consumable_id=material.id,
+    ).one()
+    assert usage.quantity == Decimal("6.0000")
+    tx = db_session.query(ConsumableTransaction).filter_by(
+        source_type="inbound_usage", source_id=usage.id, consumable_id=material.id,
+    ).one()
+    assert tx.transaction_type == "consume"
+    assert tx.quantity == Decimal("6.0000")
 
 
 def test_unmatched_inbound_no_can_save_without_sku_or_warehouse(db_session):

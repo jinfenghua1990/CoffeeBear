@@ -229,6 +229,33 @@ def create_complete_purchase(db: Session, data: dict, *, actor: str = "system") 
                     note=f"由入库单 #{inbound_doc.id} 明细自动反填",
                 ))
 
+    consumable_usage_status = "awaiting_inbound" if order_kind == "goods" else "not_applicable"
+    consumable_usage_warning = (
+        "未关联真实入库单，耗材暂未扣减；真实入库同步并关联后会按 SKU 耗材映射自动扣减"
+        if order_kind == "goods" and inbound_doc is None else ""
+    )
+    if inbound_doc is not None:
+        # 一体化新建路径绕过常规采购链批处理；真实入库单已关联时立即复用相同
+        # 的 SKU→耗材映射扣减逻辑。commit=False 保证采购主档、关联与耗材流水
+        # 在同一个数据库事务内成功或回滚。
+        db.flush()
+        from app.services.consumable_service import auto_apply_inbound_usage
+        usage_result = auto_apply_inbound_usage(
+            db,
+            link.id,
+            note="一体化建单：按真实入库明细和 SKU 耗材映射自动扣减",
+            commit=False,
+        )
+        consumable_usage_status = str(usage_result.get("status") or "pending")
+        if consumable_usage_status == "applied":
+            consumable_usage_warning = ""
+        elif consumable_usage_status == "pending_mapping":
+            consumable_usage_warning = "入库单已关联，但 SKU 尚未配置耗材映射；补齐映射后会自动补扣"
+        elif consumable_usage_status == "pending":
+            consumable_usage_warning = str(
+                usage_result.get("reason") or "入库明细尚不足以核算耗材，暂待核对"
+            )
+
     audit(
         db, actor, "purchase.order.create_complete", "external_purchase_orders", po.id,
         {
@@ -255,6 +282,8 @@ def create_complete_purchase(db: Session, data: dict, *, actor: str = "system") 
         "inboundNo": inbound_no,
         "inboundStatus": inbound_status,
         "inboundWarning": inbound_warning,
+        "consumableUsageStatus": consumable_usage_status,
+        "consumableUsageWarning": consumable_usage_warning,
         "lineCount": len(checked),
         "consumablePurchaseId": consumable_purchase_id,
     }

@@ -899,7 +899,7 @@ export default function PurchaseWorkbenchPage() {
     setNewOrderOpen(true);
   }, []);
 
-  const handleNewOrderCreated = useCallback((orderId: number) => {
+  const handleNewOrderCreated = useCallback((orderId: number, notice?: string) => {
     // 新建后的完整录入只留在 NewPurchaseModal 内，不能再把同一订单选到列表下方详情区。
     requestedOrder.current = null;
     setNewOrderId(orderId);
@@ -907,7 +907,7 @@ export default function PurchaseWorkbenchPage() {
     setOrderDetail(null);
     setDetailLoading(true);
     resetSupplyChainFilters();
-    setNotice("基础信息已保存，当前窗口已进入完整采购订单录入");
+    setNotice(notice || "基础信息已保存，当前窗口已进入完整采购订单录入");
     void Promise.all([loadOrders(), loadSummary()]);
     void procurementWorkbenchApi.workbench(orderId)
       .then((detail) => setOrderDetail(detail))
