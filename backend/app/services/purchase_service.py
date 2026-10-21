@@ -353,9 +353,15 @@ def add_allocation(db: Session, po: ExternalPurchaseOrder, *, sku_id: int | None
     if allocation_id is None and note:
         row.note = note
     db.add(row)
-    db.commit()
+    db.flush()
     audit(db, actor, "purchase.allocation.update" if allocation_id else "purchase.allocation.add", "purchase_allocation_items", row.id,
-          {"poId": po.id, "skuCode": sku.sku_code, "amount": str(row.amount), "before": before})
+          {"poId": po.id, "skuCode": sku.sku_code, "amount": str(row.amount), "before": before},
+          commit=False)
+    from app.services.purchase_consumable_usage_service import reconcile_purchase_order_consumable_usage
+    reconcile_purchase_order_consumable_usage(
+        db, po.id, note="采购 SKU 分配保存后重新核算耗材", commit=False
+    )
+    db.commit()
     # 分配行原为入库单反填时，把人工修正回写入库单明细并重算单据金额（源头更正）
     if was_inbound_auto:
         try:
@@ -378,9 +384,14 @@ def remove_allocation(db: Session, po: ExternalPurchaseOrder, item_id: int,
     if row and row.po_id == po.id:
         detail = {"poId": po.id, "skuCode": row.sku_code}
         db.delete(row)
-        db.commit()
+        db.flush()
         audit(db, actor, "purchase.allocation.delete", "purchase_allocation_items",
-              item_id, detail)
+              item_id, detail, commit=False)
+        from app.services.purchase_consumable_usage_service import reconcile_purchase_order_consumable_usage
+        reconcile_purchase_order_consumable_usage(
+            db, po.id, note="采购 SKU 分配删除后冲销耗材", commit=False
+        )
+        db.commit()
 
 
 def add_expense(db: Session, po: ExternalPurchaseOrder, *, expense_type: str, amount,

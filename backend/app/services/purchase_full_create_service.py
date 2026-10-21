@@ -229,32 +229,46 @@ def create_complete_purchase(db: Session, data: dict, *, actor: str = "system") 
                     note=f"由入库单 #{inbound_doc.id} 明细自动反填",
                 ))
 
-    consumable_usage_status = "awaiting_inbound" if order_kind == "goods" else "not_applicable"
-    consumable_usage_warning = (
-        "未关联真实入库单，耗材暂未扣减；真实入库同步并关联后会按 SKU 耗材映射自动扣减"
-        if order_kind == "goods" and inbound_doc is None else ""
-    )
-    if inbound_doc is not None:
-        # 一体化新建路径绕过常规采购链批处理；真实入库单已关联时立即复用相同
-        # 的 SKU→耗材映射扣减逻辑。commit=False 保证采购主档、关联与耗材流水
-        # 在同一个数据库事务内成功或回滚。
-        db.flush()
-        from app.services.consumable_service import auto_apply_inbound_usage
-        usage_result = auto_apply_inbound_usage(
+    consumable_usage_status = "not_applicable"
+    consumable_usage_warning = ""
+    if order_kind == "goods":
+        # 采购单保存即按已匹配 SKU 的采购数量扣减耗材，不依赖入库单号。
+        # 所有增量流水与采购单在同一事务内提交；后续真实入库关联会识别该来源，
+        # 不再重复扣减。
+        from app.services.purchase_consumable_usage_service import reconcile_purchase_order_consumable_usage
+        usage_result = reconcile_purchase_order_consumable_usage(
             db,
-            link.id,
-            note="一体化建单：按真实入库明细和 SKU 耗材映射自动扣减",
+            po.id,
+            note="采购单保存：按 SKU 采购数量立即扣减耗材",
             commit=False,
         )
         consumable_usage_status = str(usage_result.get("status") or "pending")
-        if consumable_usage_status == "applied":
-            consumable_usage_warning = ""
-        elif consumable_usage_status == "pending_mapping":
-            consumable_usage_warning = "入库单已关联，但 SKU 尚未配置耗材映射；补齐映射后会自动补扣"
-        elif consumable_usage_status == "pending":
-            consumable_usage_warning = str(
-                usage_result.get("reason") or "入库明细尚不足以核算耗材，暂待核对"
+        missing_skus = usage_result.get("missingSkuIds") or []
+        if consumable_usage_status == "pending_mapping":
+            consumable_usage_warning = "采购单已保存，但 SKU 尚未配置耗材映射，暂无法自动扣减；补齐映射后会自动补扣"
+        elif consumable_usage_status == "applied" and missing_skus:
+            consumable_usage_warning = f"已按已配置的 SKU 映射扣减耗材；另有 {len(missing_skus)} 个 SKU 尚未配置映射，补齐后会自动补扣"
+        elif consumable_usage_status == "awaiting_sku":
+            consumable_usage_warning = "采购单已保存，但尚无已匹配的 SKU 明细；匹配 SKU 后会自动核算耗材"
+        elif consumable_usage_status == "manual_inbound_preserved":
+            consumable_usage_warning = "该采购单已有人工确认的入库耗材登记，已保留人工结果，避免重复扣减"
+
+        if inbound_doc is not None:
+            # 真实入库关联继续沿用统一入口；若采购单数量已经扣减，入口只做幂等检查，
+            # 不会再按入库单数量扣第二次。
+            db.flush()
+            from app.services.consumable_service import auto_apply_inbound_usage
+            inbound_usage_result = auto_apply_inbound_usage(
+                db,
+                link.id,
+                note="一体化建单：按采购 SKU 数量核算耗材",
+                commit=False,
             )
+            if (
+                not consumable_usage_warning
+                and inbound_usage_result.get("status") == "pending_mapping"
+            ):
+                consumable_usage_warning = "入库单已关联，但 SKU 尚未配置耗材映射；补齐映射后会自动补扣"
 
     audit(
         db, actor, "purchase.order.create_complete", "external_purchase_orders", po.id,
