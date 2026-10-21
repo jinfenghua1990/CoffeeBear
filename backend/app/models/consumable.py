@@ -1,7 +1,7 @@
 from datetime import datetime
 from decimal import Decimal
 
-from sqlalchemy import BigInteger, DateTime, ForeignKey, Numeric, String, Text, UniqueConstraint
+from sqlalchemy import BigInteger, DateTime, ForeignKey, Index, Numeric, String, Text, UniqueConstraint
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -100,4 +100,29 @@ class InboundConsumableUsage(Base, PkMixin, TimestampMixin):
     inbound_document_id: Mapped[int] = mapped_column(BigInteger, index=True, nullable=False)
     consumable_id: Mapped[int] = mapped_column(BigInteger, index=True, nullable=False)
     quantity: Mapped[Decimal] = mapped_column(QUANTITY, nullable=False)
+    note: Mapped[str] = mapped_column(Text, default="")
+
+
+class PurchaseOrderConsumableUsageEvent(Base, PkMixin, TimestampMixin):
+    """采购单触发的耗材使用事件；quantity 是有符号增量，负数代表冲销。
+
+    保留每次重算的增量，库存变更与采购明细调整都可追溯，不能覆盖历史事件。
+    """
+
+    __tablename__ = "purchase_order_consumable_usage_events"
+    __table_args__ = (
+        Index("ix_po_consumable_usage_po_material", "po_id", "consumable_id"),
+    )
+
+    po_id: Mapped[int] = mapped_column(BigInteger, index=True, nullable=False)
+    consumable_id: Mapped[int] = mapped_column(BigInteger, index=True, nullable=False)
+    quantity: Mapped[Decimal] = mapped_column(
+        QUANTITY, nullable=False, comment="有符号使用增量：正数扣减，负数冲销",
+    )
+    warehouse_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("warehouses.id", ondelete="SET NULL"), nullable=True, index=True,
+    )
+    location: Mapped[str | None] = mapped_column(
+        String(16), nullable=True, comment="扣减/冲销位置：own=自有仓 / factory=工厂",
+    )
     note: Mapped[str] = mapped_column(Text, default="")
