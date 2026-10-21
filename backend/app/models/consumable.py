@@ -57,7 +57,7 @@ class ConsumableSkuMapping(Base, PkMixin, TimestampMixin):
     sku_id: Mapped[int] = mapped_column(BigInteger, index=True, nullable=False)
     consumable_id: Mapped[int] = mapped_column(BigInteger, index=True, nullable=False)
     usage_per_unit: Mapped[Decimal] = mapped_column(QUANTITY, default=Decimal("1"))
-    note: Mapped[str] = mapped_column(Text, default="")
+    note: Mapped[str] = mapped_column(Text, default="", server_default="")
 
 
 class ConsumableTransaction(Base, PkMixin, TimestampMixin):
