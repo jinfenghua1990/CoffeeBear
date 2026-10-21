@@ -57,7 +57,7 @@ class ConsumableSkuMapping(Base, PkMixin, TimestampMixin):
     sku_id: Mapped[int] = mapped_column(BigInteger, index=True, nullable=False)
     consumable_id: Mapped[int] = mapped_column(BigInteger, index=True, nullable=False)
     usage_per_unit: Mapped[Decimal] = mapped_column(QUANTITY, default=Decimal("1"))
-    note: Mapped[str] = mapped_column(Text, default="", server_default="")
+    note: Mapped[str] = mapped_column(Text, default="")
 
 
 class ConsumableTransaction(Base, PkMixin, TimestampMixin):
@@ -125,4 +125,4 @@ class PurchaseOrderConsumableUsageEvent(Base, PkMixin, TimestampMixin):
     location: Mapped[str | None] = mapped_column(
         String(16), nullable=True, comment="扣减/冲销位置：own=自有仓 / factory=工厂",
     )
-    note: Mapped[str] = mapped_column(Text, default="")
+    note: Mapped[str] = mapped_column(Text, default="", server_default="")
