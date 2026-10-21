@@ -12,12 +12,16 @@ from app.models.consumable import (
     ConsumableSkuMapping,
     ConsumableTransaction,
     InboundConsumableUsage,
+    PurchaseOrderConsumableUsageEvent,
 )
 from app.models.consumable_purchase import ConsumablePurchase, ConsumablePurchaseItem
 from app.models.jackyun import JackyunGoodsDocument, JackyunGoodsDocumentItem
 from app.models.procurement_chain import ProcurementChainLink
 from app.models.purchase import ExternalPurchaseOrder, PurchaseAllocationItem
+from app.services.consumable_service import auto_apply_inbound_usage, upsert_mapping
+from app.services.purchase_consumable_usage_service import reconcile_purchase_order_consumable_usage
 from app.services.purchase_full_create_service import create_complete_purchase
+from app.services.purchase_service import add_allocation, remove_allocation
 
 
 def _data(**changes):
@@ -147,12 +151,15 @@ def test_existing_inbound_link_auto_deducts_mapped_consumables_in_same_purchase_
     db_session.refresh(material)
     assert material.stock_qty == Decimal("14.0000")
     assert material.used_qty == Decimal("6.0000")
-    usage = db_session.query(InboundConsumableUsage).filter_by(
-        inbound_document_id=doc.id, consumable_id=material.id,
+    event = db_session.query(PurchaseOrderConsumableUsageEvent).filter_by(
+        po_id=result["id"], consumable_id=material.id,
     ).one()
-    assert usage.quantity == Decimal("6.0000")
+    assert event.quantity == Decimal("6.0000")
+    assert db_session.query(InboundConsumableUsage).filter_by(
+        inbound_document_id=doc.id, consumable_id=material.id,
+    ).count() == 0
     tx = db_session.query(ConsumableTransaction).filter_by(
-        source_type="inbound_usage", source_id=usage.id, consumable_id=material.id,
+        source_type="purchase_order_usage", source_id=event.id, consumable_id=material.id,
     ).one()
     assert tx.transaction_type == "consume"
     assert tx.quantity == Decimal("6.0000")
@@ -270,3 +277,173 @@ def test_existing_inbound_with_repeated_sku_lines_preserves_each_source_line(db_
     assert sum((row.quantity for row in allocations), Decimal("0")) == Decimal("7")
     assert sum((row.amount for row in allocations), Decimal("0")) == Decimal("70")
 
+
+
+
+def test_goods_purchase_without_inbound_deducts_consumables_immediately_and_idempotently(db_session):
+    sku = _sku(db_session)
+    material = Consumable(
+        code=f"HC-NO-INBOUND-{uuid4().hex[:8]}", name="无入库号耗材",
+        unit="个", status="active", stock_qty=Decimal("20"),
+        factory_qty=Decimal("0"), transit_qty=Decimal("0"),
+        purchased_qty=Decimal("20"), used_qty=Decimal("0"),
+        min_stock_qty=Decimal("0"), raw={},
+    )
+    db_session.add(material)
+    db_session.flush()
+    db_session.add(ConsumableSkuMapping(
+        sku_id=sku.id, consumable_id=material.id, usage_per_unit=Decimal("2"),
+    ))
+    db_session.flush()
+
+    result = create_complete_purchase(
+        db_session,
+        _data(items=[{"item_id": sku.id, "quantity": "3", "amount": "150"}]),
+        actor="pytest",
+    )
+    assert result["inboundStatus"] == "none"
+    assert result["consumableUsageStatus"] == "applied"
+    db_session.refresh(material)
+    assert material.stock_qty == Decimal("14.0000")
+    assert material.used_qty == Decimal("6.0000")
+
+    for _ in range(2):
+        reconcile_purchase_order_consumable_usage(db_session, result["id"], commit=True)
+    db_session.refresh(material)
+    assert material.stock_qty == Decimal("14.0000")
+    assert material.used_qty == Decimal("6.0000")
+    assert db_session.query(PurchaseOrderConsumableUsageEvent).filter_by(
+        po_id=result["id"], consumable_id=material.id,
+    ).count() == 1
+
+
+def test_later_inbound_link_does_not_deduct_purchase_consumables_twice(db_session):
+    sku = _sku(db_session)
+    material = Consumable(
+        code=f"HC-LATE-INBOUND-{uuid4().hex[:8]}", name="后续入库耗材",
+        unit="个", status="active", stock_qty=Decimal("20"),
+        factory_qty=Decimal("0"), transit_qty=Decimal("0"),
+        purchased_qty=Decimal("20"), used_qty=Decimal("0"),
+        min_stock_qty=Decimal("0"), raw={},
+    )
+    db_session.add(material)
+    db_session.flush()
+    db_session.add(ConsumableSkuMapping(
+        sku_id=sku.id, consumable_id=material.id, usage_per_unit=Decimal("2"),
+    ))
+    db_session.flush()
+    result = create_complete_purchase(
+        db_session,
+        _data(items=[{"item_id": sku.id, "quantity": "3", "amount": "150"}]),
+        actor="pytest",
+    )
+
+    doc = JackyunGoodsDocument(
+        document_type="inbound",
+        goodsdoc_no=f"RK-LATE-{uuid4().hex[:8]}",
+        raw={"source": "jackyun"},
+    )
+    db_session.add(doc)
+    db_session.flush()
+    db_session.add(JackyunGoodsDocumentItem(
+        document_id=doc.id, line_no=1, matched_sku_id=sku.id,
+        goods_no=sku.sku_code, sku_barcode=sku.barcode,
+        quantity=Decimal("3"), unit_price_tax=Decimal("50"),
+        amount_tax=Decimal("150"), raw={},
+    ))
+    link = ProcurementChainLink(
+        external_po_id=result["id"], target_type="inbound", target_id=doc.id,
+        match_method="auto", confirmed=True, note="自动确认",
+    )
+    db_session.add(link)
+    db_session.flush()
+
+    assert auto_apply_inbound_usage(db_session, link.id)["status"] == "purchase_order_usage_preserved"
+    assert auto_apply_inbound_usage(db_session, link.id)["status"] == "purchase_order_usage_preserved"
+    db_session.refresh(material)
+    assert material.stock_qty == Decimal("14.0000")
+    assert material.used_qty == Decimal("6.0000")
+    assert db_session.query(InboundConsumableUsage).filter_by(link_id=link.id).count() == 0
+    assert db_session.query(ConsumableTransaction).filter_by(
+        source_type="purchase_order_usage", consumable_id=material.id,
+    ).count() == 1
+
+
+def test_allocation_edit_and_delete_reconcile_consumable_usage_with_reversals(db_session):
+    sku = _sku(db_session)
+    material = Consumable(
+        code=f"HC-EDIT-{uuid4().hex[:8]}", name="明细编辑耗材",
+        unit="个", status="active", stock_qty=Decimal("20"),
+        factory_qty=Decimal("0"), transit_qty=Decimal("0"),
+        purchased_qty=Decimal("20"), used_qty=Decimal("0"),
+        min_stock_qty=Decimal("0"), raw={},
+    )
+    db_session.add(material)
+    db_session.flush()
+    db_session.add(ConsumableSkuMapping(
+        sku_id=sku.id, consumable_id=material.id, usage_per_unit=Decimal("2"),
+    ))
+    db_session.flush()
+    result = create_complete_purchase(
+        db_session,
+        _data(items=[{"item_id": sku.id, "quantity": "3", "amount": "150"}]),
+        actor="pytest",
+    )
+    po = db_session.get(ExternalPurchaseOrder, result["id"])
+    allocation = db_session.query(PurchaseAllocationItem).filter_by(po_id=po.id).one()
+
+    add_allocation(
+        db_session, po, sku_id=sku.id, sku_code=sku.sku_code,
+        goods_name=sku.sku_name, quantity="5", amount="250",
+        allocation_id=allocation.id, actor="pytest",
+    )
+    db_session.refresh(material)
+    assert material.stock_qty == Decimal("10.0000")
+    assert material.used_qty == Decimal("10.0000")
+
+    remove_allocation(db_session, po, allocation.id, actor="pytest")
+    db_session.refresh(material)
+    assert material.stock_qty == Decimal("20.0000")
+    assert material.used_qty == Decimal("0.0000")
+    events = db_session.query(PurchaseOrderConsumableUsageEvent).filter_by(
+        po_id=po.id, consumable_id=material.id,
+    ).order_by(PurchaseOrderConsumableUsageEvent.id).all()
+    assert [event.quantity for event in events] == [
+        Decimal("6.0000"), Decimal("4.0000"), Decimal("-10.0000"),
+    ]
+    reconcile_purchase_order_consumable_usage(db_session, po.id, commit=True)
+    assert db_session.query(PurchaseOrderConsumableUsageEvent).filter_by(
+        po_id=po.id, consumable_id=material.id,
+    ).count() == 3
+
+
+def test_mapping_added_after_purchase_backfills_usage_without_inbound_document(db_session):
+    sku = _sku(db_session)
+    material = Consumable(
+        code=f"HC-LATE-MAP-{uuid4().hex[:8]}", name="后补映射耗材",
+        unit="个", status="active", stock_qty=Decimal("20"),
+        factory_qty=Decimal("0"), transit_qty=Decimal("0"),
+        purchased_qty=Decimal("20"), used_qty=Decimal("0"),
+        min_stock_qty=Decimal("0"), raw={},
+    )
+    db_session.add(material)
+    db_session.flush()
+    result = create_complete_purchase(
+        db_session,
+        _data(items=[{"item_id": sku.id, "quantity": "3", "amount": "150"}]),
+        actor="pytest",
+    )
+    assert result["consumableUsageStatus"] == "pending_mapping"
+    db_session.refresh(material)
+    assert material.stock_qty == Decimal("20.0000")
+
+    upsert_mapping(
+        db_session, mapping_id=None, sku_id=sku.id,
+        consumable_id=material.id, usage_per_unit="2",
+    )
+    db_session.refresh(material)
+    assert material.stock_qty == Decimal("14.0000")
+    assert material.used_qty == Decimal("6.0000")
+    assert db_session.query(PurchaseOrderConsumableUsageEvent).filter_by(
+        po_id=result["id"], consumable_id=material.id,
+    ).count() == 1
