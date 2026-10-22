@@ -120,7 +120,7 @@ set_image() {
 
 set_updater_image() {
   image=$1
-  tmp="$ENV_FILE.tmp.$$"
+  tmp="$ENV_FILE.tmp.$"
   if ! awk -v image="$image" '
     BEGIN { count = 0 }
     /^UPDATE_AGENT_IMAGE=/ { count++; print "UPDATE_AGENT_IMAGE=" image; next }
@@ -133,6 +133,37 @@ set_updater_image() {
   fi
   chmod 600 "$tmp"
   mv "$tmp" "$ENV_FILE"
+}
+
+# 镜像层下载偶发 unexpected EOF / 网络中断时，自动重试完整 pull。
+# docker 会复用已完整下载的层；失败耗尽前不会停止现有容器或执行数据库迁移。
+pull_with_retry() {
+  max_attempts=4
+  attempt=1
+  base_delay=${COFFEEBEAR_PULL_RETRY_BASE_SECONDS:-10}
+  case "$base_delay" in
+    ''|*[!0-9]*) base_delay=10 ;;
+  esac
+
+  while [ "$attempt" -le "$max_attempts" ]; do
+    echo "镜像拉取尝试 ${attempt}/${max_attempts}..."
+    if dc "$@"; then
+      echo "镜像拉取成功。"
+      return 0
+    fi
+
+    if [ "$attempt" -lt "$max_attempts" ]; then
+      delay=$((attempt * base_delay))
+      echo "镜像拉取失败；${delay} 秒后自动重试。当前容器不会切换，数据库迁移尚未执行。"
+      if [ "$delay" -gt 0 ]; then
+        sleep "$delay"
+      fi
+    fi
+    attempt=$((attempt + 1))
+  done
+
+  echo "镜像拉取连续失败 ${max_attempts} 次；已停止更新，未执行数据库迁移。" >&2
+  return 1
 }
 restore_config() {
   set_image "$OLD_IMAGE" || true
@@ -178,12 +209,12 @@ fi
 if ! set_image "$TARGET_IMAGE"; then exit 1; fi
 if [ -n "$TARGET_UPDATER_IMAGE" ] && ! set_updater_image "$TARGET_UPDATER_IMAGE"; then restore_config; exit 1; fi
 if [ -n "$TARGET_UPDATER_IMAGE" ]; then
-  if ! dc --profile ops --profile updater pull api worker beat migrate updater update-job; then
+  if ! pull_with_retry --profile ops --profile updater pull api worker beat migrate updater update-job; then
     restore_config
     echo "镜像拉取失败，已恢复原镜像配置；现有容器未切换。" >&2
     exit 1
   fi
-elif ! dc --profile ops pull api worker beat migrate; then
+elif ! pull_with_retry --profile ops pull api worker beat migrate; then
   restore_config
   echo "镜像拉取失败，已恢复原 APP_IMAGE；现有容器未切换。" >&2
   exit 1
