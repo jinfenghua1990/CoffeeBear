@@ -166,24 +166,24 @@ GitHub 是 CoffeeBear 项目决策、当前状态和重要实施历史的事实�
 
 ---
 
-## DEC-004 — NAS 应用运行 + 云端唯一数据源，云服务器可接管（2026-10-22）
+## DEC-004 — Neon + R2 统一数据源，NAS 保持运行（2026-10-22）
 
-**状态：已接受（架构目标）；未完成 Production 迁移与验收**  
+**状态：目标架构已接受；生产迁移与验收未完成**  
 **来源：维护者明确确认；GitHub Issue #59**
 
 ### 决策
 
-- NAS 继续作为 CoffeeBear 的本地日常应用运行端，短期不升级 NAS 内存；不得为更新而在 NAS 上重构建完整镜像。
-- 将 Production **唯一业务数据库**规划为云端 PostgreSQL（本轮沟通按 Supabase），唯一业务附件对象存储规划为 Cloudflare R2；云端 Redis 为共享任务队列候选，提供方待实际确认。
-- 云服务器可部署同版本 CoffeeBear 作为 Production **备用计算节点**，NAS 与云服务器直接访问同一云端正式数据，不做两套独立业务数据库双向同步。
-- 与 DEC-001 兼容：两计算节点均属于一个 Production，不代表两个 Production，也不允许 Test 连接正式库。
-- 只允许一个活跃 Celery beat / 数据库迁移执行者；固定 GHCR 不可变镜像，严格校验数据库迁移兼容性。
-- 旧本地 PostgreSQL、`DATA_DIR` 文件、R2 备份与现有更新器不能凭修改连接字符串就视为已迁移；必须按 `docs/NAS_CLOUD_SHARED_DATA.md` 清单化、改造、核对、演练后才能生产切换。
+- CoffeeBear 的目标唯一正式数据库为 **Neon PostgreSQL**。
+- CoffeeBear 的目标唯一正式业务对象存储为 **Cloudflare R2**；现有 R2 备份功能不能代替业务文件读写。
+- NAS 当前继续运行；短期不升级 NAS 内存，不在 NAS 上构建完整镜像。必须保留现有生产数据和可恢复备份，直到迁移验收完成。
+- 免费云服务器方案尚未选定，本轮不部署云服务器、不切换应用流量。未来节点的主备角色待选定运行方案后再确定。
+- 目标内部入口为 `coffee.alsvidbike.com`。旧 chaibenn 域名不再作为正式入口；启用新入口前必须配置 Cloudflare Access 邮箱 allowlist、保留 Coffee 自身登录，并确保源站无法绕过 Access。
+- 若 NAS 与未来云端应用同时运行，两者必须使用同一个 Neon 数据库和同一个 R2 业务空间；禁止两个独立正式数据库同时接收写入。
+- 全 Production 只允许一个活跃 Celery Beat 和一个数据库迁移执行者。共享 Redis/队列方案尚未确定，完成前不能宣称后台任务可以无缝接管。
+- 正式迁移前必须完成本地 PostgreSQL 与 `DATA_DIR` 盘点、Neon 数据导入核对、R2 业务文件适配、更新器备份/恢复改造和真实业务演练。
 
-### 历史配置关系
+### 当前状态边界
 
-旧 `docs/ENVIRONMENT.md` / README 中的 Cloud Run + Neon 方案属于历史阶段记录；2026-10-22 新决策优先，但**不证明目前实际运行数据库已更换**。旧 NAS Compose 保留直到正式迁移验收，以免中断业务。
+当前仓库的 NAS Compose 仍包含本地 PostgreSQL、Redis 和本地 `DATA_DIR`；Tunnel 模板准备新 hostname 不会自动修改 Cloudflare DNS、Access 策略或正在运行的 NAS。不能把文档或配置准备描述为已迁移或已切换。
 
-### 现实边界
-
-云数据库或外网不可用时 NAS 也会受影响；同一数据库不能自动解决 R2 业务文件改造、Redis/任务重复、程序版本差异或备份问题。Issue #59 保持 Open 到 Production 验收。
+具体清单见 `docs/NAS_CLOUD_SHARED_DATA.md`。Issue #59 在数据库、文件、任务队列、备份恢复和访问保护完成验收前保持开放。
