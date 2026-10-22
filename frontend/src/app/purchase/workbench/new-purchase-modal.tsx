@@ -150,8 +150,8 @@ export function NewPurchaseModal({ onClose, onCreated, createdOrderId, renderCre
   }
 
   return (
-    <div className="fixed inset-0 z-modal flex items-start justify-center overflow-y-auto bg-slate-950/40 p-3 sm:p-6">
-      <div role="dialog" aria-modal="true" aria-label="一体化新建采购单" className="my-auto flex h-[92vh] max-h-[calc(100vh-24px)] w-full max-w-[1320px] flex-col overflow-hidden rounded-2xl bg-[#f7f9fc] shadow-2xl">
+    <div className="fixed inset-0 z-modal flex items-center justify-center overflow-y-auto bg-slate-950/40 p-3 sm:p-6">
+      <div role="dialog" aria-modal="true" aria-label="一体化新建采购单" className="flex max-h-[calc(100vh-24px)] h-auto w-full max-w-[1320px] flex-col overflow-hidden rounded-2xl bg-[#f7f9fc] shadow-2xl">
         {configuring ? (
           <div className="min-h-0 flex-1 overflow-y-auto">{renderCreated?.(createdOrderId!)}</div>
         ) : (
