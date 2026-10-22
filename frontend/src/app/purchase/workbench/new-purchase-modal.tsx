@@ -83,7 +83,7 @@ export function NewPurchaseModal({ onClose, onCreated, createdOrderId, renderCre
     }
   }
 
-  function updateLine(key: number, field: "itemId" | "quantity" | "amount", value: string) {
+  function updateLine(key: number, field: "itemId" | "quantity" | "amount" | "consumableId" | "consumableQuantity", value: string) {
     setLines((prev) => prev.map((row) => row.key === key ? { ...row, [field]: value } : row));
   }
 
