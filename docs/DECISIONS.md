@@ -162,3 +162,28 @@ GitHub 是 CoffeeBear 项目决策、当前状态和重要实施历史的事实�
 2. 先核对最新代码、Issue、PR 和 Git 历史。
 3. 仍无法确定时，创建 / 更新 Issue 请求维护者裁决。
 4. 裁决后同步修正文档，避免冲突继续存在。
+
+
+---
+
+## DEC-004 — NAS 应用运行 + 云端唯一数据源，云服务器可接管（2026-10-22）
+
+**状态：已接受（架构目标）；未完成 Production 迁移与验收**  
+**来源：维护者明确确认；GitHub Issue #59**
+
+### 决策
+
+- NAS 继续作为 CoffeeBear 的本地日常应用运行端，短期不升级 NAS 内存；不得为更新而在 NAS 上重构建完整镜像。
+- 将 Production **唯一业务数据库**规划为云端 PostgreSQL（本轮沟通按 Supabase），唯一业务附件对象存储规划为 Cloudflare R2；云端 Redis 为共享任务队列候选，提供方待实际确认。
+- 云服务器可部署同版本 CoffeeBear 作为 Production **备用计算节点**，NAS 与云服务器直接访问同一云端正式数据，不做两套独立业务数据库双向同步。
+- 与 DEC-001 兼容：两计算节点均属于一个 Production，不代表两个 Production，也不允许 Test 连接正式库。
+- 只允许一个活跃 Celery beat / 数据库迁移执行者；固定 GHCR 不可变镜像，严格校验数据库迁移兼容性。
+- 旧本地 PostgreSQL、`DATA_DIR` 文件、R2 备份与现有更新器不能凭修改连接字符串就视为已迁移；必须按 `docs/NAS_CLOUD_SHARED_DATA.md` 清单化、改造、核对、演练后才能生产切换。
+
+### 历史配置关系
+
+旧 `docs/ENVIRONMENT.md` / README 中的 Cloud Run + Neon 方案属于历史阶段记录；2026-10-22 新决策优先，但**不证明目前实际运行数据库已更换**。旧 NAS Compose 保留直到正式迁移验收，以免中断业务。
+
+### 现实边界
+
+云数据库或外网不可用时 NAS 也会受影响；同一数据库不能自动解决 R2 业务文件改造、Redis/任务重复、程序版本差异或备份问题。Issue #59 保持 Open 到 Production 验收。
