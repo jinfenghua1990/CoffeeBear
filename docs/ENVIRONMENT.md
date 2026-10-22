@@ -1,28 +1,49 @@
-# CoffeeBear 环境规范（目标与现状分开）
+# CoffeeBear 环境规范
 
-> 2026-10-22 已接受 DEC-004；跟踪 Issue #59。**目标状态不等于已经上线。**
+> 2026-10-22 更新。架构目标已确认，但数据迁移、域名切换和云服务器部署均未执行。
 
-## 环境数量
+## 1. 环境数量
 
-CoffeeBear 只保留 Test（开发验证）与 Production（唯一真实业务）两个逻辑环境。NAS 本地应用与备用云端应用是同一 Production 的两个运行节点，绝不是两套分别写入业务数据的正式环境。Test 必须使用隔离数据库、对象空间与密钥。
+CoffeeBear 只维护两个逻辑环境：
 
-## 已确认目标
+- **Test**：开发、功能测试、Docker 和数据库迁移验证；必须使用非生产数据、独立密钥与隔离存储。
+- **Production**：唯一正式业务环境。当前 NAS 应用继续运行；未来云端运行节点尚未选定，也尚未部署。
 
-- Production 常用计算：NAS 的 CoffeeBear 容器；GHCR 预构建、固定不可变镜像，不在内存受限 NAS 本地构建。
-- Production 备用计算：云服务器的相同 CoffeeBear 镜像，故障切换时接管应用入口。
-- Production 唯一数据库：云端 PostgreSQL（按本轮决策规划 Supabase；云库是否已创建/连接需要实机核对）。
-- Production 业务对象存储：Cloudflare R2；它不同于既有的 R2 备份归档接口。
-- 任务队列：可从 NAS / 云备机访问的统一 Redis，供应商待落地核对；全 Production 只允许一个活跃 Celery beat。
-- 代码与镜像：GitHub + GHCR；旧应用版本可能不兼容新 schema，需有发布与回滚纪律。
+未来 NAS 与云端应用如同时存在，只是同一 Production 的多个计算节点，不代表两套正式环境。
 
-## 当前代码事实和重要限制
+## 2. 唯一正式数据源（目标）
 
-截至本次代码审阅，`deploy/zspace/docker-compose.yml` 仍包含本地 PostgreSQL / Redis，且 `DATA_DIR` 挂载到 NAS。当前还不能凭设置 DATABASE_URL 就保证附件/财务文件一致。NAS 正式环境具体数据库和密钥未读取或更改；所有迁移必须经 Test、备份、文件审计、数据验收、单节点调度验证。
+- **主数据库：Neon PostgreSQL**。
+- **业务对象存储：Cloudflare R2**。
+- 业务数据进入 PostgreSQL；图片和文件对象进入 R2。
+- GitHub/GHCR 管理代码和不可变镜像，不存放业务文件或生产密钥。
+- 当前 NAS Compose 仍包含本地 PostgreSQL、Redis 和 `DATA_DIR`。目标尚未落地，禁止只改 `DATABASE_URL` 就直接切换。
 
-## 历史决策
+## 3. 应用运行位置
 
-此前 Cloud Run 主运行、Render 备选、Neon 主库、Supabase 备选的写法保留在历史 Git 记录中；对于**新的目标架构**以 DEC-004 为准。变更前应检查现有云服务，避免重复开户和误删资源。
+- 当前：保留 NAS 现有应用，不执行云服务器切换。
+- 未来：免费云端方案仍在评估，供应商和主备角色暂不确定。
+- NAS 内存暂不升级；后续发布优先使用 GHCR 预构建、固定版本镜像，避免在 NAS 上构建完整镜像。
+- 云端运行节点只有在数据迁移、访问保护、后台任务和回滚方案验证后才可加入 Production。
 
-## 具体实施
+## 4. Redis 与后台任务
 
-参见 `docs/NAS_CLOUD_SHARED_DATA.md`，发布与安全边界参见 `docs/DEPLOYMENT.md` 和 `docs/DATABASE.md`，进度参见 Issue #59。
+当前 Redis 仍是 NAS 本地容器。它不等于未来 NAS 与云端共享的队列。正式双节点运行前，必须确定受认证和 TLS 保护的共享队列，且全 Production 只有一个活跃 Celery Beat 和一个数据库迁移执行者。
+
+## 5. 内部域名与访问策略
+
+- 目标内部域名：`coffee.alsvidbike.com`。
+- 不再将旧 chaibenn 域名作为正式入口。
+- 访问前置保护：Cloudflare Access 仅允许明确授权的邮箱；进入应用后仍须通过 Coffee 自身登录。
+- 仅写入仓库模板不等于 DNS 或 Access 已配置。必须先配置 Access、检查源站无法绕过门禁，再启用新 DNS/Tunnel。
+- 当前不切换线上 DNS 或流量。
+
+## 6. 数据迁移与发布约束
+
+1. 先备份 NAS 数据库和 `DATA_DIR`，并验证恢复。
+2. 在 Test 验证 Neon 数据导入、R2 文件迁移、连接权限和业务链路。
+3. 改造更新器以支持云数据库备份/恢复；不要依赖本地 `postgres` 容器继续处理云数据库。
+4. 验证唯一 Beat、Redis 队列、任务幂等与数据库迁移兼容性。
+5. 保留回滚窗口，未验收前不得删除 NAS 原数据。
+
+详见 `docs/NAS_CLOUD_SHARED_DATA.md`、`docs/DEPLOYMENT.md` 与 `docs/DATABASE.md`。
