@@ -2,6 +2,8 @@
 
 > GitHub 仓库：`jinfenghua1990/CoffeeBear`
 
+> **2026-10-22 最新部署决策（DEC-004 / Issue #59）：** CoffeeBear 以 NAS 本地运行、云端唯一 PostgreSQL（目标 Supabase）与业务对象存储 R2、云服务器备用为目标。NAS 不现场构建镜像、不要求近期升级内存。**目前只是已确认的目标，正式 NAS 数据库和文件尚未完成迁移及实机验收**。阅读 [NAS/云端统一数据方案](docs/NAS_CLOUD_SHARED_DATA.md)。下方 Cloud Run / Neon 文字仅是旧阶段记录，不代表现行目标或实际已部署状态。
+
 CoffeeBear 是 **卖咖啡的熊中国国内业务** 的唯一长期业务仓库。它负责国内采购、库存、销售、物流、银行、税务、财务与月结，不再承载 ALSVID、自行车出口、欧洲经销商或外贸运行时。
 
 ## 当前治理状态
