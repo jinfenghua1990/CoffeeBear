@@ -10,6 +10,35 @@ depends_on = None
 
 
 def upgrade() -> None:
+    # Some legacy databases were restored with the warehouses.id NOT NULL
+    # marker but without the original primary-key constraint. PostgreSQL will
+    # reject a foreign key to a column that is not unique, so repair that
+    # schema drift before creating the new usage table. The guarded block is
+    # idempotent for databases where the primary key is already present.
+    op.execute(
+        """
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1
+                FROM pg_constraint
+                WHERE conrelid = 'warehouses'::regclass
+                  AND contype IN ('p', 'u')
+                  AND conkey = ARRAY[
+                      (SELECT attnum
+                       FROM pg_attribute
+                       WHERE attrelid = 'warehouses'::regclass
+                         AND attname = 'id')
+                  ]::smallint[]
+            ) THEN
+                ALTER TABLE warehouses
+                    ADD CONSTRAINT warehouses_pkey PRIMARY KEY (id);
+            END IF;
+        END
+        $$;
+        """
+    )
+
     op.create_table(
         "purchase_order_consumable_usage_events",
         sa.Column("id", sa.BigInteger(), autoincrement=True, nullable=False),
