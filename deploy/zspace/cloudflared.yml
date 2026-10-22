@@ -1,7 +1,8 @@
-# Cloudflare Tunnel 入口配置（随 docker-compose.tunnel.yml 挂载到容器）。
-# 说明：tunnel 身份由 --token 提供，这里只定义「把哪个公网域名转到哪个后端」。
-# 后端用 compose 服务名 api（与 tunnel 同属一个 compose 网络），端口 8000 为 FastAPI。
+# Cloudflare Tunnel 目标入口模板（随 docker-compose.tunnel.yml 挂载）。
+# 此文件只定义 hostname -> 后端映射，不会创建 DNS 记录或 Cloudflare Access 策略。
+# 在 Cloudflare Zero Trust 配置并验证 coffee.alsvidbike.com 的 Access 邮箱 allowlist 前，不要应用此变更。
+# Access 外层门禁必须保留，Coffee 自身管理员登录仍然启用；不得直接暴露源站端口。
 ingress:
-  - hostname: coffee.chaibenn.com
+  - hostname: coffee.alsvidbike.com
     service: http://api:8000
   - service: http_status:404
