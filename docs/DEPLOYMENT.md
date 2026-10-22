@@ -149,3 +149,15 @@ Issue #48 同时修正了 Q4 更新脚本：Production 应部署已经发布的�
 - 遗留风险
 
 这些记录应保存在 GitHub，而不是只存在聊天记录里。
+
+
+## 9. NAS + 云端共享 Production 数据源（2026-10-22 新目标）
+
+按 DEC-004 / Issue #59，NAS 与备用云服务器在切换后使用同一云端 PostgreSQL / R2 业务存储及受控共享任务队列。**这尚未部署，不得仅修改 .env 的 DATABASE_URL 直接切换**。
+
+- 必须先盘点 DATA_DIR 持久业务文件并把业务对象操作改为 R2，保留安全恢复期；R2_BACKUP_* 不能直接充当业务上传对象存储。
+- 当前 `deploy/update-q4.sh` 用 `exec postgres pg_dump` 生成数据库备份。改云库之前必须专门修复并测试更新器/恢复方案，否则自动更新会因无本地 postgres 失败。
+- NAS/云端必须只执行一份 Alembic 迁移和 Celery beat，部署镜像保持一致并验收数据库向前兼容性。
+- 旧 Compose 不直接覆盖；准备新的 opt-in 远端数据库模式，在 Test 验证后才生产迁移。
+
+实施验收清单：`docs/NAS_CLOUD_SHARED_DATA.md`。
