@@ -170,3 +170,8 @@
 3. 更新本文件状态；
 4. 如影响长期规则，同步更新 `docs/DECISIONS.md`、`docs/CURRENT_STATE.md` 或相关专项文档；
 5. 确认没有遗留阻塞后再关闭 Issue。
+
+
+### Issue #59 — NAS 本地运行 / 云端唯一数据库与 R2（2026-10-22）
+
+**状态：架构方向已确认；迁移与生产验证未完成**。NAS 日常运行 CoffeeBear，云服务器为可切换备用节点；唯一 PostgreSQL 与业务文件规划分别在云端 PostgreSQL（本轮目标 Supabase）及 R2。当前 Compose 仍使用本地 PostgreSQL/Redis 和 /data 文件；需要清查并改造文件引用、云 Redis、迁移器、备份器和唯一 beat。具体清单见 `docs/NAS_CLOUD_SHARED_DATA.md`。禁止未验收就切换/删除现有 NAS 数据。
