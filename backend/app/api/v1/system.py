@@ -42,10 +42,12 @@ def _runtime_release_info(db: Session) -> dict[str, Any]:
     if image_ref:
         tail = image_ref.rsplit("/", 1)[-1]
         if ":" in tail:
-            image_tag = tail.rsplit(":", 1)[-1]
+            candidate = tail.rsplit(":", 1)[-1]
+            if not (candidate.startswith("sha256") or len(candidate) == 64):
+                image_tag = candidate
 
     git_sha = (settings.GIT_SHA or "").strip()
-    version = image_tag or (f"sha-{git_sha[:12]}" if git_sha else "local")
+    version = image_tag or (f"sha-{git_sha[:12]}" if git_sha and len(git_sha) != 64 else "当前镜像")
     container_managed = settings.DEPLOYMENT_MODE == "container"
     return {
         "appEnv": settings.APP_ENV,
