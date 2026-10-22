@@ -162,29 +162,25 @@ SYSTEM_UPDATE_ENABLED=0
 
 首次初始化前，后台会提示更新器不可用；此时必须先按上方步骤更新 Compose 配置并启动 updater。不要用旧的 `git pull + docker compose up --build` 脚本代替正式镜像发布流程。
 
-## 公网访问（可选）：Cloudflare Tunnel
+## 内部入口（准备中）：Cloudflare Tunnel + Access
 
-`docker-compose.tunnel.yml` 为可选 overlay，无需在路由器开端口、不暴露 NAS IP、自带 HTTPS。
+目标 hostname：`coffee.alsvidbike.com`。此系统不是公开网站，必须只允许授权邮箱访问。
 
-前置：一个托管在 Cloudflare 的域名（免费套餐即可）。
+**不要在 Access 策略准备好前启用新 DNS/Tunnel，也不要在本轮直接切换线上入口。** 当前 NAS 继续运行；本节是后续操作步骤。
 
-1. 本机取得 token：
-
-```bash
-cloudflared tunnel login
-cloudflared tunnel create coffeebear
-cloudflared tunnel route dns coffeebear coffee.yourdomain.com
-cloudflared tunnel token coffeebear   # 长串 token
-```
-
-2. token 填入 `.env` 的 `CLOUDFLARED_TOKEN=`。
-3. 启动（tunnel 不映射任何宿主机端口）：
+1. 在 Cloudflare Zero Trust → Access → Applications 中创建 Self-hosted 应用，hostname 设为 `coffee.alsvidbike.com`。
+2. 添加 Allow policy，仅填写维护者明确指定的邮箱；默认拒绝其他用户。先验证 Access 策略保存成功。不要把邮箱白名单或 Token 写进 Git。
+3. 创建或确认 Cloudflare Tunnel，确保 Tunnel 后端指向 Compose 网络内的 `http://api:8000`，并确认 NAS API 端口未被路由器公开。
+4. 只有 Access policy 已就绪并验证后，才执行 DNS 路由操作（这会更改线上 DNS，需由维护者单独确认执行时机）：
 
 ```bash
-docker compose -f docker-compose.yml -f docker-compose.tunnel.yml --profile public up -d tunnel
+cloudflared tunnel route dns coffeebear coffee.alsvidbike.com
 ```
 
-4. Cloudflare Zero Trust → Networks → Tunnels 显示 Healthy 后，`https://coffee.yourdomain.com` 即公网入口。建议叠加 Cloudflare Access 保护登录页；公网后 ADMIN_PASSWORD 必须强密码。
+5. 将 Tunnel token 放在 NAS 本地未提交的 `.env` 中，启动 tunnel overlay；不要把 token 提交到 GitHub。
+6. 最后验证：未授权邮箱被 Access 拒绝；授权邮箱通过 Access 后仍需 Coffee 自身管理员登录；确认源站无公网绕过路径。
+
+`deploy/zspace/cloudflared.yml` 已准备目标 hostname，但 GitHub 文件修改不会创建 DNS 记录，也不会更改当前正在运行的 Tunnel。
 
 ## 安全边界
 
