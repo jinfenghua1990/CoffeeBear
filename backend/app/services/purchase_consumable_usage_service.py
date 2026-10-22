@@ -96,6 +96,7 @@ def reconcile_purchase_order_consumable_usage(
     note: str = "",
     commit: bool = True,
     force_zero: bool = False,
+    explicit_usage: dict[int, Decimal] | None = None,
 ) -> dict:
     """Idempotently reconcile usage to Σ(purchased SKU qty × usage-per-unit).
 
@@ -134,14 +135,21 @@ def reconcile_purchase_order_consumable_usage(
     missing_sku_ids = sorted(sku_id for sku_id in sku_ids if not mappings_by_sku.get(sku_id))
     manual_override = _manual_inbound_override(db, po.id)
     desired: dict[int, Decimal] = defaultdict(lambda: _ZERO)
+    explicit_usage = explicit_usage or {}
+    explicit_sku_ids = set(explicit_usage)
     if not manual_override and not force_zero:
         for allocation in allocations:
             sku_id = int(allocation.sku_id)
+            if sku_id in explicit_sku_ids:
+                continue
             quantity = to_decimal(allocation.quantity)
             for mapping in mappings_by_sku.get(sku_id, []):
                 usage = quantity * to_decimal(mapping.usage_per_unit)
                 if usage > _ZERO:
                     desired[mapping.consumable_id] += usage
+        for material_id, quantity in explicit_usage.items():
+            if quantity > _ZERO:
+                desired[material_id] += quantity
 
     events = db.query(PurchaseOrderConsumableUsageEvent).filter_by(
         po_id=po.id,
