@@ -1,11 +1,11 @@
-# 外接公网数据库（Supabase）变体：与 docker-compose.yml 组合使用，替换内置 postgres。
+# 外接托管 PostgreSQL（目标为 Neon）变体：仅供迁移准备和 Test 验证，未验收前不要用于 Production。
 # 用法：
 #   docker compose -f docker-compose.yml -f docker-compose.external-db.yml config  # 预检
 #   docker compose -f docker-compose.yml -f docker-compose.external-db.yml up -d
 # .env 要求：
-#   DATABASE_URL / MIGRATION_DATABASE_URL 指向公网 Postgres（如 Supabase pooler）。
+#   DATABASE_URL / MIGRATION_DATABASE_URL 指向同一个 Neon PostgreSQL 数据库；运行连接可使用 Neon pooled endpoint，Alembic 迁移连接优先使用 direct endpoint，并验证权限。
 #   POSTGRES_* 本地管理员变量不再需要（保留不影响）。
-# Redis 仍为本地容器：Celery worker/beat 必需。
+# Redis 仍为本地容器：这只适合单 NAS 节点，不能解决未来双节点共享队列。当前 overlay 不代表 R2 业务文件已接入。
 #
 # 兼容性：!override 需要 docker compose >= 2.24。
 # 若 NAS 上版本过旧，改用：docker compose -f ... up -d --scale postgres=0
