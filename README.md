@@ -2,7 +2,7 @@
 
 > GitHub 仓库：`jinfenghua1990/CoffeeBear`
 
-> **2026-10-22 最新部署决策（DEC-004 / Issue #59）：** CoffeeBear 以 NAS 本地运行、云端唯一 PostgreSQL（目标 Supabase）与业务对象存储 R2、云服务器备用为目标。NAS 不现场构建镜像、不要求近期升级内存。**目前只是已确认的目标，正式 NAS 数据库和文件尚未完成迁移及实机验收**。阅读 [NAS/云端统一数据方案](docs/NAS_CLOUD_SHARED_DATA.md)。下方 Cloud Run / Neon 文字仅是旧阶段记录，不代表现行目标或实际已部署状态。
+> **2026-10-22 当前决策（DEC-004 / Issue #59）：** 目标为 Neon PostgreSQL 唯一主数据库 + Cloudflare R2 唯一业务对象存储。NAS 当前继续运行；免费云服务器方案尚未选定，本轮不部署云服务器、不切换线上 DNS。内部域名目标为 `coffee.alsvidbike.com`，访问需 Cloudflare Access 邮箱授权与 Coffee 自身登录。**目标未等于上线：** 生产 Compose 仍有本地 PostgreSQL/Redis 与 `DATA_DIR` 依赖，迁移和实机验收未完成。详见 [NAS/云端统一数据方案](docs/NAS_CLOUD_SHARED_DATA.md)。
 
 CoffeeBear 是 **卖咖啡的熊中国国内业务** 的唯一长期业务仓库。它负责国内采购、库存、销售、物流、银行、税务、财务与月结，不再承载 ALSVID、自行车出口、欧洲经销商或外贸运行时。
 
@@ -85,16 +85,14 @@ Production Environment（正式环境）
 - ❌ 不维护三套长期环境
 - ✅ Test 作为生产发布前验证环境
 - ✅ Production 是唯一正式业务运行环境
-程序：
-主要：Cloud Run
-备选：Render
+当前与目标架构：
 
-数据库：
-主要用：Neon PostgreSQL”
-备选用：Supabase PostgreSQL
+- 当前应用：NAS 继续运行，暂不切换云服务器。
+- 目标唯一主数据库：Neon PostgreSQL（迁移与生产验收尚未完成）。
+- 目标唯一业务对象存储：Cloudflare R2（业务文件接入尚未完成）。
+- 未来云服务器：免费方案待选；本轮不部署、不改线上流量。
+- 内部域名目标：`coffee.alsvidbike.com`，启用前必须配置 Cloudflare Access 邮箱白名单与源站保护。
 
-对象存储：
-Cloudflare R2
 完整环境规范见：`docs/ENVIRONMENT.md`。
 
 ## 仓库边界
