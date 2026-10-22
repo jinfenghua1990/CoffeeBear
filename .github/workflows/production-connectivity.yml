@@ -1,0 +1,54 @@
+name: Production Connectivity Check
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Verify Neon and Cloudflare R2
+    runs-on: ubuntu-latest
+    environment: production
+    timeout-minutes: 10
+    steps:
+      - name: Check required production secrets are present
+        shell: bash
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+          R2_ACCESS_KEY: ${{ secrets.R2_ACCESS_KEY }}
+          R2_SECRET_KEY: ${{ secrets.R2_SECRET_KEY }}
+        run: |
+          set -euo pipefail
+          for name in DATABASE_URL R2_ENDPOINT R2_BUCKET R2_ACCESS_KEY R2_SECRET_KEY; do
+            if [ -z "${!name:-}" ]; then
+              echo "::error::Missing production secret: ${name}"
+              exit 1
+            fi
+          done
+          echo "All required production secrets are present."
+
+      - name: Check Neon PostgreSQL connection
+        shell: bash
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          set -euo pipefail
+          result="$(psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -Atqc 'select current_database()')"
+          test "$result" = "neondb"
+          echo "Neon database connection verified."
+
+      - name: Check Cloudflare R2 bucket connection
+        shell: bash
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_KEY }}
+          R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+        run: |
+          set -euo pipefail
+          aws s3api head-bucket             --bucket "$R2_BUCKET"             --endpoint-url "$R2_ENDPOINT"
+          echo "Cloudflare R2 bucket connection verified."
