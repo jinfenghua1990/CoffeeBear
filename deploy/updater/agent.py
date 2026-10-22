@@ -191,7 +191,10 @@ def automatic_update_loop() -> None:
                     if not detected_at:
                         write_status(**checked, autoUpdateDetectedAt=now(), autoUpdateEligibleAt=(time.time() + AUTO_UPDATE_DELAY_SECONDS))
                         log("检测到新正式版本，已进入 1 小时等待期，不会立即更新")
-                    elif time.time() >= float(status.get("autoUpdateEligibleAt") or 0):
+                    elif (
+                        time.time() >= float(status.get("autoUpdateEligibleAt") or 0)
+                        and status.get("lastInstallResult") != "failed"
+                    ):
                         start_update(latest_release(), "auto-update")
                 else:
                     if status.get("autoUpdateDetectedAt"):
@@ -249,6 +252,8 @@ class Handler(BaseHTTPRequestHandler):
             if current_sha and not SHA_RE.fullmatch(current_sha): raise ValueError("当前运行版本 SHA 格式无效")
             if parsed.path=="/check":
                 checked=build_status(current_sha,current_version,current_image); old=read_status()
+                for key in ("autoUpdateDetectedAt","autoUpdateEligibleAt","lastInstallResult","lastAutoError"):
+                    if key in old: checked[key]=old[key]
                 if old.get("running"):
                     for key in ("phase","progress","running","message","logs","startedAt","startedBy","targetSha"):
                         if key in old: checked[key]=old[key]
