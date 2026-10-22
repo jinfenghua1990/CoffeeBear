@@ -226,8 +226,10 @@ CoffeeBear 使用 PostgreSQL，迁移工具为 Alembic。
 Issue #48 的代码与脚本修改仍需通过 PR CI；实际 NAS 容器更新、迁移和业务 smoke test 尚未执行。正式环境不能仅凭静态代码或 CI 结果宣称验收通过。
 
 
-## 2026-10-22 — NAS + 云端唯一数据源新决策（Issue #59）
+## 2026-10-22 — Neon / R2 统一数据源与内部域名目标（Issue #59）
 
-维护者已确认以 NAS 作为日常 CoffeeBear 应用运行端、云服务器作为同一 Production 的备用计算节点；最终唯一正式数据库采用云端 PostgreSQL（本轮规划 Supabase），正式业务文件使用 Cloudflare R2。NAS 暂不升级内存，升级应用采用 GHCR 预构建不可变镜像。
+维护者已确认目标唯一主数据库为 Neon PostgreSQL、目标业务对象存储为 Cloudflare R2。NAS 当前继续运行，短期不升级内存；免费云服务器方案尚未选定，本轮不部署云服务器、不切换线上流量。
 
-**实施状态：未迁移、未验证、未切换。** 当前生产 Compose 仍包含本地 PostgreSQL/Redis 与本地 DATA_DIR，R2 备份不能代替业务对象文件存储；旧升级脚本仍需适配云数据库备份。详见 `docs/NAS_CLOUD_SHARED_DATA.md` 和 Issue #59。
+内部域名目标为 `coffee.alsvidbike.com`，需要 Cloudflare Access 邮箱授权与 Coffee 自身登录双层保护。仓库 Tunnel 模板的 hostname 准备不等于 DNS 或 Access 已生效。
+
+**实施状态：未迁移、未验证、未切换。** 当前生产 Compose 仍包含本地 PostgreSQL/Redis 与本地 `DATA_DIR`，R2 备份不能代替业务文件存储；更新脚本仍需适配 Neon 备份/恢复。详见 `docs/NAS_CLOUD_SHARED_DATA.md` 和 Issue #59。
