@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Restricted internal updater for CoffeeBear's NAS Compose deployment."""
 from __future__ import annotations
-import json, os, re, secrets, subprocess, threading, urllib.error, urllib.parse, urllib.request
+import json, os, re, secrets, subprocess, threading, time, urllib.error, urllib.parse, urllib.request
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -13,6 +13,7 @@ SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 DIGEST_RE = re.compile(r"^ghcr\.io/jinfenghua1990/coffeebear@sha256:[0-9a-f]{64}$")
 VERSION_RE = re.compile(r"^v\d{4}\.\d{2}\.\d{2}\.\d{6}$")
 ACTIVE = {"queued", "preflight", "backup", "installing", "migrating", "restarting", "healthcheck"}
+AUTO_UPDATE_DELAY_SECONDS = 60 * 60
 DATA_DIR = Path(os.environ.get("DATA_DIR", "/data")).resolve()
 STATE_DIR = DATA_DIR / "system-update"
 STATUS_FILE = STATE_DIR / "container-status.json"
@@ -104,7 +105,7 @@ def build_status(current_sha: str, current_version: str, current_image: str) -> 
         "updateLevelLabel":"功能版本" if available else "小版本","hasMigration":False,"impactedModules":[],
         "classificationReasons":["以已验证的正式发布为更新来源"],
         "lastCheckAt":now(),"lastCheckError":"","lastAutoError":"",
-        "settings":{"enabled":False,"mode":"manual","checkIntervalMinutes":60,"autoUpdateHour":3,
+        "settings":{"enabled":True,"mode":"auto_update","checkIntervalMinutes":60,"autoUpdateHour":3,
                     "autoUpdateWindowMinutes":60,"autoInstallLevel":"patch","branch":"main","remote":"origin"},
         "updateAgentAvailable":True,"updateAgentError":"",
     }
@@ -174,6 +175,31 @@ def start_update(release: dict[str, Any], actor: str) -> None:
                      latestReleaseTag=release["tag"],lastCheckError="",error="")
     threading.Thread(target=run_update,args=(release,actor),daemon=True).start()
 
+def automatic_update_loop() -> None:
+    """Poll validated releases and wait one full hour before installing."""
+    while True:
+        try:
+            status = read_status()
+            settings = status.get("settings") if isinstance(status.get("settings"), dict) else {}
+            if settings.get("enabled", True) and settings.get("mode") == "auto_update" and not status.get("running"):
+                current_sha = str(status.get("currentSha") or "")
+                current_version = str(status.get("currentCommit", {}).get("version") or "")
+                current_image = str(status.get("currentImageRef") or "")
+                checked = build_status(current_sha, current_version, current_image)
+                if checked.get("updateAvailable"):
+                    detected_at = str(status.get("autoUpdateDetectedAt") or "")
+                    if not detected_at:
+                        write_status(**checked, autoUpdateDetectedAt=now(), autoUpdateEligibleAt=(time.time() + AUTO_UPDATE_DELAY_SECONDS))
+                        log("检测到新正式版本，已进入 1 小时等待期，不会立即更新")
+                    elif time.time() >= float(status.get("autoUpdateEligibleAt") or 0):
+                        start_update(latest_release(), "auto-update")
+                else:
+                    if status.get("autoUpdateDetectedAt"):
+                        write_status(autoUpdateDetectedAt="", autoUpdateEligibleAt=0)
+        except Exception as exc:
+            write_status(lastAutoError=str(exc)[:1000])
+        time.sleep(300)
+
 class Handler(BaseHTTPRequestHandler):
     server_version="CoffeeBearUpdater/1.0"
     def log_message(self,fmt: str,*args: Any)->None: return
@@ -205,7 +231,7 @@ class Handler(BaseHTTPRequestHandler):
             status.setdefault("history", [])
         status.setdefault("phase","idle"); status.setdefault("progress",0); status.setdefault("running",False)
         status.setdefault("message","更新器已就绪，请检查正式版本"); status.setdefault("logs",[]); status.setdefault("history",[])
-        status.setdefault("settings",{"enabled":False,"mode":"manual","checkIntervalMinutes":60,"autoUpdateHour":3,
+        status.setdefault("settings",{"enabled":True,"mode":"auto_update","checkIntervalMinutes":60,"autoUpdateHour":3,
                                      "autoUpdateWindowMinutes":60,"autoInstallLevel":"patch","branch":"main","remote":"origin"})
         if current_sha: status["currentSha"]=current_sha
         if current_version:
@@ -242,5 +268,6 @@ class Handler(BaseHTTPRequestHandler):
 
 def main()->None:
     ensure_state()
+    threading.Thread(target=automatic_update_loop, daemon=True).start()
     ThreadingHTTPServer((os.environ.get("UPDATE_AGENT_BIND","0.0.0.0"),int(os.environ.get("UPDATE_AGENT_PORT","8765"))),Handler).serve_forever()
 if __name__=="__main__": main()
