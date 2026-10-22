@@ -60,6 +60,8 @@ class CompletePurchaseItemBody(BaseModel):
     item_id: int = Field(gt=0)
     quantity: str
     amount: str
+    consumable_id: int | None = Field(default=None, gt=0)
+    consumable_quantity: str | None = None
 
 
 class CompletePurchaseBody(CreatePOBody):

@@ -95,12 +95,25 @@ def create_complete_purchase(db: Session, data: dict, *, actor: str = "system") 
     model = ProductSku if order_kind == "goods" else Consumable
     active = {row.id: row for row in db.query(model).filter(model.id.in_(ids)).all()} if ids else {}
     checked = []
+    explicit_usage: dict[int, Decimal] = {}
+    explicit_sku_ids: set[int] = set()
+    active_consumables = {}
+    consumable_ids = [int(row.get("consumable_id")) for row in lines if row.get("consumable_id")]
+    if consumable_ids:
+        active_consumables = {row.id: row for row in db.query(Consumable).filter(Consumable.id.in_(consumable_ids)).all()}
     for index, line in enumerate(lines, 1):
         ref = active.get(int(line["item_id"]))
         if ref is None or ref.status != "active" or (order_kind == "goods" and ref.product_type == "virtual_bundle"):
             raise ValueError(f"第{index}行商品不存在或已停用")
         qty = _quantity(line.get("quantity"), f"第{index}行数量")
         total = _money(line.get("amount"), f"第{index}行总价")
+        if order_kind == "goods" and line.get("consumable_id") is not None:
+            material = active_consumables.get(int(line["consumable_id"]))
+            if material is None or material.status != "active":
+                raise ValueError(f"第{index}行耗材不存在或已停用")
+            usage = _quantity(line.get("consumable_quantity"), f"第{index}行耗材使用量")
+            explicit_usage[material.id] = explicit_usage.get(material.id, Decimal("0")) + usage
+            explicit_sku_ids.add(ref.id)
         checked.append((ref, qty, total))
     # 允许已有入库单号但暂未导入 SKU 的历史采购订单先完整登记；不会因此自动入库。
     if not checked and not inbound_no:
@@ -241,6 +254,7 @@ def create_complete_purchase(db: Session, data: dict, *, actor: str = "system") 
             po.id,
             note="采购单保存：按 SKU 采购数量立即扣减耗材",
             commit=False,
+            explicit_usage=explicit_usage,
         )
         consumable_usage_status = str(usage_result.get("status") or "pending")
         missing_skus = usage_result.get("missingSkuIds") or []

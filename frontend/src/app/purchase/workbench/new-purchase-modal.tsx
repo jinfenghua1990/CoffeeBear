@@ -6,8 +6,8 @@ import {
   type CatalogSkuRow, type ConsumableRow, type WarehouseRow,
 } from "@/lib/api";
 
-type EntryLine = { key: number; itemId: string; quantity: string; amount: string };
-const EMPTY_LINE: EntryLine = { key: 1, itemId: "", quantity: "1", amount: "" };
+type EntryLine = { key: number; itemId: string; quantity: string; amount: string; consumableId: string; consumableQuantity: string };
+const EMPTY_LINE: EntryLine = { key: 1, itemId: "", quantity: "1", amount: "", consumableId: "", consumableQuantity: "" };
 
 function localDateTime() {
   const now = new Date();
@@ -92,8 +92,8 @@ export function NewPurchaseModal({ onClose, onCreated, createdOrderId, renderCre
     if (busy) return;
     setError("");
     const completeLines = lines.filter((row) => row.itemId || row.amount.trim());
-    if (completeLines.some((row) => !row.itemId || !(Number(row.quantity) > 0) || !(Number(row.amount) >= 0) || !row.amount.trim())) {
-      setError("请补齐每条商品的商品名称、采购数量和行总价");
+    if (completeLines.some((row) => !row.itemId || !(Number(row.quantity) > 0) || !(Number(row.amount) >= 0) || !row.amount.trim() || (row.consumableId && !(Number(row.consumableQuantity) > 0)))) {
+      setError("请补齐每条商品的商品名称、采购数量、行总价；填写耗材时还要填写使用量");
       return;
     }
     const inboundRef = inboundNo.trim();
@@ -124,6 +124,8 @@ export function NewPurchaseModal({ onClose, onCreated, createdOrderId, renderCre
           invoice_reference_no: invoiceNo.trim(),
           items: completeLines.map((row) => ({
             item_id: Number(row.itemId), quantity: row.quantity, amount: row.amount,
+            consumable_id: row.consumableId ? Number(row.consumableId) : null,
+            consumable_quantity: row.consumableId ? row.consumableQuantity : null,
           })),
         }),
       });
@@ -186,18 +188,20 @@ export function NewPurchaseModal({ onClose, onCreated, createdOrderId, renderCre
 
               <section className="rounded-xl border border-slate-200 bg-white p-4">
                 <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
-                  <div><h3 className="text-sm font-semibold text-slate-900">商品明细 <span className="font-normal text-slate-400">（{lines.filter((row) => row.itemId).length} 行）</span></h3><p className="mt-1 text-xs text-slate-500">可连续添加，行总价直接填写，单价自动折算；无 SKU 的历史入库单可先保存号码。</p></div>
-                  <button type="button" onClick={() => setLines((prev) => [...prev, { key: Math.max(...prev.map((row) => row.key)) + 1, itemId: "", quantity: "1", amount: "" }])} className="rounded-lg border border-indigo-200 px-3 py-2 text-xs font-medium text-indigo-700 hover:bg-indigo-50">+ 增加商品</button>
+                  <div><h3 className="text-sm font-semibold text-slate-900">商品明细 <span className="font-normal text-slate-400">（{lines.filter((row) => row.itemId).length} 行）</span></h3><p className="mt-1 text-xs text-slate-500">正品、数量、金额和对应耗材一次录入，保存后自动核算耗材使用。</p></div>
+                  <button type="button" onClick={() => setLines((prev) => [...prev, { ...EMPTY_LINE, key: Math.max(...prev.map((row) => row.key)) + 1 }])} className="rounded-lg border border-indigo-200 px-3 py-2 text-xs font-medium text-indigo-700 hover:bg-indigo-50">+ 增加商品</button>
                 </div>
                 {catalogError ? <p className="mb-2 text-xs text-red-600">{catalogError}</p> : null}
                 <label className="mb-3 block max-w-lg"><span className={labelClass}>搜索商品档案</span><input className={inputClass} value={search} onChange={(e) => setSearch(e.target.value)} placeholder="搜索 SKU、商品名称或耗材代码" /></label>
                 <div className="space-y-2">
                   {lines.map((line, index) => (
-                    <div key={line.key} className="grid items-end gap-2 rounded-lg border border-slate-100 bg-slate-50 p-3 sm:grid-cols-[2.5rem_1fr_100px_130px_40px]">
+                    <div key={line.key} className="grid items-end gap-2 rounded-lg border border-slate-100 bg-slate-50 p-3 sm:grid-cols-[2.5rem_1.5fr_90px_115px_1.1fr_95px_40px]">
                       <div className="pb-2 text-center text-xs text-slate-400">{index + 1}</div>
                       <label><span className={labelClass}>{orderKind === "goods" ? "商品 SKU" : "耗材"}</span><select className={inputClass} value={line.itemId} onChange={(e) => updateLine(line.key, "itemId", e.target.value)}><option value="">选择商品</option>{candidates.map((item) => <option key={item.id} value={item.id}>{item.code} · {item.name} ({item.unit})</option>)}</select></label>
                       <label><span className={labelClass}>数量</span><input type="number" min="0.0001" step="0.0001" value={line.quantity} onChange={(e) => updateLine(line.key, "quantity", e.target.value)} className={inputClass} /></label>
                       <label><span className={labelClass}>行总价（元）</span><input type="number" min="0" step="0.01" value={line.amount} onChange={(e) => updateLine(line.key, "amount", e.target.value)} className={inputClass} placeholder="含税总价" /></label>
+                      <label><span className={labelClass}>耗材名称</span><select className={inputClass} value={line.consumableId} onChange={(e) => updateLine(line.key, "consumableId", e.target.value)}><option value="">不指定</option>{materials.map((item) => <option key={item.id} value={item.id}>{item.code} · {item.name}</option>)}</select></label>
+                      <label><span className={labelClass}>耗材使用量</span><input type="number" min="0.0001" step="0.0001" value={line.consumableQuantity} onChange={(e) => updateLine(line.key, "consumableQuantity", e.target.value)} className={inputClass} placeholder="总用量" disabled={!line.consumableId} /></label>
                       <button type="button" disabled={lines.length === 1} onClick={() => setLines((prev) => prev.filter((row) => row.key !== line.key))} className="h-9 rounded-lg text-lg text-slate-400 hover:bg-red-50 hover:text-red-600 disabled:opacity-30" title="删除此行">×</button>
                     </div>
                   ))}
