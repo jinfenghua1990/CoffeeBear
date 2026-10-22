@@ -1,131 +1,28 @@
-# CoffeeBear 环境规范
+# CoffeeBear 环境规范（目标与现状分开）
 
-## 1. 总体原则
+> 2026-10-22 已接受 DEC-004；跟踪 Issue #59。**目标状态不等于已经上线。**
 
-CoffeeBear 采用轻量化云原生部署模型。
+## 环境数量
 
-长期固定环境：
+CoffeeBear 只保留 Test（开发验证）与 Production（唯一真实业务）两个逻辑环境。NAS 本地应用与备用云端应用是同一 Production 的两个运行节点，绝不是两套分别写入业务数据的正式环境。Test 必须使用隔离数据库、对象空间与密钥。
 
-1. Test（开发 / 测试验证环境）
-2. Production（正式业务环境）
+## 已确认目标
 
-不长期维护 Dev / Staging / Production 三套环境。
+- Production 常用计算：NAS 的 CoffeeBear 容器；GHCR 预构建、固定不可变镜像，不在内存受限 NAS 本地构建。
+- Production 备用计算：云服务器的相同 CoffeeBear 镜像，故障切换时接管应用入口。
+- Production 唯一数据库：云端 PostgreSQL（按本轮决策规划 Supabase；云库是否已创建/连接需要实机核对）。
+- Production 业务对象存储：Cloudflare R2；它不同于既有的 R2 备份归档接口。
+- 任务队列：可从 NAS / 云备机访问的统一 Redis，供应商待落地核对；全 Production 只允许一个活跃 Celery beat。
+- 代码与镜像：GitHub + GHCR；旧应用版本可能不兼容新 schema，需有发布与回滚纪律。
 
-## 2. 程序运行环境
+## 当前代码事实和重要限制
 
-### Primary
+截至本次代码审阅，`deploy/zspace/docker-compose.yml` 仍包含本地 PostgreSQL / Redis，且 `DATA_DIR` 挂载到 NAS。当前还不能凭设置 DATABASE_URL 就保证附件/财务文件一致。NAS 正式环境具体数据库和密钥未读取或更改；所有迁移必须经 Test、备份、文件审计、数据验收、单节点调度验证。
 
-Google Cloud Run
+## 历史决策
 
-用于正式业务运行：
+此前 Cloud Run 主运行、Render 备选、Neon 主库、Supabase 备选的写法保留在历史 Git 记录中；对于**新的目标架构**以 DEC-004 为准。变更前应检查现有云服务，避免重复开户和误删资源。
 
-- 自动扩缩容
-- 容器化部署
-- GitHub 持续交付
+## 具体实施
 
-### Alternative
-
-Render
-
-作为备用部署方案，用于：
-
-- 快速验证
-- 备用生产迁移
-- 降低云厂商绑定风险
-
-## 3. 数据库规范
-
-### Primary
-
-Neon PostgreSQL
-
-用途：
-
-- 正式业务数据库
-- 用户数据
-- 订单数据
-- 商品数据
-- 业务核心数据
-
-### Alternative
-
-Supabase PostgreSQL
-
-作为备用 PostgreSQL 托管方案。
-
-## 4. 对象存储规范
-
-Primary：
-
-Cloudflare R2
-
-用途：
-
-- 商品图片
-- 营销素材
-- 用户上传文件
-- 附件资源
-
-规则：
-
-- 图片、视频、大文件不进入 GitHub
-- 大文件不直接存数据库
-- 文件资源进入 R2
-- 业务数据进入 PostgreSQL
-
-## 5. Production 架构
-
-```text
-GitHub
-  |
-  |
-Google Cloud Run
-  |
-  |---- Neon PostgreSQL
-  |       正式业务数据库
-  |
-  |---- Cloudflare R2
-  |       对象存储
-  |
-  |---- Secret Manager
-          密钥管理
-```
-
-## 6. Test 环境
-
-用途：
-
-- 新功能开发验证
-- 功能测试
-- Docker 构建验证
-- 数据库迁移验证
-- 发布前检查
-
-规则：
-
-- 不连接 Production 数据
-- 不使用 Production 密钥
-- 不使用 Production 对象存储
-
-## 7. 密钥管理
-
-禁止提交：
-
-- 数据库密码
-- API Token
-- R2 Secret
-- JWT Secret
-- SMTP 密码
-
-生产环境密钥统一使用云端 Secret 管理。
-
-## 8. 完整环境规范
-
-相关文档：
-
-- README.md
-- docs/CURRENT_STATE.md
-- docs/ACTIVE_WORK.md
-- docs/DECISIONS.md
-- docs/DEPLOYMENT.md
-- docs/DATABASE.md
+参见 `docs/NAS_CLOUD_SHARED_DATA.md`，发布与安全边界参见 `docs/DEPLOYMENT.md` 和 `docs/DATABASE.md`，进度参见 Issue #59。
