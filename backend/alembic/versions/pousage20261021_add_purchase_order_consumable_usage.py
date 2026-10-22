@@ -10,30 +10,66 @@ depends_on = None
 
 
 def upgrade() -> None:
-    # Some legacy databases were restored with the warehouses.id NOT NULL
-    # marker but without the original primary-key constraint. PostgreSQL will
-    # reject a foreign key to a column that is not unique, so repair that
-    # schema drift before creating the new usage table. The guarded block is
-    # idempotent for databases where the primary key is already present.
+    # Some legacy databases were restored with only NOT NULL markers and lost
+    # the primary keys created by PkMixin. Restore the missing single-column
+    # keys before creating a foreign key. The checks are deliberately limited
+    # to tables known to be PkMixin tables in this application, and are
+    # idempotent for databases where the keys already exist.
     op.execute(
         """
         DO $$
+        DECLARE
+            table_name text;
+            duplicate_count bigint;
         BEGIN
-            IF NOT EXISTS (
-                SELECT 1
-                FROM pg_constraint
-                WHERE conrelid = 'warehouses'::regclass
-                  AND contype IN ('p', 'u')
-                  AND conkey = ARRAY[
-                      (SELECT attnum
-                       FROM pg_attribute
-                       WHERE attrelid = 'warehouses'::regclass
-                         AND attname = 'id')
-                  ]::smallint[]
-            ) THEN
-                ALTER TABLE warehouses
-                    ADD CONSTRAINT warehouses_pkey PRIMARY KEY (id);
-            END IF;
+            FOREACH table_name IN ARRAY ARRAY[
+                'monthly_finance_periods',
+                'procurement_chain_links',
+                'product_skus',
+                'products',
+                'purchase_allocation_items',
+                'roles',
+                'sales_order_items',
+                'sales_orders',
+                'suppliers',
+                'sync_jobs',
+                'sync_logs',
+                'tax_accounting_category_rules',
+                'tax_invoice_import_records',
+                'tax_invoice_imports',
+                'tax_invoice_links',
+                'tax_invoices',
+                'user_roles',
+                'users',
+                'warehouses'
+            ] LOOP
+                IF NOT EXISTS (
+                    SELECT 1 FROM pg_class c
+                    JOIN pg_namespace n ON n.oid = c.relnamespace
+                    JOIN pg_constraint con ON con.conrelid = c.oid
+                    WHERE n.nspname = 'public'
+                      AND c.relname = table_name
+                      AND con.contype = 'p'
+                      AND con.conkey = ARRAY[
+                          (SELECT attnum FROM pg_attribute
+                           WHERE attrelid = c.oid AND attname = 'id')
+                      ]::smallint[]
+                ) THEN
+                    EXECUTE format(
+                        'SELECT count(*) - count(DISTINCT id) FROM public.%I',
+                        table_name
+                    ) INTO duplicate_count;
+                    IF duplicate_count <> 0 THEN
+                        RAISE EXCEPTION
+                            'Cannot restore % primary key: duplicate or NULL id values exist',
+                            table_name;
+                    END IF;
+                    EXECUTE format(
+                        'ALTER TABLE public.%I ADD CONSTRAINT %I PRIMARY KEY (id)',
+                        table_name, table_name || '_pkey'
+                    );
+                END IF;
+            END LOOP;
         END
         $$;
         """
