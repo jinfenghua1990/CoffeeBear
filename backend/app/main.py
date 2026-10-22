@@ -133,18 +133,33 @@ def health() -> dict:
 
 # ---------- 前端静态托管（next export 产物，单口 8000 同服 API + 前端） ----------
 def _resolve_static(rel_path: str) -> str | None:
-    """把 clean URL 解析到 out/ 下的真实文件：/products -> products.html / products/index.html。"""
+    """把 clean URL 解析到 out/ 下的真实文件：/products -> products.html / products/index.html。
+
+    安全边界（重要）：rel_path 直接来自 URL，uvicorn 会把 %2e%2e%2f 解码成 ../，
+    因此必须拒绝上跳段与绝对路径，并在 realpath 之后校验结果仍位于 FRONTEND_OUT 内，
+    否则可用 /..%2f..%2f.env 读取 out/ 之外的任意文件（.env / 源码 / /proc/self/environ）。
+    """
+    root = os.path.realpath(_FRONTEND_OUT)
     if not rel_path or rel_path == "/":
-        index_path = os.path.join(_FRONTEND_OUT, "index.html")
+        index_path = os.path.join(root, "index.html")
         return index_path if os.path.isfile(index_path) else None
+
+    normalized = rel_path.replace("\\", "/")
+    if os.path.isabs(rel_path) or normalized.startswith("/"):
+        return None
+    if ".." in normalized.split("/"):
+        return None
+
     cand = [
-        os.path.join(_FRONTEND_OUT, rel_path),
-        os.path.join(_FRONTEND_OUT, rel_path + ".html"),
-        os.path.join(_FRONTEND_OUT, rel_path, "index.html"),
+        os.path.join(root, normalized),
+        os.path.join(root, normalized + ".html"),
+        os.path.join(root, normalized, "index.html"),
     ]
     for c in cand:
-        if os.path.isfile(c):
-            return c
+        real = os.path.realpath(c)
+        # 目录包含校验：realpath 已消解 ../ 与符号链接，越界一律丢弃
+        if real != root and real.startswith(root + os.sep) and os.path.isfile(real):
+            return real
     return None
 
 
