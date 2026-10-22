@@ -149,3 +149,33 @@ Issue #48 同时修正了 Q4 更新脚本：Production 应部署已经发布的�
 - 遗留风险
 
 这些记录应保存在 GitHub，而不是只存在聊天记录里。
+
+
+## 9. NAS + 云端共享 Production 数据源（2026-10-22 新目标）
+
+按 DEC-004 / Issue #59，NAS 与备用云服务器在切换后使用同一云端 PostgreSQL / R2 业务存储及受控共享任务队列。**这尚未部署，不得仅修改 .env 的 DATABASE_URL 直接切换**。
+
+- 必须先盘点 DATA_DIR 持久业务文件并把业务对象操作改为 R2，保留安全恢复期；R2_BACKUP_* 不能直接充当业务上传对象存储。
+- 当前 `deploy/update-q4.sh` 用 `exec postgres pg_dump` 生成数据库备份。改云库之前必须专门修复并测试更新器/恢复方案，否则自动更新会因无本地 postgres 失败。
+- NAS/云端必须只执行一份 Alembic 迁移和 Celery beat，部署镜像保持一致并验收数据库向前兼容性。
+- 旧 Compose 不直接覆盖；准备新的 opt-in 远端数据库模式，在 Test 验证后才生产迁移。
+
+实施验收清单：`docs/NAS_CLOUD_SHARED_DATA.md`。
+
+
+## 10. 内部域名与 Cloudflare Access（准备中）
+
+目标内部入口：`https://coffee.alsvidbike.com`。旧 chaibenn 域名不再作为正式入口。
+
+- 当前 NAS 应用继续运行；免费云服务器方案尚未选定，本轮不部署云服务器、不切换线上流量。
+- `deploy/zspace/cloudflared.yml` 是目标 hostname 模板，不会自动创建 DNS 记录或 Access 策略。
+- 在启用新 Tunnel/DNS 前，先于 Cloudflare Zero Trust 建立 Self-hosted Access 应用，hostname 为 `coffee.alsvidbike.com`，策略仅 Allow 维护者指定的邮箱，其他身份默认拒绝。
+- Access 只作为外层门禁；Coffee 自身管理员登录不可关闭。不得把邮箱白名单、Access Token、Tunnel Token 或密钥写进仓库。
+- 确认源站无法通过公网 IP/端口绕过 Access；不在路由器开放 NAS API 端口。若宿主机端口映射仍存在，必须通过防火墙或 Compose 绑定限制为可信本地接口。
+- 完成未授权拒绝、授权访问后仍需应用登录、退出后重新认证等检查后，才允许由维护者执行 DNS/Tunnel 切换。
+
+## 11. Neon / R2 迁移状态
+
+Neon PostgreSQL 与 Cloudflare R2 是目标唯一数据服务，但当前 Production Compose 仍包含本地 PostgreSQL/Redis，应用仍存在 `DATA_DIR` 本地文件依赖。现有 R2 备份功能不代表业务文件已经迁移。
+
+云端数据库和 R2 业务文件接入、更新器备份/恢复适配、共享 Redis/唯一 Beat、生产数据校验与回滚演练全部通过之前，禁止直接更改 Production 连接串、删除本地数据库或宣称迁移完成。

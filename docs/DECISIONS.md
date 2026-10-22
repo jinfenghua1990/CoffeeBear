@@ -162,3 +162,28 @@ GitHub 是 CoffeeBear 项目决策、当前状态和重要实施历史的事实�
 2. 先核对最新代码、Issue、PR 和 Git 历史。
 3. 仍无法确定时，创建 / 更新 Issue 请求维护者裁决。
 4. 裁决后同步修正文档，避免冲突继续存在。
+
+
+---
+
+## DEC-004 — Neon + R2 统一数据源，NAS 保持运行（2026-10-22）
+
+**状态：目标架构已接受；生产迁移与验收未完成**  
+**来源：维护者明确确认；GitHub Issue #59**
+
+### 决策
+
+- CoffeeBear 的目标唯一正式数据库为 **Neon PostgreSQL**。
+- CoffeeBear 的目标唯一正式业务对象存储为 **Cloudflare R2**；现有 R2 备份功能不能代替业务文件读写。
+- NAS 当前继续运行；短期不升级 NAS 内存，不在 NAS 上构建完整镜像。必须保留现有生产数据和可恢复备份，直到迁移验收完成。
+- 免费云服务器方案尚未选定，本轮不部署云服务器、不切换应用流量。未来节点的主备角色待选定运行方案后再确定。
+- 目标内部入口为 `coffee.alsvidbike.com`。旧 chaibenn 域名不再作为正式入口；启用新入口前必须配置 Cloudflare Access 邮箱 allowlist、保留 Coffee 自身登录，并确保源站无法绕过 Access。
+- 若 NAS 与未来云端应用同时运行，两者必须使用同一个 Neon 数据库和同一个 R2 业务空间；禁止两个独立正式数据库同时接收写入。
+- 全 Production 只允许一个活跃 Celery Beat 和一个数据库迁移执行者。共享 Redis/队列方案尚未确定，完成前不能宣称后台任务可以无缝接管。
+- 正式迁移前必须完成本地 PostgreSQL 与 `DATA_DIR` 盘点、Neon 数据导入核对、R2 业务文件适配、更新器备份/恢复改造和真实业务演练。
+
+### 当前状态边界
+
+当前仓库的 NAS Compose 仍包含本地 PostgreSQL、Redis 和本地 `DATA_DIR`；Tunnel 模板准备新 hostname 不会自动修改 Cloudflare DNS、Access 策略或正在运行的 NAS。不能把文档或配置准备描述为已迁移或已切换。
+
+具体清单见 `docs/NAS_CLOUD_SHARED_DATA.md`。Issue #59 在数据库、文件、任务队列、备份恢复和访问保护完成验收前保持开放。

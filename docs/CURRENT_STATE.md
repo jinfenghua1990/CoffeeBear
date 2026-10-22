@@ -2,7 +2,7 @@
 
 > 本文件用于让后续开发者、AI Agent、Review Bot 在进入仓库后快速了解“现在做到哪里、当前约束是什么、下一步看哪里”。
 >
-> 最后整理：2026-10-11
+> 最后整理：2026-10-22
 
 ## 1. 项目定位
 
@@ -224,3 +224,12 @@ CoffeeBear 使用 PostgreSQL，迁移工具为 Alembic。
 - 更新脚本需要先备份数据库和 `DATA_DIR`，执行迁移与健康检查后再恢复 worker/beat。
 
 Issue #48 的代码与脚本修改仍需通过 PR CI；实际 NAS 容器更新、迁移和业务 smoke test 尚未执行。正式环境不能仅凭静态代码或 CI 结果宣称验收通过。
+
+
+## 2026-10-22 — Neon / R2 统一数据源与内部域名目标（Issue #59）
+
+维护者已确认目标唯一主数据库为 Neon PostgreSQL、目标业务对象存储为 Cloudflare R2。NAS 当前继续运行，短期不升级内存；免费云服务器方案尚未选定，本轮不部署云服务器、不切换线上流量。
+
+内部域名目标为 `coffee.alsvidbike.com`，需要 Cloudflare Access 邮箱授权与 Coffee 自身登录双层保护。仓库 Tunnel 模板的 hostname 准备不等于 DNS 或 Access 已生效。
+
+**实施状态：未迁移、未验证、未切换。** 当前生产 Compose 仍包含本地 PostgreSQL/Redis 与本地 `DATA_DIR`，R2 备份不能代替业务文件存储；更新脚本仍需适配 Neon 备份/恢复。详见 `docs/NAS_CLOUD_SHARED_DATA.md` 和 Issue #59。

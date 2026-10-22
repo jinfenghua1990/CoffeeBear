@@ -1,103 +1,49 @@
 # CoffeeBear 存储架构决策
 
-## 已确认方案
+> 已确认的目标：Neon PostgreSQL 作为唯一主数据库，Cloudflare R2 作为唯一业务对象存储。当前 NAS 运行配置尚未完成迁移。
 
-CoffeeBear 采用：
+## 1. 数据服务
 
-```text
-GitHub
-  |
-Google Cloud Run
-  |
-Neon PostgreSQL
-  |
-Cloudflare R2
-```
+- **Neon PostgreSQL**：用户、员工、门店、商品、库存、采购、订单、客户、供应商、财务和权限等结构化业务数据。
+- **Cloudflare R2**：商品图片、营销媒体和经确认的业务附件。
+- **GitHub/GHCR**：源代码和不可变容器镜像；不得保存业务文件、数据库转储或真实密钥。
+- **NAS**：现阶段继续运行 CoffeeBear，并在迁移完成前保留本地原始数据库和文件以便回滚。
 
-## 数据库
+## 2. R2 Bucket 与前缀
 
-Neon PostgreSQL 作为业务数据库。
-
-存储内容：
-
-- 用户
-- 员工
-- 门店
-- 商品
-- 库存
-- 订单
-- 客户
-- 供应商
-- 财务业务数据
-- 权限与流程状态
-
-## 对象存储
-
-Cloudflare R2 作为文件和媒体存储。
-
-正式 Bucket：
+目标正式 Bucket：
 
 ```text
 coffeebear-prod
 ```
 
-目录规划：
+建议对象分类：
 
 ```text
-coffeebear-prod
-├── products
-│   ├── coffee-beans
-│   ├── drinks
-│   └── packaging
-├── stores
-│   ├── store-images
-│   └── store-documents
-├── marketing
-│   ├── banners
-│   ├── campaigns
-│   └── videos
-├── documents
-│   ├── contracts
-│   ├── invoices
-│   └── manuals
-└── users
-    └── avatars
+coffeebear-prod/
+├── business/
+│   ├── products/
+│   ├── stores/
+│   ├── marketing/
+│   ├── documents/
+│   └── users/
+└── coffeebear/backup/
 ```
 
-## 环境规则
+业务对象和备份对象用途不同，必须采用独立前缀、清晰生命周期与最小权限；如权限模型需要，改用独立 Bucket。现有 `R2_BACKUP_*` 配置只代表备份能力，不代表业务上传已经接入 R2。
 
-当前 CoffeeBear 不单独建立 coffeebear-dev 对象存储。
+文件权限必须按类型设计：可公开访问的商品图与私有财务、税务、合同附件不能使用相同的公开访问规则。敏感认证态和临时缓存需要先做分类审查，不应不加区分地上传至业务 Bucket。
 
-直接使用正式业务环境：
+## 3. 数据库与文件一致性
 
-```text
-coffeebear-prod
-```
+- PostgreSQL 保存业务记录和稳定的 R2 object key / 元数据。
+- 文件内容存储在 R2，不把大文件直接存入 PostgreSQL。
+- NAS 与未来云端节点最终共用同一 Neon 数据库和同一 R2 业务空间。
+- 上传/删除流程应处理对象写入与数据库事务之间的失败窗口，必要时采用暂存、补偿或定期孤儿对象清理。
+- 迁移旧文件需核对数量、大小和 SHA-256；验收前保留 NAS 原件。
 
-后续如需要大版本迁移或灾备，再增加 backup 存储。
+## 4. 当前实施状态
 
-## 设计原则
+仓库现有 R2 备份服务和脚本，但业务上传/下载仍有 `DATA_DIR` 本地路径依赖。当前生产 Compose 仍配置本地 PostgreSQL / Redis；因此，不能宣称 Neon 主库或 R2 业务存储已在生产启用。
 
-- 数据库只保存业务数据。
-- 图片、视频、附件不直接存入 PostgreSQL。
-- 代码仓库 GitHub 不存放业务文件。
-- 应用通过配置读取对象存储地址，避免绑定具体供应商。
-
-## 存储空间隔离（硬约束）
-
-CoffeeBear 的 R2 存储空间**必须独占**，不得与其他项目共用桶或命名空间。
-
-| 归属 | 存储空间 | 说明 |
-|---|---|---|
-| CoffeeBear | `coffeebear-prod` | 本项目唯一允许写入的桶 |
-| 其他项目 | `ecommerce-workspace-backup` / `ecommerce-workspace-cold` / `alsvid-development` / `alsvid-production` | **严禁读写** |
-
-约定：
-
-- 对象前缀固定为 `coffeebear/backup`，不得使用 `ecommerce-workspace/` 或 `alsvid/` 前缀。
-- R2 凭据必须是**仅授权 `coffeebear-prod` 桶**的令牌，不得复用其他项目的账号级令牌。
-- 该约束在服务层强制（`r2_backup_service.save_config` 拒绝其他项目的桶与命名空间），不是仅靠约定。
-
-## 未来扩展
-
-如文件规模增长，可保持 Neon PostgreSQL 不变，仅替换对象存储层。
+具体迁移与验收清单见 `docs/NAS_CLOUD_SHARED_DATA.md`。

@@ -1,131 +1,49 @@
 # CoffeeBear 环境规范
 
-## 1. 总体原则
+> 2026-10-22 更新。架构目标已确认，但数据迁移、域名切换和云服务器部署均未执行。
 
-CoffeeBear 采用轻量化云原生部署模型。
+## 1. 环境数量
 
-长期固定环境：
+CoffeeBear 只维护两个逻辑环境：
 
-1. Test（开发 / 测试验证环境）
-2. Production（正式业务环境）
+- **Test**：开发、功能测试、Docker 和数据库迁移验证；必须使用非生产数据、独立密钥与隔离存储。
+- **Production**：唯一正式业务环境。当前 NAS 应用继续运行；未来云端运行节点尚未选定，也尚未部署。
 
-不长期维护 Dev / Staging / Production 三套环境。
+未来 NAS 与云端应用如同时存在，只是同一 Production 的多个计算节点，不代表两套正式环境。
 
-## 2. 程序运行环境
+## 2. 唯一正式数据源（目标）
 
-### Primary
+- **主数据库：Neon PostgreSQL**。
+- **业务对象存储：Cloudflare R2**。
+- 业务数据进入 PostgreSQL；图片和文件对象进入 R2。
+- GitHub/GHCR 管理代码和不可变镜像，不存放业务文件或生产密钥。
+- 当前 NAS Compose 仍包含本地 PostgreSQL、Redis 和 `DATA_DIR`。目标尚未落地，禁止只改 `DATABASE_URL` 就直接切换。
 
-Google Cloud Run
+## 3. 应用运行位置
 
-用于正式业务运行：
+- 当前：保留 NAS 现有应用，不执行云服务器切换。
+- 未来：免费云端方案仍在评估，供应商和主备角色暂不确定。
+- NAS 内存暂不升级；后续发布优先使用 GHCR 预构建、固定版本镜像，避免在 NAS 上构建完整镜像。
+- 云端运行节点只有在数据迁移、访问保护、后台任务和回滚方案验证后才可加入 Production。
 
-- 自动扩缩容
-- 容器化部署
-- GitHub 持续交付
+## 4. Redis 与后台任务
 
-### Alternative
+当前 Redis 仍是 NAS 本地容器。它不等于未来 NAS 与云端共享的队列。正式双节点运行前，必须确定受认证和 TLS 保护的共享队列，且全 Production 只有一个活跃 Celery Beat 和一个数据库迁移执行者。
 
-Render
+## 5. 内部域名与访问策略
 
-作为备用部署方案，用于：
+- 目标内部域名：`coffee.alsvidbike.com`。
+- 不再将旧 chaibenn 域名作为正式入口。
+- 访问前置保护：Cloudflare Access 仅允许明确授权的邮箱；进入应用后仍须通过 Coffee 自身登录。
+- 仅写入仓库模板不等于 DNS 或 Access 已配置。必须先配置 Access、检查源站无法绕过门禁，再启用新 DNS/Tunnel。
+- 当前不切换线上 DNS 或流量。
 
-- 快速验证
-- 备用生产迁移
-- 降低云厂商绑定风险
+## 6. 数据迁移与发布约束
 
-## 3. 数据库规范
+1. 先备份 NAS 数据库和 `DATA_DIR`，并验证恢复。
+2. 在 Test 验证 Neon 数据导入、R2 文件迁移、连接权限和业务链路。
+3. 改造更新器以支持云数据库备份/恢复；不要依赖本地 `postgres` 容器继续处理云数据库。
+4. 验证唯一 Beat、Redis 队列、任务幂等与数据库迁移兼容性。
+5. 保留回滚窗口，未验收前不得删除 NAS 原数据。
 
-### Primary
-
-Neon PostgreSQL
-
-用途：
-
-- 正式业务数据库
-- 用户数据
-- 订单数据
-- 商品数据
-- 业务核心数据
-
-### Alternative
-
-Supabase PostgreSQL
-
-作为备用 PostgreSQL 托管方案。
-
-## 4. 对象存储规范
-
-Primary：
-
-Cloudflare R2
-
-用途：
-
-- 商品图片
-- 营销素材
-- 用户上传文件
-- 附件资源
-
-规则：
-
-- 图片、视频、大文件不进入 GitHub
-- 大文件不直接存数据库
-- 文件资源进入 R2
-- 业务数据进入 PostgreSQL
-
-## 5. Production 架构
-
-```text
-GitHub
-  |
-  |
-Google Cloud Run
-  |
-  |---- Neon PostgreSQL
-  |       正式业务数据库
-  |
-  |---- Cloudflare R2
-  |       对象存储
-  |
-  |---- Secret Manager
-          密钥管理
-```
-
-## 6. Test 环境
-
-用途：
-
-- 新功能开发验证
-- 功能测试
-- Docker 构建验证
-- 数据库迁移验证
-- 发布前检查
-
-规则：
-
-- 不连接 Production 数据
-- 不使用 Production 密钥
-- 不使用 Production 对象存储
-
-## 7. 密钥管理
-
-禁止提交：
-
-- 数据库密码
-- API Token
-- R2 Secret
-- JWT Secret
-- SMTP 密码
-
-生产环境密钥统一使用云端 Secret 管理。
-
-## 8. 完整环境规范
-
-相关文档：
-
-- README.md
-- docs/CURRENT_STATE.md
-- docs/ACTIVE_WORK.md
-- docs/DECISIONS.md
-- docs/DEPLOYMENT.md
-- docs/DATABASE.md
+详见 `docs/NAS_CLOUD_SHARED_DATA.md`、`docs/DEPLOYMENT.md` 与 `docs/DATABASE.md`。

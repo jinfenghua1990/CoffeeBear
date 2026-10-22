@@ -2,7 +2,7 @@
 
 > 本文件用于避免多个机器人重复做同一件事，也让维护者快速知道“现在正在处理什么”。
 >
-> 最后整理：2026-10-11
+> 最后整理：2026-10-22
 
 ## 状态说明
 
@@ -170,3 +170,10 @@
 3. 更新本文件状态；
 4. 如影响长期规则，同步更新 `docs/DECISIONS.md`、`docs/CURRENT_STATE.md` 或相关专项文档；
 5. 确认没有遗留阻塞后再关闭 Issue。
+
+
+### Issue #59 — Neon / R2 统一数据源与内部域名（2026-10-22）
+
+**状态：目标已确认；实施未完成**。Neon PostgreSQL 为目标唯一主数据库，Cloudflare R2 为目标唯一业务对象存储。NAS 现状先保留，免费云服务器尚未选定，本轮不部署、不切换线上流量。内部域名目标为 `coffee.alsvidbike.com`，启用前必须配置 Cloudflare Access 邮箱 allowlist、Coffee 自身登录和源站保护。
+
+未完成：Neon 数据迁移与核对、业务文件 R2 适配、共享队列/唯一 Beat、更新器云库备份恢复、DNS/Access 实际配置和实机验收。生产 Compose 仍有本地 PostgreSQL/Redis 与 `DATA_DIR` 依赖；禁止把文档更新当成生产切换。具体清单见 `docs/NAS_CLOUD_SHARED_DATA.md`。
