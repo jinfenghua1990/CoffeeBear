@@ -113,6 +113,7 @@ def latest_release() -> dict[str, Any]:
 def build_status(current_sha: str, current_version: str, current_image: str) -> dict[str, Any]:
     release = latest_release()
     available = current_sha != release["sourceSha"] if SHA_RE.fullmatch(current_sha) else current_version != release["tag"]
+    displayed_current_version = release["tag"] if not available else (current_version or current_image or "未知版本")
     commits = [{"sha":release["sourceSha"],"shortSha":release["sourceSha"][:10],
                 "subject":release["name"],"committedAt":release["publishedAt"],"version":release["tag"]}] if available else []
     return {
@@ -121,7 +122,7 @@ def build_status(current_sha: str, current_version: str, current_image: str) -> 
         "currentImageRef":current_image,"latestImageRef":release["appImageRef"],
         "latestUpdaterImageRef":release["updaterImageRef"],"latestReleaseUrl":release["url"],
         "latestReleaseTag":release["tag"],"updateAvailable":available,
-        "currentCommit":{"sha":current_sha,"shortSha":current_sha[:10],"subject":"当前运行版本","committedAt":"","version":current_version or current_image or "未知版本"},
+        "currentCommit":{"sha":current_sha,"shortSha":current_sha[:10],"subject":"当前运行版本","committedAt":"","version":displayed_current_version},
         "latestCommit":{"sha":release["sourceSha"],"shortSha":release["sourceSha"][:10],"subject":release["name"],"committedAt":release["publishedAt"],"version":release["tag"]},
         "changes":commits,"changedFiles":[],"changedFileCount":0,"updateLevel":"feature" if available else "patch",
         "updateLevelLabel":"功能版本" if available else "小版本","hasMigration":False,"impactedModules":[],
@@ -131,6 +132,15 @@ def build_status(current_sha: str, current_version: str, current_image: str) -> 
                     "autoUpdateWindowMinutes":60,"autoInstallLevel":"patch","branch":"main","remote":"origin"},
         "updateAgentAvailable":True,"updateAgentError":"",
     }
+
+def display_current_version(status: dict[str, Any], current_sha: str, runtime_version: str) -> str:
+    """Prefer the validated release tag when a digest-only runtime reports a SHA."""
+    latest = status.get("latestCommit") if isinstance(status.get("latestCommit"), dict) else {}
+    latest_sha = str(latest.get("sha") or "")
+    latest_version = str(latest.get("version") or "")
+    if current_sha and current_sha == latest_sha and VERSION_RE.fullmatch(latest_version):
+        return latest_version
+    return runtime_version or str((status.get("currentCommit") or {}).get("version") or "未知版本")
 
 def registry_login() -> None:
     username, password = (os.environ.get("GHCR_USERNAME") or "").strip(), (os.environ.get("GHCR_TOKEN") or "").strip()
@@ -276,8 +286,8 @@ class Handler(BaseHTTPRequestHandler):
         status.setdefault("settings",{"enabled":True,"mode":"auto_update","checkIntervalMinutes":60,"autoUpdateHour":3,
                                      "autoUpdateWindowMinutes":60,"autoInstallLevel":"patch","branch":"main","remote":"origin"})
         if current_sha: status["currentSha"]=current_sha
-        if current_version:
-            status["currentCommit"]={"sha":current_sha,"shortSha":current_sha[:10],"subject":"当前运行版本","committedAt":"","version":current_version}
+        if current_sha or current_version:
+            status["currentCommit"]={"sha":current_sha,"shortSha":current_sha[:10],"subject":"当前运行版本","committedAt":"","version":display_current_version(status, current_sha, current_version)}
         if current_image: status["currentImageRef"]=current_image
         status["updateAgentAvailable"]=True; status["updateAgentError"]=""
         self.send_json(200,status)
