@@ -70,8 +70,10 @@ export function NewPurchaseModal({ onClose, onCreated, createdOrderId, renderCre
 
   const totalLines = lines.reduce((sum, row) => sum + (Number(row.amount) || 0), 0);
   const availableWarehouses = warehouses.filter((row) => row.purpose === orderKind || row.purpose === "both");
-  const inputClass = "h-9 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm text-slate-800 outline-none focus:border-indigo-400 focus:ring-2 focus:ring-indigo-100";
-  const labelClass = "mb-1 block text-xs font-medium text-slate-600";
+  // 与采购详情共用同一套紧凑信息密度：11px 标签、32px 控件、圆角 6px。
+  // 新建单只是可编辑态，不应因为是弹窗而拥有另一套视觉比例。
+  const inputClass = "h-8 w-full rounded-md border border-slate-200 bg-white px-2 text-[12px] text-slate-700 outline-none transition focus:border-indigo-400 focus:ring-2 focus:ring-indigo-100 disabled:bg-slate-50";
+  const labelClass = "mb-1 block text-[11px] font-medium text-slate-500";
   const configuring = createdOrderId != null && renderCreated != null;
 
   function changeKind(kind: "goods" | "consumable") {
@@ -152,23 +154,24 @@ export function NewPurchaseModal({ onClose, onCreated, createdOrderId, renderCre
   }
 
   return (
-    <div className="fixed inset-0 z-modal flex items-center justify-center overflow-y-auto bg-slate-950/40 p-3 sm:p-6">
-      <div role="dialog" aria-modal="true" aria-label="一体化新建采购单" className="flex max-h-[calc(100vh-24px)] h-auto w-full max-w-[1320px] flex-col overflow-hidden rounded-2xl bg-[#f7f9fc] shadow-2xl">
+    <div className="fixed inset-0 z-modal flex items-center justify-center overflow-y-auto bg-slate-950/40 p-2 sm:p-3">
+      <div role="dialog" aria-modal="true" aria-label="一体化新建采购单" className="flex h-[calc(100vh-24px)] w-full max-w-[2048px] flex-col overflow-hidden rounded-xl bg-[#f7f9fc] shadow-[0_8px_32px_rgba(40,53,85,0.18)]">
         {configuring ? (
           <div className="min-h-0 flex-1 overflow-y-auto">{renderCreated?.(createdOrderId!)}</div>
         ) : (
           <form onSubmit={submit} className="flex min-h-0 flex-1 flex-col">
-            <header className="flex shrink-0 items-center justify-between border-b border-slate-200 bg-white px-6 py-4">
+            <header className="flex shrink-0 items-center justify-between border-b border-slate-200 bg-white px-5 py-3">
               <div>
-                <h2 className="text-lg font-semibold text-slate-900">新建采购单</h2>
-                <p className="mt-1 text-xs text-slate-500">采购信息、商品明细、入库单号一次录入，最后统一保存整张单据。</p>
+                <h2 className="text-[16px] font-semibold tracking-tight text-slate-900">新建采购单</h2>
+                <p className="mt-1 text-[11px] text-slate-400">采购信息、商品明细、入库单号一次录入，最后统一保存整张单据。</p>
               </div>
-              <button type="button" onClick={onClose} disabled={busy} aria-label="关闭" className="rounded-lg px-3 py-1 text-xl text-slate-500 hover:bg-slate-100">×</button>
+              <button type="button" onClick={onClose} disabled={busy} aria-label="关闭" className="rounded-md px-2 py-1 text-xl text-slate-500 hover:bg-slate-100">×</button>
             </header>
-            <div className="min-h-0 flex-1 space-y-4 overflow-y-auto p-4 sm:p-6">
-              <section className="rounded-xl border border-slate-200 bg-white p-4">
-                <h3 className="mb-4 text-sm font-semibold text-slate-900">采购基本信息</h3>
-                <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+            <div className="min-h-0 flex-1 space-y-3 overflow-y-auto p-3 sm:p-4">
+              <section className="overflow-hidden rounded-lg border border-slate-200 bg-white shadow-sm">
+                <div className="border-b border-slate-100 px-4 py-2.5"><h3 className="text-[13px] font-semibold text-slate-900">采购参数</h3><p className="mt-0.5 text-[11px] text-slate-400">新建时录入主档；保存后可在采购详情页继续调整。</p></div>
+                <div className="p-4">
+                <div className="grid gap-x-3 gap-y-2.5 sm:grid-cols-2 lg:grid-cols-4">
                   <label><span className={labelClass}>供应商 *</span><input required autoFocus value={supplier} onChange={(e) => setSupplier(e.target.value)} className={inputClass} placeholder="供应商名称" maxLength={256} /></label>
                   <label><span className={labelClass}>采购渠道 *</span><select className={inputClass} value={platform} onChange={(e) => setPlatform(e.target.value)}><option value="1688">1688</option><option value="pdd">拼多多</option><option value="taobao">淘宝 / 天猫</option><option value="other">其他 / 线下</option></select></label>
                   <label><span className={labelClass}>采购订单号 *</span><input required value={orderNo} maxLength={128} onChange={(e) => setOrderNo(e.target.value)} className={inputClass} placeholder="优先填写平台原始订单号" /></label>
@@ -178,44 +181,48 @@ export function NewPurchaseModal({ onClose, onCreated, createdOrderId, renderCre
                   <label><span className={labelClass}>采购总金额（元）*</span><input type="number" min="0" step="0.01" required className={inputClass} value={orderAmount} onChange={(e) => setOrderAmount(e.target.value)} placeholder="订单应付金额" /></label>
                   <label><span className={labelClass}>已付款金额（元）*</span><input type="number" min="0" step="0.01" required className={inputClass} value={paidAmount} onChange={(e) => setPaidAmount(e.target.value)} /><span className="mt-1 block text-[11px] text-slate-400">未付款填 0，不自动视为已付款</span></label>
                 </div>
-                <div className="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                <div className="mt-2.5 grid gap-x-3 gap-y-2.5 sm:grid-cols-2 lg:grid-cols-3">
                   <label><span className={labelClass}>已有入库单号（手工优先）</span><input value={inboundNo} onChange={(e) => setInboundNo(e.target.value)} maxLength={128} className={inputClass} placeholder="输入你已有的入库单号" /></label>
                   <label><span className={labelClass}>发票号码参考（可选）</span><input value={invoiceNo} onChange={(e) => setInvoiceNo(e.target.value)} maxLength={128} className={inputClass} placeholder="待财务票据导入后正式匹配" /></label>
                   <label><span className={labelClass}>采购备注</span><input value={title} onChange={(e) => setTitle(e.target.value)} className={inputClass} placeholder="采购说明 / 特殊要求" /></label>
                 </div>
-                <p className="mt-3 text-xs leading-5 text-slate-500">有入库单号先精确关联已有记录；暂未同步时保留原号等待核对，不会自动生成一张假入库单，也不会直接增加库存。发票号只保存参考，实际发票状态以税务发票池为准。</p>
+                <p className="mt-2.5 text-[11px] leading-5 text-slate-400">有入库单号先精确关联已有记录；暂未同步时保留原号等待核对，不会自动生成一张假入库单，也不会直接增加库存。发票号只保存参考，实际发票状态以税务发票池为准。</p>
+                </div>
               </section>
 
-              <section className="rounded-xl border border-slate-200 bg-white p-4">
-                <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
-                  <div><h3 className="text-sm font-semibold text-slate-900">商品明细 <span className="font-normal text-slate-400">（{lines.filter((row) => row.itemId).length} 行）</span></h3><p className="mt-1 text-xs text-slate-500">正品、数量、金额和对应耗材一次录入，保存后自动核算耗材使用。</p></div>
-                  <button type="button" onClick={() => setLines((prev) => [...prev, { ...EMPTY_LINE, key: Math.max(...prev.map((row) => row.key)) + 1 }])} className="rounded-lg border border-indigo-200 px-3 py-2 text-xs font-medium text-indigo-700 hover:bg-indigo-50">+ 增加商品</button>
+              <section className="overflow-hidden rounded-lg border border-slate-200 bg-white shadow-sm">
+                <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-100 px-4 py-2.5">
+                  <div><h3 className="text-[13px] font-semibold text-slate-900">商品明细 <span className="font-normal text-slate-400">（{lines.filter((row) => row.itemId).length} 行）</span></h3><p className="mt-0.5 text-[11px] text-slate-400">正品、数量、金额和对应耗材一次录入，保存后自动核算耗材使用。</p></div>
+                  <button type="button" onClick={() => setLines((prev) => [...prev, { ...EMPTY_LINE, key: Math.max(...prev.map((row) => row.key)) + 1 }])} className="rounded-md bg-indigo-600 px-3 py-1.5 text-[11px] font-medium text-white shadow-[0_4px_12px_rgba(79,70,229,.2)] hover:bg-indigo-700">+ 新增商品</button>
                 </div>
+                <div className="p-4">
                 {catalogError ? <p className="mb-2 text-xs text-red-600">{catalogError}</p> : null}
-                <label className="mb-3 block max-w-lg"><span className={labelClass}>搜索商品档案</span><input className={inputClass} value={search} onChange={(e) => setSearch(e.target.value)} placeholder="搜索 SKU、商品名称或耗材代码" /></label>
-                <div className="space-y-2">
+                <label className="mb-2.5 block max-w-[420px]"><span className={labelClass}>搜索商品档案</span><input className={inputClass} value={search} onChange={(e) => setSearch(e.target.value)} placeholder="搜索 SKU、商品名称或耗材代码" /></label>
+                <div className="overflow-x-auto rounded-md border border-slate-100">
+                  <div className="grid min-w-[940px] grid-cols-[2.5rem_1.5fr_90px_115px_1.1fr_95px_40px] gap-2 bg-slate-50 px-3 py-2 text-[11px] font-medium text-slate-500"><span>#</span><span>{orderKind === "goods" ? "商品 SKU" : "耗材"}</span><span>数量</span><span>金额</span><span>耗材名称</span><span>使用量</span><span /></div>
                   {lines.map((line, index) => (
-                    <div key={line.key} className="grid items-end gap-2 rounded-lg border border-slate-100 bg-slate-50 p-3 sm:grid-cols-[2.5rem_1.5fr_90px_115px_1.1fr_95px_40px]">
-                      <div className="pb-2 text-center text-xs text-slate-400">{index + 1}</div>
-                      <label><span className={labelClass}>{orderKind === "goods" ? "商品 SKU" : "耗材"}</span><select className={inputClass} value={line.itemId} onChange={(e) => updateLine(line.key, "itemId", e.target.value)}><option value="">选择商品</option>{candidates.map((item) => <option key={item.id} value={item.id}>{item.code} · {item.name} ({item.unit})</option>)}</select></label>
-                      <label><span className={labelClass}>数量</span><input type="number" min="0.0001" step="0.0001" value={line.quantity} onChange={(e) => updateLine(line.key, "quantity", e.target.value)} className={inputClass} /></label>
-                      <label><span className={labelClass}>行总价（元）</span><input type="number" min="0" step="0.01" value={line.amount} onChange={(e) => updateLine(line.key, "amount", e.target.value)} className={inputClass} placeholder="含税总价" /></label>
-                      <label><span className={labelClass}>耗材名称</span><select className={inputClass} value={line.consumableId} onChange={(e) => updateLine(line.key, "consumableId", e.target.value)}><option value="">不指定</option>{materials.map((item) => <option key={item.id} value={item.id}>{item.code} · {item.name}</option>)}</select></label>
-                      <label><span className={labelClass}>耗材使用量</span><input type="number" min="0.0001" step="0.0001" value={line.consumableQuantity} onChange={(e) => updateLine(line.key, "consumableQuantity", e.target.value)} className={inputClass} placeholder="总用量" disabled={!line.consumableId} /></label>
-                      <button type="button" disabled={lines.length === 1} onClick={() => setLines((prev) => prev.filter((row) => row.key !== line.key))} className="h-9 rounded-lg text-lg text-slate-400 hover:bg-red-50 hover:text-red-600 disabled:opacity-30" title="删除此行">×</button>
+                    <div key={line.key} className="grid min-w-[940px] grid-cols-[2.5rem_1.5fr_90px_115px_1.1fr_95px_40px] items-end gap-2 border-t border-slate-50 px-3 py-2 hover:bg-slate-50/50">
+                      <div className="pb-2 text-center text-[11px] text-slate-400">{index + 1}</div>
+                      <label><span className="sr-only">{orderKind === "goods" ? "商品 SKU" : "耗材"}</span><select aria-label={orderKind === "goods" ? "商品 SKU" : "耗材"} className={inputClass} value={line.itemId} onChange={(e) => updateLine(line.key, "itemId", e.target.value)}><option value="">选择商品</option>{candidates.map((item) => <option key={item.id} value={item.id}>{item.code} · {item.name} ({item.unit})</option>)}</select></label>
+                      <label><span className="sr-only">数量</span><input aria-label="数量" type="number" min="0.0001" step="0.0001" value={line.quantity} onChange={(e) => updateLine(line.key, "quantity", e.target.value)} className={inputClass} /></label>
+                      <label><span className="sr-only">行总价（元）</span><input aria-label="行总价（元）" type="number" min="0" step="0.01" value={line.amount} onChange={(e) => updateLine(line.key, "amount", e.target.value)} className={inputClass} placeholder="含税总价" /></label>
+                      <label><span className="sr-only">耗材名称</span><select aria-label="耗材名称" className={inputClass} value={line.consumableId} onChange={(e) => updateLine(line.key, "consumableId", e.target.value)}><option value="">不指定</option>{materials.map((item) => <option key={item.id} value={item.id}>{item.code} · {item.name}</option>)}</select></label>
+                      <label><span className="sr-only">耗材使用量</span><input aria-label="耗材使用量" type="number" min="0.0001" step="0.0001" value={line.consumableQuantity} onChange={(e) => updateLine(line.key, "consumableQuantity", e.target.value)} className={inputClass} placeholder="总用量" disabled={!line.consumableId} /></label>
+                      <button type="button" disabled={lines.length === 1} onClick={() => setLines((prev) => prev.filter((row) => row.key !== line.key))} className="h-8 rounded-md text-lg text-slate-400 hover:bg-red-50 hover:text-red-600 disabled:opacity-30" title="删除此行">×</button>
                     </div>
                   ))}
                 </div>
-                <div className="mt-4 flex flex-wrap justify-end gap-5 text-sm text-slate-700">
+                </div>
+                <div className="flex flex-wrap justify-end gap-5 border-t border-slate-100 bg-slate-50/50 px-4 py-2 text-[11px] text-slate-700">
                   <span>明细合计 <strong>¥{totalLines.toFixed(2)}</strong></span>
                   <span>与订单金额差额 <strong className={Math.abs(Number(orderAmount || 0) - totalLines) > 0.01 ? "text-amber-700" : "text-emerald-700"}>¥{(Number(orderAmount || 0) - totalLines).toFixed(2)}</strong></span>
                 </div>
-                <p className="mt-1 text-right text-xs text-slate-400">金额不一致时可保存待核对；运费等差额不冒充商品成本。</p>
+                <p className="mt-1 text-right text-[11px] text-slate-400">金额不一致时可保存待核对；运费等差额不冒充商品成本。</p>
               </section>
             </div>
-            <footer className="flex shrink-0 flex-wrap items-center justify-between gap-3 border-t border-slate-200 bg-white px-6 py-4">
-              <div className="max-w-[75%] text-xs text-slate-500">{error ? <span role="alert" className="text-red-600">{error}</span> : "一次提交整张单；若任何关键写入失败，后台会回滚，不会只保存一半。"}</div>
-              <div className="flex gap-2"><button type="button" disabled={busy} onClick={onClose} className="rounded-lg border border-slate-200 px-4 py-2 text-sm text-slate-600">取消</button><button type="submit" disabled={busy || Boolean(catalogError)} className="rounded-lg bg-indigo-600 px-5 py-2 text-sm font-semibold text-white hover:bg-indigo-700 disabled:opacity-50">{busy ? "保存中…" : "保存整张采购单"}</button></div>
+            <footer className="flex shrink-0 flex-wrap items-center justify-between gap-3 border-t border-slate-200 bg-white px-5 py-3">
+              <div className="max-w-[75%] text-[11px] text-slate-500">{error ? <span role="alert" className="text-red-600">{error}</span> : "一次提交整张单；若任何关键写入失败，后台会回滚，不会只保存一半。"}</div>
+              <div className="flex gap-2"><button type="button" disabled={busy} onClick={onClose} className="rounded-md border border-slate-200 px-4 py-2 text-[12px] text-slate-600">取消</button><button type="submit" disabled={busy || Boolean(catalogError)} className="rounded-md bg-indigo-600 px-5 py-2 text-[12px] font-semibold text-white hover:bg-indigo-700 disabled:opacity-50">{busy ? "保存中…" : "保存整张采购单"}</button></div>
             </footer>
           </form>
         )}
