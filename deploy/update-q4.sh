@@ -11,6 +11,10 @@ case "$DEPLOY_DIR" in
 esac
 COMPOSE_FILE=${COFFEEBEAR_COMPOSE_FILE:-"$DEPLOY_DIR/docker-compose.yml"}
 ENV_FILE=${COFFEEBEAR_ENV_FILE:-"$DEPLOY_DIR/.env"}
+# Retain the deployment account's ownership when this script is invoked from
+# the updater container (which runs as root).  The host-side scheduled updater
+# must still be able to read .env on its next run.
+ENV_OWNER=$(stat -c '%u:%g' "$ENV_FILE" 2>/dev/null || true)
 
 usage() {
   echo "用法：$0 ghcr.io/jinfenghua1990/coffeebear:vYYYY.MM.DD.HHmmss [更新器镜像]" >&2
@@ -116,6 +120,7 @@ set_image() {
   fi
   chmod 600 "$tmp"
   mv "$tmp" "$ENV_FILE"
+  [ -z "$ENV_OWNER" ] || chown "$ENV_OWNER" "$ENV_FILE"
 }
 
 set_updater_image() {
@@ -133,6 +138,7 @@ set_updater_image() {
   fi
   chmod 600 "$tmp"
   mv "$tmp" "$ENV_FILE"
+  [ -z "$ENV_OWNER" ] || chown "$ENV_OWNER" "$ENV_FILE"
 }
 
 # 镜像层下载偶发 unexpected EOF / 网络中断时，自动重试完整 pull。
@@ -208,7 +214,9 @@ if [ -n "${GHCR_USERNAME:-}" ] && [ -n "${GHCR_TOKEN:-}" ]; then
 fi
 if ! set_image "$TARGET_IMAGE"; then exit 1; fi
 if [ -n "$TARGET_UPDATER_IMAGE" ] && ! set_updater_image "$TARGET_UPDATER_IMAGE"; then restore_config; exit 1; fi
-if [ -n "$TARGET_UPDATER_IMAGE" ]; then
+if [ "${COFFEEBEAR_IMAGE_PREVERIFIED:-}" = "1" ] && docker image inspect "$TARGET_IMAGE" >/dev/null 2>&1; then
+  echo "目标镜像已在本机完成摘要校验，跳过对 ghcr.io 的重复拉取。"
+elif [ -n "$TARGET_UPDATER_IMAGE" ]; then
   if ! pull_with_retry --profile ops --profile updater pull api worker beat migrate updater update-job; then
     restore_config
     echo "镜像拉取失败，已恢复原镜像配置；现有容器未切换。" >&2
