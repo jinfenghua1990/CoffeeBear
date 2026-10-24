@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Restricted internal updater for CoffeeBear's NAS Compose deployment."""
 from __future__ import annotations
-import json, os, re, secrets, subprocess, threading, time, urllib.error, urllib.parse, urllib.request
+import base64, json, os, re, secrets, subprocess, threading, time, urllib.error, urllib.parse, urllib.request
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -65,10 +65,32 @@ def log(message: str) -> None:
     logs.append(f"[{now()}] {message}")
     write_status(logs=logs[-160:], message=message)
 
-def request_json(url: str, timeout: int = 15) -> dict[str, Any]:
-    req = urllib.request.Request(url, headers={"Accept":"application/vnd.github+json","User-Agent":"CoffeeBear-NAS-Updater","X-GitHub-Api-Version":"2022-11-28"})
-    with urllib.request.urlopen(req, timeout=timeout) as response:
-        value = json.loads(response.read(2_000_000).decode("utf-8"))
+def request_bytes(url: str, *, headers: dict[str, str], timeout: int = 30, limit: int = 2_000_000) -> bytes:
+    """Fetch a small trusted release resource with bounded retries.
+
+    NAS connections may intermittently reset or stall while GitHub's raw host is
+    reachable through a proxy.  A transient read failure must never turn into a
+    failed deployment before the backup/install job has even started.
+    """
+    errors: list[str] = []
+    for attempt in range(3):
+        try:
+            req = urllib.request.Request(url, headers=headers)
+            with urllib.request.urlopen(req, timeout=timeout) as response:
+                body = response.read(limit + 1)
+            if len(body) > limit:
+                raise RuntimeError("GitHub 返回内容超过安全大小限制")
+            return body
+        except (OSError, TimeoutError, urllib.error.URLError) as exc:
+            errors.append(str(exc))
+            if attempt < 2:
+                time.sleep(2 ** attempt)
+    raise RuntimeError(f"GitHub 读取连续失败（已重试 3 次）：{errors[-1] if errors else '未知错误'}")
+
+def request_json(url: str, timeout: int = 30) -> dict[str, Any]:
+    value = json.loads(request_bytes(url, timeout=timeout, headers={
+        "Accept":"application/vnd.github+json", "User-Agent":"CoffeeBear-NAS-Updater", "X-GitHub-Api-Version":"2022-11-28"
+    }).decode("utf-8"))
     if not isinstance(value, dict): raise RuntimeError("GitHub 返回了无法识别的响应")
     return value
 
@@ -91,6 +113,7 @@ def latest_release() -> dict[str, Any]:
 def build_status(current_sha: str, current_version: str, current_image: str) -> dict[str, Any]:
     release = latest_release()
     available = current_sha != release["sourceSha"] if SHA_RE.fullmatch(current_sha) else current_version != release["tag"]
+    displayed_current_version = release["tag"] if not available else (current_version or current_image or "未知版本")
     commits = [{"sha":release["sourceSha"],"shortSha":release["sourceSha"][:10],
                 "subject":release["name"],"committedAt":release["publishedAt"],"version":release["tag"]}] if available else []
     return {
@@ -99,7 +122,7 @@ def build_status(current_sha: str, current_version: str, current_image: str) -> 
         "currentImageRef":current_image,"latestImageRef":release["appImageRef"],
         "latestUpdaterImageRef":release["updaterImageRef"],"latestReleaseUrl":release["url"],
         "latestReleaseTag":release["tag"],"updateAvailable":available,
-        "currentCommit":{"sha":current_sha,"shortSha":current_sha[:10],"subject":"当前运行版本","committedAt":"","version":current_version or current_image or "未知版本"},
+        "currentCommit":{"sha":current_sha,"shortSha":current_sha[:10],"subject":"当前运行版本","committedAt":"","version":displayed_current_version},
         "latestCommit":{"sha":release["sourceSha"],"shortSha":release["sourceSha"][:10],"subject":release["name"],"committedAt":release["publishedAt"],"version":release["tag"]},
         "changes":commits,"changedFiles":[],"changedFileCount":0,"updateLevel":"feature" if available else "patch",
         "updateLevelLabel":"功能版本" if available else "小版本","hasMigration":False,"impactedModules":[],
@@ -110,6 +133,15 @@ def build_status(current_sha: str, current_version: str, current_image: str) -> 
         "updateAgentAvailable":True,"updateAgentError":"",
     }
 
+def display_current_version(status: dict[str, Any], current_sha: str, runtime_version: str) -> str:
+    """Prefer the validated release tag when a digest-only runtime reports a SHA."""
+    latest = status.get("latestCommit") if isinstance(status.get("latestCommit"), dict) else {}
+    latest_sha = str(latest.get("sha") or "")
+    latest_version = str(latest.get("version") or "")
+    if current_sha and current_sha == latest_sha and VERSION_RE.fullmatch(latest_version):
+        return latest_version
+    return runtime_version or str((status.get("currentCommit") or {}).get("version") or "未知版本")
+
 def registry_login() -> None:
     username, password = (os.environ.get("GHCR_USERNAME") or "").strip(), (os.environ.get("GHCR_TOKEN") or "").strip()
     if not username or not password: return
@@ -117,12 +149,29 @@ def registry_login() -> None:
                             stdout=subprocess.PIPE,stderr=subprocess.STDOUT,timeout=30,check=False)
     if result.returncode: raise RuntimeError("GHCR 登录失败，请检查 GHCR_USERNAME / GHCR_TOKEN")
 
+def fetch_release_update_script(tag: str) -> str:
+    """Get the signed release script via two independent GitHub endpoints."""
+    raw_url = f"https://raw.githubusercontent.com/{REPOSITORY}/{urllib.parse.quote(tag, safe='')}/deploy/update-q4.sh"
+    try:
+        return request_bytes(raw_url, timeout=45, limit=512_000, headers={"User-Agent":"CoffeeBear-NAS-Updater"}).decode("utf-8")
+    except Exception as raw_error:
+        # The GitHub Contents API uses a different network route from the raw
+        # host.  It is a safe fallback because the release tag is validated
+        # before this function is called and the returned script is checked
+        # again below.
+        api_url = f"https://api.github.com/repos/{REPOSITORY}/contents/deploy/update-q4.sh?ref={urllib.parse.quote(tag, safe='')}"
+        try:
+            item = request_json(api_url, timeout=45)
+            if item.get("encoding") != "base64" or not isinstance(item.get("content"), str):
+                raise RuntimeError("GitHub Contents API 未返回 base64 脚本内容")
+            return base64.b64decode(item["content"], validate=True).decode("utf-8")
+        except Exception as api_error:
+            raise RuntimeError(f"无法获取正式更新脚本：Raw 失败（{raw_error}）；GitHub API 备用通道失败（{api_error}）") from api_error
+
 def run_update(release: dict[str, Any], actor: str) -> None:
     try:
         script_path = STATE_DIR / f"update-q4-{release['tag']}.sh"
-        url = f"https://raw.githubusercontent.com/{REPOSITORY}/{release['tag']}/deploy/update-q4.sh"
-        req = urllib.request.Request(url, headers={"User-Agent":"CoffeeBear-NAS-Updater"})
-        with urllib.request.urlopen(req, timeout=20) as response: script = response.read(512_000).decode("utf-8")
+        script = fetch_release_update_script(release["tag"])
         if "CoffeeBear" not in script or "UPDATE_AGENT_IMAGE" not in script:
             raise RuntimeError("正式版本中的 NAS 更新脚本未通过校验")
         script_path.write_text(script, encoding="utf-8")
@@ -237,8 +286,8 @@ class Handler(BaseHTTPRequestHandler):
         status.setdefault("settings",{"enabled":True,"mode":"auto_update","checkIntervalMinutes":60,"autoUpdateHour":3,
                                      "autoUpdateWindowMinutes":60,"autoInstallLevel":"patch","branch":"main","remote":"origin"})
         if current_sha: status["currentSha"]=current_sha
-        if current_version:
-            status["currentCommit"]={"sha":current_sha,"shortSha":current_sha[:10],"subject":"当前运行版本","committedAt":"","version":current_version}
+        if current_sha or current_version:
+            status["currentCommit"]={"sha":current_sha,"shortSha":current_sha[:10],"subject":"当前运行版本","committedAt":"","version":display_current_version(status, current_sha, current_version)}
         if current_image: status["currentImageRef"]=current_image
         status["updateAgentAvailable"]=True; status["updateAgentError"]=""
         self.send_json(200,status)
