@@ -65,6 +65,17 @@ function number(value: string | null | undefined) {
   return Number.isFinite(parsed) ? parsed : 0;
 }
 
+/**
+ * 「到货入库 → 手工关联」依赖的三个接口后端尚未实现：
+ *   GET  /api/v1/supply-chain/production-orders/{id}/inbound-candidates
+ *   GET  /api/v1/supply-chain/production-inbound-allocations
+ *   POST /api/v1/supply-chain/production-orders/{id}/inbound-links
+ * 全仓库 App 层都搜不到对应路由，请求必然是 404。这里显式关掉，
+ * 页面改成如实说明「功能未接通」，而不是让用户对着一串加载失败猜是不是自己点错了。
+ * 后端补齐后把这个开关打开即可恢复。
+ */
+const INBOUND_LINK_API_READY = false;
+
 function qty(value: string | number, digits = 1) {
   const parsed = Number(value);
   if (!Number.isFinite(parsed)) return String(value);
@@ -147,6 +158,13 @@ export default function ReceivingPage() {
       setAllocations([]);
       return;
     }
+    if (!INBOUND_LINK_API_READY) {
+      // 后端没有这两个接口，发出请求只会换来两条 404；直接置空，由页面顶部说明原因。
+      setCandidates([]);
+      setAllocations([]);
+      setLoadingCandidates(false);
+      return;
+    }
     setLoadingCandidates(true);
     setError("");
     try {
@@ -182,6 +200,11 @@ export default function ReceivingPage() {
 
   async function linkInbound(candidate: Candidate) {
     if (!selected) return;
+    if (!INBOUND_LINK_API_READY) {
+      setNotice("");
+      setError("该功能的后端接口尚未上线，暂时无法提交关联");
+      return;
+    }
     const quantity = quantities[candidate.inboundItemId] || candidate.suggestedLinkQty;
     if (number(quantity) <= 0) {
       setError("关联入库数量必须大于 0");
@@ -236,6 +259,10 @@ export default function ReceivingPage() {
         </div>
       </header>
 
+      {!INBOUND_LINK_API_READY && <div className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm leading-6 text-amber-800">
+        <b>该页面暂不可用</b>：手工关联吉客云入库单依赖的接口（入库候选 / 已关联记录 / 提交关联）后端还没有实现，所以下方只能看生产单的到货数量，候选列表永远为空、也无法提交关联。
+        这是功能未完成，不是数据问题，也不影响库存计算 —— 库存仍由吉客云出入库单据独立运算。
+      </div>}
       {error && <div className="rounded-lg bg-red-50 px-4 py-3 text-sm text-red-700">{error}</div>}
       {notice && <div className="rounded-lg bg-emerald-50 px-4 py-3 text-sm text-emerald-700">{notice}</div>}
 
@@ -288,11 +315,11 @@ export default function ReceivingPage() {
                     <td className="px-3 py-3"><div className="text-xs text-slate-700">{candidate.warehouseName || "—"}</div><div className="mt-1 max-w-[180px] truncate text-[10px] text-slate-400">{candidate.supplierName || "供应商未提供"}</div></td>
                     <td className="px-3 py-3 tabular-nums text-slate-600">{qty(candidate.inboundItemQuantity)}</td>
                     <td className="px-3 py-3 font-semibold tabular-nums text-emerald-700">{qty(candidate.inboundItemAvailableQty)}</td>
-                    <td className="px-3 py-3"><div className="flex items-center gap-1.5"><input type="number" min="0.0001" step="1" value={quantities[candidate.inboundItemId] ?? candidate.suggestedLinkQty} onChange={(e) => setQuantities((current) => ({ ...current, [candidate.inboundItemId]: e.target.value }))} className="w-24 rounded-md border border-slate-200 px-2 py-1.5 text-xs" /><button onClick={() => linkInbound(candidate)} disabled={workingId !== null} className="rounded-md bg-indigo-600 px-2.5 py-1.5 text-[11px] font-medium text-white disabled:opacity-40">{workingId === candidate.inboundItemId ? "关联中…" : "确认关联"}</button></div><div className="mt-1 text-[10px] text-slate-400">建议 {qty(candidate.suggestedLinkQty)}</div></td>
+                    <td className="px-3 py-3"><div className="flex items-center gap-1.5"><input type="number" min="0.0001" step="1" value={quantities[candidate.inboundItemId] ?? candidate.suggestedLinkQty} onChange={(e) => setQuantities((current) => ({ ...current, [candidate.inboundItemId]: e.target.value }))} className="w-24 rounded-md border border-slate-200 px-2 py-1.5 text-xs" /><button onClick={() => linkInbound(candidate)} disabled={!INBOUND_LINK_API_READY || workingId !== null} className="rounded-md bg-indigo-600 px-2.5 py-1.5 text-[11px] font-medium text-white disabled:opacity-40">{workingId === candidate.inboundItemId ? "关联中…" : "确认关联"}</button></div><div className="mt-1 text-[10px] text-slate-400">建议 {qty(candidate.suggestedLinkQty)}</div></td>
                   </tr>)}
                 </tbody>
               </table>
-              {!loadingCandidates && candidates.length === 0 && <div className="p-8 text-center text-sm text-slate-400">暂未找到可匹配的吉客云真实入库明细。请先同步或导入吉客云入库单，并确认 SKU 匹配。</div>}
+              {!loadingCandidates && candidates.length === 0 && <div className="p-8 text-center text-sm text-slate-400">{INBOUND_LINK_API_READY ? "暂未找到可匹配的吉客云真实入库明细。请先同步或导入吉客云入库单，并确认 SKU 匹配。" : "后端接口未上线，这里不会返回任何候选入库明细。"}</div>}
               {loadingCandidates && <div className="p-8 text-center text-sm text-slate-400">正在读取吉客云入库候选…</div>}
             </div>
 
