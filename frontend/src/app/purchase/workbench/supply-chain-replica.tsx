@@ -20,6 +20,8 @@ type Props = {
   detail: WorkbenchDetail | null;
   loading: boolean;
   detailLoading: boolean;
+  /** 我正在等的订单号：detail 还是上一张单时用它判断「内容已过期、正在换单」。 */
+  pendingOrderId?: number | null;
   alibaba1688Job: Alibaba1688BrowserJob | null;
   refreshBusy: boolean;
   exportBusy: boolean;
@@ -676,11 +678,14 @@ function ProductDetailCard({ orderId, orderKind, products, rawOrderItems, hasAll
   </DetailCard>;
 }
 
-function SupplyChainDetail({ detail, loading, onRefresh, refreshBusy, onOpenOperations, onCloseOperations, operationsOpen, onOpenWorkbenchView }: Pick<Props, "detail" | "onRefresh" | "refreshBusy" | "onOpenOperations" | "onCloseOperations" | "operationsOpen" | "onOpenWorkbenchView"> & { loading: boolean }) {
+function SupplyChainDetail({ detail, loading, pendingOrderId, onRefresh, refreshBusy, onOpenOperations, onCloseOperations, operationsOpen, onOpenWorkbenchView }: Pick<Props, "detail" | "pendingOrderId" | "onRefresh" | "refreshBusy" | "onOpenOperations" | "onCloseOperations" | "operationsOpen" | "onOpenWorkbenchView"> & { loading: boolean }) {
   if (loading && !detail) return <section className="flex h-full min-h-0 items-center justify-center rounded-xl border border-slate-200 bg-white text-[13px] text-slate-400">正在读取订单明细…</section>;
   if (!detail) return <section className="flex h-full min-h-0 items-center justify-center rounded-xl border border-slate-200 bg-white text-[13px] text-slate-400">选择上方订单后，在这里查看供应链明细。</section>;
 
   const { order } = detail;
+  // 换单期间 detail 仍是上一张单（避免整块塌陷重绘），这里只标记「还没换成目标单」，
+  // 用顶部细进度条 + 标题旁小字说明，内容原位等数据到了再替换。
+  const pendingSwap = pendingOrderId != null && order.orderId !== pendingOrderId;
   const wh: DetailWarehouse = detail.warehouse || { warehouseName: "", jackyunWarehouseId: "", isSellable: null, currentStock: null, inTransitQty: 0 };
   const allocations = (detail.detail.allocations || []) as DetailAllocation[];
   const rawOrderItems = (detail.detail.orderItems || []) as DetailOrderItem[];
@@ -714,11 +719,13 @@ function SupplyChainDetail({ detail, loading, onRefresh, refreshBusy, onOpenOper
   ];
   const detailsHref = `/purchase/workbench?view=orders&order=${order.orderId}`;
 
-  return <section id="purchase-order-detail" className="flex h-full min-h-0 flex-col overflow-hidden rounded-xl border border-slate-200 bg-[#fbfcff] shadow-[0_3px_16px_rgba(51,78,126,.04)]">
+  return <section id="purchase-order-detail" className="relative flex h-full min-h-0 flex-col overflow-hidden rounded-xl border border-slate-200 bg-[#fbfcff] shadow-[0_3px_16px_rgba(51,78,126,.04)]">
+    {pendingSwap && <span aria-hidden className="pointer-events-none absolute inset-x-0 top-0 z-10 h-[2px] animate-pulse bg-blue-500/70" />}
     <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-b border-slate-200 bg-white px-4 py-1.5">
       <div className="flex min-w-0 items-center gap-2.5">
         <h2 className="truncate text-[17px] font-semibold tracking-tight text-slate-900">{order.orderNo}</h2>
         <span className={cx("shrink-0 rounded-md px-2 py-0.5 text-[10px] font-medium", statusTone(activeStatus))}>{activeStatus}</span>
+        {pendingSwap && <span className="shrink-0 text-[10px] text-blue-500">读取中…</span>}
         {activeStatus === "异常" && detailExceptionText ? <span className="min-w-0 truncate text-[11px] text-rose-500" title={detailExceptionText}>{detailExceptionText}</span> : null}
       </div>
       <div className="flex flex-wrap items-center gap-2">
@@ -790,8 +797,15 @@ export function SupplyChainReplica(props: Props) {
   }, [props.selectedOrderId]);
 
   useEffect(() => {
-    if (props.selectedOrderId === null || !props.orders.some((item) => item.orderId === props.selectedOrderId)) return;
-    selectedOrderRowRef.current?.scrollIntoView({ block: "nearest" });
+    const row = selectedOrderRowRef.current;
+    const scroller = ordersListRef.current;
+    if (!row || !scroller) return;
+    // 只在选中行被滚出可视区时才拉回来：每次点单都无条件 scrollIntoView，
+    // 会让列表跟着跳一下，和详情区的重绘叠在一起就是「点一下整页闪」。
+    const rowRect = row.getBoundingClientRect();
+    const boxRect = scroller.getBoundingClientRect();
+    if (rowRect.top >= boxRect.top && rowRect.bottom <= boxRect.bottom) return;
+    row.scrollIntoView({ block: "nearest" });
   }, [props.orders, props.selectedOrderId]);
 
   useEffect(() => {
@@ -972,6 +986,7 @@ export function SupplyChainReplica(props: Props) {
         <SupplyChainDetail
           detail={props.detail}
           loading={props.detailLoading}
+          pendingOrderId={props.pendingOrderId}
           onRefresh={props.onRefresh}
           refreshBusy={props.refreshBusy}
           onOpenOperations={props.onOpenOperations}

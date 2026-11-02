@@ -433,7 +433,9 @@ export default function PurchaseWorkbenchPage() {
   useEffect(() => {
     setView(parseWorkbenchView(searchParams.get("view")));
     const orderId = Number(searchParams.get("order"));
-    if (Number.isInteger(orderId) && orderId !== 0) { requestedOrder.current = orderId; setSelectedOrderId(orderId); }
+    // 只认正整数订单号：地址里带 order=-430 这类脏值时，旧逻辑会去请求一个不存在的单，
+    // 详情区就一直卡在「正在读取订单明细…」，反复点别的单还会再闪一次。
+    if (Number.isInteger(orderId) && orderId > 0) { requestedOrder.current = orderId; setSelectedOrderId(orderId); }
     if (searchParams.get("action") === "new") {
       requestedOrder.current = null;
       setOperationsOpen(false);
@@ -446,7 +448,9 @@ export default function PurchaseWorkbenchPage() {
       setStatusFilter(status as FilterKey);
     }
     const kind = searchParams.get("kind");
-    setKindFilter(kind === "goods" || kind === "consumable" ? kind : "all");
+    // 地址里没有 kind 时保持用户当前选择：无脑回写成 all 会连带触发 setPage(1) + 列表重拉，
+    // 点一张单却让整张列表闪一下就是这个副作用。
+    if (kind === "goods" || kind === "consumable" || kind === "all") setKindFilter(kind);
   }, [searchParams]);
 
   useEffect(() => {
@@ -686,18 +690,25 @@ export default function PurchaseWorkbenchPage() {
     else if (view === "suppliers") void loadSuppliers();
   }, [loadChain, loadMatching, loadOrders, loadSuppliers, pageActive, view]);
 
+  // 换单时不再把 detail 清空：先 setOrderDetail(null) 会让详情区先塌成
+  // 「正在读取订单明细…」占位、数据回来再撑开，点一次就闪两下。
+  // 现在保留上一张单的内容，等新数据到了原地替换（顶部细进度条由 detailLoading 驱动）。
   useEffect(() => {
     if (!pageActive) return;
     if (view !== "orders" || selectedOrderId === null) {
       setOrderDetail(null);
+      setDetailLoading(false);
       return;
     }
     let cancelled = false;
-    setOrderDetail(null);
     setDetailLoading(true);
     procurementWorkbenchApi.workbench(selectedOrderId)
       .then((detail) => { if (!cancelled) setOrderDetail(detail); })
-      .catch(() => { if (!cancelled) setOrderDetail(null); })
+      .catch(() => {
+        if (cancelled) return;
+        setOrderDetail(null);
+        setError("订单明细加载失败，请点「同步最新」重试");
+      })
       .finally(() => { if (!cancelled) setDetailLoading(false); });
     return () => { cancelled = true; };
   }, [pageActive, selectedOrderId, view]);
@@ -958,6 +969,7 @@ export default function PurchaseWorkbenchPage() {
           detail={newOrderOpen ? null : orderDetail}
           loading={loading}
           detailLoading={detailLoading}
+          pendingOrderId={newOrderOpen ? null : selectedOrderId}
           refreshBusy={busyAction === "refresh"}
           exportBusy={busyAction === "export"}
           statusFilter={statusFilter}
@@ -997,7 +1009,7 @@ export default function PurchaseWorkbenchPage() {
         {(notice || error) && <div className="fixed bottom-5 right-5 z-toast max-w-md rounded-lg border border-blue-100 bg-white px-4 py-3 text-[12px] text-slate-700 shadow-xl"><div className="flex items-start gap-3"><span className={error ? "text-rose-600" : "text-blue-600"}>{error || notice}</span><button onClick={() => { setNotice(""); setError(""); }} className="shrink-0 text-slate-400 hover:text-slate-700">×</button></div></div>}
         {operationsOpen && <div className="fixed inset-0 z-modal flex items-start justify-center overflow-y-auto bg-slate-950/35 p-3 sm:p-6" onMouseDown={(event) => { if (event.target === event.currentTarget) setOperationsOpen(false); }} role="dialog" aria-modal="true" aria-label="编辑采购订单">
           <div className="my-auto flex h-[90vh] w-full max-w-[1440px] max-h-[calc(100vh-32px)] flex-col overflow-hidden rounded-xl border border-slate-200 bg-[#f7f9fd] shadow-2xl">
-            <div className="flex min-h-0 flex-1 flex-col"><OrderDetailPanel key={selectedOrderId} detail={orderDetail} loading={detailLoading} onOrderChanged={refreshSelectedOrder} onOrderDeleted={(message) => { setNotice(message); setOperationsOpen(false); void removeDeletedOrder(); }} onOpenSupplier={(name) => { setOperationsOpen(false); setSelectedSupplierName(name); changeView("suppliers"); }} onCloseDialog={() => setOperationsOpen(false)} /></div>
+            <div className="flex min-h-0 flex-1 flex-col"><OrderDetailPanel detail={orderDetail?.order.orderId === selectedOrderId ? orderDetail : null} loading={detailLoading} onOrderChanged={refreshSelectedOrder} onOrderDeleted={(message) => { setNotice(message); setOperationsOpen(false); void removeDeletedOrder(); }} onOpenSupplier={(name) => { setOperationsOpen(false); setSelectedSupplierName(name); changeView("suppliers"); }} onCloseDialog={() => setOperationsOpen(false)} /></div>
           </div>
         </div>}
         {newPurchaseDialog}
