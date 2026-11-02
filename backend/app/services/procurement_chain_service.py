@@ -1901,9 +1901,19 @@ def _external_of(db: Session, pf: ChainPrefetch | None, order_no: str) -> Extern
             ),
             None,
         )
-    return db.query(ExternalPurchaseOrder).filter_by(
-        external_order_id=order_no, platform="1688"
-    ).order_by(ExternalPurchaseOrder.id.desc()).first()
+    return next(
+        (
+            po
+            for po in db.query(ExternalPurchaseOrder)
+            .filter_by(external_order_id=order_no, platform="1688")
+            .order_by(ExternalPurchaseOrder.id.desc())
+            .all()
+            # 与预加载分支同一口径：referenceOnly 副本只是入库文件里的参考编号，
+            # 不能当成这张单的工作流副本（点查分支此前漏了这个判断）。
+            if not is_reference_only_external_po(po)
+        ),
+        None,
+    )
 
 
 def _pair_supplier_key(

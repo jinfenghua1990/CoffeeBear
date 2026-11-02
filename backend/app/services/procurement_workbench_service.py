@@ -19,16 +19,17 @@ from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.core.audit import audit
-from app.models.alibaba1688_import import Alibaba1688Order
+from app.models.alibaba1688_import import Alibaba1688FileImport, Alibaba1688Order
 from app.models.catalog import Warehouse
 from app.models.consumable import Consumable
 from app.models.ops import ExceptionRecord
 from app.models.purchase import ExternalPurchaseOrder
+from app.services.import_lifecycle import filter_active_import, filter_active_rows
 from app.services.procurement_chain_service import (
     _order_row,
     _source_pairs,
     chain_snapshot,
-    order_supplier_history,
+    is_reference_only_external_po,
     supplier_detail,
     supplier_summaries,
 )
@@ -987,23 +988,62 @@ def list_orders(
     }
 
 
+def _supplier_suggestions(db: Session, limit: int = 30) -> list[str]:
+    """供应商输入框的联想候选：工作流副本里出现过的供应商名（去重）。
+
+    以前这个下拉喂的是 ``order_supplier_history``——为了几个名字，把全部订单
+    连同 6~8 张关联表全量预取一遍；而取回来的 recentOrders 其实都是同一个供应商，
+    候选全是重复值。改用 ``supplier_name`` 索引上的 distinct，单次请求成本接近 0。
+    """
+    rows = (
+        db.query(ExternalPurchaseOrder.supplier_name)
+        .filter(ExternalPurchaseOrder.supplier_name.isnot(None), ExternalPurchaseOrder.supplier_name != "")
+        .distinct()
+        .limit(limit)
+        .all()
+    )
+    return sorted({str(name).strip() for (name,) in rows if str(name or "").strip()})
+
+
 def workbench(db: Session, order_id: int) -> dict | None:
-    """选中订单的工作面板：5 步骤每步的状态 + 关键明细 + 跳转入口。"""
-    pairs, pf = chain_snapshot(db)
+    """选中订单的工作面板：5 步骤每步的状态 + 关键明细 + 跳转入口。
+
+    这里必须走点查：以前复用 ``chain_snapshot``，等于每次点开一张单都把
+    external_purchase_orders / alibaba1688_orders / 入库单 / 结算单 / 吉客云采购单
+    全表加载一遍（含 raw JSONB 解码），再在内存里线性找这一张。
+    ``_order_row`` 的约定就是「pf 为空走点查，只服务单条详情」，这里按约定传 None。
+    """
     order: Alibaba1688Order | None = None
     external: ExternalPurchaseOrder | None = None
-    for candidate_order, candidate_external in pairs:
-        candidate_id = candidate_order.id if candidate_order is not None else -candidate_external.id
-        if candidate_id == order_id:
-            order, external = candidate_order, candidate_external
-            break
+    if order_id > 0:
+        # 与列表口径一致：只认 row_status=active 且批次仍有效的文件订单
+        order = (
+            filter_active_rows(
+                filter_active_import(
+                    db.query(Alibaba1688Order), Alibaba1688Order, Alibaba1688FileImport, Alibaba1688Order.import_id
+                ),
+                Alibaba1688Order,
+            )
+            .filter(Alibaba1688Order.id == order_id)
+            .first()
+        )
+    elif order_id < 0:
+        external = db.query(ExternalPurchaseOrder).filter(ExternalPurchaseOrder.id == -order_id).first()
+        # 与列表口径一致：referenceOnly 副本和 platform 为空的历史行不进链路
+        if external is not None and (is_reference_only_external_po(external) or external.platform is None):
+            external = None
     if order is None and external is None:
         return None
-    if order is None and external is not None:
-        row = _order_row(db, None, external, pf=pf)
-    else:
-        row = _order_row(db, order, external, pf=pf)
-    _enrich_allocation_inventory(db, row)
+    # 正数 id 时 external 由 _order_row 按单号点查补上，配对规则与列表一致
+    row = _order_row(db, order, external, pf=None)
+    # 正品库存 = 全量入库 − 全量出库，算一次给「明细行库存」和「仓库卡」共用；
+    # 没有分配行时算它纯属浪费，留给 _warehouse_block 自己按需计算。
+    positions: dict[str, Any] | None = None
+    if row.get("allocations"):
+        from app.services.inventory_position_service import current_positions
+
+        positions = current_positions(db)
+    _enrich_allocation_inventory(db, row, positions)
     states = _step_states(row)
     closeout_stage_value = closeout_stage(row, states)
     supplier = row.get("supplier") or ""
@@ -1058,12 +1098,14 @@ def workbench(db: Session, order_id: int) -> dict | None:
             "unallocatedAmount": row.get("unallocatedAmount"),
         },
         "stepTotal": WORKBENCH_TOTAL,
-        "warehouse": _warehouse_block(db, row),
-        "supplierHistory": order_supplier_history(db, supplier, exclude_order_id=row["orderId"]) if supplier else None,
+        "warehouse": _warehouse_block(db, row, positions),
+        # 供应商输入框的联想候选（前端只需名字）；不再为它做一次全量订单聚合
+        "supplierSuggestions": _supplier_suggestions(db),
+        "supplierHistory": None,
     }
 
 
-def _warehouse_block(db: Session, row: dict[str, Any]) -> dict[str, Any]:
+def _warehouse_block(db: Session, row: dict[str, Any], positions_arg: dict[str, Any] | None = None) -> dict[str, Any]:
     """仓库信息卡：目标仓库 + 吉客云仓库ID + 是否可售 + 当前库存 + 在途数量。
 
     全部来自本地已落库事实：仓库主档（Warehouses）、独立运算库存（采购入库 − 销售出库）、
@@ -1096,7 +1138,9 @@ def _warehouse_block(db: Session, row: dict[str, Any]) -> dict[str, Any]:
     current_stock_value: Decimal | None = None
     if wh is not None and sku_ids:
         from app.services.inventory_position_service import current_positions
-        positions = current_positions(db)
+        # 库存是「全量入库 − 全量出库」的运算结果，一张详情卡最多用到其中几行；
+        # 调用方算过一次就直接复用，避免同一请求里正品库存被算两遍。
+        positions = positions_arg if positions_arg is not None else current_positions(db)
         current_stock_value = sum(
             (
                 positions["by_sku_warehouse"].get(sku_id, {}).get(wh.id, Decimal("0"))
@@ -1126,7 +1170,7 @@ def _warehouse_block(db: Session, row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _enrich_allocation_inventory(db: Session, row: dict[str, Any]) -> None:
+def _enrich_allocation_inventory(db: Session, row: dict[str, Any], positions: dict[str, Any] | None = None) -> None:
     """给详情中的每条采购明细补充其对应仓库的当前库存。
 
     订单可能包含多个 SKU 或多张入库单，订单级 ``warehouse.currentStock`` 只是总览，
@@ -1136,9 +1180,10 @@ def _enrich_allocation_inventory(db: Session, row: dict[str, Any]) -> None:
     if not allocations:
         return
 
-    from app.services.inventory_position_service import current_positions
+    if positions is None:
+        from app.services.inventory_position_service import current_positions
 
-    positions = current_positions(db)
+        positions = current_positions(db)
     warehouse_rows = db.query(Warehouse).all()
     warehouse_lookup: dict[str, Warehouse] = {}
     for warehouse in warehouse_rows:

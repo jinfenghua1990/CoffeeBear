@@ -3170,6 +3170,8 @@ export type WorkbenchDetail = {
     currentStock: number | null;
     inTransitQty: number;
   } | null;
+  /** 供应商输入框的联想候选（后端用 supplier_name 索引去重，不再为下拉做全量订单聚合）。 */
+  supplierSuggestions?: string[];
   supplierHistory: {
     orderCount: number;
     totalPurchase: number;

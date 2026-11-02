@@ -2553,7 +2553,7 @@ async function saveInboundAmount(documentId: number, value: string, note: string
                   <label className="w-[4.5em] shrink-0 text-[11px] text-slate-500">供应商<span className="ml-1 text-rose-500">*</span></label>
                   <input list={"purchase-supplier-" + order.orderId} value={mainForm.supplier} disabled={!mainEditable} onChange={(event) => setMainForm({ ...mainForm, supplier: event.target.value })} className="h-8 min-w-0 flex-1 rounded-md border border-slate-200 bg-white px-2 text-[12px] font-medium text-slate-700 outline-none focus:border-indigo-400 disabled:bg-slate-50" />
                   <datalist id={"purchase-supplier-" + order.orderId}>
-                    {detail.supplierHistory?.recentOrders.map((item) => <option key={item.orderId} value={item.supplier || ""} />)}
+                    {(detail.supplierSuggestions ?? detail.supplierHistory?.recentOrders.map((item) => item.supplier || "") ?? []).filter(Boolean).map((name) => <option key={name} value={name} />)}
                   </datalist>
                 </div>
                 <div className="flex min-w-0 items-center gap-2">
