@@ -750,6 +750,10 @@ _VALID_STATUSES = {
     "refine", "po", "inbound", "transit", "invoice", "exception",
 }
 
+# API 层的 status 校验直接引用这个正则，避免两边各维护一份名单：
+# 之前接口硬编码的正则漏了 transit，点「在途订单」指标卡会 422，列表直接报加载失败。
+VALID_STATUS_PATTERN = "^(?:" + "|".join(sorted(_VALID_STATUSES)) + ")$"
+
 
 def _exception_summary(rec: ExceptionRecord) -> dict[str, Any]:
     """把异常记录压缩成前端可直接展示的摘要（标题/原因/金额差异/建议处理）。"""

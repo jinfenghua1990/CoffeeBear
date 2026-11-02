@@ -46,7 +46,7 @@ def summary(db: Session = Depends(get_db)) -> dict:
 
 @router.get("/orders")
 def orders(
-    status: str = Query("all", pattern="^(all|pending|done|order|content|sku|jackyun_po|closeout|refine|po|inbound|invoice|exception)$"),
+    status: str = Query("all", pattern=service.VALID_STATUS_PATTERN),
     q: str = Query(""),
     sort_by: str = Query("date", pattern="^(date|amount|status|invoice)$"),
     page: int = Query(1, ge=1),

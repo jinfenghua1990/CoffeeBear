@@ -433,9 +433,8 @@ export default function PurchaseWorkbenchPage() {
   useEffect(() => {
     setView(parseWorkbenchView(searchParams.get("view")));
     const orderId = Number(searchParams.get("order"));
-    // 只认正整数订单号：地址里带 order=-430 这类脏值时，旧逻辑会去请求一个不存在的单，
-    // 详情区就一直卡在「正在读取订单明细…」，反复点别的单还会再闪一次。
-    if (Number.isInteger(orderId) && orderId > 0) { requestedOrder.current = orderId; setSelectedOrderId(orderId); }
+    // 订单 ID 是「文件订单取正数、纯工作流订单取 -id」，负数同样合法，这里只排除 0 和非法值。
+    if (Number.isInteger(orderId) && orderId !== 0) { requestedOrder.current = orderId; setSelectedOrderId(orderId); }
     if (searchParams.get("action") === "new") {
       requestedOrder.current = null;
       setOperationsOpen(false);
