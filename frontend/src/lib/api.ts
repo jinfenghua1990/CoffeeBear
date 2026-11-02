@@ -2918,6 +2918,12 @@ export const procurementChainApi = {
       method: "PATCH",
       body: JSON.stringify({ inbound_at: inboundAt, note }),
     }),
+  /** 更正入库单号：本系统与吉客云独立运行，单号靠人工在两边保持一致 */
+  correctInboundNo: (documentId: number, goodsdocNo: string, note = "") =>
+    jsonFetch<{ ok: boolean; documentId: number; before: string | null; after: string; changed: boolean }>(`/api/v1/procurement-chain/inbound-documents/${documentId}/no`, {
+      method: "PATCH",
+      body: JSON.stringify({ goodsdoc_no: goodsdocNo, note }),
+    }),
   correctInboundItemPrice: (documentId: number, itemId: number, unitPriceTax: string, note = "") =>
     jsonFetch<{
       ok: boolean;

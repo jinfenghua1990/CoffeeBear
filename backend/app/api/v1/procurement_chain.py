@@ -185,6 +185,11 @@ class DocumentAmountBody(BaseModel):
     note: str = ""
 
 
+class DocumentNoBody(BaseModel):
+    goodsdoc_no: str = Field(..., min_length=1, max_length=128)
+    note: str = ""
+
+
 class DocumentDateBody(BaseModel):
     inbound_at: datetime
     note: str = ""
@@ -302,6 +307,28 @@ def recalc_inbound_document_amount(request: Request, document_id: int,
           "jackyun_goods_documents", document_id,
           {"before": result["before"], "after": result["after"]})
     return {"ok": True, "before": result["before"], "after": result["after"]}
+
+
+@router.patch("/inbound-documents/{document_id}/no")
+def patch_inbound_document_no(request: Request, document_id: int, body: DocumentNoBody,
+                              db: Session = Depends(get_db)) -> dict:
+    """人工更正入库单号。
+
+    本系统与吉客云是两套独立系统、不做联通：入库单先在本系统生成，单号再由人工
+    在吉客云建单时手抄保持一致。写错、后补、或吉客云那边改名都会导致两边不一致，
+    所以这里开放单号更正，并按 (document_type, goodsdoc_no) 唯一口径查重。
+    """
+    from app.services import inbound_edit_service
+
+    try:
+        result = inbound_edit_service.set_document_no(db, document_id, body.goodsdoc_no)
+    except ValueError as exc:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=str(exc))
+    audit(db, current_actor(request), "purchase.inbound.no_correct",
+          "jackyun_goods_documents", document_id,
+          {"before": result["before"], "after": result["after"], "note": body.note})
+    return result
 
 
 @router.patch("/inbound-documents/{document_id}/date")

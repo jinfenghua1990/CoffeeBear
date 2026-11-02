@@ -324,11 +324,14 @@ function InboundDetailModal({ row, activeTab, onTabChange, onClose, onDeleted, o
   const [editingDate, setEditingDate] = useState(false);
   const [draftDate, setDraftDate] = useState("");
   const [draftDateNote, setDraftDateNote] = useState("");
+  const [editingNo, setEditingNo] = useState(false);
+  const [draftNo, setDraftNo] = useState("");
+  const [draftNoNote, setDraftNoNote] = useState("");
   const [editingItemId, setEditingItemId] = useState<number | null>(null);
   const [draftPrice, setDraftPrice] = useState("");
   const [draftPriceNote, setDraftPriceNote] = useState("");
-  // 改价 / 改入库时间还没提交时，关 Tab 或刷新会给出「存在未保存内容」提示
-  useTabDirty(editingDate || editingItemId !== null);
+  // 改价 / 改入库时间 / 改单号还没提交时，关 Tab 或刷新会给出「存在未保存内容」提示
+  useTabDirty(editingDate || editingNo || editingItemId !== null);
   // 工作区下所有 Tab 都常驻挂载：隐藏 Tab 不能响应全局 Esc，
   // 否则在别的 Tab 按 Esc 会把这里正在改价/改入库时间的详情弹窗关掉。
   const tabActive = useTabActive();
@@ -345,6 +348,26 @@ function InboundDetailModal({ row, activeTab, onTabChange, onClose, onDeleted, o
   const badge = sourceBadge(row);
   // 耗材入库是流水聚合出的虚拟单据（id 为负），不落吉客云入库单，不能改日期/单价。
   const canCorrect = row.source !== "consumable";
+
+  async function saveNo() {
+    const next = draftNo.trim();
+    if (!next) {
+      setActionError("请填写入库单号");
+      return;
+    }
+    setSaving(true);
+    setActionError("");
+    try {
+      await procurementChainApi.correctInboundNo(row.id, next, draftNoNote.trim());
+      setEditingNo(false);
+      setDraftNoNote("");
+      onSaved();
+    } catch (caught) {
+      setActionError(caught instanceof Error ? caught.message : String(caught));
+    } finally {
+      setSaving(false);
+    }
+  }
 
   async function saveDate() {
     if (!draftDate) {
@@ -406,8 +429,15 @@ function InboundDetailModal({ row, activeTab, onTabChange, onClose, onDeleted, o
           </div>
           <div className="flex items-center gap-2">
             {canCorrect && <button type="button" onClick={() => {
+              setEditingNo((current) => !current);
+              setDraftNo((current) => current || (row.inboundNo ?? ""));
+              setEditingDate(false);
+              setActionError("");
+            }} className="rounded-lg border border-indigo-200 px-3 py-1.5 text-xs font-medium text-indigo-600 hover:bg-indigo-50">{editingNo ? "收起改单号" : "改入库单号"}</button>}
+            {canCorrect && <button type="button" onClick={() => {
               setEditingDate((current) => !current);
               setDraftDate((current) => current || toLocalInputValue(row.inboundAt));
+              setEditingNo(false);
               setActionError("");
             }} className="rounded-lg border border-indigo-200 px-3 py-1.5 text-xs font-medium text-indigo-600 hover:bg-indigo-50">{editingDate ? "收起改时间" : "改入库时间"}</button>}
             {row.source === "local_purchase_inbound" && <button type="button" disabled={deleting} onClick={async () => {
@@ -425,6 +455,18 @@ function InboundDetailModal({ row, activeTab, onTabChange, onClose, onDeleted, o
             <button type="button" onClick={onClose} aria-label="关闭明细" className="rounded-lg px-2 py-1 text-xl leading-none text-slate-400 hover:bg-slate-100 hover:text-slate-700">×</button>
           </div>
         </div>
+        {editingNo && canCorrect && (
+          <div className="shrink-0 border-b border-indigo-100 bg-indigo-50/50 px-5 py-2.5">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="text-xs font-medium text-slate-600">更正入库单号</span>
+              <input value={draftNo} onChange={(event) => setDraftNo(event.target.value)} placeholder="填写与吉客云一致的入库单号" className="h-8 min-w-[180px] rounded-lg border border-slate-200 bg-white px-2 font-mono text-xs text-slate-700 outline-none focus:border-indigo-400" />
+              <input value={draftNoNote} onChange={(event) => setDraftNoNote(event.target.value)} placeholder="更正原因（可选，写入审计日志）" className="h-8 min-w-[200px] flex-1 rounded-lg border border-slate-200 bg-white px-2 text-xs text-slate-700 outline-none placeholder:text-slate-400 focus:border-indigo-400" />
+              <button type="button" onClick={() => void saveNo()} disabled={saving} className="h-8 rounded-lg bg-indigo-600 px-3 text-xs font-medium text-white hover:bg-indigo-700 disabled:opacity-60">{saving ? "保存中…" : "保存"}</button>
+              <button type="button" onClick={() => { setEditingNo(false); setDraftNoNote(""); }} className="h-8 rounded-lg border border-slate-200 bg-white px-3 text-xs text-slate-600 hover:bg-slate-50">取消</button>
+            </div>
+            <p className="mt-1.5 text-[11px] text-slate-400">本系统与吉客云不互联：这里只改本系统，改完请确认吉客云里是同一个单号，两边才能对得上。单号在本系统内唯一，重复会被拒绝。</p>
+          </div>
+        )}
         {editingDate && canCorrect && (
           <div className="shrink-0 border-b border-indigo-100 bg-indigo-50/50 px-5 py-2.5">
             <div className="flex flex-wrap items-center gap-2">
