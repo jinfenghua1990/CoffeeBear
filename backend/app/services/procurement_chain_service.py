@@ -149,6 +149,23 @@ def order_time(order: Alibaba1688Order) -> datetime | None:
     return order.order_time
 
 
+def resolve_order_datetime(
+    order: Alibaba1688Order | None, external: ExternalPurchaseOrder | None
+) -> datetime | None:
+    """订单的展示时间：1688 下单时间 → 文件副本导入时间 → 工作流副本下单/同步时间。
+
+    列表的日期筛选和 ``_order_row`` 的 orderDate 必须同源：分开写两份兜底逻辑，
+    筛出来的单和表格里显示的时间就会对不上（一类常见的「明明在这个月却查不到」）。
+    """
+    if order is not None:
+        moment = order_time(order) or order.created_at
+        if moment is not None:
+            return moment
+    if external is not None:
+        return external.ordered_at or external.created_at
+    return None
+
+
 def _days_apart(a: datetime | None, b: datetime | None) -> float | None:
     """两日期的绝对间隔；普通候选排序使用，不表达先后方向。"""
     if a is None or b is None:
@@ -2420,16 +2437,10 @@ def _order_row(
         else None
     )
     invoice_status = str(invoice_truth_row["status"])
-    order_date = _order_date_str(order) if order is not None else None
-    # 1688 导出文件常见缺失 order_time 字段：用导入时间 created_at 兜底，
-    # 保证列表页时间分组与排序在测试数据上也能展示出顺序。
-    if order_date is None and order is not None and order.created_at is not None:
-        order_date = order.created_at.isoformat()
-    if order_date is None and external is not None:
-        # 工作流副本可能来自已归档/删除的原始导入；保留其订单时间，缺失时才退回同步时间，
-        # 让采购台仍能按真实可追溯时间排序，同时不把空时间伪造成业务完成。
-        fallback_time = external.ordered_at or external.created_at
-        order_date = fallback_time.isoformat() if fallback_time else None
+    order_date = None
+    resolved_moment = resolve_order_datetime(order, external)
+    if resolved_moment is not None:
+        order_date = resolved_moment.isoformat()
     supplier = (
         (order.seller_company_name if order is not None else "")
         or (external.supplier_name if external is not None else "")

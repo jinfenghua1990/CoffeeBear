@@ -30,6 +30,7 @@ from app.services.procurement_chain_service import (
     _source_pairs,
     chain_snapshot,
     is_reference_only_external_po,
+    resolve_order_datetime,
     supplier_detail,
     supplier_summaries,
 )
@@ -892,6 +893,21 @@ def list_orders(
     """按下单时间倒序、按时间标签分组的订单列表；支持状态和日期筛选。"""
     status = status if status in _VALID_STATUSES else "all"
     pairs, pf = chain_snapshot(db)
+    # 日期先筛再聚合：按月份核账是采购台的高频操作，先把区间外的订单挡在
+    # _order_row 之外，不必为它们再做一遍分配/入库/发票/结算的完整行聚合。
+    # 时间口径与 _order_row 的 orderDate 同源（resolve_order_datetime），
+    # 所以筛掉的单和列表里显示的时间不会互相打架。
+    if start_date is not None or end_date is not None:
+        in_range: list[tuple[Alibaba1688Order | None, ExternalPurchaseOrder | None]] = []
+        for candidate_order, candidate_external in pairs:
+            moment = resolve_order_datetime(candidate_order, candidate_external)
+            order_day = moment.date() if moment is not None else None
+            if start_date is not None and (order_day is None or order_day < start_date):
+                continue
+            if end_date is not None and (order_day is None or order_day > end_date):
+                continue
+            in_range.append((candidate_order, candidate_external))
+        pairs = in_range
     rows = [_order_row(db, o, ext, pf=pf) for o, ext in pairs]
     today = datetime.now(ZoneInfo(settings.TZ)).date()
     exception_refs = _exception_refs(db)
