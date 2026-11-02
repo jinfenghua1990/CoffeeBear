@@ -26,6 +26,7 @@ from app.models.ops import ExceptionRecord
 from app.models.purchase import ExternalPurchaseOrder
 from app.services.import_lifecycle import filter_active_import, filter_active_rows
 from app.services.procurement_chain_service import (
+    _external_of,
     _order_row,
     _source_pairs,
     chain_snapshot,
@@ -1040,6 +1041,25 @@ def _supplier_suggestions(db: Session, limit: int = 30) -> list[str]:
     return sorted({str(name).strip() for (name,) in rows if str(name or "").strip()})
 
 
+def _manual_inbound_no(external: ExternalPurchaseOrder | None, order: Alibaba1688Order | None) -> str:
+    """订单上人工填写的入库单号。
+
+    工作流副本放在 ``raw.manualInboundNo``；文件副本的杂项字段在 ``raw_payload``。
+    注意 ``Alibaba1688Order`` **没有** ``raw`` 字段，早先这里直接读 ``order.raw``，
+    只要外部副本缺失就会抛 AttributeError，整张详情 500。
+    """
+    if external is not None and isinstance(external.raw, dict):
+        value = external.raw.get("manualInboundNo")
+        if value:
+            return str(value)
+    payload = getattr(order, "raw_payload", None) if order is not None else None
+    if isinstance(payload, dict):
+        value = payload.get("manualInboundNo") or (payload.get("row") or {}).get("manualInboundNo")
+        if value:
+            return str(value)
+    return ""
+
+
 def workbench(db: Session, order_id: int) -> dict | None:
     """选中订单的工作面板：5 步骤每步的状态 + 关键明细 + 跳转入口。
 
@@ -1069,7 +1089,10 @@ def workbench(db: Session, order_id: int) -> dict | None:
             external = None
     if order is None and external is None:
         return None
-    # 正数 id 时 external 由 _order_row 按单号点查补上，配对规则与列表一致
+    # 正数 id 时 external 由 _order_row 按单号点查补上；外层这个变量也要有一份，
+    # 下面读取「人工入库单号」和面包屑都依赖它（_order_row 内部补的只是它自己的局部变量）。
+    if order is not None and external is None:
+        external = _external_of(db, None, order.external_order_id)
     row = _order_row(db, order, external, pf=None)
     # 正品库存 = 全量入库 − 全量出库，算一次给「明细行库存」和「仓库卡」共用；
     # 没有分配行时算它纯属浪费，留给 _warehouse_block 自己按需计算。
@@ -1090,7 +1113,7 @@ def workbench(db: Session, order_id: int) -> dict | None:
             "fileOrderId": row.get("fileOrderId"),
             "externalPoId": row.get("externalPoId"),
             "orderNo": row["orderNo"],
-            "inboundReferenceNo": str((external.raw if external is not None and isinstance(external.raw, dict) else (order.raw if order is not None and isinstance(order.raw, dict) else {})).get("manualInboundNo") or ""),
+            "inboundReferenceNo": _manual_inbound_no(external, order),
             "platform": row.get("platform") or "other",
             "orderKind": _order_kind(row.get("orderNo"), row.get("supplier"), consumable_nos, row.get("orderKindOverride", ""), bool(row.get("consumable"))),
             "orderKindOverride": row.get("orderKindOverride", ""),
