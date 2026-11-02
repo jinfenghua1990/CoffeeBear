@@ -143,13 +143,22 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     const persisted = readPersisted();
     if (persisted) {
+      // 恢复时按当前规则重算 workspace / identity：
+      // 身份规则会迭代（例如采购工作台不再按 order 分页签），沿用旧值会让
+      // 多个页签指向同一身份，之后点单时既匹配不上、又会凭空多开一个页签。
+      const restored: WorkspaceTab[] = [];
+      const seen = new Set<string>();
+      for (const tab of persisted.tabs.slice(0, MAX_TABS * 2)) {
+        const resolved = resolveRoute(`${tab.pathname}${tab.search ? `?${tab.search}` : ""}`);
+        const workspace = routeWorkspace(tab.pathname, tab.search);
+        const identity = resolved ? tabIdentity(resolved.pathname, resolved.search, resolved.entry) : tab.identity;
+        const key = `${workspace}::${identity}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        restored.push({ ...tab, workspace, identity });
+      }
       stateRef.current = {
-        tabs: persisted.tabs.slice(0, MAX_TABS * 2).map((tab) => ({
-          ...tab,
-          // 路由归属规则会迭代；恢复历史 Tab 时按当前 pathname + query 重新计算，
-          // 避免旧 sessionStorage 永久保留曾经错误的工作台归属。
-          workspace: routeWorkspace(tab.pathname, tab.search),
-        })),
+        tabs: restored,
         activeId: null,
       };
       scrollRef.current = { ...persisted.scrollTops };

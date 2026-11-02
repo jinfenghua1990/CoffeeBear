@@ -227,13 +227,17 @@ export default function BusinessPartnersPage() {
     setSelectedId(items[0]?.id ?? null);
   }, [items, selectedId, setSelectedId]);
 
+  // 切换单位时不再先 setDetail(null)：清空会让右侧整块先塌成
+  // 「正在汇总往来数据…」占位再重绘，点一下就闪两下。
+  // 旧档案先留着，新数据到了原地替换；期间整块禁点，避免把改动存到上一个单位上。
   const loadDetail = useCallback(async (id: number | null) => {
-    setDetail(null);
-    if (id == null) return;
+    if (id == null) { setDetail(null); return; }
     setDetailLoading(true);
     try {
       setDetail(await businessPartnerApi.detail(id));
     } catch (caught) {
+      // 失败时清掉不属于当前选中单位的旧档案，否则会一直挂着「读取中」却显示别家的数据
+      setDetail((current) => (current && current.id === id ? current : null));
       setError(caught instanceof Error ? caught.message : "加载往来明细失败");
     } finally {
       setDetailLoading(false);
@@ -241,6 +245,8 @@ export default function BusinessPartnersPage() {
   }, []);
 
   useEffect(() => { void loadDetail(selectedId); }, [loadDetail, selectedId]);
+  // 右侧显示的档案还不是当前选中单位 = 正在切换，用顶部细进度条提示并临时禁点
+  const detailPending = detail != null && selectedId != null && detail.id !== selectedId;
   useTabTitle(detail ? `往来单位 · ${detail.name}` : "往来单位档案");
 
   // 详情里还有未确认的「疑似同一主体」时弹窗，请人工判断；已判断过的组合后端不会再返回。
@@ -474,10 +480,11 @@ export default function BusinessPartnersPage() {
           </div>
         </aside>
 
-        <main className="min-w-0 overflow-hidden rounded-xl border border-slate-200 bg-white">
+        <main className={`relative min-w-0 overflow-hidden rounded-xl border border-slate-200 bg-white${detailPending ? " pointer-events-none" : ""}`}>
           {!selectedId && <div className="flex min-h-[560px] flex-col items-center justify-center text-slate-400"><div className="text-base">选择一个往来单位</div><div className="mt-1 text-sm">查看它的采购、发票、银行支付和销售往来</div></div>}
-          {selectedId && detailLoading && <div className="flex min-h-[560px] items-center justify-center text-sm text-slate-400">正在汇总往来数据…</div>}
-          {detail && !detailLoading && <>
+          {detailPending && <span aria-hidden className="pointer-events-none absolute inset-x-0 top-0 z-10 h-[2px] animate-pulse bg-blue-500/70" />}
+          {selectedId && !detail && <div className="flex min-h-[560px] items-center justify-center text-sm text-slate-400">{detailLoading ? "正在汇总往来数据…" : "该单位暂时没有可展示的往来数据"}</div>}
+          {detail && <>
             <div className="border-b border-slate-100 px-4 py-3">
               <div className="flex flex-wrap items-start justify-between gap-3">
                 <div className="min-w-0 flex-1">

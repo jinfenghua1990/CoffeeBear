@@ -107,10 +107,10 @@ const ROUTES: RouteEntry[] = [
     pathname: "/purchase/workbench",
     title: "采购订单",
     businessType: "purchase",
-    identityKeys: ["order"],
+    // 不把 order 当 Tab 身份：订单切换是工作台内部（列表 + 订单子标签）的事。
+    // 曾经 identityKeys: ["order"] 会让「点一张没点过的单」= 新建一个顶层页签，
+    // 新页签冷挂载连表带详情整块重绘，这正是点一下闪一下的来源，还会把 12 个页签额度用光。
     titleFor: (search) => {
-      const order = search.get("order");
-      if (order) return `采购单 · ${order}`;
       const view = search.get("view");
       return view ? WORKBENCH_VIEWS[parseWorkbenchView(view)] : null;
     },

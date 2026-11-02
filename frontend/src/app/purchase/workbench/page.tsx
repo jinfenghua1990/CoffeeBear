@@ -713,14 +713,16 @@ export default function PurchaseWorkbenchPage() {
     return () => { cancelled = true; };
   }, [pageActive, selectedOrderId, view]);
 
+  // 与订单详情同一套处理：切供应商保留上一家的画像，新数据到了原地替换，
+  // 否则画像区会先塌成「正在加载供应商画像…」再撑开，点一下就闪两下。
   useEffect(() => {
     if (!pageActive) return;
     if (view !== "suppliers" || !selectedSupplierName) {
       setSupplierDetail(null);
+      setDetailLoading(false);
       return;
     }
     let cancelled = false;
-    setSupplierDetail(null);
     setDetailLoading(true);
     procurementWorkbenchApi.supplierDetail(selectedSupplierName)
       .then((detail) => { if (!cancelled) setSupplierDetail(detail); })
@@ -1094,6 +1096,7 @@ export default function PurchaseWorkbenchPage() {
               <SupplierDetailPanel
                 detail={supplierDetail}
                 loading={detailLoading}
+                pendingName={selectedSupplierName}
                 onRenamed={async (newName) => {
                   setSelectedSupplierName(newName);
                   await loadSuppliers();
@@ -3683,9 +3686,11 @@ function orderMatchStatus(order: { orderAmount: number; remaining: number }): { 
   return { text: "待开票", cls: "bg-amber-50 text-amber-600", sub: "无发票覆盖" };
 }
 
-function SupplierDetailPanel({ detail, loading, onRenamed }: {
+function SupplierDetailPanel({ detail, loading, pendingName, onRenamed }: {
   detail: WorkbenchSupplierDetail | null;
   loading: boolean;
+  /** 正在切换的目标供应商：detail 还是上一家时置灰并禁点，避免把改名写到旧供应商上。 */
+  pendingName?: string | null;
   onRenamed?: (newName: string) => void | Promise<void>;
 }) {
   const supplierName = detail?.supplierName ?? null;
@@ -3747,9 +3752,11 @@ function SupplierDetailPanel({ detail, loading, onRenamed }: {
 
   if (loading && !detail) return <aside className="rounded-xl border border-slate-200 bg-white"><Loading text="正在加载供应商画像…" /></aside>;
   if (!detail) return <aside className="flex min-h-[480px] items-center justify-center rounded-xl border border-slate-200 bg-white text-[12px] text-slate-400">选择供应商查看详情</aside>;
+  const pendingSwap = pendingName != null && detail.supplierName !== pendingName;
   return (
     <aside className="xl:sticky xl:top-[calc(var(--wb-header-h,162px)+8px)] xl:self-start">
-      <div className="rounded-xl border border-slate-200/90 bg-white p-4 shadow-[0_4px_18px_rgba(40,53,85,0.04)]">
+      <div className={cx("relative rounded-xl border border-slate-200/90 bg-white p-4 shadow-[0_4px_18px_rgba(40,53,85,0.04)] transition-opacity duration-150", pendingSwap && "pointer-events-none opacity-60")}>
+        {pendingSwap && <span aria-hidden className="pointer-events-none absolute inset-x-0 top-0 z-10 h-[2px] animate-pulse rounded-t-xl bg-blue-500/70" />}
         <div className="flex items-start justify-between gap-2">
           <div className="min-w-0 flex-1">
             <div className="text-[11px] text-slate-400">供应商画像</div>
