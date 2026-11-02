@@ -925,8 +925,23 @@ def list_orders(
             continue
         if q:
             ql = q.lower()
-            sku_text = " ".join(f"{a.get('skuCode', '')} {a.get('goodsName', '')}" for a in row.get("allocations", []))
-            hay = f"{row.get('orderNo','')} {row.get('supplier','')} {row.get('title','')} {sku_text}".lower()
+            # 搜索要覆盖「已分配 SKU」和「尚未分配时的 1688 原始商品行」两套口径：
+            # 只搜 allocations 的话，还没做 SKU 分配的订单按商品名根本搜不出来。
+            sku_text = " ".join(
+                f"{a.get('skuCode') or ''} {a.get('goodsName') or ''}" for a in row.get("allocations") or []
+            )
+            item_text = " ".join(
+                f"{item.get('productName') or ''} {item.get('productNumber') or ''}"
+                for item in row.get("orderItems") or []
+            )
+            consumable_items = (row.get("consumable") or {}).get("items") or []
+            consumable_text = " ".join(
+                f"{item.get('name') or ''} {item.get('code') or ''}" for item in consumable_items
+            )
+            hay = (
+                f"{row.get('orderNo') or ''} {row.get('supplier') or ''} {row.get('title') or ''} "
+                f"{row.get('adjustmentNote') or ''} {sku_text} {item_text} {consumable_text}"
+            ).lower()
             if ql not in hay:
                 continue
         out.append({

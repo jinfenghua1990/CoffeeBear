@@ -507,13 +507,21 @@ export default function PurchaseWorkbenchPage() {
 
   function changeKind(nextKind: SupplyChainKindFilter) {
     setKindFilter(nextKind);
+    setPage(1);
     const params = new URLSearchParams(searchParams.toString());
     if (nextKind === "all") params.delete("kind");
     else params.set("kind", nextKind);
     syncWorkspaceUrl(`/purchase/workbench?${params.toString()}`);
   }
 
-  useEffect(() => { setPage(1); }, [statusFilter, channelFilter, kindFilter, warehouseFilter, startDate, endDate, query]);
+  // 页码重置必须和筛选变更在同一个事件里：如果靠 effect 事后补 setPage(1)，
+  // 「筛选已改、页码还是旧的」会先发一次请求，页码回到 1 之后再发一次，白跑一趟。
+  const changeStatusFilter = useCallback((next: FilterKey) => { setStatusFilter(next); setPage(1); }, []);
+  const changeChannelFilter = useCallback((next: ChannelKey) => { setChannelFilter(next); setPage(1); }, []);
+  const changeWarehouseFilter = useCallback((next: string) => { setWarehouseFilter(next); setPage(1); }, []);
+  const changeStartDate = useCallback((next: string) => { setStartDate(next); setPage(1); }, []);
+  const changeEndDate = useCallback((next: string) => { setEndDate(next); setPage(1); }, []);
+  const applySearch = useCallback(() => { setQuery(searchDraft.trim()); setPage(1); }, [searchDraft]);
 
   const loadSummary = useCallback(async () => {
     try { setSummary(await procurementWorkbenchApi.summary()); } catch { setSummary(null); }
@@ -556,12 +564,17 @@ export default function PurchaseWorkbenchPage() {
       const requested = requestedOrder.current;
       requestedOrder.current = null;
       setSelectedOrderId((current) => requested ?? items.find(item => item.orderId === current)?.orderId ?? items[0]?.orderId ?? null);
-    } catch {
+    } catch (caught) {
       if (seq !== viewRequestSeq.current) return;
       setOrders([]);
       setTotal(0);
       setOutstandingTotal(0);
-      setError("订单数据加载失败，请刷新后重试");
+      // 后端会带具体原因（日期区间非法、参数校验失败等），照原样透出去；
+      // 一律显示「请刷新后重试」等于把故障原因藏起来，用户只能干等。
+      const reason = caught instanceof Error && caught.message && !/^Failed to fetch$/i.test(caught.message)
+        ? caught.message
+        : "";
+      setError(reason ? `订单数据加载失败：${reason}` : "订单数据加载失败，请检查网络后重试");
     } finally {
       if (seq === viewRequestSeq.current) setLoading(false);
     }
@@ -980,20 +993,20 @@ export default function PurchaseWorkbenchPage() {
           startDate={startDate}
           endDate={endDate}
           searchDraft={searchDraft}
-          onStatusFilterChange={setStatusFilter}
-          onChannelFilterChange={setChannelFilter}
+          onStatusFilterChange={changeStatusFilter}
+          onChannelFilterChange={changeChannelFilter}
           onKindFilterChange={changeKind}
-          onWarehouseFilterChange={setWarehouseFilter}
-          onStartDateChange={setStartDate}
-          onEndDateChange={setEndDate}
+          onWarehouseFilterChange={changeWarehouseFilter}
+          onStartDateChange={changeStartDate}
+          onEndDateChange={changeEndDate}
           onSearchDraftChange={setSearchDraft}
-          onApplySearch={() => setQuery(searchDraft.trim())}
+          onApplySearch={applySearch}
           onReset={resetSupplyChainFilters}
           onNewOrder={openNewOrder}
           onExport={exportCurrentPurchaseOrders}
           onRefresh={refresh}
           onSelectOrder={selectOrder}
-          onPageChange={(nextPage) => { setSelectedOrderId(null); setPage(nextPage); }}
+          onPageChange={(nextPage) => setPage(nextPage)}
           onOpenOperations={openOperations}
           onCloseOperations={() => setOperationsOpen(false)}
           operationsOpen={operationsOpen}
