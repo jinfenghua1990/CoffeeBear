@@ -2938,6 +2938,21 @@ export const procurementChainApi = {
       method: "PATCH",
       body: JSON.stringify({ unit_price_tax: unitPriceTax, note }),
     }),
+  correctInboundItemQuantity: (documentId: number, itemId: number, quantity: string, note = "") =>
+    jsonFetch<{
+      ok: boolean;
+      documentId: number;
+      itemId: number;
+      lineNo: number;
+      before: string | null;
+      after: string;
+      amountTaxAfter: string | null;
+      documentQuantityAfter: string;
+      documentAmountAfter: string;
+    }>(`/api/v1/procurement-chain/inbound-documents/${documentId}/items/${itemId}/quantity`, {
+      method: "PATCH",
+      body: JSON.stringify({ quantity, note }),
+    }),
   createLocalInbound: (body: {
     order_id: number;
     inbound_no?: string;

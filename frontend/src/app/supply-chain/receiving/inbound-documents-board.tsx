@@ -150,6 +150,13 @@ function previewAmount(item: InboundItem, draftPrice: string) {
   return `≈${formatMoney(price * item.actualQuantity)}`;
 }
 
+function previewQuantityAmount(item: InboundItem, draftQty: string) {
+  const qty = Number(draftQty);
+  const price = Number(item.unitPrice ?? 0);
+  if (!draftQty.trim() || !Number.isFinite(qty) || qty <= 0 || !Number.isFinite(price)) return "—";
+  return `≈${formatMoney(price * qty)}`;
+}
+
 function sourceBadge(row: InboundDocumentRow): { label: string; cls: string } {
   if (row.source === "consumable") return { label: "耗材入库", cls: "border-teal-200 bg-teal-50 text-teal-700" };
   if (row.isLocal) return { label: "本系统入库", cls: "border-indigo-200 bg-indigo-50 text-indigo-700" };
@@ -330,8 +337,11 @@ function InboundDetailModal({ row, activeTab, onTabChange, onClose, onDeleted, o
   const [editingItemId, setEditingItemId] = useState<number | null>(null);
   const [draftPrice, setDraftPrice] = useState("");
   const [draftPriceNote, setDraftPriceNote] = useState("");
-  // 改价 / 改入库时间 / 改单号还没提交时，关 Tab 或刷新会给出「存在未保存内容」提示
-  useTabDirty(editingDate || editingNo || editingItemId !== null);
+  const [editingQtyItemId, setEditingQtyItemId] = useState<number | null>(null);
+  const [draftQty, setDraftQty] = useState("");
+  const [draftQtyNote, setDraftQtyNote] = useState("");
+  // 改价 / 改入库时间 / 改单号 / 改数量还没提交时，关 Tab 或刷新会给出「存在未保存内容」提示
+  useTabDirty(editingDate || editingNo || editingItemId !== null || editingQtyItemId !== null);
   // 工作区下所有 Tab 都常驻挂载：隐藏 Tab 不能响应全局 Esc，
   // 否则在别的 Tab 按 Esc 会把这里正在改价/改入库时间的详情弹窗关掉。
   const tabActive = useTabActive();
@@ -399,6 +409,25 @@ function InboundDetailModal({ row, activeTab, onTabChange, onClose, onDeleted, o
       await procurementChainApi.correctInboundItemPrice(row.id, itemId, draftPrice.trim(), draftPriceNote.trim());
       setEditingItemId(null);
       setDraftPriceNote("");
+      onSaved();
+    } catch (caught) {
+      setActionError(caught instanceof Error ? caught.message : String(caught));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function saveItemQuantity(itemId: number) {
+    if (!draftQty.trim()) {
+      setActionError("请填写数量");
+      return;
+    }
+    setSaving(true);
+    setActionError("");
+    try {
+      await procurementChainApi.correctInboundItemQuantity(row.id, itemId, draftQty.trim(), draftQtyNote.trim());
+      setEditingQtyItemId(null);
+      setDraftQtyNote("");
       onSaved();
     } catch (caught) {
       setActionError(caught instanceof Error ? caught.message : String(caught));
@@ -493,6 +522,7 @@ function InboundDetailModal({ row, activeTab, onTabChange, onClose, onDeleted, o
               <tbody className="divide-y divide-slate-100">
                 {row.items.map((item) => {
                   const editing = editingItemId === item.id;
+                  const editingQty = editingQtyItemId === item.id;
                   return (
                   <tr key={item.id}>
                     <td className="px-3 py-2.5 text-slate-400">{item.lineNo}</td>
@@ -500,16 +530,26 @@ function InboundDetailModal({ row, activeTab, onTabChange, onClose, onDeleted, o
                     <td className="px-3 py-2.5 font-medium text-slate-700">{item.goodsName}{item.rawGoodsName ? <div className="mt-0.5 text-[10px] font-normal text-slate-400" title="吉客云原录入的货品名称">吉客云原录：{item.rawGoodsName}</div> : null}</td>
                     <td className="px-3 py-2.5 text-slate-500">{item.spec}</td>
                     <td className="px-3 py-2.5 text-slate-500">{item.unit}</td>
-                    <td className="px-3 py-2.5 text-right tabular-nums text-slate-700">{formatQuantity(item.actualQuantity)}</td>
+                    <td className="px-3 py-2.5 text-right tabular-nums text-slate-700">
+                      {editingQty
+                        ? <input value={draftQty} onChange={(event) => setDraftQty(event.target.value)} inputMode="decimal" autoFocus className="h-7 w-20 rounded border border-indigo-300 bg-white px-2 text-right text-xs text-slate-700 outline-none focus:border-indigo-500" />
+                        : formatQuantity(item.actualQuantity)}
+                    </td>
                     <td className="px-3 py-2.5 text-right tabular-nums text-slate-600">
                       {editing
                         ? <input value={draftPrice} onChange={(event) => setDraftPrice(event.target.value)} inputMode="decimal" autoFocus className="h-7 w-24 rounded border border-indigo-300 bg-white px-2 text-right text-xs text-slate-700 outline-none focus:border-indigo-500" />
                         : formatMoney(item.unitPrice ?? null)}
                     </td>
-                    <td className="px-3 py-2.5 text-right tabular-nums font-medium text-slate-800">{editing ? previewAmount(item, draftPrice) : formatMoney(item.amountTax ?? null)}</td>
+                    <td className="px-3 py-2.5 text-right tabular-nums font-medium text-slate-800">
+                      {editing ? previewAmount(item, draftPrice)
+                       : editingQty ? previewQuantityAmount(item, draftQty)
+                       : formatMoney(item.amountTax ?? null)}
+                    </td>
                     <td className="max-w-[180px] px-3 py-2.5 text-slate-400" title={item.note}>
                       {editing
                         ? <input value={draftPriceNote} onChange={(event) => setDraftPriceNote(event.target.value)} placeholder="更正原因（可选）" className="h-7 w-full rounded border border-slate-200 px-2 text-xs text-slate-700 outline-none placeholder:text-slate-400 focus:border-indigo-400" />
+                        : editingQty
+                        ? <input value={draftQtyNote} onChange={(event) => setDraftQtyNote(event.target.value)} placeholder="更正原因（可选）" className="h-7 w-full rounded border border-slate-200 px-2 text-xs text-slate-700 outline-none placeholder:text-slate-400 focus:border-indigo-400" />
                         : (item.note || "—")}
                     </td>
                     <td className="whitespace-nowrap px-3 py-2.5 text-right">
@@ -518,13 +558,26 @@ function InboundDetailModal({ row, activeTab, onTabChange, onClose, onDeleted, o
                           <button type="button" onClick={() => void saveItemPrice(item.id)} disabled={saving} className="text-[11px] font-medium text-indigo-600 hover:text-indigo-800 disabled:opacity-50">{saving ? "保存中…" : "保存"}</button>
                           <button type="button" onClick={() => { setEditingItemId(null); setDraftPriceNote(""); }} className="text-[11px] text-slate-400 hover:text-slate-600">取消</button>
                         </span>
+                      ) : editingQty ? (
+                        <span className="flex items-center justify-end gap-2">
+                          <button type="button" onClick={() => void saveItemQuantity(item.id)} disabled={saving} className="text-[11px] font-medium text-indigo-600 hover:text-indigo-800 disabled:opacity-50">{saving ? "保存中…" : "保存"}</button>
+                          <button type="button" onClick={() => { setEditingQtyItemId(null); setDraftQtyNote(""); }} className="text-[11px] text-slate-400 hover:text-slate-600">取消</button>
+                        </span>
                       ) : canCorrect ? (
-                        <button type="button" title="更正含税单价，保存后自动重算本行金额和单据金额" onClick={() => {
-                          setEditingItemId(item.id);
-                          setDraftPrice(item.unitPrice == null ? "" : String(item.unitPrice));
-                          setDraftPriceNote("");
-                          setActionError("");
-                        }} className="text-[11px] font-medium text-indigo-600 hover:text-indigo-800">改单价</button>
+                        <span className="flex items-center justify-end gap-2">
+                          <button type="button" title="更正数量，保存后自动重算本行金额、单据头数量/金额与耗材台账" onClick={() => {
+                            setEditingQtyItemId(item.id);
+                            setDraftQty(item.actualQuantity == null ? "" : String(item.actualQuantity));
+                            setDraftQtyNote("");
+                            setActionError("");
+                          }} className="text-[11px] font-medium text-indigo-600 hover:text-indigo-800">改数量</button>
+                          <button type="button" title="更正含税单价，保存后自动重算本行金额和单据金额" onClick={() => {
+                            setEditingItemId(item.id);
+                            setDraftPrice(item.unitPrice == null ? "" : String(item.unitPrice));
+                            setDraftPriceNote("");
+                            setActionError("");
+                          }} className="text-[11px] font-medium text-indigo-600 hover:text-indigo-800">改单价</button>
+                        </span>
                       ) : null}
                     </td>
                   </tr>

@@ -200,6 +200,11 @@ class DocumentItemPriceBody(BaseModel):
     note: str = ""
 
 
+class DocumentItemQuantityBody(BaseModel):
+    quantity: str
+    note: str = ""
+
+
 class LocalInboundItemBody(BaseModel):
     allocation_id: int
     quantity: Annotated[Decimal, Field(gt=0, max_digits=18, decimal_places=4)]
@@ -365,6 +370,27 @@ def patch_inbound_item_price(request: Request, document_id: int, item_id: int,
               "documentId", "lineNo", "before", "after",
               "amountTaxBefore", "amountTaxAfter",
               "documentAmountBefore", "documentAmountAfter",
+          )} | {"note": body.note})
+    return result
+
+
+@router.patch("/inbound-documents/{document_id}/items/{item_id}/quantity")
+def patch_inbound_item_quantity(request: Request, document_id: int, item_id: int,
+                                body: DocumentItemQuantityBody, db: Session = Depends(get_db)) -> dict:
+    """人工更正入库明细数量，并联动重算该行金额、单据头数量/金额，重算耗材台账。"""
+    from app.services import inbound_edit_service
+
+    try:
+        result = inbound_edit_service.set_item_quantity(db, document_id, item_id, body.quantity)
+    except ValueError as exc:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=str(exc))
+    audit(db, current_actor(request), "purchase.inbound.item_quantity_correct",
+          "jackyun_goods_document_items", item_id,
+          {key: result[key] for key in (
+              "documentId", "lineNo", "before", "after",
+              "amountTaxBefore", "amountTaxAfter",
+              "documentQuantityAfter", "documentAmountBefore", "documentAmountAfter",
           )} | {"note": body.note})
     return result
 
