@@ -2144,7 +2144,31 @@ function OrderDetailPanel({ detail, loading, onOrderChanged, onOrderDeleted, onO
         setInboundMessage(`采购参数已保存，已优先关联入库单：${requestedInboundNo}`);
         inboundStepRequired = false;
       } else if (requestedInboundNo && !alreadyLinkedInbound) {
-        setInboundMessage("采购参数和手工入库单号已保存；真实单据待同步，不影响实际库存");
+        // 候选里匹配不到这个号，但这张单已经挂着唯一一张本系统入库单时，直接把那张单改成填写的号。
+        // 否则用户填的号只记在订单上，入库单本身还是系统自动编的号，两个系统永远对不齐。
+        // 多张入库单时不动手（改错对象比不改更糟），交给「到仓入库」页面逐张改。
+        const target = inbound.length === 1 ? inbound[0] : null;
+        const currentNo = (target?.goodsdocNo || "").trim();
+        const canRename = Boolean(target?.documentId) && currentNo.toLowerCase() !== requestedInboundNo.toLowerCase();
+        if (canRename) {
+          const confirmed = window.confirm(
+            `系统里这张入库单当前单号是「${currentNo || "未记录"}」。\n是否把它改成你填的「${requestedInboundNo}」？\n\n只改单号，采购/发票关联不受影响。`
+          );
+          if (confirmed) {
+            try {
+              await procurementChainApi.correctInboundNo(target!.documentId!, requestedInboundNo, "与吉客云手工建单号对齐");
+              setInboundMessage(`采购参数已保存，入库单号已改为「${requestedInboundNo}」`);
+            } catch (renameError) {
+              setInboundMessage(
+                `采购参数已保存，但入库单号未能更正：${renameError instanceof Error ? renameError.message : String(renameError)}`
+              );
+            }
+          } else {
+            setInboundMessage("采购参数和手工入库单号已保存；真实单据待同步，不影响实际库存");
+          }
+        } else {
+          setInboundMessage("采购参数和手工入库单号已保存；真实单据待同步，不影响实际库存");
+        }
       } else {
         setInboundMessage("采购参数已保存");
       }
