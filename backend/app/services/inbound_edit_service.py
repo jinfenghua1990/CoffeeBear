@@ -185,6 +185,8 @@ def set_item_quantity(db: Session, document_id: int, item_id: int, quantity) -> 
     )
     document.total_quantity = new_total_qty.quantize(MONEY_QUANT)
 
+    from app.services.inbound_allocation_seed import recalc_document_amount
+
     head = recalc_document_amount(db, document_id)
 
     # 耗材台账：对每个指向本入库单的采购关联重算（与正常建链同一入口，幂等）
