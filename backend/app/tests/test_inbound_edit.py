@@ -19,7 +19,7 @@ from app.models.catalog import ProductSku
 from app.models.jackyun import JackyunGoodsDocument, JackyunGoodsDocumentItem
 from app.models.org import AuditLog
 from app.services.inbound_cost_service import weighted_inbound_costs
-from app.services.inbound_edit_service import set_document_date, set_item_unit_price
+from app.services.inbound_edit_service import set_document_date, set_item_unit_price, set_item_quantity
 
 
 def _mk_sku(db, code: str) -> ProductSku:
@@ -171,5 +171,93 @@ def test_api_corrects_date_and_price_with_audit(db_session, client):
     bad = client.patch(
         f"/api/v1/procurement-chain/inbound-documents/{doc.id}/date",
         json={"inbound_at": "1999-08-31T10:00:00"},
+    )
+    assert bad.status_code == 400
+
+
+def test_set_item_quantity_recalculates_line_and_head(db_session):
+    sku = _mk_sku(db_session, f"EDIT-QTY-{uuid4().hex[:8]}")
+    doc = _mk_doc(db_session, document_at=datetime(2026, 8, 1), total_amount="20")
+    first = _mk_item(db_session, doc.id, 1, sku.id, "10", "1")
+    _mk_item(db_session, doc.id, 2, None, "5", "2")
+
+    result = set_item_quantity(db_session, doc.id, first.id, "12")
+
+    assert Decimal(result["before"]) == Decimal("10.0000")
+    assert result["after"] == "12.0000"
+    assert Decimal(result["amountTaxAfter"]) == Decimal("12.0000")
+    db_session.refresh(first)
+    assert first.quantity == Decimal("12.0000")
+    assert first.amount_tax == Decimal("12.0000")
+    db_session.refresh(doc)
+    # 单据头数量 = 两行合计；金额 = 两行金额合计
+    assert doc.total_quantity == Decimal("17.0000")
+    assert doc.total_amount == Decimal("22.0000")
+    # 加权成本按数量加权：单价不变仍为 1，故 SKU 单位成本不变
+    assert weighted_inbound_costs(db_session, sku_ids={sku.id}) == {sku.id: Decimal("1.0000")}
+
+
+def test_set_item_quantity_keeps_unit_price_when_price_missing(db_session):
+    sku = _mk_sku(db_session, f"EDIT-QTY2-{uuid4().hex[:8]}")
+    doc = _mk_doc(db_session, document_at=datetime(2026, 8, 1))
+    # 只给金额、不给单价：改数量时按 旧金额/旧数量 反推单价，保证单价不变
+    item = JackyunGoodsDocumentItem(
+        document_id=doc.id, line_no=1, goods_no="G-1", goods_name="货品 1",
+        quantity=Decimal("10"), unit_price_tax=None,
+        amount_tax=Decimal("25"), matched_sku_id=sku.id, match_status="manual",
+    )
+    db_session.add(item)
+    db_session.flush()
+
+    result = set_item_quantity(db_session, doc.id, item.id, "20")
+
+    assert result["after"] == "20.0000"
+    # 反推单价 = 25/10 = 2.5，新金额 = 20 * 2.5 = 50
+    assert Decimal(result["amountTaxAfter"]) == Decimal("50.0000")
+    db_session.refresh(item)
+    assert item.amount_tax == Decimal("50.0000")
+
+
+def test_set_item_quantity_rejects_nonpositive_and_foreign_item(db_session):
+    sku = _mk_sku(db_session, f"EDIT-QTYGUARD-{uuid4().hex[:8]}")
+    doc = _mk_doc(db_session, document_at=datetime(2026, 8, 1))
+    item = _mk_item(db_session, doc.id, 1, sku.id, "3", "2")
+    other = _mk_doc(db_session, document_at=datetime(2026, 8, 1))
+
+    with pytest.raises(ValueError, match="必须大于 0"):
+        set_item_quantity(db_session, doc.id, item.id, "0")
+    with pytest.raises(ValueError, match="必须大于 0"):
+        set_item_quantity(db_session, doc.id, item.id, "-5")
+    with pytest.raises(ValueError, match="不属于该入库单"):
+        set_item_quantity(db_session, other.id, item.id, "1")
+    with pytest.raises(ValueError, match="入库单不存在"):
+        set_item_quantity(db_session, -1, item.id, "1")
+
+
+def test_api_corrects_quantity_with_audit(db_session, client):
+    sku = _mk_sku(db_session, f"EDIT-QTYAPI-{uuid4().hex[:8]}")
+    doc = _mk_doc(db_session, document_at=datetime(2026, 8, 1), total_amount="10")
+    item = _mk_item(db_session, doc.id, 1, sku.id, "10", "1")
+
+    response = client.patch(
+        f"/api/v1/procurement-chain/inbound-documents/{doc.id}/items/{item.id}/quantity",
+        json={"quantity": "15", "note": "实收清点后为 15"},
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["after"] == "15.0000"
+    assert payload["amountTaxAfter"] == "15.0000"
+    assert payload["documentQuantityAfter"] == "15.0000"
+
+    qty_logs = db_session.query(AuditLog).filter(
+        AuditLog.action == "purchase.inbound.item_quantity_correct",
+        AuditLog.object_id == str(item.id),
+    ).all()
+    assert len(qty_logs) == 1
+    assert qty_logs[0].detail["documentQuantityAfter"] == "15.0000"
+
+    bad = client.patch(
+        f"/api/v1/procurement-chain/inbound-documents/{doc.id}/items/{item.id}/quantity",
+        json={"quantity": "0"},
     )
     assert bad.status_code == 400

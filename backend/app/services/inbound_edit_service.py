@@ -135,3 +135,84 @@ def set_item_unit_price(db: Session, document_id: int, item_id: int, unit_price_
         "documentAmountBefore": head["before"],
         "documentAmountAfter": head["after"],
     }
+
+
+def set_item_quantity(db: Session, document_id: int, item_id: int, quantity) -> dict:
+    """更正入库明细数量，联动重算该行金额、单据头数量/金额，并重算耗材台账。
+
+    数量直接决定库存数量与加权成本，故与改单价不同：
+    - 改数量后按「新数量 × 含税单价」重算本行金额；单价缺失时用旧金额/旧数量反推，
+      保证只改数量时单价不变；
+    - 单据头 ``total_quantity`` 与 ``total_amount``（=Σ 明细金额）一并重算；
+    - 库存（current_positions）与加权成本（weighted_inbound_costs）均为实时聚合，
+      无需单独重算，下次读取自动对齐；
+    - 耗材台账按 SKU 映射落库，需对每个指向本入库单的采购关联重跑 auto_apply_inbound_usage
+      （与正常建链同一入口，幂等）。
+    """
+    document = db.get(JackyunGoodsDocument, document_id)
+    if document is None or document.document_type != "inbound":
+        raise ValueError("入库单不存在")
+    item = db.get(JackyunGoodsDocumentItem, item_id)
+    if item is None or item.document_id != document.id:
+        raise ValueError("入库明细不存在或不属于该入库单")
+
+    qty = to_decimal(quantity)
+    if not qty.is_finite() or qty <= 0:
+        raise ValueError("入库数量必须大于 0")
+
+    before_qty = item.quantity
+    before_amount = item.amount_tax
+
+    # 单价优先用已记录的含税单价；缺失时用旧金额/旧数量反推，保证只改数量时单价不变
+    price = item.unit_price_tax
+    if price is None and before_qty is not None and before_qty > 0 and before_amount is not None:
+        price = to_decimal(before_amount) / to_decimal(before_qty)
+
+    item.quantity = qty.quantize(MONEY_QUANT)
+    if price is not None:
+        item.amount_tax = (qty * to_decimal(price)).quantize(MONEY_QUANT)
+    db.flush()
+
+    # 单据头：数量合计（recalc_document_amount 只重算金额头，这里补数量头）
+    items = (
+        db.query(JackyunGoodsDocumentItem)
+        .filter(JackyunGoodsDocumentItem.document_id == document_id)
+        .all()
+    )
+    new_total_qty = sum(
+        (to_decimal(i.quantity) for i in items if i.quantity is not None),
+        Decimal("0"),
+    )
+    document.total_quantity = new_total_qty.quantize(MONEY_QUANT)
+
+    head = recalc_document_amount(db, document_id)
+
+    # 耗材台账：对每个指向本入库单的采购关联重算（与正常建链同一入口，幂等）
+    from app.models.procurement_chain import ProcurementChainLink
+    from app.services.consumable_service import auto_apply_inbound_usage
+
+    links = (
+        db.query(ProcurementChainLink)
+        .filter(
+            ProcurementChainLink.target_type == "inbound",
+            ProcurementChainLink.target_id == document.id,
+        )
+        .all()
+    )
+    for link in links:
+        auto_apply_inbound_usage(db, link.id, note="入库数量更正后重算耗材台账", commit=False)
+    db.commit()
+
+    return {
+        "ok": True,
+        "documentId": document_id,
+        "itemId": item_id,
+        "lineNo": item.line_no,
+        "before": _text(before_qty),
+        "after": str(item.quantity),
+        "amountTaxBefore": _text(before_amount),
+        "amountTaxAfter": _text(item.amount_tax),
+        "documentQuantityAfter": str(document.total_quantity),
+        "documentAmountBefore": head["before"],
+        "documentAmountAfter": head["after"],
+    }
