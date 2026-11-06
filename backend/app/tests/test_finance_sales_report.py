@@ -337,7 +337,8 @@ def test_output_red_invoice_only_offsets_invoice_net_not_sales_total(db_session)
         buyer_name=f"客户-{token}",
         total_amount=Decimal("1000.00"),
         source_system="tax_export",
-        raw={"是否正数发票": "是"},
+        raw={"是否正数发票": "是", "货物或应税劳务名称": "红冲测试商品",
+             "税收分类编码": "3040205000000000000", "价税合计": "1000.00"},
     )
     red = TaxInvoice(
         invoice_key=f"out-red-{token}",
