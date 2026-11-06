@@ -56,6 +56,7 @@ class ParsedTaxInvoiceExport:
     detail_headers: list[str] = dataclass_field(default_factory=list)
     detail_mapping: dict[str, str] = dataclass_field(default_factory=dict)
     detail_rows: list[dict[str, str]] = dataclass_field(default_factory=list)
+    summary_rows: list[dict[str, str]] = dataclass_field(default_factory=list)
 
 
 def normalize_header(value: object) -> str:
@@ -293,6 +294,7 @@ def _parse_xlsx(content: bytes, *, max_rows: int) -> tuple[
     list[str],
     dict[str, str],
     list[dict[str, str]],
+    list[dict[str, str]],
 ]:
     from openpyxl import load_workbook
 
@@ -411,6 +413,7 @@ def _parse_xlsx(content: bytes, *, max_rows: int) -> tuple[
         detail_headers,
         resolve_mapping(detail_headers),
         detail_rows,
+        summary_rows,
     )
 
 
@@ -455,6 +458,7 @@ def parse_tax_invoice_export(content: bytes, original_name: str, *, max_rows: in
             detail_headers,
             detail_mapping,
             detail_rows,
+            summary_rows,
         ) = _parse_xlsx(content, max_rows=max_rows)
     else:
         sheet_name, headers, rows = _parse_csv(content, max_rows=max_rows)
@@ -467,6 +471,7 @@ def parse_tax_invoice_export(content: bytes, original_name: str, *, max_rows: in
         detail_headers = []
         detail_mapping = {}
         detail_rows = []
+        summary_rows = []
     mapping = resolve_mapping(headers)
     normalized_headers = " ".join(normalize_header(value) for value in headers)
     # “进销项”是税务系统常见的综合字段名，不能因为包含“销项”就误判为销项。
@@ -493,4 +498,5 @@ def parse_tax_invoice_export(content: bytes, original_name: str, *, max_rows: in
         detail_headers=detail_headers,
         detail_mapping=detail_mapping,
         detail_rows=detail_rows,
+        summary_rows=summary_rows,
     )

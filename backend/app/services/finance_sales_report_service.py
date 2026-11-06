@@ -481,7 +481,8 @@ def _unbilled_detail_rows(db: Session, year: int, month: int) -> list[dict[str, 
     from app.models.catalog import Product
 
     start, nxt = month_bounds(year, month)
-    invoiced_by_group, red_adjustment_by_group = _output_invoiced_by_group(db, start, nxt)
+    # 按月商品销项抵减不属于任一订单/SKU；商品行保留销售额，抵减另列一行。
+    invoiced_by_group, red_adjustment_by_group = {}, {}
     orders = (
         db.query(SalesOrder)
         .filter(_valid_order_condition())
@@ -694,9 +695,11 @@ def build_unbilled_income_report(
 
     sales = build_report(db, year, month, get_or_create_template(db, company))
     start, nxt = month_bounds(year, month)
-    invoiced_by_group, red_adjustment_by_group = _output_invoiced_by_group(db, start, nxt)
-    linked_invoiced_total = sum(invoiced_by_group.values(), Decimal("0"))
-    linked_red_adjustment = sum(red_adjustment_by_group.values(), Decimal("0"))
+    from app.services.monthly_output_invoice_service import monthly_output_invoice_summary
+    month_invoices = monthly_output_invoice_summary(db, start, nxt, company)
+    linked_invoiced_total = month_invoices["invoiced"]
+    # 红字冲当月发票净额，不在下单月的销售基数上重复冲减。
+    linked_red_adjustment = Decimal("0")
     sales_total = Decimal(sales["summary"]["salesAmount"] or "0")
     source_details, details, selected_keys, adjustment = _unbilled_details_for_period(
         db, company=company, year=year, month=month,
@@ -717,15 +720,23 @@ def build_unbilled_income_report(
             (Decimal(d.get("adjustedSales") or d.get("sales") or "0") for d in details),
             Decimal("0"),
         )
-        invoiced_total = row_invoiced_total
-    # 红字发票同时冲减销售基数与已开票净额；未关联的服务费发票不参与本表。
+        invoiced_total = linked_invoiced_total
+    # 发票无需与销售订单匹配；不伪造 SKU 分摊，单列月度开票抵减明细。
+    if invoiced_total:
+        details = [*details, {
+            "period": f"{year}-{month:02d}", "taxCode": "",
+            "taxName": "商品销项发票", "product": "当月商品销项开票抵减（按开票日期）",
+            "quantity": "0", "sales": "0.00", "redSalesAdjustment": "0.00",
+            "adjustedSales": "0.00", "invoiced": _string_decimal(invoiced_total),
+            "unbilled": _string_decimal(-invoiced_total), "cost": "0.00",
+        }]
+    row_invoiced_total = sum((Decimal(d.get("invoiced") or "0") for d in details), Decimal("0"))
     unbilled = adjusted_sales_total - invoiced_total
     version = adjustment.version if adjustment is not None else _latest_sales_summary_version(
         db, company=company, year=year, month=month,
     )
-    unattributed = invoiced_total - row_invoiced_total
-    if unattributed < 0:
-        unattributed = Decimal("0")
+    # 月度抵减已作为单独明细行列示，无须关联某张销售订单。
+    unattributed = Decimal("0")
     return {
         "period": f"{year}-{month:02d}",
         "year": year,
@@ -736,12 +747,15 @@ def build_unbilled_income_report(
         "invoicedAmount": _string_decimal(invoiced_total),
         "unbilledAmount": _string_decimal(unbilled),
         "rowInvoicedTotal": _string_decimal(row_invoiced_total),
+        "excludedServiceInvoiceAmount": _string_decimal(month_invoices["service"]),
+        "pendingOutputInvoiceCount": month_invoices["pendingCount"],
+        "pendingOutputInvoiceAmount": _string_decimal(month_invoices["pendingAmount"]),
         "unattributedInvoiced": _string_decimal(unattributed),
         "version": version or None,
         "adjusted": adjustment is not None,
         "selectedKeys": selected_keys,
         "sourceCount": len(source_details),
-        "selectedCount": len(details),
+        "selectedCount": len(details) - (1 if invoiced_total else 0),
         "updatedAt": adjustment.updated_at.isoformat() if adjustment and adjustment.updated_at else None,
         # 调整弹窗必须能看到完整原始明细，才能把上一版本取消的行重新勾回来；
         # details 始终代表当前保存版本，用于只读预览和最终交付。
