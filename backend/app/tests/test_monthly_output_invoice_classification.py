@@ -38,10 +38,10 @@ def _tax_export_bytes(*, invoice_specs):
     ])
     for i, (invoice_no, lines) in enumerate(invoice_specs, start=1):
         total = sum((amount for _, _, amount in lines), Decimal("0"))
-        base.append([i, invoice_no, "91331021MA2HJK362B", COMPANY, "91330100123456789X",
+        base.append([i, invoice_no, "91330000000000001X", COMPANY, "91330100123456789X",
                      "示例客户", "2097-10-13", float(total), 0, float(total), "正常", "是"])
         for code, name, amount in lines:
-            summary.append([i, invoice_no, "91331021MA2HJK362B", COMPANY,
+            summary.append([i, invoice_no, "91330000000000001X", COMPANY,
                             "91330100123456789X", "示例客户", "2097-10-13",
                             code, name, float(amount), 0, float(amount)])
     summary.append(["合计行", None, None, None, None, None, None, None, None,
