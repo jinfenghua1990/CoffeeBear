@@ -2363,6 +2363,46 @@ def _ingest_rows(
             record.error_summary = ""
     needs_review += detail_needs_review
 
+    # “信息汇总表”里有税收分类编码/开票项目，基础信息主表没有。
+    # 只接收校验一致的官方项目行，按票号挂元数据，不创建平行发票。
+    if parsed.summary_rows and parsed.summary_validation.get("status") == "matched":
+        from app.models.tax import TaxAccountingCategoryRule
+        from app.services.monthly_output_invoice_service import classify_output_line
+
+        rules = db.query(TaxAccountingCategoryRule).filter(
+            TaxAccountingCategoryRule.enabled.is_(True)
+        ).order_by(TaxAccountingCategoryRule.priority, TaxAccountingCategoryRule.id).all()
+        items_by_key: dict[str, list[dict[str, str]]] = {}
+        number_column = parsed.summary_mapping.get("invoice_number", "")
+        code_column = parsed.summary_mapping.get("invoice_code", "")
+        for item in parsed.summary_rows:
+            number = str(item.get(number_column) or "").strip()
+            code = str(item.get(code_column) or "").strip()
+            key = f"{code}|{number}"
+            if not number or key not in processed_invoices:
+                continue
+            tax_code = str(item.get("税收分类编码") or item.get("商品和服务税收分类编码") or "").strip()
+            goods_name = str(item.get("货物或应税劳务名称") or item.get("项目名称") or "").strip()
+            total = str(item.get("价税合计") or item.get("含税金额") or "").strip()
+            if not total:
+                continue
+            items_by_key.setdefault(key, []).append({
+                "taxCode": tax_code, "goodsName": goods_name, "totalAmount": total,
+            })
+        for key, item_rows in items_by_key.items():
+            invoice = processed_invoices[key]
+            raw = dict(invoice.raw) if isinstance(invoice.raw, dict) else {}
+            raw["_taxSummaryLines"] = item_rows
+            invoice.raw = raw
+            if invoice.direction != "output" or invoice.category:
+                continue
+            kinds = {classify_output_line(
+                item["taxCode"], item["goodsName"], rules,
+            ) for item in item_rows}
+            if len(kinds) == 1 and "" not in kinds:
+                invoice.category = kinds.pop()
+                invoice.raw = {**invoice.raw, "_autoOutputCategory": invoice.category}
+
     batch.sheet_name = parsed.sheet_name
     batch.headers = parsed.headers
     batch.mapping = {

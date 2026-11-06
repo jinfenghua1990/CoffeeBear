@@ -336,6 +336,7 @@ def test_output_red_discount_adjusts_sales_basis_and_does_not_create_unbilled_in
         buyer_name=f"客户-{token}",
         total_amount=Decimal("1000.00"),
         source_system="tax_export",
+        category="buyer_sales",
         raw={"是否正数发票": "是"},
     )
     red = TaxInvoice(
@@ -362,20 +363,21 @@ def test_output_red_discount_adjusts_sales_basis_and_does_not_create_unbilled_in
     ))
     db_session.commit()
 
-    company = f"red-discount-company-{token}"
+    company = "本公司"
     report = svc.build_unbilled_income_report(db_session, 2026, 8, company=company)
 
     assert Decimal(report["salesAmount"]) == Decimal("1000.00")
-    assert Decimal(report["redSalesAdjustmentAmount"]) == Decimal("-300.00")
-    assert Decimal(report["adjustedSalesAmount"]) == Decimal("700.00")
+    assert Decimal(report["redSalesAdjustmentAmount"]) == Decimal("0.00")
+    assert Decimal(report["adjustedSalesAmount"]) == Decimal("1000.00")
     assert Decimal(report["invoicedAmount"]) == Decimal("700.00")
-    assert Decimal(report["unbilledAmount"]) == Decimal("0.00")
+    assert Decimal(report["unbilledAmount"]) == Decimal("300.00")
     detail = next(row for row in report["details"] if row["product"] == "红冲测试商品")
     assert Decimal(detail["sales"]) == Decimal("1000.00")
-    assert Decimal(detail["redSalesAdjustment"]) == Decimal("-300.00")
-    assert Decimal(detail["adjustedSales"]) == Decimal("700.00")
-    assert Decimal(detail["invoiced"]) == Decimal("700.00")
-    assert Decimal(detail["unbilled"]) == Decimal("0.00")
+    assert Decimal(detail["redSalesAdjustment"]) == Decimal("0.00")
+    assert Decimal(detail["invoiced"]) == Decimal("0.00")
+    deduction = next(row for row in report["details"] if row["product"].startswith("当月商品销项"))
+    assert Decimal(deduction["invoiced"]) == Decimal("700.00")
+    assert Decimal(deduction["unbilled"]) == Decimal("-700.00")
 
 
 def test_unbilled_income_xlsx_matches_delivery_tabs():
@@ -464,3 +466,41 @@ def test_unlinked_output_service_invoice_is_excluded_from_unbilled_income(db_ses
     assert report["redSalesAdjustmentAmount"] == "0.00"
     assert report["invoicedAmount"] == "0.00"
     assert report["unbilledAmount"] == "100.00"
+
+
+def test_monthly_goods_invoice_summary_excludes_service_without_sales_links(db_session):
+    """从税局信息汇总表读取商品/服务性质，不要求对应一张销售订单。"""
+    from app.models.tax import TaxInvoice
+    from app.services.monthly_core import month_bounds
+    from app.services.monthly_output_invoice_service import monthly_output_invoice_summary
+
+    token = uuid4().hex[:10]
+    company = f"测试开票公司{token}"
+    db_session.add_all([
+        TaxInvoice(
+            invoice_key=f"goods-{token}", invoice_number=f"GOODS-{token}",
+            direction="output", status="issued",
+            issue_date=datetime(2026, 8, 10, tzinfo=ZoneInfo(settings.TZ)),
+            seller_name=company, total_amount=Decimal("317.33"), source_system="tax_export",
+            raw={"_taxSummaryLines": [{
+                "taxCode": "1030307060000000000",
+                "goodsName": "*软饮料*咖啡", "totalAmount": "317.33",
+            }]},
+        ),
+        TaxInvoice(
+            invoice_key=f"fee-{token}", invoice_number=f"FEE-{token}",
+            direction="output", status="issued",
+            issue_date=datetime(2026, 8, 13, tzinfo=ZoneInfo(settings.TZ)),
+            seller_name=company, total_amount=Decimal("652.39"), source_system="tax_export",
+            raw={"_taxSummaryLines": [{
+                "taxCode": "3040203000000000000",
+                "goodsName": "*生产生活服务*信息技术服务费", "totalAmount": "652.39",
+            }]},
+        ),
+    ])
+    db_session.commit()
+    start, end = month_bounds(2026, 8)
+    result = monthly_output_invoice_summary(db_session, start, end, company)
+    assert result["invoiced"] == Decimal("317.33")
+    assert result["service"] == Decimal("652.39")
+    assert result["pendingCount"] == 0
