@@ -247,6 +247,24 @@ def test_cancelled_order_items_skip_catalog_check_but_deal_orders_still_enforced
     _cleanup_sales_fixtures(db_session)
 
 
+def test_closed_order_items_also_skip_catalog_check(client, db_session, tmp_path, monkeypatch):
+    """「已关闭」等其它非成交状态同样跳过档案校验，口径统一由 sales_scope 维护。"""
+    monkeypatch.setattr(service.settings, "DATA_DIR", str(tmp_path))
+
+    content = _xlsx([
+        _ITEM_HEADER,
+        ["JYTEST-501", "PDD", "已关闭", None, "关闭单无编码货品", 1, 30, 30],
+    ])
+    response = client.post(
+        "/api/v1/sales-file/import",
+        files={"file": ("销售单查询.xlsx", content, "application/octet-stream")},
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["skippedNonDealRows"] == 1
+    _cleanup_sales_fixtures(db_session)
+
+
 # ---------- 明细成本口径：文件只提供销售数量与客户实付，成本按本系统入库加权 ----------
 
 
