@@ -130,8 +130,10 @@ def test_independent_sales_and_invoice_months_with_entity_filter(db_session):
             source_system="tax_export", direction="output", status="issued",
             issue_date=datetime(2096, month, 12, 9, 0, tzinfo=tz),
             seller_name=seller, category=category, total_amount=Decimal(str(amount)),
-            raw={"货物或应税劳务名称": "*软饮料*咖啡" if code == GOODS_CODE else "*生产生活服务*信息技术服务费",
-                 "税收分类编码": code, "价税合计": str(amount)},
+            raw={} if tag == "unclassified" else {
+                "货物或应税劳务名称": "*软饮料*咖啡" if code == GOODS_CODE else "*生产生活服务*信息技术服务费",
+                "税收分类编码": code, "价税合计": str(amount),
+            },
         )
 
     db_session.add_all([
