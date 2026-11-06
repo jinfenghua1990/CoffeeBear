@@ -180,6 +180,70 @@ def test_import_accepts_all_known_sku_codes(client, db_session, tmp_path, monkey
     _cleanup_sales_fixtures(db_session)
 
 
+def test_cancelled_order_items_skip_catalog_check_but_deal_orders_still_enforced(
+    client, db_session, tmp_path, monkeypatch
+):
+    """取消/关闭单的明细不参与货品档案校验；成交单仍严格校验且报错可定位。
+
+    吉客云对已取消（含「已取消-被合并」）、未结算的订单不输出货品编号，
+    这类单按 sales_scope 口径不进入业绩聚合，不应因缺编号把整份文件拒绝。
+    """
+    from app.models.sales import SalesOrder, SalesOrderItem
+
+    monkeypatch.setattr(service.settings, "DATA_DIR", str(tmp_path))
+    _make_sku(db_session, "JYTEST-SKU-B1", "JYTEST-SKU-B1")
+
+    content = _xlsx([
+        _ITEM_HEADER,
+        ["JYTEST-401", "PDD", "已完成", "JYTEST-SKU-B1", "已知货品", 1, 10, 10],
+        ["JYTEST-402", "PDD", "已取消-被合并", None, "取消单无编码货品", 1, 59, 59],
+    ])
+    response = client.post(
+        "/api/v1/sales-file/import",
+        files={"file": ("销售单查询.xlsx", content, "application/octet-stream")},
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["ordersImported"] == 1
+    assert body["itemsImported"] == 2
+    assert body["skippedNonDealRows"] == 1
+    order = db_session.query(SalesOrder).filter_by(order_no="JYTEST-402").one()
+    item = db_session.query(SalesOrderItem).filter_by(order_id=order.id).one()
+    assert item.sku_code == ""
+    assert item.sku_id is None
+    assert item.goods_name == "取消单无编码货品"
+    _cleanup_sales_fixtures(db_session)
+
+    # 成交单出现空编号：拒绝，且必须带行号/订单号/品名，不再出现「冒号后空白」。
+    blank = _xlsx([
+        _ITEM_HEADER,
+        ["JYTEST-405", "PDD", "已完成", None, "成交单空编号货品", 1, 20, 20],
+    ])
+    blank_resp = client.post(
+        "/api/v1/sales-file/import",
+        files={"file": ("销售单查询.xlsx", blank, "application/octet-stream")},
+    )
+    assert blank_resp.status_code == 400, blank_resp.text
+    detail = blank_resp.json()["detail"]
+    assert "货品编号为空" in detail and "JYTEST-405" in detail and "成交单空编号货品" in detail
+
+    # 成交单有编码但没建档：仍然整单拒绝，报错列出具体编码。
+    bad = _xlsx([
+        _ITEM_HEADER,
+        ["JYTEST-403", "PDD", "已完成", "JYTEST-SKU-B1", "已知货品", 1, 10, 10],
+        ["JYTEST-404", "PDD", "已完成", "JYTEST-SKU-UNKNOWN-B", "未知货品", 1, 5, 5],
+    ])
+    rejected = client.post(
+        "/api/v1/sales-file/import",
+        files={"file": ("销售单查询.xlsx", bad, "application/octet-stream")},
+    )
+    assert rejected.status_code == 400, rejected.text
+    assert rejected.json()["detail"] == (
+        "货品档案缺少以下货品编码，请先建档或修正后再导入：JYTEST-SKU-UNKNOWN-B"
+    )
+    _cleanup_sales_fixtures(db_session)
+
+
 # ---------- 明细成本口径：文件只提供销售数量与客户实付，成本按本系统入库加权 ----------
 
 

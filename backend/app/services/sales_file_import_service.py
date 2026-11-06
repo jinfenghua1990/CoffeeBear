@@ -172,10 +172,12 @@ def _collect_item_groups(ws, headers: dict[str, int], *, same_sheet: bool) -> di
     """读取独立明细 Sheet，或主表中按行展开的明细。"""
     groups: dict[str, list[dict[str, Any]]] = {}
     current_order_no = ""
-    for row in ws.iter_rows(values_only=True):
+    for row_no, row in enumerate(ws.iter_rows(values_only=True), 1):
         if not row:
             continue
         payload = {name: row[i] for name, i in headers.items() if i < len(row)}
+        # 记录物理行号，供缺货品编号时给出可定位的诊断信息。
+        payload["__row_no__"] = row_no
         order_no = str(_cell(payload, _ITEM_ORDER_KEYS) or "").strip()
         if order_no == "订单编号":
             continue
@@ -189,6 +191,24 @@ def _collect_item_groups(ws, headers: dict[str, int], *, same_sheet: bool) -> di
             continue
         groups.setdefault(order_no, []).append(payload)
     return groups
+
+
+def _order_status_map(ws, headers: dict[str, int]) -> dict[str, str]:
+    """订单号 → 订单状态。同一 sheet 展开明细时，合并单元格的状态沿用上一行。"""
+    result: dict[str, str] = {}
+    current_status = ""
+    for row in ws.iter_rows(values_only=True):
+        if not row:
+            continue
+        payload = {name: row[i] for name, i in headers.items() if i < len(row)}
+        status = str(_cell(payload, _STATUS_KEYS) or "").strip()
+        if status:
+            current_status = status
+        order_no = str(_cell(payload, _ORDER_KEYS) or "").strip()
+        if not order_no or order_no == "订单编号":
+            continue
+        result[order_no] = status or current_status
+    return result
 
 
 def _is_valid_status(status: str | None) -> bool:
@@ -238,26 +258,51 @@ def import_sales_file(
         wb.close()
         raise ValueError("未识别到销售明细列，请确认文件包含货品编号（或商品编码）、货品名称和数量")
 
-    # ---------- 货品档案校验：明细货品编码必须已建档，否则整单拒绝（不写任何数据） ----------
+    # ---------- 货品档案校验：只校验成交订单的明细 ----------
+    # 吉客云对已取消/已关闭/未结算订单不输出「货品编号」，而 sales_scope 明确这些单
+    # 不进入任何业绩聚合。拿它们去校验货品档案会把整份文件无辜拒绝。
+    # 成交单的明细编码仍必须非空且已建档，保证成本归集可复算。
     iws, ihd = item_ws
     same_sheet_items = iws is order_ws[0]
     item_groups = _collect_item_groups(iws, ihd, same_sheet=same_sheet_items)
+    status_by_order = _order_status_map(order_ws[0], order_ws[1])
     known_codes = {
         str(code).strip().lower()
         for (code,) in db.query(ProductSku.sku_code).all()
         if code is not None and str(code).strip()
     }
     missing_codes: list[str] = []
-    for lines in item_groups.values():
+    blank_code_rows: list[str] = []
+    skipped_non_deal_rows = 0
+    for order_no, lines in item_groups.items():
+        if order_no not in status_by_order or not _is_valid_status(status_by_order[order_no]):
+            # 主表中不存在、或已取消/关闭/作废/退款等非成交订单：明细不参与档案校验。
+            skipped_non_deal_rows += len(lines)
+            continue
         for line in lines:
             code = str(_cell(line, _ITEM_SKU_KEYS) or "").strip()
-            if (not code or code.lower() not in known_codes) and code not in missing_codes:
+            if not code:
+                name = str(_cell(line, _ITEM_NAME_KEYS) or "").strip()
+                blank_code_rows.append(
+                    f"{getattr(iws, 'title', '明细表')} 第{line.get('__row_no__', '?')}行"
+                    f"（{order_no} {name[:24]}）"
+                )
+            elif code.lower() not in known_codes and code not in missing_codes:
                 missing_codes.append(code)
-    if missing_codes:
-        wb.close()
-        raise ValueError(
-            "货品档案缺少以下货品编码，请先建档或修正后再导入：" + ",".join(missing_codes)
+    problems: list[str] = []
+    if blank_code_rows:
+        shown = "、".join(blank_code_rows[:10])
+        more = f"，另有 {len(blank_code_rows) - 10} 行" if len(blank_code_rows) > 10 else ""
+        problems.append(
+            f"成交订单的明细有 {len(blank_code_rows)} 行货品编号为空，请修正后再导入：{shown}{more}"
         )
+    if missing_codes:
+        shown_codes = ",".join(missing_codes[:30])
+        more = f" 等共 {len(missing_codes)} 个编码" if len(missing_codes) > 30 else ""
+        problems.append("货品档案缺少以下货品编码，请先建档或修正后再导入：" + shown_codes + more)
+    if problems:
+        wb.close()
+        raise ValueError("；".join(problems))
 
     imported_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
 
@@ -474,6 +519,7 @@ def import_sales_file(
         "cancelledPreserved": cancelled_preserved,
         "itemsImported": item_total,
         "itemOrderHits": item_order_hits,
+        "skippedNonDealRows": skipped_non_deal_rows,
         "financeProjectedOrders": projected_orders,
         "minDate": min(dates).strftime("%Y-%m-%d") if dates else None,
         "maxDate": max(dates).strftime("%Y-%m-%d") if dates else None,
@@ -484,5 +530,6 @@ def import_sales_file(
     audit(db, actor, "sales_file.import", "sales_orders", len(seen),
           {"ordersImported": len(seen), "cancelledSkipped": len(cancelled_nos),
            "removedCancelled": removed_cancelled, "items": item_total,
+           "skippedNonDealRows": skipped_non_deal_rows,
            "archiveFile": stats["archiveFile"], "sheets": sheet_diagnostics})
     return stats
