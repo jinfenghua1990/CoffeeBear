@@ -228,6 +228,9 @@ def test_cancelled_order_items_skip_catalog_check_but_deal_orders_still_enforced
     assert "货品编号为空" in detail and "JYTEST-405" in detail and "成交单空编号货品" in detail
 
     # 成交单有编码但没建档：仍然整单拒绝，报错列出具体编码。
+    # _cleanup_sales_fixtures 会清掉全部 JYTEST-SKU-* 档案，这里把 B1 建回去，
+    # 否则它会被一起当成「未建档」列进报错。
+    _make_sku(db_session, "JYTEST-SKU-B1", "JYTEST-SKU-B1")
     bad = _xlsx([
         _ITEM_HEADER,
         ["JYTEST-403", "PDD", "已完成", "JYTEST-SKU-B1", "已知货品", 1, 10, 10],
