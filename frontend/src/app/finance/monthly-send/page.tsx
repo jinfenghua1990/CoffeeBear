@@ -62,6 +62,9 @@ type Unbilled = {
   redSalesAdjustmentAmount?: string;
   adjustedSalesAmount?: string;
   invoicedAmount: string;
+  serviceInvoiceAmount?: string;
+  pendingInvoiceAmount?: string;
+  pendingInvoiceCount?: number;
   unbilledAmount: string;
   rowInvoicedTotal?: string;
   unattributedInvoiced?: string;
@@ -1339,7 +1342,7 @@ export default function MonthlySendPage() {
           </div>
           <ItemRow kind="bank" title={`${sel?.month || ""}月-银行交易明细`} state={{ ok: Boolean(bankTx) && bankTx.filePresent !== false, text: !bankTx ? "待上传" : bankTx.filePresent === false ? "文件缺失" : "已导入" }} summary={bankTx ? <>全部账户 · 已导入<br />{formatBytes(bankTx.size)}</> : <>等待上传原始银行流水<br /><span className="text-amber-600">上传后自动归档</span></>} updatedAt={bankTx?.uploadedAt} version={bankTx?.version} parameter={bankTx ? "账期内 · 全部账户" : "待补充资料"} selected={includeSel.includes("交易明细")} onToggle={() => setIncludeSel((s) => s.includes("交易明细") ? s.filter((x) => x !== "交易明细") : [...s, "交易明细"])} actions={<>{bankTx && <button type="button" onClick={() => void downloadFile(bankTx)} disabled={busy} className="rounded-md border border-slate-200 px-2.5 py-1.5 text-[11px] text-slate-600 hover:bg-slate-50 disabled:opacity-50">下载</button>}<button type="button" onClick={() => { uploadKind.current = "交易明细"; fileRef.current?.click(); }} disabled={busy} className="rounded-md bg-blue-600 px-2.5 py-1.5 text-[11px] font-medium text-white hover:bg-blue-700 disabled:opacity-50">{bankTx ? "替换" : "上传"}</button></>} />
           <ItemRow kind="receipt" title={`${sel?.month || ""}月-银行回单详情`} state={{ ok: Boolean(bankReceipt) && bankReceipt.filePresent !== false, text: !bankReceipt ? "待上传" : bankReceipt.filePresent === false ? "文件缺失" : "已导入" }} summary={bankReceipt ? <>全部账户 · 已导入<br />{formatBytes(bankReceipt.size)}</> : <>等待上传银行回单<br /><span className="text-amber-600">上传后自动归档</span></>} updatedAt={bankReceipt?.uploadedAt} version={bankReceipt?.version} parameter={bankReceipt ? "账期内 · 全部账户" : "待补充资料"} selected={includeSel.includes("回单详情")} onToggle={() => setIncludeSel((s) => s.includes("回单详情") ? s.filter((x) => x !== "回单详情") : [...s, "回单详情"])} actions={<>{bankReceipt && <button type="button" onClick={() => void downloadFile(bankReceipt)} disabled={busy} className="rounded-md border border-slate-200 px-2.5 py-1.5 text-[11px] text-slate-600 hover:bg-slate-50 disabled:opacity-50">下载</button>}<button type="button" onClick={() => { uploadKind.current = "回单详情"; fileRef.current?.click(); }} disabled={busy} className="rounded-md bg-blue-600 px-2.5 py-1.5 text-[11px] font-medium text-white hover:bg-blue-700 disabled:opacity-50">{bankReceipt ? "替换" : "上传"}</button></>} />
-          {needsUnbilled && (<ItemRow kind="sales" title={`${sel?.month || ""}月-销售出库-无票收入`} state={{ ok: Boolean(unbilled), text: unbilled ? (unbilled.adjusted ? "已调整" : "已生成") : "计算中" }} summary={unbilled ? <>销售总额 {money(unbilled.salesAmount)} · 红字调整 {money(unbilled.redSalesAdjustmentAmount || 0)}<br />调整后销售 {money(unbilled.adjustedSalesAmount || unbilled.salesAmount)} · 无票收入 {money(unbilled.unbilledAmount)}</> : <>正在读取销售出库数据<br /><span className="text-slate-400">按当前账期自动计算</span></>} updatedAt={unbilled?.updatedAt || salesFile?.uploadedAt} version={unbilled?.version || salesFile?.version} parameter={unbilled?.adjusted ? `已选择 ${unbilled.selectedCount || 0}/${unbilled.sourceCount || 0} 条` : "出库时间 · 全部渠道"} selected={includeSel.includes("无票收入")} onToggle={() => setIncludeSel((s) => s.includes("无票收入") ? s.filter((x) => x !== "无票收入") : [...s, "无票收入"])} actions={<><button type="button" onClick={() => { setUnbilledDetailMode("adjust"); setShowUnbilledDetail(true); }} disabled={!unbilled} className="rounded-md border border-slate-200 px-2.5 py-1.5 text-[11px] text-slate-600 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-40">调整明细</button><button type="button" onClick={() => { setUnbilledDetailMode("preview"); setShowUnbilledDetail(true); }} disabled={!unbilled || busy} className="rounded-md border border-blue-200 px-2.5 py-1.5 text-[11px] text-blue-600 hover:bg-blue-50 disabled:opacity-50">预览</button></>} />)}
+          {needsUnbilled && (<ItemRow kind="sales" title={`${sel?.month || ""}月-销售出库-无票收入`} state={{ ok: Boolean(unbilled), text: unbilled ? (unbilled.adjusted ? "已调整" : "已生成") : "计算中" }} summary={unbilled ? <>按下单月销售 {money(unbilled.salesAmount)} · 商品销项净额 {money(unbilled.invoicedAmount)}<br />无票收入差额 {money(unbilled.unbilledAmount)} · 服务费发票 {money(unbilled.serviceInvoiceAmount || 0)}（不抵扣）{Number(unbilled.pendingInvoiceCount || 0) > 0 ? <> · 待核对 {unbilled.pendingInvoiceCount} 张</> : null}</> : <>正在读取销售出库数据<br /><span className="text-slate-400">按当前账期自动计算</span></>} updatedAt={unbilled?.updatedAt || salesFile?.uploadedAt} version={unbilled?.version || salesFile?.version} parameter={unbilled?.adjusted ? `已选择 ${unbilled.selectedCount || 0}/${unbilled.sourceCount || 0} 条` : "销售按下单时间 · 发票按开票时间"} selected={includeSel.includes("无票收入")} onToggle={() => setIncludeSel((s) => s.includes("无票收入") ? s.filter((x) => x !== "无票收入") : [...s, "无票收入"])} actions={<><button type="button" onClick={() => { setUnbilledDetailMode("adjust"); setShowUnbilledDetail(true); }} disabled={!unbilled} className="rounded-md border border-slate-200 px-2.5 py-1.5 text-[11px] text-slate-600 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-40">调整明细</button><button type="button" onClick={() => { setUnbilledDetailMode("preview"); setShowUnbilledDetail(true); }} disabled={!unbilled || busy} className="rounded-md border border-blue-200 px-2.5 py-1.5 text-[11px] text-blue-600 hover:bg-blue-50 disabled:opacity-50">预览</button></>} />)}
           {needsUnbilled && (<ItemRow kind="purchase_inbound" title={`${sel?.month || ""}月-已收票对公付款明细`} state={corporateDeliveryState} summary={corporatePayment ? <>进项发票 {corporatePayment.summary.invoiceCount} 张 · 对公付款 {corporatePayment.summary.paymentCount} 笔<br />已关联 {money(corporatePayment.summary.allocatedTotal)}</> : <>正在关联银行付款、发票与采购商品<br /><span className="text-slate-400">只统计已确认的付款↔发票关联</span></>} parameter={corporateReviewSummary} updatedAt={corporatePayment?.updatedAt} version={corporatePayment?.version} selected={includeSel.includes("已收票对公付款明细")} onToggle={() => setIncludeSel((s) => s.includes("已收票对公付款明细") ? s.filter((x) => x !== "已收票对公付款明细") : [...s, "已收票对公付款明细"])} actions={<><button type="button" onClick={() => { setShowCorporateDetail(true); void loadCorporatePayment(); }} disabled={!corporatePayment} className="rounded-md border border-slate-200 px-2.5 py-1.5 text-[11px] text-slate-600 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-40">调整明细</button><button type="button" onClick={() => { setCorporateView("preview"); setFinanceTab("corporate"); void loadCorporatePayment(); }} disabled={!corporatePayment} className="rounded-md border border-violet-200 px-2.5 py-1.5 text-[11px] text-violet-600 hover:bg-violet-50 disabled:cursor-not-allowed disabled:opacity-40">预览</button></>} />)}
           <input ref={fileRef} type="file" accept=".xlsx,.xls,.csv,.pdf" className="hidden" onChange={(e) => { const file = e.target.files?.[0]; if (file) handleUploadSelection(file); }} />
           <div className="flex flex-wrap items-center justify-between gap-3 border-t border-slate-200 bg-slate-50/60 px-4 py-3">
@@ -1511,7 +1514,7 @@ export default function MonthlySendPage() {
                 </label>
                 <div className="mt-4 rounded-lg border border-blue-100 bg-blue-50/60 p-3 text-[11px] leading-4 text-blue-800">
                   {unbilledDetailMode === "adjust"
-                    ? "无票收入 = 调整后销售金额 − 已开票净额；销项红字调整同时冲减销售基数和已开票净额。当前明细按税务编号 + 产品聚合；取消勾选的明细不会进入本次版本。"
+                    ? "无票收入 = 当月销售金额 − 当月商品销项发票净额。按下单时间统计销售、按开票时间统计发票；服务费不抵扣。红字发票只冲减开票净额。取消勾选的销售明细不会进入本次版本，但本月发票净额始终完整计入。"
                     : "当前为只读发送预览，只展示这个版本实际会进入附件的明细。"} 
                 </div>
               </div>
@@ -1523,15 +1526,15 @@ export default function MonthlySendPage() {
                     <div className="mt-1 text-sm font-semibold">{money(unbilled?.salesAmount)}</div>
                   </div>
                   <div className="rounded-lg bg-slate-50 p-2.5">
-                    <div className="text-[10px] text-slate-400">销项红字调整</div>
-                    <div className="mt-1 text-sm font-semibold text-rose-700">{money(unbilled?.redSalesAdjustmentAmount || 0)}</div>
+                    <div className="text-[10px] text-slate-400">销项服务费（不抵扣）</div>
+                    <div className="mt-1 text-sm font-semibold text-slate-800">{money(unbilled?.serviceInvoiceAmount || 0)}</div>
                   </div>
                   <div className="rounded-lg bg-slate-50 p-2.5">
                     <div className="text-[10px] text-slate-400">调整后销售金额</div>
                     <div className="mt-1 text-sm font-semibold">{money(unbilled?.adjustedSalesAmount || unbilled?.salesAmount)}</div>
                   </div>
                   <div className="rounded-lg bg-slate-50 p-2.5">
-                    <div className="text-[10px] text-slate-400">已开票净额</div>
+                    <div className="text-[10px] text-slate-400">商品销项已开票净额</div>
                     <div className="mt-1 text-sm font-semibold">{money(unbilled?.invoicedAmount)}</div>
                   </div>
                   <div className="rounded-lg bg-amber-50 p-2.5">
@@ -1647,9 +1650,12 @@ export default function MonthlySendPage() {
                     {money(filteredUnbilledDetails.reduce((sum, detail) => sum + Number(detail.sales || 0), 0))}</>
                   : <>当前版本明细 {unbilled?.selectedCount ?? unbilled?.details.length ?? 0} / {unbilled?.sourceCount ?? unbilled?.details.length ?? 0} 条 · 预览合计{" "}
                     {money(filteredUnbilledDetails.reduce((sum, detail) => sum + Number(detail.sales || 0), 0))}</>}
+                {Number(unbilled?.pendingInvoiceCount || 0) > 0 ? (
+                  <span className="ml-2 text-amber-700">另有 {unbilled?.pendingInvoiceCount} 张销项发票分类待核对（金额 {money(unbilled?.pendingInvoiceAmount)}），暂不抵扣</span>
+                ) : null}
                 {Number(unbilled?.unattributedInvoiced || 0) > 0 ? (
                   <span className="ml-2 text-amber-700">
-                    已开票净额 {money(unbilled?.invoicedAmount)} 中有 {money(unbilled?.unattributedInvoiced)} 未关联到具体销售订单，仅计入总额、不摊入明细行
+                    商品销项净额 {money(unbilled?.invoicedAmount)} 中有 {money(unbilled?.unattributedInvoiced)} 未列入本次所选明细，仍计入月度差额
                   </span>
                 ) : null}
               </div>
