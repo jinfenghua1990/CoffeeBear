@@ -294,7 +294,7 @@ def test_unbilled_adjustment_persists_selected_details_and_version(db_session):
     assert Decimal(str(workbook["无票收入-汇总"].cell(row=3, column=2).value)) == selected_sales
 
 
-def test_output_red_discount_adjusts_sales_basis_and_does_not_create_unbilled_income(db_session):
+def test_output_red_invoice_only_offsets_invoice_net_not_sales_total(db_session):
     from datetime import timezone
     from app.models.tax import TaxInvoice, TaxInvoiceLink
 
@@ -333,6 +333,7 @@ def test_output_red_discount_adjusts_sales_basis_and_does_not_create_unbilled_in
         status="issued",
         issue_date=datetime(2026, 8, 10, tzinfo=timezone.utc),
         seller_name="本公司",
+        category="buyer_sales",
         buyer_name=f"客户-{token}",
         total_amount=Decimal("1000.00"),
         source_system="tax_export",
@@ -362,20 +363,20 @@ def test_output_red_discount_adjusts_sales_basis_and_does_not_create_unbilled_in
     ))
     db_session.commit()
 
-    company = f"red-discount-company-{token}"
+    company = "本公司"
     report = svc.build_unbilled_income_report(db_session, 2026, 8, company=company)
 
     assert Decimal(report["salesAmount"]) == Decimal("1000.00")
-    assert Decimal(report["redSalesAdjustmentAmount"]) == Decimal("-300.00")
-    assert Decimal(report["adjustedSalesAmount"]) == Decimal("700.00")
+    assert Decimal(report["redSalesAdjustmentAmount"]) == Decimal("0.00")
+    assert Decimal(report["adjustedSalesAmount"]) == Decimal("1000.00")
     assert Decimal(report["invoicedAmount"]) == Decimal("700.00")
-    assert Decimal(report["unbilledAmount"]) == Decimal("0.00")
+    assert Decimal(report["unbilledAmount"]) == Decimal("300.00")
     detail = next(row for row in report["details"] if row["product"] == "红冲测试商品")
     assert Decimal(detail["sales"]) == Decimal("1000.00")
-    assert Decimal(detail["redSalesAdjustment"]) == Decimal("-300.00")
-    assert Decimal(detail["adjustedSales"]) == Decimal("700.00")
+    assert Decimal(detail["redSalesAdjustment"]) == Decimal("0.00")
+    assert Decimal(detail["adjustedSales"]) == Decimal("1000.00")
     assert Decimal(detail["invoiced"]) == Decimal("700.00")
-    assert Decimal(detail["unbilled"]) == Decimal("0.00")
+    assert Decimal(detail["unbilled"]) == Decimal("300.00")
 
 
 def test_unbilled_income_xlsx_matches_delivery_tabs():
