@@ -421,6 +421,12 @@ def _monthly_output_invoice_breakdown(db: Session, start, nxt, company: str) -> 
         lines = summaries.get(invoice.id, {}).get("lineItems") or []
         if not lines and blue:
             lines = summaries.get(blue.id, {}).get("lineItems") or []
+            if not lines:
+                # 历史蓝字票可能只有 TaxInvoice.raw，没有导入明细记录。
+                # 红字票沿用蓝字票已确认的分类和税收编码，但按红票金额记负。
+                blue_raw = blue.raw if isinstance(blue.raw, dict) else {}
+                parsed_blue = tax_invoice_service._parse_line_item(blue_raw)
+                lines = [parsed_blue[0]] if parsed_blue else []
         if not lines:
             raw = invoice.raw if isinstance(invoice.raw, dict) else {}
             item = tax_invoice_service._parse_line_item(raw)
