@@ -50,6 +50,7 @@ class ParsedTaxInvoiceExport:
     ignored_row_count: int = 0
     summary_sheet_name: str = ""
     summary_headers: list[str] = dataclass_field(default_factory=list)
+    summary_rows: list[dict[str, str]] = dataclass_field(default_factory=list)
     summary_mapping: dict[str, str] = dataclass_field(default_factory=dict)
     summary_validation: dict[str, Any] = dataclass_field(default_factory=dict)
     detail_sheet_name: str = ""
@@ -287,6 +288,7 @@ def _parse_xlsx(content: bytes, *, max_rows: int) -> tuple[
     int,
     str,
     list[str],
+    list[dict[str, str]],
     dict[str, str],
     dict[str, Any],
     str,
@@ -405,6 +407,7 @@ def _parse_xlsx(content: bytes, *, max_rows: int) -> tuple[
         ignored_row_count,
         "、".join(summary_sheet_names),
         summary_headers,
+        summary_rows,
         summary_mapping,
         summary_validation,
         "、".join(detail_sheet_names),
@@ -449,6 +452,7 @@ def parse_tax_invoice_export(content: bytes, original_name: str, *, max_rows: in
             ignored_row_count,
             summary_sheet_name,
             summary_headers,
+            summary_rows,
             summary_mapping,
             summary_validation,
             detail_sheet_name,
@@ -460,6 +464,7 @@ def parse_tax_invoice_export(content: bytes, original_name: str, *, max_rows: in
         sheet_name, headers, rows = _parse_csv(content, max_rows=max_rows)
         summary_sheet_name = ""
         summary_headers = []
+        summary_rows = []
         summary_mapping = {}
         summary_validation = {}
         ignored_row_count = 0
@@ -487,6 +492,7 @@ def parse_tax_invoice_export(content: bytes, original_name: str, *, max_rows: in
         ignored_row_count=ignored_row_count,
         summary_sheet_name=summary_sheet_name,
         summary_headers=summary_headers,
+        summary_rows=summary_rows,
         summary_mapping=summary_mapping,
         summary_validation=summary_validation,
         detail_sheet_name=detail_sheet_name,
