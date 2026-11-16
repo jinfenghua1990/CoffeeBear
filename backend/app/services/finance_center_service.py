@@ -5,15 +5,17 @@ CoffeeBear 的业务 authority 仅为 DOMESTIC / 卖咖啡的熊。历史数据�
 """
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime
 from decimal import Decimal
 from typing import Any
 from uuid import uuid4
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from app.config import settings
 from app.models.finance import FinanceEntry, FinanceLegalEntity
 
 DEFAULT_ENTITY_CODE = "ZJCB"
@@ -188,7 +190,9 @@ def center_overview(
 ) -> dict[str, Any]:
     if business_scope not in {"all", "domestic"}:
         raise ValueError("CoffeeBear 仅提供国内财务范围")
-    now = datetime.now(timezone.utc)
+    # 账期默认按业务时区（Asia/Shanghai）取年月。用 UTC 会在中国 0:00-08:00
+    # 落到上个月，导致不传账期时查错月份，与 FinanceEntry 写入口径不一致。
+    now = datetime.now(ZoneInfo(settings.TZ))
     year = year or now.year
     month = month or now.month
     entity = resolve_entity(db, legal_entity_id)
