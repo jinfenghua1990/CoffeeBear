@@ -10,6 +10,37 @@ import BankReconciliationBadge, {
 import { useTabRuntime, useTabScopedState, useTabTitle, useWorkspace } from "@/lib/workspace/tab-store";
 
 type Pkg = { id: number; version: number; status: string; sha256: string; createdAt: string | null };
+type DeliveryLog = {
+  id: number;
+  packageId: number;
+  kind: string;
+  company: string;
+  year: number;
+  month: number;
+  period: string;
+  version: number;
+  sha256: string;
+  toAddrs: string[];
+  ccAddrs: string[];
+  status: string;
+  messageId: string;
+  error: string;
+  sentAt: string | null;
+  createdAt: string | null;
+};
+type SendRecord = {
+  key: string;
+  packageId: number | null;
+  period: string;
+  year: number;
+  month: number;
+  version: number | null;
+  sha256: string;
+  kind: "sent" | "resent" | "failed" | "packaged";
+  time: string | null;
+  toAddrs: string[];
+  error: string;
+};
 type LegalEntity = {
   id: number;
   code: string;
@@ -360,6 +391,10 @@ function formatDate(value: string | null | undefined) {
   return value ? new Date(value).toLocaleString("zh-CN", { year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" }) : "—";
 }
 
+function periodText(year: number | undefined, month: number | undefined) {
+  return year && month ? `${year}-${String(month).padStart(2, "0")}` : "—";
+}
+
 function formatBytes(value: number) {
   if (!value) return "—";
   if (value < 1024) return `${value} B`;
@@ -429,6 +464,12 @@ export default function MonthlySendPage() {
   const [toText, setToText] = useState("");
   const [ccText, setCcText] = useState("");
   const [periods, setPeriods] = useState<Period[]>([]);
+  const [deliveryLogs, setDeliveryLogs] = useState<DeliveryLog[]>([]);
+  const [recordsLoading, setRecordsLoading] = useState(false);
+  const [recordPeriod, setRecordPeriod] = useState("all");
+  const [recordStatus, setRecordStatus] = useState("all");
+  const [recordQuery, setRecordQuery] = useState("");
+  const [recordLimit, setRecordLimit] = useState(50);
   const [files, setFiles] = useState<FileRow[]>([]);
   const [businessStatus, setBusinessStatus] = useState<BusinessStatus | null>(null);
   const [unbilled, setUnbilled] = useState<Unbilled | null>(null);
@@ -470,6 +511,7 @@ export default function MonthlySendPage() {
   const fileRef = useRef<HTMLInputElement>(null);
   const templateRequestSeq = useRef(0);
   const periodsRequestSeq = useRef(0);
+  const logsRequestSeq = useRef(0);
   const filesRequestSeq = useRef(0);
   const businessRequestSeq = useRef(0);
   const unbilledRequestSeq = useRef(0);
@@ -541,6 +583,21 @@ export default function MonthlySendPage() {
       .then((r) => r.json())
       .then((rows) => { if (seq === periodsRequestSeq.current) setPeriods(rows); })
       .catch(() => { if (seq === periodsRequestSeq.current) setPeriods([]); });
+  }, [companyName]);
+
+  const loadDeliveryLogs = useCallback(() => {
+    if (!companyName) {
+      logsRequestSeq.current += 1;
+      setDeliveryLogs([]);
+      return;
+    }
+    const seq = ++logsRequestSeq.current;
+    setRecordsLoading(true);
+    authenticatedFetch(`/api/v1/finance/delivery-logs?company=${encodeURIComponent(companyName)}&limit=500`, { cache: "no-store" })
+      .then((r) => (r.ok ? r.json() : []))
+      .then((rows) => { if (seq === logsRequestSeq.current) setDeliveryLogs(rows); })
+      .catch(() => { if (seq === logsRequestSeq.current) setDeliveryLogs([]); })
+      .finally(() => { if (seq === logsRequestSeq.current) setRecordsLoading(false); });
   }, [companyName]);
 
   const loadFiles = useCallback(() => {
@@ -639,13 +696,19 @@ export default function MonthlySendPage() {
     if (!companyName) return;
     setTemplate(null);
     setPeriods([]);
+    setDeliveryLogs([]);
+    setRecordPeriod("all");
+    setRecordStatus("all");
+    setRecordQuery("");
+    setRecordLimit(50);
     setFiles([]);
     setBusinessStatus(null);
     setUnbilled(null);
     setCorporatePayment(null);
     void loadTemplate().catch((e) => setMsg(String(e)));
     void loadPeriods();
-  }, [companyName, loadPeriods, loadTemplate]);
+    loadDeliveryLogs();
+  }, [companyName, loadPeriods, loadDeliveryLogs, loadTemplate]);
   useEffect(() => {
     setIncludeSel(domesticSupportedByEntity
       ? ["交易明细", "回单详情", "无票收入", "已收票对公付款明细"]
@@ -946,15 +1009,16 @@ export default function MonthlySendPage() {
     } finally { setBusy(false); }
   }
 
-  async function downloadPackage(pkg: Pkg) {
-    if (!sel) return;
+  async function downloadPackage(pkg: Pkg, periodLabel?: string) {
     setBusy(true); setMsg("");
     try {
       const res = await authenticatedFetch(`/api/v1/finance/packages/${pkg.id}/download`);
       if (!res.ok) { const d = await res.json().catch(() => ({})); setMsg(`下载失败：${d.detail ?? res.status}`); return; }
       const blobUrl = URL.createObjectURL(await res.blob());
       const link = document.createElement("a");
-      link.href = blobUrl; link.download = `${sel.year}年${sel.month}月财务资料_V${pkg.version}.zip`;
+      const [y, m] = (periodLabel || periodText(sel?.year, sel?.month)).split("-");
+      const prefix = y && m ? `${y}年${Number(m)}月` : "财务资料";
+      link.href = blobUrl; link.download = `${prefix}财务资料_V${pkg.version}.zip`;
       document.body.appendChild(link); link.click(); link.remove(); URL.revokeObjectURL(blobUrl);
     } finally { setBusy(false); }
   }
@@ -978,7 +1042,7 @@ export default function MonthlySendPage() {
       const res = await authenticatedFetch(`/api/v1/finance/packages/${pkg.id}`, { method: "DELETE" });
       const d = await res.json();
       setMsg(res.ok ? `已删除 V${pkg.version}` : `删除失败：${d.detail ?? res.status}`);
-    } finally { setBusy(false); loadPeriods(); }
+    } finally { setBusy(false); loadPeriods(); loadDeliveryLogs(); }
   }
 
   function updateField(index: number, values: Partial<SalesField>) {
@@ -1022,6 +1086,82 @@ export default function MonthlySendPage() {
   const requiredDeliveryCount = needsUnbilled ? 4 : 2;
   const latestPkg = period?.packages.length ? period.packages[period.packages.length - 1] : null;
   const latestSentPkg = [...(period?.packages || [])].reverse().find((pkg) => pkg.status === "SENT") || null;
+
+  // 发送记录按“每一次发送/打包”汇总，跨全部账期，不再由当前账期切片。
+  const packageById = useMemo(
+    () => new Map(periods.flatMap((p) => p.packages.map((pkg) => [pkg.id, pkg] as const))),
+    [periods],
+  );
+  const sendRecords = useMemo<SendRecord[]>(() => {
+    const pkgMap = new Map<number, { pkg: Pkg; period: Period }>();
+    periods.forEach((p) => p.packages.forEach((pkg) => pkgMap.set(pkg.id, { pkg, period: p })));
+    const loggedPackageIds = new Set<number>();
+    const rows: SendRecord[] = deliveryLogs.map((log) => {
+      if (log.packageId) loggedPackageIds.add(log.packageId);
+      const hit = pkgMap.get(log.packageId);
+      const year = log.year || hit?.period.year || 0;
+      const month = log.month || hit?.period.month || 0;
+      return {
+        key: `log-${log.id}`,
+        packageId: log.packageId,
+        period: log.period || periodText(year, month),
+        year,
+        month,
+        version: log.version ?? hit?.pkg.version ?? null,
+        sha256: log.sha256 || hit?.pkg.sha256 || "",
+        kind: log.status === "failed" ? "failed" : log.kind === "resent" ? "resent" : "sent",
+        time: log.sentAt || log.createdAt,
+        toAddrs: log.toAddrs || [],
+        error: log.error || "",
+      };
+    });
+    periods.forEach((p) => p.packages.forEach((pkg) => {
+      if (loggedPackageIds.has(pkg.id)) return;
+      rows.push({
+        key: `pkg-${pkg.id}`,
+        packageId: pkg.id,
+        period: periodText(p.year, p.month),
+        year: p.year,
+        month: p.month,
+        version: pkg.version,
+        sha256: pkg.sha256,
+        kind: pkg.status === "SENT" ? "sent" : "packaged",
+        time: pkg.createdAt,
+        toAddrs: [],
+        error: "",
+      });
+    }));
+    return rows.sort((a, b) =>
+      (new Date(b.time || 0).getTime() - new Date(a.time || 0).getTime())
+      || (b.packageId || 0) - (a.packageId || 0));
+  }, [deliveryLogs, periods]);
+  const recordPeriods = useMemo(
+    () => [...new Set(sendRecords.map((r) => r.period).filter((p) => p && p !== "—"))].sort().reverse(),
+    [sendRecords],
+  );
+  const filteredRecords = useMemo(() => {
+    const q = recordQuery.trim().toLowerCase();
+    return sendRecords.filter((r) =>
+      (recordPeriod === "all" || r.period === recordPeriod)
+      && (recordStatus === "all" || (recordStatus === "sent" ? (r.kind === "sent" || r.kind === "resent") : r.kind === recordStatus))
+      && (!q || [r.period, r.version ? `v${r.version}` : "", r.sha256, ...r.toAddrs, r.error]
+        .join(" ").toLowerCase().includes(q)));
+  }, [sendRecords, recordPeriod, recordStatus, recordQuery]);
+  const recordStats = useMemo(() => ({
+    total: sendRecords.length,
+    sent: sendRecords.filter((r) => r.kind === "sent" || r.kind === "resent").length,
+    failed: sendRecords.filter((r) => r.kind === "failed").length,
+    packaged: sendRecords.filter((r) => r.kind === "packaged").length,
+    periods: recordPeriods.length,
+  }), [sendRecords, recordPeriods]);
+  const visibleRecords = filteredRecords.slice(0, recordLimit);
+  const recordKindLabel: Record<SendRecord["kind"], string> = { sent: "已发送", resent: "重新发送", failed: "发送失败", packaged: "仅打包" };
+  const recordKindClass: Record<SendRecord["kind"], string> = {
+    sent: "bg-emerald-50 text-emerald-700 ring-emerald-200",
+    resent: "bg-blue-50 text-blue-700 ring-blue-200",
+    failed: "bg-rose-50 text-rose-700 ring-rose-200",
+    packaged: "bg-slate-50 text-slate-600 ring-slate-200",
+  };
   const attachmentSize = (bankTx?.size || 0) + (bankReceipt?.size || 0);
   const unbilledSourceDetails = useMemo(
     () => unbilled?.sourceDetails?.length ? unbilled.sourceDetails : (unbilled?.details || []),
@@ -1277,15 +1417,21 @@ export default function MonthlySendPage() {
             ))}
           </select>
         </label>
-        <div className="flex items-center rounded-lg border border-slate-200 bg-white shadow-sm">
-          <button type="button" aria-label="上一个账期" onClick={() => setSendMonth(shiftMonthValue(sendMonth, -1))} className="px-3 py-2 text-lg leading-none text-slate-500 hover:bg-slate-50 hover:text-blue-600">‹</button>
-          <label className="border-x border-slate-200 px-3 text-sm font-semibold text-slate-800"><span className="sr-only">账期</span><input type="month" value={sendMonth} onChange={(e) => setSendMonth(e.target.value)} className="w-[118px] border-0 bg-transparent p-0 text-sm font-semibold outline-none" /></label>
-          <button type="button" aria-label="下一个账期" onClick={() => setSendMonth(shiftMonthValue(sendMonth, 1))} className="px-3 py-2 text-lg leading-none text-slate-500 hover:bg-slate-50 hover:text-blue-600">›</button>
-        </div>
-        <div className="flex items-center gap-2 text-xs text-slate-500">月度状态：<span className={`inline-flex items-center gap-1 rounded-full px-2.5 py-1 font-medium ring-1 ring-inset ${monthlyReady ? "bg-emerald-50 text-emerald-700 ring-emerald-200" : "bg-amber-50 text-amber-700 ring-amber-200"}`}><span className={`h-1.5 w-1.5 rounded-full ${monthlyReady ? "bg-emerald-500" : "bg-amber-500"}`} />{monthlyReady ? "全量资料齐全" : businessStatus && !businessReady ? "待补业务成本" : "待补财务资料"}</span></div>
-        <div className="flex items-center gap-2 text-xs text-slate-500">发送状态：<span className={`inline-flex items-center gap-1 rounded-full px-2.5 py-1 font-medium ring-1 ring-inset ${period?.status === "SENT" ? "bg-blue-50 text-blue-700 ring-blue-200" : "bg-slate-50 text-slate-600 ring-slate-200"}`}><span className={`h-1.5 w-1.5 rounded-full ${period?.status === "SENT" ? "bg-blue-500" : "bg-slate-400"}`} />{period?.status === "SENT" ? "已发送" : period?.status === "PACKAGED" ? "已打包" : "未发送"}</span></div>
-        <div className="text-xs text-slate-500">最后发送：<span className="text-slate-700">{latestSentPkg ? formatDate(latestSentPkg.createdAt) : "—"}</span></div>
-        <button type="button" onClick={() => latestPkg ? void downloadPackage(latestPkg) : setMsg("该账期暂无可导出的发送包")} disabled={busy || !latestPkg} className="ml-auto inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-medium text-blue-600 hover:border-blue-300 disabled:cursor-not-allowed disabled:text-slate-300"><svg viewBox="0 0 24 24" className="h-3.5 w-3.5" fill="none"><path d="M12 4v11m0 0-4-4m4 4 4-4M5 20h14" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" /></svg>导出清单</button>
+        {financeTab === "records" ? (
+          <div className="ml-auto text-xs text-slate-500">全部账期 · 按发送时间倒序，与月结账期选择无关</div>
+        ) : (
+          <>
+            <div className="flex items-center rounded-lg border border-slate-200 bg-white shadow-sm">
+              <button type="button" aria-label="上一个账期" onClick={() => setSendMonth(shiftMonthValue(sendMonth, -1))} className="px-3 py-2 text-lg leading-none text-slate-500 hover:bg-slate-50 hover:text-blue-600">‹</button>
+              <label className="border-x border-slate-200 px-3 text-sm font-semibold text-slate-800"><span className="sr-only">账期</span><input type="month" value={sendMonth} onChange={(e) => setSendMonth(e.target.value)} className="w-[118px] border-0 bg-transparent p-0 text-sm font-semibold outline-none" /></label>
+              <button type="button" aria-label="下一个账期" onClick={() => setSendMonth(shiftMonthValue(sendMonth, 1))} className="px-3 py-2 text-lg leading-none text-slate-500 hover:bg-slate-50 hover:text-blue-600">›</button>
+            </div>
+            <div className="flex items-center gap-2 text-xs text-slate-500">月度状态：<span className={`inline-flex items-center gap-1 rounded-full px-2.5 py-1 font-medium ring-1 ring-inset ${monthlyReady ? "bg-emerald-50 text-emerald-700 ring-emerald-200" : "bg-amber-50 text-amber-700 ring-amber-200"}`}><span className={`h-1.5 w-1.5 rounded-full ${monthlyReady ? "bg-emerald-500" : "bg-amber-500"}`} />{monthlyReady ? "全量资料齐全" : businessStatus && !businessReady ? "待补业务成本" : "待补财务资料"}</span></div>
+            <div className="flex items-center gap-2 text-xs text-slate-500">发送状态：<span className={`inline-flex items-center gap-1 rounded-full px-2.5 py-1 font-medium ring-1 ring-inset ${period?.status === "SENT" ? "bg-blue-50 text-blue-700 ring-blue-200" : "bg-slate-50 text-slate-600 ring-slate-200"}`}><span className={`h-1.5 w-1.5 rounded-full ${period?.status === "SENT" ? "bg-blue-500" : "bg-slate-400"}`} />{period?.status === "SENT" ? "已发送" : period?.status === "PACKAGED" ? "已打包" : "未发送"}</span></div>
+            <div className="text-xs text-slate-500">最后发送：<span className="text-slate-700">{latestSentPkg ? formatDate(latestSentPkg.createdAt) : "—"}</span></div>
+            <button type="button" onClick={() => latestPkg ? void downloadPackage(latestPkg) : setMsg("该账期暂无可导出的发送包")} disabled={busy || !latestPkg} className="ml-auto inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-medium text-blue-600 hover:border-blue-300 disabled:cursor-not-allowed disabled:text-slate-300"><svg viewBox="0 0 24 24" className="h-3.5 w-3.5" fill="none"><path d="M12 4v11m0 0-4-4m4 4 4-4M5 20h14" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" /></svg>导出清单</button>
+          </>
+        )}
       </section>
 
       {msg && <div role="status" className="rounded-xl border border-blue-100 bg-blue-50 px-4 py-3 text-sm text-blue-800">{msg}</div>}
@@ -1352,7 +1498,72 @@ export default function MonthlySendPage() {
         </section>
       </div>}
 
-      {financeTab === "records" && <section className={`${CARD} overflow-hidden`}><div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 px-4 py-4"><div><h2 className="text-base font-semibold text-slate-900">发送记录</h2><p className="mt-1 text-xs text-slate-400">每次打包与发送都会保留版本，便于回溯本次实际发送内容。</p></div><span className="text-xs text-slate-400">{period?.packages.length || 0} 条记录</span></div>{!period?.packages.length ? <div className="px-4 py-12 text-center text-sm text-slate-400">该账期暂无打包 / 发送记录</div> : <div className="overflow-x-auto"><table className="w-full min-w-[760px] text-sm"><thead className="bg-slate-50 text-left text-xs text-slate-500"><tr><th className="px-4 py-2.5 font-medium">版本</th><th className="px-4 py-2.5 font-medium">状态</th><th className="px-4 py-2.5 font-medium">SHA256</th><th className="px-4 py-2.5 font-medium">打包时间</th><th className="px-4 py-2.5 text-right font-medium">操作</th></tr></thead><tbody className="divide-y divide-slate-100">{[...period.packages].reverse().map((pkg) => <tr key={pkg.id}><td className="px-4 py-3 font-medium">V{pkg.version}</td><td className="px-4 py-3"><span className={`rounded-full px-2 py-1 text-xs ring-1 ring-inset ${pkg.status === "SENT" ? "bg-emerald-50 text-emerald-700 ring-emerald-200" : "bg-blue-50 text-blue-700 ring-blue-200"}`}>{pkg.status === "SENT" ? "已发送" : "已打包"}</span></td><td className="px-4 py-3 font-mono text-xs text-slate-400">{pkg.sha256}…</td><td className="px-4 py-3 text-xs text-slate-500">{formatDate(pkg.createdAt)}</td><td className="px-4 py-3 text-right"><button type="button" onClick={() => void downloadPackage(pkg)} disabled={busy} className="text-xs font-medium text-blue-600 hover:underline disabled:opacity-50">下载 ZIP</button><button type="button" onClick={() => void deletePackage(pkg)} disabled={busy} className="ml-4 text-xs font-medium text-rose-500 hover:underline disabled:opacity-50">删除</button></td></tr>)}</tbody></table></div>}</section>}
+      {financeTab === "records" && <section className={`${CARD} overflow-hidden`}>
+        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 px-4 py-4">
+          <div>
+            <h2 className="text-base font-semibold text-slate-900">发送记录</h2>
+            <p className="mt-1 text-xs text-slate-400">按每次实际发送 / 打包逐条记录，覆盖全部账期；上方账期选择只影响月结操作，不影响本列表。</p>
+          </div>
+          <button type="button" onClick={() => { loadPeriods(); loadDeliveryLogs(); }} className="rounded-lg border border-slate-200 px-3 py-2 text-xs text-slate-600 hover:bg-slate-50">刷新</button>
+        </div>
+        <div className="grid grid-cols-2 gap-px border-b border-slate-200 bg-slate-100 sm:grid-cols-5">
+          {([
+            ["记录总数", recordStats.total],
+            ["成功发送", recordStats.sent],
+            ["发送失败", recordStats.failed],
+            ["仅打包未发", recordStats.packaged],
+            ["涉及账期", recordStats.periods],
+          ] as const).map(([label, value]) => (
+            <div key={label} className="bg-white px-4 py-3">
+              <div className="text-[11px] text-slate-500">{label}</div>
+              <div className="mt-1 text-lg font-semibold text-slate-900">{value}</div>
+            </div>
+          ))}
+        </div>
+        <div className="flex flex-wrap items-center gap-2 border-b border-slate-100 bg-slate-50/60 px-4 py-3">
+          <select value={recordPeriod} onChange={(e) => { setRecordPeriod(e.target.value); setRecordLimit(50); }} className="h-8 rounded-lg border border-slate-200 bg-white px-2 text-xs text-slate-700">
+            <option value="all">全部账期</option>
+            {recordPeriods.map((p) => <option key={p} value={p}>{p}</option>)}
+          </select>
+          <select value={recordStatus} onChange={(e) => { setRecordStatus(e.target.value); setRecordLimit(50); }} className="h-8 rounded-lg border border-slate-200 bg-white px-2 text-xs text-slate-700">
+            <option value="all">全部状态</option>
+            <option value="sent">已发送 / 重发</option>
+            <option value="failed">发送失败</option>
+            <option value="packaged">仅打包</option>
+          </select>
+          <input value={recordQuery} onChange={(e) => { setRecordQuery(e.target.value); setRecordLimit(50); }} placeholder="搜索账期 / 版本 / 收件人 / SHA256" className="h-8 w-64 max-w-full rounded-lg border border-slate-200 bg-white px-3 text-xs outline-none focus:border-blue-400" />
+          <span className="ml-auto text-xs text-slate-500">共 {filteredRecords.length} 条 · 当前显示 {visibleRecords.length} 条</span>
+        </div>
+        {recordsLoading && <div className="px-4 py-10 text-center text-sm text-slate-400">正在加载发送记录…</div>}
+        {!recordsLoading && !filteredRecords.length && <div className="px-4 py-12 text-center text-sm text-slate-400">暂无打包 / 发送记录</div>}
+        {!recordsLoading && filteredRecords.length > 0 && <div className="overflow-x-auto"><table className="w-full min-w-[980px] text-sm">
+          <thead className="bg-slate-50 text-left text-xs text-slate-500"><tr>
+            <th className="px-4 py-2.5 font-medium">发送 / 打包时间</th>
+            <th className="px-4 py-2.5 font-medium">账期</th>
+            <th className="px-4 py-2.5 font-medium">版本</th>
+            <th className="px-4 py-2.5 font-medium">记录类型</th>
+            <th className="px-4 py-2.5 font-medium">收件人 / 备注</th>
+            <th className="px-4 py-2.5 font-medium">SHA256</th>
+            <th className="px-4 py-2.5 text-right font-medium">操作</th>
+          </tr></thead>
+          <tbody className="divide-y divide-slate-100">{visibleRecords.map((r) => {
+            const pkg = r.packageId != null ? packageById.get(r.packageId) : null;
+            return <tr key={r.key}>
+              <td className="px-4 py-3 text-xs text-slate-600">{formatDate(r.time)}</td>
+              <td className="px-4 py-3 text-xs font-medium text-slate-700">{r.period}</td>
+              <td className="px-4 py-3 font-medium">{r.version != null ? `V${r.version}` : "—"}</td>
+              <td className="px-4 py-3"><span className={`rounded-full px-2 py-1 text-xs ring-1 ring-inset ${recordKindClass[r.kind]}`}>{recordKindLabel[r.kind]}</span>{r.error && <div className="mt-1 max-w-[240px] truncate text-[11px] text-rose-600" title={r.error}>{r.error}</div>}</td>
+              <td className="max-w-[280px] px-4 py-3 text-xs text-slate-500"><div className="truncate" title={r.toAddrs.join(", ")}>{r.toAddrs.length ? r.toAddrs.join(", ") : "—"}</div></td>
+              <td className="px-4 py-3 font-mono text-xs text-slate-400">{r.sha256 ? `${r.sha256}…` : "—"}</td>
+              <td className="px-4 py-3 text-right">
+                {pkg && <button type="button" onClick={() => void downloadPackage(pkg, r.period)} disabled={busy} className="text-xs font-medium text-blue-600 hover:underline disabled:opacity-50">下载 ZIP</button>}
+                {pkg && pkg.status !== "SENT" && <button type="button" onClick={() => void deletePackage(pkg)} disabled={busy} className="ml-4 text-xs font-medium text-rose-500 hover:underline disabled:opacity-50">删除</button>}
+              </td>
+            </tr>;
+          })}</tbody>
+        </table></div>}
+        {filteredRecords.length > recordLimit && <div className="border-t border-slate-100 px-4 py-3 text-center"><button type="button" onClick={() => setRecordLimit((n) => n + 50)} className="text-xs font-medium text-blue-600 hover:underline">显示更多（剩余 {filteredRecords.length - recordLimit} 条）</button></div>}
+      </section>}
 
       {financeTab === "archive" && <section className={`${CARD} overflow-hidden`}><div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 px-4 py-4"><div><h2 className="text-base font-semibold text-slate-900">资料归档</h2><p className="mt-1 text-xs text-slate-400">业务源文件、银行资料、系统生成资料和历史版本都保留在当前账期。</p></div><button type="button" onClick={() => { uploadKind.current = "交易明细"; fileRef.current?.click(); }} disabled={busy} className="rounded-lg border border-blue-200 px-3 py-2 text-xs font-medium text-blue-600 hover:bg-blue-50 disabled:opacity-50">＋ 新增资料</button></div>{!files.length ? <div className="px-4 py-12 text-center text-sm text-slate-400">该账期暂无归档文件</div> : <div className="overflow-x-auto"><table className="w-full min-w-[760px] text-sm"><thead className="bg-slate-50 text-left text-xs text-slate-500"><tr><th className="px-4 py-2.5 font-medium">文件</th><th className="px-4 py-2.5 font-medium">类型</th><th className="px-4 py-2.5 font-medium">版本</th><th className="px-4 py-2.5 font-medium">归档时间</th><th className="px-4 py-2.5 text-right font-medium">操作</th></tr></thead><tbody className="divide-y divide-slate-100">{[...files].sort((a, b) => a.originalName.localeCompare(b.originalName) || a.version - b.version).map((row) => <tr key={row.id}><td className="px-4 py-3">{deliveryName(sel?.month ?? 0, row.originalName)}<span className="ml-2 text-[10px] text-slate-300">{row.originalName}</span>{row.filePresent === false ? <span className="ml-2 rounded-full bg-amber-50 px-2 py-0.5 text-[10px] font-medium text-amber-700 ring-1 ring-inset ring-amber-200">文件缺失</span> : <span className="ml-2 rounded-full bg-emerald-50 px-2 py-0.5 text-[10px] font-medium text-emerald-700 ring-1 ring-inset ring-emerald-200">已入库</span>}</td><td className="px-4 py-3 text-xs text-slate-500">{row.category === "sales_summary" ? "系统生成" : row.category === "bank" ? "银行资料" : row.category === "purchase_inbound" ? "采购入库源文件" : row.category === "sales_query" ? "销售数量源文件" : "外部数据导入"}</td><td className="px-4 py-3 text-xs text-slate-500">v{row.version}</td><td className="px-4 py-3 text-xs text-slate-400">{formatDate(row.uploadedAt)}</td><td className="px-4 py-3 text-right"><button type="button" onClick={() => void downloadFile(row)} disabled={busy} className="text-xs font-medium text-blue-600 hover:underline disabled:opacity-50">下载</button><button type="button" onClick={() => void deleteFile(row)} disabled={busy} className="ml-4 text-xs font-medium text-rose-500 hover:underline disabled:opacity-50">删除</button></td></tr>)}</tbody></table></div>}<div className="border-t border-slate-100 px-4 py-3 text-[11px] text-slate-400">每次上传 / 生成都会留版本；业务源文件用于本地入库计算，财务交付包只取所选交付资料。</div><input ref={fileRef} type="file" accept=".xlsx,.xls,.csv,.pdf" className="hidden" onChange={(e) => { const file = e.target.files?.[0]; if (file) handleUploadSelection(file); }} /></section>}
 

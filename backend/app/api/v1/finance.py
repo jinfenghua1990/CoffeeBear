@@ -678,8 +678,13 @@ def mail_status() -> dict[str, Any]:
 
 
 @router.get("/delivery-logs")
-def delivery_logs(db: Session = Depends(get_db)) -> list[dict[str, Any]]:
-    return finance_service.delivery_logs(db)
+def delivery_logs(
+    company: str | None = None,
+    limit: int = Query(500, ge=1, le=1000),
+    db: Session = Depends(get_db),
+) -> list[dict[str, Any]]:
+    """跨账期发送记录；company 仅作过滤，不按账期切片。"""
+    return finance_service.delivery_logs(db, company=company or None, limit=limit)
 
 
 class LegalEntityInput(BaseModel):

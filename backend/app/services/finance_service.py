@@ -21,6 +21,7 @@ from app.config import settings
 from app.core.audit import audit
 from app.models.finance import (
     ArchiveFile,
+    EmailDeliveryLog,
     FinanceDeliveryFile,
     FinanceDeliveryPackage,
     MonthlyFinancePeriod,
@@ -587,25 +588,40 @@ def send_delivery(db: Session, company: str, year: int, month: int, *,
             "messageId": message_id, "sentAt": log.created_at.isoformat() if log.created_at else None}
 
 
-def delivery_logs(db: Session, company: str | None = None) -> list[dict[str, Any]]:
-    from app.models.finance import EmailDeliveryLog, MonthlyFinancePeriod
+def delivery_logs(db: Session, company: str | None = None, limit: int = 500) -> list[dict[str, Any]]:
+    """跨账期发送日志：每次实际发信一条记录，按发送时间倒序。
 
-    q = db.query(EmailDeliveryLog).order_by(EmailDeliveryLog.id.desc()).limit(200)
+    发送记录不再按“当前账期”计算；公司主体只作为过滤条件。
+    """
+    q = (
+        db.query(EmailDeliveryLog, FinanceDeliveryPackage, MonthlyFinancePeriod)
+        .outerjoin(FinanceDeliveryPackage, EmailDeliveryLog.package_id == FinanceDeliveryPackage.id)
+        .outerjoin(MonthlyFinancePeriod, FinanceDeliveryPackage.period_id == MonthlyFinancePeriod.id)
+    )
+    if company:
+        q = q.filter(MonthlyFinancePeriod.company == company)
+    rows = q.order_by(
+        EmailDeliveryLog.created_at.desc(), EmailDeliveryLog.id.desc()
+    ).limit(max(1, min(limit, 1000))).all()
+
     out = []
-    for r in q.all():
-        pkg = db.get(FinanceDeliveryPackage, r.package_id) if r.package_id else None
-        period_label = None
-        version = None
-        if pkg:
-            period = db.get(MonthlyFinancePeriod, pkg.period_id) if pkg.period_id else None
-            if period:
-                period_label = f"{period.period_year}-{period.period_month:02d}"
-            version = pkg.version
+    for log, pkg, period in rows:
         out.append({
-            "id": r.id, "packageId": r.package_id, "kind": r.kind,
-            "toAddrs": r.to_addrs or [], "ccAddrs": r.cc_addrs or [],
-            "status": r.status, "messageId": r.message_id, "error": r.error,
-            "createdAt": r.created_at.isoformat() if r.created_at else None,
-            "period": period_label, "version": version,
+            "id": log.id,
+            "packageId": log.package_id,
+            "kind": log.kind,
+            "company": period.company if period else None,
+            "year": period.period_year if period else None,
+            "month": period.period_month if period else None,
+            "period": f"{period.period_year}-{period.period_month:02d}" if period else "",
+            "version": pkg.version if pkg else None,
+            "sha256": (pkg.zip_sha256 or "")[:16] if pkg else "",
+            "toAddrs": log.to_addrs or [],
+            "ccAddrs": log.cc_addrs or [],
+            "status": log.status,
+            "messageId": log.message_id,
+            "error": log.error,
+            "sentAt": log.sent_at.isoformat() if log.sent_at else None,
+            "createdAt": log.created_at.isoformat() if log.created_at else None,
         })
     return out
