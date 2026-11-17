@@ -512,7 +512,17 @@ export default function FinanceCenterPage() {
         ) : totals.length === 0 ? (
           <div className="px-4 py-8">
             <div className="text-[13px] font-medium text-slate-700">这个账期还没有进入统一事项池的数据。</div>
-            <p className="mt-1 text-[11px] leading-5 text-slate-400">原有银行、发票、月结功能没有丢失；国内订单、采购、入库和物流会逐步进入统一事项池。</p>
+            <p className="mt-1 text-[11px] leading-5 text-slate-400">
+              财务中心只做汇总，本身不产生数据。请点右上角的「同步业务数据」，把当前账期的国内订单、采购入库、退款和物流费用拉进事项池后，这里就会显示收支与利润。
+              银行、发票、月结等原有功能未变，仍在左侧菜单。
+            </p>
+            <button
+              onClick={() => void syncBusiness()}
+              disabled={syncing}
+              className="app-button-primary mt-3 rounded-lg px-3.5 py-2 text-[11px] font-medium disabled:opacity-50"
+            >
+              {syncing ? "同步中…" : "立即同步当前账期数据"}
+            </button>
           </div>
         ) : (
           <div className="grid gap-px bg-slate-100 md:grid-cols-2 xl:grid-cols-4">
