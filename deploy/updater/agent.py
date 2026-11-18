@@ -8,9 +8,25 @@ from pathlib import Path
 from typing import Any
 
 REPOSITORY = "jinfenghua1990/CoffeeBear"
-APP_PREFIX = "ghcr.io/jinfenghua1990/coffeebear@sha256:"
+# 镜像源白名单：仅官方 Registry 与经确认的可信镜像站。
+# 域名字符串是唯一事实来源，正则由它派生，避免白名单与校验规则两处漂移；
+# 不使用任何通配，杜绝「形似域名」被放行。
+CANONICAL_REGISTRY = "ghcr.io"
+IMAGE_REPO_PATH = "jinfenghua1990/coffeebear"
+ALLOWED_DOMAINS = (
+    "ghcr.io",
+    "ghcr.nju.edu.cn",
+    "ghcr.m.daocloud.io",
+    "ghcr.dockerproxy.net",
+)
+MIRROR_DOMAINS = tuple(domain for domain in ALLOWED_DOMAINS if domain != CANONICAL_REGISTRY)
+APP_PREFIX = f"{CANONICAL_REGISTRY}/{IMAGE_REPO_PATH}@sha256:"
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
-DIGEST_RE = re.compile(r"^ghcr\.io/jinfenghua1990/coffeebear@sha256:[0-9a-f]{64}$")
+_DOMAIN_PATTERN = "|".join(re.escape(domain) for domain in ALLOWED_DOMAINS)
+_MANIFEST_RE = r"^sha256:[0-9a-f]{64}$"
+DIGEST_RE = re.compile(
+    rf"^(?:{_DOMAIN_PATTERN})/{re.escape(IMAGE_REPO_PATH)}@sha256:[0-9a-f]{{64}}$"
+)
 VERSION_RE = re.compile(r"^v\d{4}\.\d{2}\.\d{2}\.\d{6}$")
 ACTIVE = {"queued", "preflight", "backup", "installing", "migrating", "restarting", "healthcheck"}
 # 自动安装只允许在每天凌晨的维护窗口内进行；白天检测到新版只提示，由人工点击安装。
@@ -120,13 +136,15 @@ def release_from_item(item: dict[str, Any]) -> dict[str, Any] | None:
     tag, body = str(item.get("tag_name") or ""), str(item.get("body") or "")
     tick = r"[\x60]"
     source = re.search(r"Source SHA:\s*" + tick + r"([0-9a-f]{40})" + tick, body)
-    app = re.search(r"(?m)^IMAGE_REF=(ghcr\.io/jinfenghua1990/coffeebear@sha256:[0-9a-f]{64})", body)
-    updater = re.search(r"(?m)^UPDATE_AGENT_IMAGE_REF=(ghcr\.io/jinfenghua1990/coffeebear@sha256:[0-9a-f]{64})", body)
+    app = re.search(rf"(?m)^IMAGE_REF=((?:{_DOMAIN_PATTERN})/{re.escape(IMAGE_REPO_PATH)}@sha256:[0-9a-f]{{64}})$", body)
+    updater = re.search(rf"(?m)^UPDATE_AGENT_IMAGE_REF=((?:{_DOMAIN_PATTERN})/{re.escape(IMAGE_REPO_PATH)}@sha256:[0-9a-f]{{64}})$", body)
     if not (VERSION_RE.fullmatch(tag) and source and app and updater):
         return None
     if not (SHA_RE.fullmatch(source.group(1)) and DIGEST_RE.fullmatch(app.group(1)) and DIGEST_RE.fullmatch(updater.group(1))):
         return None
-    return {"tag":tag,"sourceSha":source.group(1),"appImageRef":app.group(1),"updaterImageRef":updater.group(1),
+    # 下游（.env / compose / update-q4.sh）只接受规范名，故此处统一归一化，摘要保持不变。
+    return {"tag":tag,"sourceSha":source.group(1),
+            "appImageRef":canonical_ref(app.group(1)),"updaterImageRef":canonical_ref(updater.group(1)),
             "url":str(item.get("html_url") or ""),"name":str(item.get("name") or tag),"publishedAt":str(item.get("published_at") or "")}
 
 def previous_release(current_tag: str) -> dict[str, Any] | None:
@@ -144,15 +162,17 @@ def latest_release() -> dict[str, Any]:
     tag, body = str(item.get("tag_name") or ""), str(item.get("body") or "")
     tick = r"[\x60]"
     source = re.search(r"Source SHA:\s*" + tick + r"([0-9a-f]{40})" + tick, body)
-    app = re.search(r"(?m)^IMAGE_REF=(ghcr\.io/jinfenghua1990/coffeebear@sha256:[0-9a-f]{64})", body)
-    updater = re.search(r"(?m)^UPDATE_AGENT_IMAGE_REF=(ghcr\.io/jinfenghua1990/coffeebear@sha256:[0-9a-f]{64})", body)
+    app = re.search(rf"(?m)^IMAGE_REF=((?:{_DOMAIN_PATTERN})/{re.escape(IMAGE_REPO_PATH)}@sha256:[0-9a-f]{{64}})$", body)
+    updater = re.search(rf"(?m)^UPDATE_AGENT_IMAGE_REF=((?:{_DOMAIN_PATTERN})/{re.escape(IMAGE_REPO_PATH)}@sha256:[0-9a-f]{{64}})$", body)
     if not VERSION_RE.fullmatch(tag) or not source or not app or not updater:
         raise RuntimeError("最新正式发布缺少合规版本号、源代码 SHA 或不可变镜像摘要，拒绝自动部署")
     if not SHA_RE.fullmatch(source.group(1)) or not DIGEST_RE.fullmatch(app.group(1)) or not DIGEST_RE.fullmatch(updater.group(1)):
         raise RuntimeError("正式发布的 SHA 或镜像摘要校验失败")
-    if not app.group(1).startswith(APP_PREFIX) or not updater.group(1).startswith(APP_PREFIX):
-        raise RuntimeError("正式发布镜像不属于受控 CoffeeBear 仓库")
-    return {"tag":tag,"sourceSha":source.group(1),"appImageRef":app.group(1),"updaterImageRef":updater.group(1),
+    # 域名白名单与仓库归属已由 DIGEST_RE 完整覆盖（含固定仓库路径与完整摘要），
+    # 不再使用 startswith：前缀匹配对形似域名不设防。
+    # 下游（.env / compose / update-q4.sh）只接受规范名，故此处统一归一化，摘要保持不变。
+    return {"tag":tag,"sourceSha":source.group(1),
+            "appImageRef":canonical_ref(app.group(1)),"updaterImageRef":canonical_ref(updater.group(1)),
             "url":str(item.get("html_url") or ""),"name":str(item.get("name") or tag),"publishedAt":str(item.get("published_at") or "")}
 
 def build_status(current_sha: str, current_version: str, current_image: str) -> dict[str, Any]:
@@ -194,6 +214,99 @@ def registry_login() -> None:
                             stdout=subprocess.PIPE,stderr=subprocess.STDOUT,timeout=30,check=False)
     if result.returncode: raise RuntimeError("GHCR 登录失败，请检查 GHCR_USERNAME / GHCR_TOKEN")
 
+def _digest_of(ref: str) -> str:
+    """取 @sha256:... 摘要段；调用前必须已通过 DIGEST_RE 校验。"""
+    return ref.rsplit("@", 1)[1]
+
+def canonical_ref(ref: str) -> str:
+    """把白名单域名归一化为官方 ghcr.io 引用，摘要保持不变。
+
+    镜像源选择只发生在更新器内部：下游 update-q4.sh 与 .env 仍然只看到
+    `ghcr.io/...@sha256:<digest>`，其「只接受 ghcr.io」的安全校验不被放宽。
+    """
+    if not isinstance(ref, str) or not DIGEST_RE.fullmatch(ref):
+        raise RuntimeError(f"镜像引用不在白名单内或摘要格式非法：{ref!r}")
+    if not re.fullmatch(_MANIFEST_RE, _digest_of(ref)):
+        raise RuntimeError("镜像摘要必须是 sha256:64 位十六进制值")
+    return f"{CANONICAL_REGISTRY}/{IMAGE_REPO_PATH}@{_digest_of(ref)}"
+
+def _docker(*args: str, timeout: int = 60) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(["docker", *args], text=True, stdout=subprocess.PIPE,
+                          stderr=subprocess.STDOUT, timeout=timeout, check=False)
+
+def image_digests(ref: str) -> tuple[str, ...]:
+    """读取本地镜像记录的 RepoDigests；镜像不存在时返回空元组。"""
+    result = _docker("image", "inspect", "--format", "{{json .RepoDigests}}", ref)
+    if result.returncode:
+        return ()
+    try:
+        value = json.loads((result.stdout or "").strip() or "[]")
+    except ValueError:
+        return ()
+    return tuple(item for item in value if isinstance(item, str)) if isinstance(value, list) else ()
+
+def digest_present(ref: str) -> bool:
+    """本地是否已有该摘要对应的镜像内容（按 RepoDigests 严格比对，不看 tag）。"""
+    want = "@" + _digest_of(ref)
+    return any(item.endswith(want) for item in image_digests(ref))
+
+def warm_image(ref: str) -> str:
+    """按白名单顺序拉取不可变摘要镜像，校验 RepoDigests 后确保规范名可用。
+
+    安全要点：
+    1. 只接受白名单域名 + 固定仓库路径 + 完整 sha256，无通配；
+    2. 每个源拉取后必须校验 RepoDigests 含目标摘要，不匹配即弃用该源；
+    3. 镜像层按 digest 存于本地 content store（与仓库域名无关），因此随后对
+       ghcr.io 规范名的拉取只需获取 manifest，update-q4.sh 原有的 ghcr.io
+       拉取步骤可在秒级完成，无需放宽其入参校验。
+    """
+    target = canonical_ref(ref)
+    digest = _digest_of(target)
+    if digest_present(target):
+        log(f"目标镜像已在本机且摘要匹配：{digest[:19]}…")
+        return target
+    timeout = int(os.environ.get("COFFEEBEAR_PULL_TIMEOUT", "900") or 900)
+    errors: list[str] = []
+    for domain in MIRROR_DOMAINS:
+        candidate = f"{domain}/{IMAGE_REPO_PATH}@{digest}"
+        write_status(phase="installing", progress=35, running=True, message=f"从 {domain} 拉取目标镜像")
+        log(f"尝试镜像源 {domain}")
+        try:
+            result = _docker("pull", candidate, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            errors.append(f"{domain}: 超过 {timeout}s 未完成")
+            log(f"{domain} 拉取超时，切换下一个镜像源")
+            continue
+        if result.returncode:
+            tail = (result.stdout or "").strip().splitlines()
+            errors.append(f"{domain}: {(tail[-1] if tail else '未知错误')[:200]}")
+            log(f"{domain} 拉取失败，切换下一个镜像源")
+            continue
+        if not digest_present(candidate):
+            errors.append(f"{domain}: RepoDigests 未包含期望摘要，已弃用该源")
+            log(f"{domain} 返回内容摘要不匹配，已弃用该源")
+            continue
+        write_status(phase="installing", progress=45, running=True,
+                     message=f"镜像已通过摘要校验（来源 {domain}）")
+        log(f"镜像摘要校验通过（来源 {domain}）")
+        break
+    if not digest_present(target):
+        # 层已在本机时此步只需 manifest，通常数秒；失败不致命，
+        # update-q4.sh 会退回自行拉取（同样只需 manifest）。
+        probe_timeout = int(os.environ.get("COFFEEBEAR_CANONICAL_PULL_TIMEOUT", "90") or 90)
+        try:
+            result = _docker("pull", target, timeout=probe_timeout)
+            if result.returncode:
+                tail = (result.stdout or "").strip().splitlines()
+                log(f"注册规范名 manifest 失败（不影响后续）：{(tail[-1] if tail else '')[:200]}")
+            else:
+                log("已注册 ghcr.io 规范名，后续拉取将命中本地层")
+        except subprocess.TimeoutExpired:
+            log(f"注册规范名 manifest 超过 {probe_timeout}s，跳过")
+    if not any(digest_present(f"{domain}/{IMAGE_REPO_PATH}@{digest}") for domain in ALLOWED_DOMAINS):
+        raise RuntimeError("所有镜像源均未取得可信镜像，未更改任何运行配置：" + "；".join(errors)[:1200])
+    return target
+
 def fetch_release_script(tag: str, filename: str) -> str:
     """Get a release-pinned deploy script via two independent GitHub endpoints."""
     quoted_tag = urllib.parse.quote(tag, safe="")
@@ -225,9 +338,15 @@ def run_update(release: dict[str, Any], actor: str) -> None:
                      targetSha=release["sourceSha"],latestSha=release["sourceSha"],latestReleaseTag=release["tag"],
                      startedAt=now(),startedBy=actor,lastCheckError="",error="")
         registry_login()
+        # 先从镜像站按原摘要把层拉到本地，再由 update-q4.sh 自行拉 ghcr.io 规范名（只取 manifest）。
+        app_ref = warm_image(release["appImageRef"])
+        updater_ref = warm_image(release["updaterImageRef"])
         command = ["docker","compose","--project-directory",str(WORKSPACE),"--env-file",str(ENV_FILE),"-f",str(COMPOSE_FILE),
-                   "--profile","ops","run","--rm","update-job","/app/update-job.sh",str(script_path),
-                   release["appImageRef"],release["updaterImageRef"],release["tag"],release["sourceSha"],actor[:80]]
+                   "--profile","ops","run","--rm",
+                   # update-q4.sh 已有的开关：目标镜像已在本机且可 inspect 时跳过重复 pull。
+                   "-e","COFFEEBEAR_IMAGE_PREVERIFIED=1",
+                   "update-job","/app/update-job.sh",str(script_path),
+                   app_ref,updater_ref,release["tag"],release["sourceSha"],actor[:80]]
         log("启动隔离的正式更新任务容器")
         process = subprocess.Popen(command,cwd=str(WORKSPACE),env=os.environ.copy(),text=True,
                                    stdout=subprocess.PIPE,stderr=subprocess.STDOUT,bufsize=1)
@@ -251,7 +370,8 @@ def run_update(release: dict[str, Any], actor: str) -> None:
         if rc == 0 and status.get("phase") != "success":
             write_status(phase="success",progress=100,running=False,message=f"正式版本 {release['tag']} 更新完成",
                          currentSha=release["sourceSha"],latestSha=release["sourceSha"],targetSha=release["sourceSha"],
-                         updateAvailable=False,latestReleaseTag=release["tag"],finishedAt=now(),lastInstallResult="success",error="")
+                         currentImageRef=app_ref,updateAvailable=False,latestReleaseTag=release["tag"],
+                         finishedAt=now(),lastInstallResult="success",error="")
     except Exception as exc:
         log(f"更新失败：{str(exc)[:1000]}")
         status=read_status()
@@ -297,9 +417,13 @@ def run_rollback(target: dict[str, Any], actor: str) -> None:
         write_status(phase="installing",progress=30,running=True,message=f"回退到正式版本 {target['tag']}",
                      targetSha=target["sourceSha"],startedAt=now(),startedBy=actor,lastCheckError="",error="")
         registry_login()
+        # 回退镜像可能已不在本地，同样按多源回退预热，避免回退路径受 ghcr.io 单点影响。
+        rollback_ref = warm_image(target["appImageRef"])
         command = ["docker","compose","--project-directory",str(WORKSPACE),"--env-file",str(ENV_FILE),"-f",str(COMPOSE_FILE),
-                   "--profile","ops","run","--rm","update-job","/app/update-job.sh",str(script_path),
-                   target["appImageRef"],"",target["tag"],target["sourceSha"],actor[:80]]
+                   "--profile","ops","run","--rm",
+                   "-e","COFFEEBEAR_IMAGE_PREVERIFIED=1",
+                   "update-job","/app/update-job.sh",str(script_path),
+                   rollback_ref,"",target["tag"],target["sourceSha"],actor[:80]]
         log("启动隔离回退任务容器")
         process = subprocess.Popen(command,cwd=str(WORKSPACE),env=os.environ.copy(),text=True,
                                    stdout=subprocess.PIPE,stderr=subprocess.STDOUT,bufsize=1)
