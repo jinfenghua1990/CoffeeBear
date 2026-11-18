@@ -114,6 +114,17 @@ def apply(*, current_sha: str, current_version: str, image_ref: str, actor: str)
     return value
 
 
+def rollback(*, current_sha: str, current_version: str, image_ref: str, actor: str) -> dict[str, Any]:
+    value = _request(
+        "/rollback",
+        method="POST",
+        payload={**_runtime_fields(current_sha, current_version, image_ref), "actor": actor},
+    )
+    value["updateAgentAvailable"] = True
+    value["updateAgentError"] = ""
+    return value
+
+
 def readiness(*, current_sha: str, current_version: str, image_ref: str, runtime: dict[str, Any]) -> dict[str, Any]:
     status = status_payload(current_sha=current_sha, current_version=current_version, image_ref=image_ref, runtime=runtime)
     checks = [
