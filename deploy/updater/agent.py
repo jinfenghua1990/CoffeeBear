@@ -2,7 +2,7 @@
 """Restricted internal updater for CoffeeBear's NAS Compose deployment."""
 from __future__ import annotations
 import base64, json, os, re, secrets, subprocess, threading, time, urllib.error, urllib.parse, urllib.request
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -13,7 +13,11 @@ SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 DIGEST_RE = re.compile(r"^ghcr\.io/jinfenghua1990/coffeebear@sha256:[0-9a-f]{64}$")
 VERSION_RE = re.compile(r"^v\d{4}\.\d{2}\.\d{2}\.\d{6}$")
 ACTIVE = {"queued", "preflight", "backup", "installing", "migrating", "restarting", "healthcheck"}
-AUTO_UPDATE_DELAY_SECONDS = 60 * 60
+# 自动安装只允许在每天凌晨的维护窗口内进行；白天检测到新版只提示，由人工点击安装。
+# 窗口以北京时间计算（容器默认 UTC），默认 01:00-02:00，可用环境变量覆盖。
+AUTO_UPDATE_START_HOUR = int(os.environ.get("COFFEEBEAR_AUTO_UPDATE_HOUR", "1"))
+AUTO_UPDATE_WINDOW_MINUTES = int(os.environ.get("COFFEEBEAR_AUTO_UPDATE_WINDOW_MINUTES", "60"))
+CN_TZ = timezone(timedelta(hours=8))
 DATA_DIR = Path(os.environ.get("DATA_DIR", "/data")).resolve()
 STATE_DIR = DATA_DIR / "system-update"
 STATUS_FILE = STATE_DIR / "container-status.json"
@@ -26,6 +30,16 @@ LOCK = threading.RLock()
 
 def now() -> str:
     return datetime.now(timezone.utc).astimezone().isoformat()
+
+def in_auto_update_window() -> bool:
+    """仅在北京时间每天凌晨维护窗口内返回 True。跨零点窗口同样支持。"""
+    cn_now = datetime.now(CN_TZ)
+    minute_of_day = cn_now.hour * 60 + cn_now.minute
+    start = AUTO_UPDATE_START_HOUR * 60
+    end = (AUTO_UPDATE_START_HOUR * 60 + AUTO_UPDATE_WINDOW_MINUTES) % (24 * 60)
+    if start <= end:
+        return start <= minute_of_day < end
+    return minute_of_day >= start or minute_of_day < end
 
 def ensure_state() -> None:
     STATE_DIR.mkdir(parents=True, exist_ok=True)
@@ -94,6 +108,37 @@ def request_json(url: str, timeout: int = 30) -> dict[str, Any]:
     if not isinstance(value, dict): raise RuntimeError("GitHub 返回了无法识别的响应")
     return value
 
+def request_json_list(url: str, timeout: int = 30) -> list[Any]:
+    value = json.loads(request_bytes(url, timeout=timeout, headers={
+        "Accept":"application/vnd.github+json", "User-Agent":"CoffeeBear-NAS-Updater", "X-GitHub-Api-Version":"2022-11-28"
+    }).decode("utf-8"))
+    if not isinstance(value, list):
+        raise RuntimeError("GitHub 返回了无法识别的发布列表")
+    return value
+
+def release_from_item(item: dict[str, Any]) -> dict[str, Any] | None:
+    tag, body = str(item.get("tag_name") or ""), str(item.get("body") or "")
+    tick = r"[\x60]"
+    source = re.search(r"Source SHA:\s*" + tick + r"([0-9a-f]{40})" + tick, body)
+    app = re.search(r"(?m)^IMAGE_REF=(ghcr\.io/jinfenghua1990/coffeebear@sha256:[0-9a-f]{64})", body)
+    updater = re.search(r"(?m)^UPDATE_AGENT_IMAGE_REF=(ghcr\.io/jinfenghua1990/coffeebear@sha256:[0-9a-f]{64})", body)
+    if not (VERSION_RE.fullmatch(tag) and source and app and updater):
+        return None
+    if not (SHA_RE.fullmatch(source.group(1)) and DIGEST_RE.fullmatch(app.group(1)) and DIGEST_RE.fullmatch(updater.group(1))):
+        return None
+    return {"tag":tag,"sourceSha":source.group(1),"appImageRef":app.group(1),"updaterImageRef":updater.group(1),
+            "url":str(item.get("html_url") or ""),"name":str(item.get("name") or tag),"publishedAt":str(item.get("published_at") or "")}
+
+def previous_release(current_tag: str) -> dict[str, Any] | None:
+    """Find the release immediately older than current_tag among validated releases."""
+    items = request_json_list(f"https://api.github.com/repos/{REPOSITORY}/releases?per_page=30")
+    releases = [r for item in items if isinstance(item, dict) and (r := release_from_item(item)) is not None]
+    releases.sort(key=lambda r: r["publishedAt"], reverse=True)
+    for index, release in enumerate(releases):
+        if release["tag"] == current_tag:
+            return releases[index + 1] if index + 1 < len(releases) else None
+    return None
+
 def latest_release() -> dict[str, Any]:
     item = request_json(f"https://api.github.com/repos/{REPOSITORY}/releases/latest")
     tag, body = str(item.get("tag_name") or ""), str(item.get("body") or "")
@@ -149,29 +194,29 @@ def registry_login() -> None:
                             stdout=subprocess.PIPE,stderr=subprocess.STDOUT,timeout=30,check=False)
     if result.returncode: raise RuntimeError("GHCR 登录失败，请检查 GHCR_USERNAME / GHCR_TOKEN")
 
-def fetch_release_update_script(tag: str) -> str:
-    """Get the signed release script via two independent GitHub endpoints."""
-    raw_url = f"https://raw.githubusercontent.com/{REPOSITORY}/{urllib.parse.quote(tag, safe='')}/deploy/update-q4.sh"
+def fetch_release_script(tag: str, filename: str) -> str:
+    """Get a release-pinned deploy script via two independent GitHub endpoints."""
+    quoted_tag = urllib.parse.quote(tag, safe="")
+    raw_url = f"https://raw.githubusercontent.com/{REPOSITORY}/{quoted_tag}/deploy/{filename}"
     try:
         return request_bytes(raw_url, timeout=45, limit=512_000, headers={"User-Agent":"CoffeeBear-NAS-Updater"}).decode("utf-8")
     except Exception as raw_error:
         # The GitHub Contents API uses a different network route from the raw
-        # host.  It is a safe fallback because the release tag is validated
-        # before this function is called and the returned script is checked
-        # again below.
-        api_url = f"https://api.github.com/repos/{REPOSITORY}/contents/deploy/update-q4.sh?ref={urllib.parse.quote(tag, safe='')}"
+        # host. It is a safe fallback because the tag is validated by the caller
+        # and the returned script is checked again before execution.
+        api_url = f"https://api.github.com/repos/{REPOSITORY}/contents/deploy/{filename}?ref={quoted_tag}"
         try:
             item = request_json(api_url, timeout=45)
             if item.get("encoding") != "base64" or not isinstance(item.get("content"), str):
                 raise RuntimeError("GitHub Contents API 未返回 base64 脚本内容")
             return base64.b64decode(item["content"], validate=True).decode("utf-8")
         except Exception as api_error:
-            raise RuntimeError(f"无法获取正式更新脚本：Raw 失败（{raw_error}）；GitHub API 备用通道失败（{api_error}）") from api_error
+            raise RuntimeError(f"无法获取正式脚本 {filename}：Raw 失败（{raw_error}）；GitHub API 备用通道失败（{api_error}）") from api_error
 
 def run_update(release: dict[str, Any], actor: str) -> None:
     try:
         script_path = STATE_DIR / f"update-q4-{release['tag']}.sh"
-        script = fetch_release_update_script(release["tag"])
+        script = fetch_release_script(release["tag"], "update-q4.sh")
         if "CoffeeBear" not in script or "UPDATE_AGENT_IMAGE" not in script:
             raise RuntimeError("正式版本中的 NAS 更新脚本未通过校验")
         script_path.write_text(script, encoding="utf-8")
@@ -224,8 +269,77 @@ def start_update(release: dict[str, Any], actor: str) -> None:
                      latestReleaseTag=release["tag"],lastCheckError="",error="")
     threading.Thread(target=run_update,args=(release,actor),daemon=True).start()
 
+def rollback_target(status: dict[str, Any]) -> dict[str, Any]:
+    """Resolve the version currently running so we can find its immediate predecessor."""
+    current_tag = str(status.get("latestReleaseTag") or "")
+    version = str((status.get("currentCommit") or {}).get("version") or "")
+    if not VERSION_RE.fullmatch(current_tag) and VERSION_RE.fullmatch(version):
+        current_tag = version
+    if not VERSION_RE.fullmatch(current_tag):
+        raise RuntimeError("无法确定当前运行的正式版本，回退已取消")
+    target = previous_release(current_tag)
+    if target is None:
+        raise RuntimeError("当前已是仓库中最早的正式版本，没有可回退的上一版")
+    return target
+
+def run_rollback(target: dict[str, Any], actor: str) -> None:
+    try:
+        # Pull the rollback script from the latest validated release: the
+        # rollback capability itself may not exist in the currently running
+        # (older) version, but it is guaranteed to be in the newest release.
+        script_tag = latest_release()["tag"]
+        script = fetch_release_script(script_tag, "rollback-q4.sh")
+        if "CoffeeBear" not in script or "APP_IMAGE" not in script or "rollback" not in script:
+            raise RuntimeError("当前版本中的回退脚本未通过校验")
+        script_path = STATE_DIR / f"rollback-q4-{script_tag}.sh"
+        script_path.write_text(script, encoding="utf-8")
+        os.chmod(script_path, 0o700)
+        write_status(phase="installing",progress=30,running=True,message=f"回退到正式版本 {target['tag']}",
+                     targetSha=target["sourceSha"],startedAt=now(),startedBy=actor,lastCheckError="",error="")
+        registry_login()
+        command = ["docker","compose","--project-directory",str(WORKSPACE),"--env-file",str(ENV_FILE),"-f",str(COMPOSE_FILE),
+                   "--profile","ops","run","--rm","update-job","/app/update-job.sh",str(script_path),
+                   target["appImageRef"],"",target["tag"],target["sourceSha"],actor[:80]]
+        log("启动隔离回退任务容器")
+        process = subprocess.Popen(command,cwd=str(WORKSPACE),env=os.environ.copy(),text=True,
+                                   stdout=subprocess.PIPE,stderr=subprocess.STDOUT,bufsize=1)
+        if process.stdout:
+            for line in process.stdout:
+                line=line.rstrip()
+                if not line: continue
+                log(line[:1000])
+                if "[rollback 1/5]" in line: write_status(phase="backup",progress=15,message="准备回退镜像")
+                elif "[rollback 3/5]" in line: write_status(phase="restarting",progress=70,message="启动回退版本")
+                elif "[rollback 4/5]" in line: write_status(phase="healthcheck",progress=90,message="验证回退版本")
+        rc=process.wait()
+        if rc != 0:
+            write_status(phase="failed",progress=100,running=False,message="回退失败，已尝试恢复原版本",
+                         error=f"回退任务退出码 {rc}",finishedAt=now(),lastInstallResult="failed")
+            raise RuntimeError(f"NAS 回退任务失败（退出码 {rc}）")
+        write_status(phase="success",progress=100,running=False,message=f"已回退到正式版本 {target['tag']}",
+                     currentSha=target["sourceSha"],latestSha=target["sourceSha"],targetSha=target["sourceSha"],
+                     updateAvailable=False,latestReleaseTag=target["tag"],finishedAt=now(),
+                     lastInstallResult="success",lastAction="rollback",error="")
+    except Exception as exc:
+        log(f"回退失败：{str(exc)[:1000]}")
+        status=read_status()
+        if status.get("phase") not in {"success","failed"}:
+            write_status(phase="failed",progress=100,running=False,message="回退失败",error=str(exc)[:1500],
+                         finishedAt=now(),lastInstallResult="failed")
+
+def start_rollback(actor: str) -> dict[str, Any]:
+    with LOCK:
+        status=read_status()
+        if status.get("running") or status.get("phase") in ACTIVE:
+            raise RuntimeError("已有更新或回退任务正在执行")
+        target = rollback_target(status)
+        write_status(phase="queued",progress=1,running=True,message="回退任务已排队",startedAt=now(),
+                     startedBy=actor,targetSha=target["sourceSha"],lastAction="rollback",lastCheckError="",error="")
+    threading.Thread(target=run_rollback,args=(target,actor),daemon=True).start()
+    return target
+
 def automatic_update_loop() -> None:
-    """Poll validated releases and wait one full hour before installing."""
+    """白天只提示；仅在北京时间每日凌晨维护窗口内自动安装，不再有 1 小时冷静期。"""
     while True:
         try:
             status = read_status()
@@ -236,14 +350,14 @@ def automatic_update_loop() -> None:
                 current_image = str(status.get("currentImageRef") or "")
                 checked = build_status(current_sha, current_version, current_image)
                 if checked.get("updateAvailable"):
-                    detected_at = str(status.get("autoUpdateDetectedAt") or "")
-                    if not detected_at:
-                        write_status(**checked, autoUpdateDetectedAt=now(), autoUpdateEligibleAt=(time.time() + AUTO_UPDATE_DELAY_SECONDS))
-                        log("检测到新正式版本，已进入 1 小时等待期，不会立即更新")
+                    if not status.get("autoUpdateDetectedAt"):
+                        write_status(**checked, autoUpdateDetectedAt=now(), autoUpdateEligibleAt=0)
+                        log("检测到新正式版本：白天不自动安装，将在凌晨维护窗口自动更新，或由管理员手动点击安装")
                     elif (
-                        time.time() >= float(status.get("autoUpdateEligibleAt") or 0)
+                        in_auto_update_window()
                         and status.get("lastInstallResult") != "failed"
                     ):
+                        log("进入凌晨维护窗口，开始自动安装新正式版本")
                         start_update(latest_release(), "auto-update")
                 else:
                     if status.get("autoUpdateDetectedAt"):
@@ -314,6 +428,9 @@ class Handler(BaseHTTPRequestHandler):
                     self.send_json(200,{**read_status(),"started":False,"reason":"already_latest","message":"当前已经是最新正式版本"}); return
                 start_update(release,actor)
                 self.send_json(202,{**read_status(),"started":True}); return
+            if parsed.path=="/rollback":
+                target=start_rollback(actor)
+                self.send_json(202,{**read_status(),"started":True,"targetTag":target["tag"]}); return
             self.send_json(404,{"detail":"未找到"})
         except (ValueError,RuntimeError,urllib.error.URLError,TimeoutError) as exc:
             self.send_json(409,{"detail":str(exc)[:1500]})

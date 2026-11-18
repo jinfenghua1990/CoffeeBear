@@ -371,6 +371,25 @@ export default function SystemUpdatePage() {
     }
   }
 
+  async function rollbackNow() {
+    if (status?.running || busy === "rollback") return;
+    if (!window.confirm("确定回退到上一个正式版本吗？\n\n只会切回上一版应用代码，数据库和业务数据保持不变。回退过程会先停止服务，约 1-2 分钟。")) return;
+    setBusy("rollback");
+    setError("");
+    setNotice("");
+    sawRunningRef.current = true;
+    try {
+      const next = await systemUpdateApi.rollback();
+      setStatus(next);
+      if (next.started !== false) setNotice(`正在回退${next.targetTag ? `到 ${next.targetTag}` : ""}，完成后会自动刷新状态。`);
+    } catch (caught) {
+      sawRunningRef.current = false;
+      setError(caught instanceof Error ? caught.message : String(caught));
+    } finally {
+      setBusy("");
+    }
+  }
+
   async function saveSettings() {
     if (!draft) return;
     setBusy("save");
@@ -724,6 +743,17 @@ export default function SystemUpdatePage() {
                           >
                             {status.running ? (isContainer ? "更新进行中…" : "同步进行中…") : status.updateAvailable ? (isContainer ? "安装正式版本" : "从云端同步到本地") : "当前已是最新版本"}
                           </button>
+                          {isContainer && (
+                            <button
+                              type="button"
+                              onClick={() => void rollbackNow()}
+                              disabled={Boolean(busy || status.running)}
+                              title="只切回上一版应用代码，数据库和业务数据保持不变"
+                              className="app-button-secondary h-8 rounded-lg px-2.5 text-[10px] font-medium text-amber-700 disabled:cursor-not-allowed disabled:opacity-45 dark:text-amber-300"
+                            >
+                              {busy === "rollback" ? "回退中…" : "回退上一版"}
+                            </button>
+                          )}
                           <button
                             type="button"
                             onClick={() => void refreshRuntime()}

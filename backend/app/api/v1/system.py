@@ -200,6 +200,25 @@ def system_update_apply(request: Request, db: Session = Depends(get_db)) -> dict
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
+@router.post("/update/rollback", dependencies=[Depends(require_roles("admin"))])
+def system_update_rollback(request: Request, db: Session = Depends(get_db)) -> dict[str, Any]:
+    if settings.DEPLOYMENT_MODE != "container":
+        from fastapi import HTTPException
+        raise HTTPException(status_code=409, detail="回退上一版本仅在容器部署模式可用")
+    from fastapi import HTTPException
+    from app.services import container_update_service
+    runtime = _runtime_release_info(db)
+    try:
+        return container_update_service.rollback(
+            current_sha=settings.GIT_SHA,
+            current_version=runtime["version"],
+            image_ref=runtime["imageRef"],
+            actor=current_actor(request),
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
 @router.get("/global-status")
 def global_status(db: Session = Depends(get_db)) -> dict[str, Any]:
     """顶部全局状态：待处理异常数 + 各数据源最近同步情况。"""

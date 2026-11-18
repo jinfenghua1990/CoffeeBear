@@ -347,6 +347,7 @@ export const systemUpdateApi = {
       body: JSON.stringify(body),
     }),
   apply: () => jsonFetch<SystemUpdateStatus & { started: boolean; reason?: string }>("/api/v1/system/update/apply", { method: "POST" }),
+  rollback: () => jsonFetch<SystemUpdateStatus & { started: boolean; targetTag?: string }>("/api/v1/system/update/rollback", { method: "POST" }),
 };
 
 export async function testJackyun(): Promise<{
