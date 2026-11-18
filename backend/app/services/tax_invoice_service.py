@@ -2319,17 +2319,31 @@ def _ingest_rows(
                     record.recognition_status = "needs_review"
                     record.error_summary = review_reason
 
+    # 税局导出的“信息汇总表”含税收分类编码和货物名称；
+    # 无专门“发票明细”时，将其作为明细来源，绝不作为第二份发票头。
+    summary_has_goods = any(
+        ("货物或应税劳务" in header or "项目名称" in header or "商品名称" in header)
+        for header in parsed.summary_headers
+    )
+    detail_rows = parsed.detail_rows or (parsed.summary_rows if summary_has_goods else [])
+    detail_sheet_name = parsed.detail_sheet_name or (
+        parsed.summary_sheet_name if summary_has_goods else ""
+    )
+    detail_headers = parsed.detail_headers if parsed.detail_rows else parsed.summary_headers
+    detail_mapping = parsed.detail_mapping if parsed.detail_rows else parsed.summary_mapping
     detail_needs_review = 0
-    if parsed.detail_rows:
+    if detail_rows:
         detail_parsed = replace(
             parsed,
-            sheet_name=parsed.detail_sheet_name,
-            headers=parsed.detail_headers,
-            mapping=parsed.detail_mapping,
-            rows=parsed.detail_rows,
+            sheet_name=detail_sheet_name,
+            headers=detail_headers,
+            mapping=detail_mapping,
+            rows=detail_rows,
         )
         detail_start = len(parsed.rows)
-        for detail_index, raw in enumerate(parsed.detail_rows, start=1):
+        for detail_index, raw in enumerate(detail_rows, start=1):
+            if not _value(raw, detail_parsed, "invoice_number"):
+                continue  # 汇总表末尾的合计行不是发票明细
             row_index = detail_start + detail_index
             record = records_by_index.get(row_index)
             if record is None:
@@ -2362,6 +2376,8 @@ def _ingest_rows(
             record.invoice_id = invoice.id
             record.error_summary = ""
     needs_review += detail_needs_review
+    db.flush()
+    _auto_categorize_output_invoices(db, list(processed_invoices.values()))
 
     batch.sheet_name = parsed.sheet_name
     batch.headers = parsed.headers
@@ -2371,12 +2387,12 @@ def _ingest_rows(
         "__sheetRoles": {
             "primary": parsed.sheet_name,
             "summary": parsed.summary_sheet_name,
-            "detail": parsed.detail_sheet_name,
+            "detail": detail_sheet_name,
         },
         "__summaryValidation": parsed.summary_validation,
     }
-    if parsed.detail_sheet_name:
-        batch.mapping["__detailHeaders"] = parsed.detail_headers
+    if detail_sheet_name:
+        batch.mapping["__detailHeaders"] = detail_headers
     batch.row_count = len(parsed.rows)
     batch.recognized_row_count = recognized
     batch.matched_row_count = matched
@@ -2911,6 +2927,7 @@ def _parse_line_item(
     return (
         {
             "goodsName": goods_name,
+            "taxCode": _line_text_first(payload, "税收分类编码", "商品和服务税收分类编码", "税收编码"),
             "spec": _line_text(payload, "规格型号"),
             "unit": _line_text(payload, "单位"),
             "quantity": _line_out(_line_number_first(payload, "数量")),
@@ -2945,6 +2962,7 @@ def _dedupe_line_items(items: list[dict]) -> list[dict]:
     for item in items:
         key = (
             str(item.get("goodsName") or ""),
+            str(item.get("taxCode") or ""),
             str(item.get("spec") or ""),
             str(item.get("unit") or ""),
             _norm_num(item.get("quantity")),
@@ -3063,6 +3081,58 @@ def invoice_line_summaries(db: Session, rows: list[TaxInvoice], max_items: int =
         result[invoice_id]["lineItems"] = unique[:max_items]
     return result
 
+
+
+def classify_output_line_item(item: dict, rules: list | None = None) -> str:
+    """销项分类：优先税收编码、再用已维护规则，最后按明确项目名称兜底。
+    返回 buyer_sales/platform_service/空（待判断）；绝不按税率或客户猜测。
+    """
+    from app.services.tax_category_rule_service import match_rule
+
+    code = str(item.get("taxCode") or "").strip()
+    name = str(item.get("goodsName") or "").strip()
+    if code.isdigit():
+        if code.startswith("1"):
+            return "buyer_sales"
+        if code.startswith("3"):
+            return "platform_service"
+    if name and rules:
+        rule = match_rule(name, rules)
+        if rule is not None:
+            rule_code = str(rule.tax_code or "").strip()
+            if rule_code.startswith("1"):
+                return "buyer_sales"
+            if rule_code.startswith("3"):
+                return "platform_service"
+    if "服务费" in name or "技术服务" in name or "*生产生活服务*" in name:
+        return "platform_service"
+    if "*软饮料*" in name or "咖啡" in name:
+        return "buyer_sales"
+    return ""
+
+
+def _auto_categorize_output_invoices(db: Session, rows: list[TaxInvoice]) -> None:
+    """导入后只填充尚未分类的有效蓝字销项票；人工分类始终优先。"""
+    from app.models.tax import TaxAccountingCategoryRule
+
+    candidates = [row for row in rows if row.direction == "output" and not row.category and row.status == "issued"]
+    if not candidates:
+        return
+    rules = (
+        db.query(TaxAccountingCategoryRule)
+        .filter(TaxAccountingCategoryRule.enabled.is_(True))
+        .order_by(TaxAccountingCategoryRule.priority, TaxAccountingCategoryRule.id)
+        .all()
+    )
+    summaries = invoice_line_summaries(db, candidates, max_items=1000)
+    for row in candidates:
+        items = summaries.get(row.id, {}).get("lineItems") or []
+        if not items:
+            parsed = _parse_line_item(row.raw if isinstance(row.raw, dict) else {})
+            items = [parsed[0]] if parsed else []
+        categories = {classify_output_line_item(item, rules) for item in items}
+        if len(categories) == 1 and "" not in categories:
+            row.category = categories.pop()
 
 def set_processing_status(
     db: Session, invoice_id: int, processing_status: str, actor: str = "system"
